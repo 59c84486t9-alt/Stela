@@ -315,10 +315,11 @@ pub struct Specialization {
 /// control stage maps the patch number through the patch index buffer, reads
 /// the factors at the [`TessellationArguments`] the push constants name,
 /// applies the scale, the step function and the partition's rounding, and
-/// emits the patch's factors. The function itself becomes the evaluation
-/// stage, which fetches control points and per-patch stage-in from the
-/// argument table's buffers through the control point index buffer, so the
-/// pipeline has no fixed-function vertex input.
+/// emits the patch's factors with the patch ID and instance index
+/// (`compiler/metal_abi.h` builds both stages). The function itself becomes
+/// the evaluation stage, which fetches control points and per-patch stage-in
+/// from the argument table's buffers through the control point index buffer,
+/// so the pipeline has no fixed-function vertex input.
 ///
 /// [`TessellationArguments`]: super::binding::TessellationArguments
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

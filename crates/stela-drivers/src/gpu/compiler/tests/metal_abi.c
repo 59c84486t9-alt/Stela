@@ -3,6 +3,7 @@
 #include "../metal_abi.h"
 #include "util/ralloc.h"
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #ifdef NDEBUG
@@ -184,6 +185,125 @@ static void select_flags_each_command(void)
    ralloc_free(shader);
 }
 
+/* The folded factor of factor * scale. */
+static float fold_factor(enum stela_metal_partition partition, unsigned max, float factor,
+                         float scale)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_TESS_CTRL, NULL, "factor");
+   const struct stela_metal_tessellation tessellation = {.partition = partition,
+                                                         .max_factor = max};
+   nir_def *value = stela_metal_tessellation_factor(&b, nir_imm_float(&b, factor),
+                                                    nir_imm_float(&b, scale), &tessellation);
+   nir_store_global(&b, value, nir_imm_int64(&b, 0), .align_mul = 4);
+   nir_opt_constant_folding(b.shader);
+   nir_intrinsic_instr *store = NULL;
+   nir_foreach_block(block, b.impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_store_global)
+            store = nir_instr_as_intrinsic(instr);
+      }
+   }
+   assert(store && nir_src_is_const(store->src[0]));
+   float folded = (float)nir_src_as_float(store->src[0]);
+   ralloc_free(b.shader);
+   return folded;
+}
+
+static void tessellation_factors_follow_metal_rules(void)
+{
+   assert(fold_factor(STELA_METAL_PARTITION_INTEGER, 16, 5, 2) == 10);
+   assert(fold_factor(STELA_METAL_PARTITION_INTEGER, 16, 20, 1) == 16);
+   assert(fold_factor(STELA_METAL_PARTITION_FRACTIONAL_EVEN, 16, 20, 1) == 16);
+   assert(fold_factor(STELA_METAL_PARTITION_FRACTIONAL_ODD, 16, 20, 1) == 15);
+   assert(fold_factor(STELA_METAL_PARTITION_FRACTIONAL_ODD, 16, 2.5f, 1) == 2.5f);
+   /* pow2 rounds up, within the maximum. */
+   assert(fold_factor(STELA_METAL_PARTITION_POW2, 64, 5, 1) == 8);
+   assert(fold_factor(STELA_METAL_PARTITION_POW2, 64, 8, 1) == 8);
+   assert(fold_factor(STELA_METAL_PARTITION_POW2, 64, 1, 1) == 1);
+   assert(fold_factor(STELA_METAL_PARTITION_POW2, 64, 0.25f, 1) == 1);
+   assert(fold_factor(STELA_METAL_PARTITION_POW2, 64, 33, 1) == 64);
+   assert(fold_factor(STELA_METAL_PARTITION_POW2, 48, 40, 1) == 48);
+   /* Culling factors pass through. */
+   assert(fold_factor(STELA_METAL_PARTITION_POW2, 64, 0, 1) == 0);
+   assert(fold_factor(STELA_METAL_PARTITION_INTEGER, 64, 4, -1) == -4);
+   assert(isnan(fold_factor(STELA_METAL_PARTITION_POW2, 64, NAN, 1)));
+}
+
+static nir_variable *variable(nir_shader *shader, nir_variable_mode mode, unsigned location)
+{
+   nir_foreach_variable_with_modes(var, shader, mode) {
+      if (var->data.location == (int)location)
+         return var;
+   }
+   assert(!"missing variable");
+   return NULL;
+}
+
+static void tessellation_vertex_passes_the_draw_indices(void)
+{
+   nir_shader *shader = stela_metal_tessellation_vertex(NULL);
+   assert(shader->info.stage == MESA_SHADER_VERTEX);
+   assert(!strcmp(nir_shader_get_entrypoint(shader)->function->name, "main"));
+   nir_variable *patch = variable(shader, nir_var_shader_out, VARYING_SLOT_VAR0);
+   assert(patch->type == glsl_uvec_type(2));
+   nir_shader_gather_info(shader, nir_shader_get_entrypoint(shader));
+   assert(BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_VERTEX_ID));
+   assert(BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_BASE_INSTANCE));
+   ralloc_free(shader);
+}
+
+static void tessellation_control_reads_factors_by_step(void)
+{
+   const struct {
+      struct stela_metal_tessellation tessellation;
+      enum tess_primitive_mode mode;
+      enum gl_tess_spacing spacing;
+      bool ccw;
+      /* Of the TessellationArguments and the factor record. */
+      unsigned loads;
+   } cases[] = {
+      {{false, STELA_METAL_PARTITION_POW2, 64, STELA_METAL_FACTOR_STEP_CONSTANT,
+        STELA_METAL_WINDING_CLOCKWISE},
+       TESS_PRIMITIVE_TRIANGLES, TESS_SPACING_EQUAL, true, 2 + 1 + 3 + 4},
+      {{true, STELA_METAL_PARTITION_FRACTIONAL_ODD, 16, STELA_METAL_FACTOR_STEP_PER_PATCH,
+        STELA_METAL_WINDING_COUNTER_CLOCKWISE},
+       TESS_PRIMITIVE_QUADS, TESS_SPACING_FRACTIONAL_ODD, false, 2 + 1 + 3 + 6},
+      {{true, STELA_METAL_PARTITION_FRACTIONAL_EVEN, 16,
+        STELA_METAL_FACTOR_STEP_PER_PATCH_AND_PER_INSTANCE, STELA_METAL_WINDING_CLOCKWISE},
+       TESS_PRIMITIVE_QUADS, TESS_SPACING_FRACTIONAL_EVEN, true, 2 + 1 + 4 + 6},
+      {{false, STELA_METAL_PARTITION_INTEGER, 16, STELA_METAL_FACTOR_STEP_PER_INSTANCE,
+        STELA_METAL_WINDING_COUNTER_CLOCKWISE},
+       TESS_PRIMITIVE_TRIANGLES, TESS_SPACING_EQUAL, false, 2 + 1 + 4 + 4},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
+      nir_shader *shader = stela_metal_tessellation_control(NULL, &cases[i].tessellation);
+      assert(shader->info.stage == MESA_SHADER_TESS_CTRL);
+      assert(!strcmp(nir_shader_get_entrypoint(shader)->function->name, "main"));
+      assert(shader->info.tess.tcs_vertices_out == 1);
+      assert(shader->info.tess._primitive_mode == cases[i].mode);
+      assert(shader->info.tess.spacing == cases[i].spacing);
+      assert(shader->info.tess.ccw == cases[i].ccw);
+      assert(exec_list_is_empty(&nir_shader_get_entrypoint(shader)->locals));
+
+      nir_variable *outer = variable(shader, nir_var_shader_out, VARYING_SLOT_TESS_LEVEL_OUTER);
+      nir_variable *inner = variable(shader, nir_var_shader_out, VARYING_SLOT_TESS_LEVEL_INNER);
+      nir_variable *patch = variable(shader, nir_var_shader_out, VARYING_SLOT_PATCH0);
+      assert(outer->data.patch && outer->data.compact && glsl_get_length(outer->type) == 4);
+      assert(inner->data.patch && inner->data.compact && glsl_get_length(inner->type) == 2);
+      assert(patch->data.patch && !patch->data.compact && patch->type == glsl_uvec_type(2));
+      assert(glsl_type_is_array(variable(shader, nir_var_shader_in, VARYING_SLOT_VAR0)->type));
+
+      struct census census = count(shader);
+      assert(census.push_constants == 1 && census.push_base == STELA_METAL_PUSH_ARGUMENTS);
+      /* The patch index binding and entry, the factor binding, the scale,
+       * the stride by step, and each half factor. */
+      assert(census.loads == cases[i].loads);
+      assert(census.stores == 0 && census.loops == 0);
+      ralloc_free(shader);
+   }
+}
+
 int main(void)
 {
    glsl_type_singleton_init_or_ref();
@@ -191,6 +311,9 @@ int main(void)
    textures_and_samplers_index_the_heap();
    accumulate_sums_each_run_in_a_loop();
    select_flags_each_command();
+   tessellation_factors_follow_metal_rules();
+   tessellation_vertex_passes_the_draw_indices();
+   tessellation_control_reads_factors_by_step();
    glsl_type_singleton_decref();
    puts("metal abi: ok");
    return 0;

@@ -40,6 +40,14 @@
 #define STELA_METAL_SELECT_COUNT 16u
 #define STELA_METAL_KERNEL_WORKGROUP 64u
 
+/* TessellationArguments, which the tessellation control stage reads at the
+ * push constants' arguments address. Bindings are (address, length). */
+#define STELA_METAL_TESSELLATION_FACTORS 0u
+#define STELA_METAL_TESSELLATION_PATCH_INDICES 16u
+#define STELA_METAL_TESSELLATION_CONTROL_POINT_INDICES 32u
+#define STELA_METAL_TESSELLATION_INSTANCE_STRIDE 48u
+#define STELA_METAL_TESSELLATION_FACTOR_SCALE 52u
+
 /* Descriptor set 0 is the device's bindless heap: one array per
  * binding.rs HeapArray, indexed by the halves of a texture's or sampler's
  * MTLResourceID. A texture's low half names its sampled image or uniform
@@ -98,5 +106,56 @@ nir_shader *stela_metal_accumulate_kernel(const nir_shader_compiler_options *opt
 /* Thread n below count writes the 32-bit flags[n]: 1 when the execution range
  * (uint location, length) at range holds command n, else 0. */
 nir_shader *stela_metal_select_kernel(const nir_shader_compiler_options *options);
+
+/* MTLTessellationPartitionMode, MTLTessellationFactorStepFunction and
+ * MTLWinding, in their raw values. */
+enum stela_metal_partition {
+   STELA_METAL_PARTITION_POW2,
+   STELA_METAL_PARTITION_INTEGER,
+   STELA_METAL_PARTITION_FRACTIONAL_ODD,
+   STELA_METAL_PARTITION_FRACTIONAL_EVEN,
+};
+enum stela_metal_factor_step {
+   STELA_METAL_FACTOR_STEP_CONSTANT,
+   STELA_METAL_FACTOR_STEP_PER_PATCH,
+   STELA_METAL_FACTOR_STEP_PER_INSTANCE,
+   STELA_METAL_FACTOR_STEP_PER_PATCH_AND_PER_INSTANCE,
+};
+enum stela_metal_winding {
+   STELA_METAL_WINDING_CLOCKWISE,
+   STELA_METAL_WINDING_COUNTER_CLOCKWISE,
+};
+
+/* A tessellated pipeline's fixed tessellation properties. */
+struct stela_metal_tessellation {
+   bool quad; /* Quad patches; triangle patches otherwise. */
+   enum stela_metal_partition partition;
+   unsigned max_factor; /* maxTessellationFactor, even. */
+   enum stela_metal_factor_step step;
+   enum stela_metal_winding winding;
+};
+
+/* The stages a tessellated pipeline runs ahead of its post-tessellation
+ * vertex function, which becomes the evaluation stage. Each patch is one
+ * single-point patch-list vertex numbered by the draw's patch number. The
+ * vertex stage passes (vertex index, instance index) on in VAR0; the
+ * instance index includes the base instance, as Metal's instance_id does.
+ * The control stage maps the patch number through the patch index buffer to
+ * the patch ID, reads the patch's MTL{Triangle,Quad}TessellationFactorsHalf
+ * by the step function, takes each through stela_metal_tessellation_factor
+ * and emits them with (patch ID, instance index) in PATCH0. A patch whose
+ * patch index or factors lie outside their buffers is culled with zero
+ * factors, as are patches Metal culls: those with a zero, negative or NaN
+ * edge factor. Entry points "main"; options may be NULL. */
+nir_shader *stela_metal_tessellation_vertex(const nir_shader_compiler_options *options);
+nir_shader *stela_metal_tessellation_control(const nir_shader_compiler_options *options,
+                                             const struct stela_metal_tessellation *tessellation);
+
+/* One 32-bit Metal factor as Vulkan's tessellator takes it: scaled, clamped
+ * to the maximum factor (less one for fractional-odd partitions) and, for
+ * pow2 partitions, rounded up to a power of two. Zero, negative and NaN
+ * factors pass through unchanged. */
+nir_def *stela_metal_tessellation_factor(nir_builder *b, nir_def *factor, nir_def *scale,
+                                         const struct stela_metal_tessellation *tessellation);
 
 #endif

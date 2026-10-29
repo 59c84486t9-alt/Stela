@@ -101,13 +101,18 @@ static nir_builder kernel(const nir_shader_compiler_options *options, const char
    return b;
 }
 
+static nir_shader *validated(nir_builder *b)
+{
+   nir_lower_vars_to_ssa(b->shader);
+   nir_remove_dead_variables(b->shader, nir_var_function_temp, NULL);
+   nir_validate_shader(b->shader, "Metal internal shader");
+   return b->shader;
+}
+
 static nir_shader *finish(nir_builder *b)
 {
    nir_pop_if(b, NULL);
-   nir_lower_vars_to_ssa(b->shader);
-   nir_remove_dead_variables(b->shader, nir_var_function_temp, NULL);
-   nir_validate_shader(b->shader, "Metal internal kernel");
-   return b->shader;
+   return validated(b);
 }
 
 nir_shader *stela_metal_accumulate_kernel(const nir_shader_compiler_options *options)
@@ -157,4 +162,153 @@ nir_shader *stela_metal_select_kernel(const nir_shader_compiler_options *options
    nir_def *flag = nir_iadd(&b, flags, nir_u2u64(&b, nir_imul_imm(&b, thread, 4)));
    nir_store_global(&b, nir_b2i32(&b, selected), flag, .align_mul = 4);
    return finish(&b);
+}
+
+nir_shader *stela_metal_tessellation_vertex(const nir_shader_compiler_options *options)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX, options,
+                                                  "stela_metal_tessellation_vertex");
+   nir_variable *patch = nir_variable_create(b.shader, nir_var_shader_out, glsl_uvec_type(2),
+                                             "patch");
+   patch->data.location = VARYING_SLOT_VAR0;
+   patch->data.interpolation = INTERP_MODE_FLAT;
+   nir_def *instance = nir_iadd(&b, nir_load_instance_id(&b), nir_load_base_instance(&b));
+   nir_store_var(&b, patch, nir_vec2(&b, nir_load_vertex_id(&b), instance), 0x3);
+   return validated(&b);
+}
+
+nir_def *stela_metal_tessellation_factor(nir_builder *b, nir_def *factor, nir_def *scale,
+                                         const struct stela_metal_tessellation *tessellation)
+{
+   unsigned max = tessellation->partition == STELA_METAL_PARTITION_FRACTIONAL_ODD
+                     ? tessellation->max_factor - 1
+                     : tessellation->max_factor;
+   nir_def *scaled = nir_fmul(b, factor, scale);
+   nir_def *clamped = nir_fmin(b, scaled, nir_imm_float(b, (float)max));
+   if (tessellation->partition == STELA_METAL_PARTITION_POW2) {
+      /* The next power of two in integers, which transcendental
+       * approximations could round past. */
+      nir_def *integer = nir_f2u32(b, nir_fceil(b, clamped));
+      nir_def *bits = nir_iadd_imm(b, nir_ufind_msb(b, nir_iadd_imm(b, integer, -1)), 1);
+      clamped = nir_fmin(b, nir_u2f32(b, nir_ishl(b, nir_imm_int(b, 1), bits)),
+                         nir_imm_float(b, (float)max));
+   }
+   return nir_bcsel(b, nir_fgt_imm(b, scaled, 0.0), clamped, scaled);
+}
+
+static nir_variable *patch_output(nir_shader *shader, const struct glsl_type *type,
+                                  unsigned location, const char *name)
+{
+   nir_variable *var = nir_variable_create(shader, nir_var_shader_out, type, name);
+   var->data.location = location;
+   var->data.patch = true;
+   var->data.compact = glsl_type_is_array(type);
+   return var;
+}
+
+nir_shader *stela_metal_tessellation_control(const nir_shader_compiler_options *options,
+                                             const struct stela_metal_tessellation *tessellation)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_TESS_CTRL, options,
+                                                  "stela_metal_tessellation_control");
+   b.shader->info.tess.tcs_vertices_out = 1;
+   b.shader->info.tess._primitive_mode =
+      tessellation->quad ? TESS_PRIMITIVE_QUADS : TESS_PRIMITIVE_TRIANGLES;
+   switch (tessellation->partition) {
+   case STELA_METAL_PARTITION_POW2:
+   case STELA_METAL_PARTITION_INTEGER:
+      b.shader->info.tess.spacing = TESS_SPACING_EQUAL;
+      break;
+   case STELA_METAL_PARTITION_FRACTIONAL_ODD:
+      b.shader->info.tess.spacing = TESS_SPACING_FRACTIONAL_ODD;
+      break;
+   case STELA_METAL_PARTITION_FRACTIONAL_EVEN:
+      b.shader->info.tess.spacing = TESS_SPACING_FRACTIONAL_EVEN;
+      break;
+   }
+   /* The APIs orient the domain oppositely: Metal's clockwise is Vulkan's
+    * VertexOrderCcw, as MoltenVK and DXVK map it. */
+   b.shader->info.tess.ccw = tessellation->winding == STELA_METAL_WINDING_CLOCKWISE;
+
+   nir_variable *input = nir_variable_create(
+      b.shader, nir_var_shader_in, glsl_array_type(glsl_uvec_type(2), 32, 0), "patch");
+   input->data.location = VARYING_SLOT_VAR0;
+   input->data.interpolation = INTERP_MODE_FLAT;
+   nir_variable *outputs[2] = {
+      patch_output(b.shader, glsl_array_type(glsl_float_type(), 4, 0),
+                   VARYING_SLOT_TESS_LEVEL_OUTER, "outer"),
+      patch_output(b.shader, glsl_array_type(glsl_float_type(), 2, 0),
+                   VARYING_SLOT_TESS_LEVEL_INNER, "inner"),
+   };
+   nir_variable *patch_ids = patch_output(b.shader, glsl_uvec_type(2), VARYING_SLOT_PATCH0,
+                                          "patch_id");
+
+   nir_def *vertex =
+      nir_load_deref(&b, nir_build_deref_array_imm(&b, nir_build_deref_var(&b, input), 0));
+   nir_def *number = nir_channel(&b, vertex, 0);
+   nir_def *instance = nir_channel(&b, vertex, 1);
+   nir_def *arguments = load_push(&b, 64, STELA_METAL_PUSH_ARGUMENTS);
+
+   /* The patch ID: the patch number, or its entry in the patch index buffer. */
+   nir_def *indices = load(&b, arguments, STELA_METAL_TESSELLATION_PATCH_INDICES, 64);
+   nir_def *indices_bytes = load(&b, arguments, STELA_METAL_TESSELLATION_PATCH_INDICES + 8, 64);
+   nir_def *index_offset = nir_imul_imm(&b, nir_u2u64(&b, number), 4);
+   nir_def *indexed = nir_ine_imm(&b, indices, 0);
+   nir_def *index_in_bounds = nir_uge(&b, indices_bytes, nir_iadd_imm(&b, index_offset, 4));
+   nir_variable *patch = nir_local_variable_create(b.impl, glsl_uint_type(), "patch");
+   nir_store_var(&b, patch, number, 1);
+   nir_push_if(&b, nir_iand(&b, indexed, index_in_bounds));
+   nir_store_var(&b, patch, load(&b, nir_iadd(&b, indices, index_offset), 0, 32), 1);
+   nir_pop_if(&b, NULL);
+   nir_def *id = nir_load_var(&b, patch);
+
+   /* The patch's factor record. */
+   unsigned edges = tessellation->quad ? 4 : 3, insides = tessellation->quad ? 2 : 1;
+   unsigned record = 2 * (edges + insides);
+   nir_def *offset = nir_imm_int64(&b, 0);
+   if (tessellation->step == STELA_METAL_FACTOR_STEP_PER_PATCH ||
+       tessellation->step == STELA_METAL_FACTOR_STEP_PER_PATCH_AND_PER_INSTANCE)
+      offset = nir_iadd(&b, offset, nir_imul_imm(&b, nir_u2u64(&b, id), record));
+   if (tessellation->step == STELA_METAL_FACTOR_STEP_PER_INSTANCE ||
+       tessellation->step == STELA_METAL_FACTOR_STEP_PER_PATCH_AND_PER_INSTANCE) {
+      nir_def *stride = load(&b, arguments, STELA_METAL_TESSELLATION_INSTANCE_STRIDE, 32);
+      offset = nir_iadd(&b, offset, nir_imul(&b, nir_u2u64(&b, instance), nir_u2u64(&b, stride)));
+   }
+   nir_def *factors = load(&b, arguments, STELA_METAL_TESSELLATION_FACTORS, 64);
+   nir_def *factors_bytes = load(&b, arguments, STELA_METAL_TESSELLATION_FACTORS + 8, 64);
+   nir_def *in_bounds = nir_iand(&b, nir_ior(&b, nir_inot(&b, indexed), index_in_bounds),
+                                 nir_uge(&b, factors_bytes, nir_iadd_imm(&b, offset, record)));
+
+   /* Zero levels, which cull the patch, unless the record is in bounds. */
+   nir_variable *levels[2] = {
+      nir_local_variable_create(b.impl, glsl_vec4_type(), "outer"),
+      nir_local_variable_create(b.impl, glsl_vec_type(2), "inner"),
+   };
+   nir_store_var(&b, levels[0], nir_imm_zero(&b, 4, 32), 0xf);
+   nir_store_var(&b, levels[1], nir_imm_zero(&b, 2, 32), 0x3);
+   nir_push_if(&b, in_bounds);
+   {
+      nir_def *scale = load(&b, arguments, STELA_METAL_TESSELLATION_FACTOR_SCALE, 32);
+      nir_def *address = nir_iadd(&b, factors, offset);
+      nir_def *values[6];
+      for (unsigned i = 0; i < edges + insides; i++)
+         values[i] = stela_metal_tessellation_factor(
+            &b, nir_f2f32(&b, load(&b, address, 2 * i, 16)), scale, tessellation);
+      nir_def *zero = nir_imm_float(&b, 0.0f);
+      nir_def *outer[4] = {values[0], values[1], values[2], edges == 4 ? values[3] : zero};
+      nir_def *inner[2] = {values[edges], insides == 2 ? values[edges + 1] : zero};
+      nir_store_var(&b, levels[0], nir_vec(&b, outer, 4), 0xf);
+      nir_store_var(&b, levels[1], nir_vec(&b, inner, 2), 0x3);
+   }
+   nir_pop_if(&b, NULL);
+
+   for (unsigned level = 0; level < 2; level++) {
+      nir_def *value = nir_load_var(&b, levels[level]);
+      nir_deref_instr *output = nir_build_deref_var(&b, outputs[level]);
+      for (unsigned i = 0; i < glsl_get_length(outputs[level]->type); i++)
+         nir_store_deref(&b, nir_build_deref_array_imm(&b, output, i), nir_channel(&b, value, i),
+                         1);
+   }
+   nir_store_var(&b, patch_ids, nir_vec2(&b, id, instance), 0x3);
+   return validated(&b);
 }

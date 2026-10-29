@@ -446,7 +446,10 @@ impl DescriptorHeap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu::metal::nvidia::{CHIPS, fixture::nvk};
+    use crate::gpu::metal::{
+        abi::{TessellationFactorStepFunction, TessellationPartitionMode, Winding},
+        nvidia::{CHIPS, fixture::nvk},
+    };
 
     #[test]
     fn compiler_header_matches_the_layouts() {
@@ -518,6 +521,26 @@ mod tests {
                 "STELA_METAL_KERNEL_WORKGROUP",
                 AccumulateArguments::WORKGROUP_SIZE,
             ),
+            (
+                "STELA_METAL_TESSELLATION_FACTORS",
+                TessellationArguments::FACTORS_OFFSET,
+            ),
+            (
+                "STELA_METAL_TESSELLATION_PATCH_INDICES",
+                TessellationArguments::PATCH_INDICES_OFFSET,
+            ),
+            (
+                "STELA_METAL_TESSELLATION_CONTROL_POINT_INDICES",
+                TessellationArguments::CONTROL_POINT_INDICES_OFFSET,
+            ),
+            (
+                "STELA_METAL_TESSELLATION_INSTANCE_STRIDE",
+                TessellationArguments::INSTANCE_STRIDE_OFFSET,
+            ),
+            (
+                "STELA_METAL_TESSELLATION_FACTOR_SCALE",
+                TessellationArguments::FACTOR_SCALE_OFFSET,
+            ),
         ];
         for (name, value) in expected {
             assert_eq!(define(name), value, "{name}");
@@ -534,42 +557,105 @@ mod tests {
                 .filter(|enumerator| enumerator.starts_with("STELA_"))
                 .collect()
         };
-        let heap = [
-            ("STELA_METAL_HEAP_SAMPLED_IMAGES", HeapArray::SampledImages),
-            ("STELA_METAL_HEAP_STORAGE_IMAGES", HeapArray::StorageImages),
-            ("STELA_METAL_HEAP_SAMPLERS", HeapArray::Samplers),
-            (
-                "STELA_METAL_HEAP_UNIFORM_TEXEL_BUFFERS",
-                HeapArray::UniformTexelBuffers,
-            ),
-            (
-                "STELA_METAL_HEAP_STORAGE_TEXEL_BUFFERS",
-                HeapArray::StorageTexelBuffers,
-            ),
-        ];
-        let declared = enumerators("stela_metal_heap_array");
-        assert_eq!(declared.len(), heap.len());
-        for (name, array) in heap {
-            assert_eq!(
-                declared.iter().position(|&declared| declared == name),
-                Some(array.raw() as usize),
-                "{name}"
-            );
-        }
-        let tables = [
-            ("STELA_METAL_TABLE_PRIMARY", TableSlot::Primary),
-            ("STELA_METAL_TABLE_FRAGMENT", TableSlot::Fragment),
-            ("STELA_METAL_TABLE_MESH", TableSlot::Mesh),
-        ];
-        let declared = enumerators("stela_metal_table");
-        assert_eq!(declared.len(), tables.len());
-        for (name, slot) in tables {
-            assert_eq!(
-                declared.iter().position(|&declared| declared == name),
-                Some(slot.raw() as usize),
-                "{name}"
-            );
-        }
+        let check_enum = |name: &str, values: &[(&str, u64)]| {
+            let declared = enumerators(name);
+            assert_eq!(declared.len(), values.len(), "{name}");
+            for &(enumerator, raw) in values {
+                assert_eq!(
+                    declared.iter().position(|&declared| declared == enumerator),
+                    Some(raw as usize),
+                    "{enumerator}"
+                );
+            }
+        };
+        check_enum(
+            "stela_metal_heap_array",
+            &[
+                (
+                    "STELA_METAL_HEAP_SAMPLED_IMAGES",
+                    HeapArray::SampledImages.raw().into(),
+                ),
+                (
+                    "STELA_METAL_HEAP_STORAGE_IMAGES",
+                    HeapArray::StorageImages.raw().into(),
+                ),
+                (
+                    "STELA_METAL_HEAP_SAMPLERS",
+                    HeapArray::Samplers.raw().into(),
+                ),
+                (
+                    "STELA_METAL_HEAP_UNIFORM_TEXEL_BUFFERS",
+                    HeapArray::UniformTexelBuffers.raw().into(),
+                ),
+                (
+                    "STELA_METAL_HEAP_STORAGE_TEXEL_BUFFERS",
+                    HeapArray::StorageTexelBuffers.raw().into(),
+                ),
+            ],
+        );
+        check_enum(
+            "stela_metal_table",
+            &[
+                ("STELA_METAL_TABLE_PRIMARY", TableSlot::Primary.raw().into()),
+                (
+                    "STELA_METAL_TABLE_FRAGMENT",
+                    TableSlot::Fragment.raw().into(),
+                ),
+                ("STELA_METAL_TABLE_MESH", TableSlot::Mesh.raw().into()),
+            ],
+        );
+        check_enum(
+            "stela_metal_partition",
+            &[
+                (
+                    "STELA_METAL_PARTITION_POW2",
+                    TessellationPartitionMode::Pow2.raw(),
+                ),
+                (
+                    "STELA_METAL_PARTITION_INTEGER",
+                    TessellationPartitionMode::Integer.raw(),
+                ),
+                (
+                    "STELA_METAL_PARTITION_FRACTIONAL_ODD",
+                    TessellationPartitionMode::FractionalOdd.raw(),
+                ),
+                (
+                    "STELA_METAL_PARTITION_FRACTIONAL_EVEN",
+                    TessellationPartitionMode::FractionalEven.raw(),
+                ),
+            ],
+        );
+        check_enum(
+            "stela_metal_factor_step",
+            &[
+                (
+                    "STELA_METAL_FACTOR_STEP_CONSTANT",
+                    TessellationFactorStepFunction::Constant.raw(),
+                ),
+                (
+                    "STELA_METAL_FACTOR_STEP_PER_PATCH",
+                    TessellationFactorStepFunction::PerPatch.raw(),
+                ),
+                (
+                    "STELA_METAL_FACTOR_STEP_PER_INSTANCE",
+                    TessellationFactorStepFunction::PerInstance.raw(),
+                ),
+                (
+                    "STELA_METAL_FACTOR_STEP_PER_PATCH_AND_PER_INSTANCE",
+                    TessellationFactorStepFunction::PerPatchAndPerInstance.raw(),
+                ),
+            ],
+        );
+        check_enum(
+            "stela_metal_winding",
+            &[
+                ("STELA_METAL_WINDING_CLOCKWISE", Winding::Clockwise.raw()),
+                (
+                    "STELA_METAL_WINDING_COUNTER_CLOCKWISE",
+                    Winding::CounterClockwise.raw(),
+                ),
+            ],
+        );
         assert_eq!(
             AccumulateArguments::WORKGROUP_SIZE,
             SelectArguments::WORKGROUP_SIZE
