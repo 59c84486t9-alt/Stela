@@ -218,6 +218,9 @@ enum stela_air_stage_semantic {
     * members are the attributes of each control point. */
    STELA_AIR_CONTROL_POINTS,
    STELA_AIR_POSITION_IN_PATCH, /* The tessellated vertex's float2 or float3. */
+   /* A fragment's barycentric_coord: float to float3, interpolated and
+    * sampled as qualified. */
+   STELA_AIR_BARYCENTRIC,
    /* Object and mesh inputs: the object payload, a mesh function's mesh and
     * an object function's mesh grid properties. */
    STELA_AIR_PAYLOAD, STELA_AIR_MESH_OUTPUT, STELA_AIR_MESH_GRID,
@@ -265,6 +268,10 @@ struct stela_air_stage_io {
    enum stela_air_depth_qualifier depth; /* Only DEPTH. */
    bool used, invariant;
    bool argument_buffer; /* Only STAGE_BUFFER: an air.indirect_buffer. */
+   /* A VARYING the function interpolates itself, an interpolant<T, P>: its
+    * argument is an opaque pointer the air.interpolate_* calls read, and it
+    * has no sampling qualifier. */
+   bool interpolant;
    /* A mesh output each primitive has, rather than each vertex; a fragment
     * input of one. */
    bool per_primitive;

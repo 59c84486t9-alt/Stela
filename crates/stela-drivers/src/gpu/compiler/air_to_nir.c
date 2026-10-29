@@ -1839,6 +1839,77 @@ control_point_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee,
       fail(t, STELA_AIR_ALLOCATION, "control point map allocation failed");
 }
 
+/* An air.interpolate_<place>_<perspective>.<type> call: the interpolant
+ * argument its first operand names, sampled at the pixel center, the
+ * centroid, a sample or an offset. Metal measures offsets from the pixel's
+ * upper-left corner and NIR from its center, as SPIRV-Cross's MSL backend
+ * accounts for. */
+static bool
+interpolant_call(struct translator *t, LLVMValueRef inst, const char *name, size_t name_length,
+                 bool *lowered)
+{
+   static const char prefix[] = "air.interpolate_";
+   *lowered = name_length > strlen(prefix) && !memcmp(name, prefix, strlen(prefix));
+   if (!*lowered)
+      return true;
+   enum { CENTER, CENTROID, SAMPLE, OFFSET };
+   static const char *const places[] = {
+      [CENTER] = "center_", [CENTROID] = "centroid_", [SAMPLE] = "sample_", [OFFSET] = "offset_",
+   };
+   const char *rest = name + strlen(prefix);
+   size_t left = name_length - strlen(prefix);
+   unsigned place = 0;
+   while (place < ARRAY_SIZE(places) &&
+          (left < strlen(places[place]) || memcmp(rest, places[place], strlen(places[place]))))
+      place++;
+   if (place == ARRAY_SIZE(places))
+      return fail(t, STELA_AIR_INSTRUCTION, "unsupported interpolation %.*s", (int)name_length, name);
+   rest += strlen(places[place]);
+   left -= strlen(places[place]);
+   static const char perspective[] = "perspective.", linear[] = "no_perspective.";
+   enum stela_air_interpolation interpolation =
+      left > strlen(perspective) && !memcmp(rest, perspective, strlen(perspective)) ?
+         STELA_AIR_PERSPECTIVE :
+      left > strlen(linear) && !memcmp(rest, linear, strlen(linear)) ? STELA_AIR_NO_PERSPECTIVE :
+                                                                        STELA_AIR_INTERPOLATION_NONE;
+   const struct stela_air_stage_io *io = NULL;
+   unsigned operands = place == SAMPLE || place == OFFSET ? 2 : 1;
+   for (unsigned i = 0; LLVMGetNumArgOperands(inst) == operands && i < t->render.entry.input_count;
+        i++) {
+      if (t->render.inputs[i].interpolant &&
+          LLVMGetOperand(inst, 0) == LLVMGetParam(t->entry, t->render.inputs[i].argument))
+         io = &t->render.inputs[i];
+   }
+   if (!io)
+      return fail(t, STELA_AIR_INSTRUCTION, "interpolants are read through their argument");
+   LLVMTypeRef type = LLVMTypeOf(inst);
+   bool vector = LLVMGetTypeKind(type) == LLVMVectorTypeKind;
+   LLVMTypeKind scalar = LLVMGetTypeKind(vector ? LLVMGetElementType(type) : type);
+   if (interpolation != io->interpolation || (vector ? LLVMGetVectorSize(type) : 1) != io->components ||
+       scalar != (io->primitive == STELA_AIR_HALF ? LLVMHalfTypeKind : LLVMFloatTypeKind))
+      return fail(t, STELA_AIR_TYPE, "interpolation of another interpolant");
+   nir_variable *var =
+      nir_find_variable_with_location(t->b.shader, nir_var_shader_in, stage_location(t, io));
+   nir_def *deref = &nir_build_deref_var(&t->b, var)->def, *def;
+   if (place == CENTROID) {
+      def = nir_interp_deref_at_centroid(&t->b, io->components, 32, deref);
+   } else if (place == SAMPLE) {
+      nir_def *sample = get_value(t, LLVMGetOperand(inst, 1));
+      if (!sample || sample->num_components != 1 || sample->bit_size != 32)
+         return fail(t, STELA_AIR_TYPE, "interpolation sample is one uint");
+      def = nir_interp_deref_at_sample(&t->b, io->components, 32, deref, sample);
+   } else {
+      nir_def *offset = place == CENTER ? nir_imm_vec2(&t->b, 0.0f, 0.0f) :
+                                          get_value(t, LLVMGetOperand(inst, 1));
+      if (!offset || offset->num_components != 2 || offset->bit_size != 32)
+         return fail(t, STELA_AIR_TYPE, "interpolation offset is one float2");
+      if (place == OFFSET)
+         offset = nir_fadd_imm(&t->b, offset, -0.5);
+      def = nir_interp_deref_at_offset(&t->b, io->components, 32, deref, offset);
+   }
+   return put_value(t, inst, stage_narrow(&t->b, def, io->primitive), 0);
+}
+
 static bool
 stage_arguments(struct translator *t, LLVMValueRef fn)
 {
@@ -1889,6 +1960,16 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
          def = nir_load_frag_coord(&t->b);
       } else if (io->semantic == STELA_AIR_CONTROL_POINTS) {
          continue; /* Calls of its function read it. */
+      } else if (io->semantic == STELA_AIR_BARYCENTRIC) {
+         if (!io->used) continue;
+         enum glsl_interp_mode mode = io->interpolation == STELA_AIR_PERSPECTIVE ?
+            INTERP_MODE_SMOOTH : INTERP_MODE_NOPERSPECTIVE;
+         def = io->sampling == STELA_AIR_SAMPLE ?
+                  nir_load_barycentric_coord_sample(&t->b, 32, .interp_mode = mode) :
+               io->sampling == STELA_AIR_CENTROID ?
+                  nir_load_barycentric_coord_centroid(&t->b, 32, .interp_mode = mode) :
+                  nir_load_barycentric_coord_pixel(&t->b, 32, .interp_mode = mode);
+         def = nir_trim_vector(&t->b, def, io->components);
       } else if (io->semantic == STELA_AIR_POSITION_IN_PATCH) {
          /* Metal's patch coordinates are Vulkan's with the upper-left domain
           * origin. */
@@ -1901,6 +1982,7 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
       } else {
          nir_variable *var = stage_variable(t, io, false);
          if (!var) return false;
+         if (io->interpolant) continue; /* Calls interpolate it. */
          def = stage_narrow(&t->b, nir_load_var(&t->b, var), io->primitive);
       }
       if (!put_value(t, param, def, io->buffer.access)) return false;
@@ -2963,6 +3045,10 @@ instruction(struct translator *t, LLVMValueRef inst)
       const char *name = LLVMGetValueName2(callee, &name_length);
       bool lowered;
       if (!control_point_call(t, inst, callee, &lowered))
+         return false;
+      if (lowered)
+         return true;
+      if (!interpolant_call(t, inst, name, name_length, &lowered))
          return false;
       if (lowered)
          return true;

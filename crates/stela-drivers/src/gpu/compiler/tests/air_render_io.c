@@ -107,6 +107,45 @@ static const char *fragment =
    "!42 = !{i32 2, !\"air.fragment_input\", !\"user(s)\", !\"air.sample\", !\"air.no_perspective\","
    " !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"s\"}\n";
 
+#define INTERPOLANT(type, place, perspective, suffix) \
+   "declare " type " @air.interpolate_" place "_" perspective "." suffix "(ptr addrspace(1)"
+
+/* Interpolates its color at the center, centroid, a sample and an offset,
+ * its s at the center, and reads its barycentric coordinates. */
+static const char *pulled =
+   "define <4 x float> @fragment(ptr addrspace(1) %color, ptr addrspace(1) %s, <3 x float> %bary,"
+   " i32 %sample) {\n"
+   "%a = call <2 x float> @air.interpolate_center_perspective.v2f32(ptr addrspace(1) %color)\n"
+   "%b = call <2 x float> @air.interpolate_centroid_perspective.v2f32(ptr addrspace(1) %color)\n"
+   "%c = call <2 x float> @air.interpolate_sample_perspective.v2f32(ptr addrspace(1) %color, i32 %sample)\n"
+   "%d = call <2 x float> @air.interpolate_offset_perspective.v2f32(ptr addrspace(1) %color,"
+   " <2 x float> <float 0.25, float 0.75>)\n"
+   "%e = call float @air.interpolate_center_no_perspective.f32(ptr addrspace(1) %s)\n"
+   "%ab = fadd <2 x float> %a, %b\n%cd = fadd <2 x float> %c, %d\n%sum = fadd <2 x float> %ab, %cd\n"
+   "%x = extractelement <2 x float> %sum, i32 0\n%y = extractelement <3 x float> %bary, i32 1\n"
+   "%v0 = insertelement <4 x float> undef, float %x, i32 0\n"
+   "%v1 = insertelement <4 x float> %v0, float %y, i32 1\n"
+   "%v2 = insertelement <4 x float> %v1, float %e, i32 2\n"
+   "%v3 = insertelement <4 x float> %v2, float 1.0, i32 3\n"
+   "ret <4 x float> %v3\n}\n"
+   INTERPOLANT("<2 x float>", "center", "perspective", "v2f32") ")\n"
+   INTERPOLANT("<2 x float>", "centroid", "perspective", "v2f32") ")\n"
+   INTERPOLANT("<2 x float>", "sample", "perspective", "v2f32") ", i32)\n"
+   INTERPOLANT("<2 x float>", "offset", "perspective", "v2f32") ", <2 x float>)\n"
+   INTERPOLANT("float", "center", "no_perspective", "f32") ")\n"
+   "!air.fragment = !{!2}\n"
+   "!2 = !{ptr @fragment, !3, !4}\n!3 = !{!30}\n"
+   "!30 = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\","
+   " !\"air.arg_name\", !\"color\"}\n"
+   "!4 = !{!40, !41, !42, !43}\n"
+   "!40 = !{i32 0, !\"air.fragment_input\", !\"user(color)\", !\"air.interpolation_function\","
+   " !\"air.perspective\", !\"air.arg_type_name\", !\"float2\", !\"air.arg_name\", !\"color\"}\n"
+   "!41 = !{i32 1, !\"air.fragment_input\", !\"user(s)\", !\"air.interpolation_function\","
+   " !\"air.no_perspective\", !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"s\"}\n"
+   "!42 = !{i32 2, !\"air.barycentric_coord\", !\"air.center\", !\"air.perspective\","
+   " !\"air.arg_type_name\", !\"float3\", !\"air.arg_name\", !\"bary\"}\n"
+   "!43 = !{i32 3, !\"air.sample_id\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"sample\"}\n";
+
 static const struct stela_air_varying_slot varyings[] = {
    {"user(color)", 11, STELA_AIR_FLOAT, 2, 0},
    {"user(id)", 8, STELA_AIR_UINT, 1, 1},
@@ -377,6 +416,73 @@ fragment_functions_interpolate_and_write_targets(void)
    ralloc_free(shader);
 }
 
+/* The intrinsics of the shader's entry point. */
+static unsigned
+intrinsics(nir_shader *shader, nir_intrinsic_op op, nir_intrinsic_instr **last)
+{
+   unsigned count = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic && nir_instr_as_intrinsic(instr)->intrinsic == op) {
+            *last = nir_instr_as_intrinsic(instr);
+            count++;
+         }
+      }
+   }
+   return count;
+}
+
+static bool
+offset_is(nir_intrinsic_instr *interp, float x, float y)
+{
+   return nir_src_is_const(interp->src[1]) && nir_src_comp_as_float(interp->src[1], 0) == x &&
+          nir_src_comp_as_float(interp->src[1], 1) == y;
+}
+
+static void
+fragment_functions_interpolate_their_interpolants(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = translate(pulled, STELA_AIR_FRAGMENT, false, &error);
+   if (!shader)
+      fprintf(stderr, "pulled: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   NIR_PASS(_, shader, nir_opt_constant_folding);
+   nir_variable *color = variable(shader, nir_var_shader_in, VARYING_SLOT_VAR0, 0);
+   assert(typed(color, GLSL_TYPE_FLOAT, 2) && color->data.interpolation == INTERP_MODE_SMOOTH &&
+          !color->data.centroid && !color->data.sample);
+   nir_variable *s = variable(shader, nir_var_shader_in, VARYING_SLOT_VAR2, 0);
+   assert(typed(s, GLSL_TYPE_FLOAT, 1) && s->data.interpolation == INTERP_MODE_NOPERSPECTIVE);
+   nir_intrinsic_instr *last = NULL;
+   assert(intrinsics(shader, nir_intrinsic_load_deref, &last) == 0);
+   assert(intrinsics(shader, nir_intrinsic_interp_deref_at_centroid, &last) == 1);
+   assert(intrinsics(shader, nir_intrinsic_interp_deref_at_sample, &last) == 1);
+   /* Metal's offsets are from the pixel's corner, NIR's from its center. */
+   nir_intrinsic_instr *offsets[3] = {0};
+   unsigned count = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_interp_deref_at_offset)
+            offsets[count++] = nir_instr_as_intrinsic(instr);
+      }
+   }
+   assert(count == 3 && offset_is(offsets[0], 0.0f, 0.0f) && offset_is(offsets[1], -0.25f, 0.25f) &&
+          offset_is(offsets[2], 0.0f, 0.0f) && offsets[2]->def.num_components == 1);
+   assert(intrinsics(shader, nir_intrinsic_load_barycentric_coord_pixel, &last) == 1 &&
+          nir_intrinsic_interp_mode(last) == INTERP_MODE_SMOOTH);
+   ralloc_free(shader);
+
+   /* Barycentric coordinates are sampled and interpolated as qualified. */
+   char *text = change(pulled, "!\"air.barycentric_coord\", !\"air.center\", !\"air.perspective\"",
+                       "!\"air.barycentric_coord\", !\"air.sample\", !\"air.no_perspective\"");
+   shader = translate(text, STELA_AIR_FRAGMENT, false, &error);
+   free(text);
+   assert(shader && intrinsics(shader, nir_intrinsic_load_barycentric_coord_sample, &last) == 1 &&
+          nir_intrinsic_interp_mode(last) == INTERP_MODE_NOPERSPECTIVE);
+   ralloc_free(shader);
+}
+
 static void
 refuses_unrepresentable_render_io(void)
 {
@@ -415,6 +521,21 @@ refuses_unrepresentable_render_io(void)
       {vertex, "i32 5, i32 1", "i32 3, i32 1", STELA_AIR_VERTEX, STELA_AIR_ARGUMENT},
       {vertex, "i32 5, i32 1", "i32 31, i32 1", STELA_AIR_VERTEX, STELA_AIR_ARGUMENT},
       {vertex, "i32 5, i32 1", "i32 5, i32 2", STELA_AIR_VERTEX, STELA_AIR_ARGUMENT},
+      /* Interpolants are never flat, and each call picks where it samples. */
+      {pulled, "!\"air.interpolation_function\", !\"air.no_perspective\"",
+       "!\"air.interpolation_function\", !\"air.flat\"", STELA_AIR_FRAGMENT, STELA_AIR_ARGUMENT},
+      {pulled, "!\"air.interpolation_function\", !\"air.perspective\"",
+       "!\"air.interpolation_function\", !\"air.center\", !\"air.perspective\"", STELA_AIR_FRAGMENT,
+       STELA_AIR_ARGUMENT},
+      /* Calls interpolate as their interpolant declares. */
+      {pulled, "!\"air.interpolation_function\", !\"air.no_perspective\"",
+       "!\"air.interpolation_function\", !\"air.perspective\"", STELA_AIR_FRAGMENT, STELA_AIR_TYPE},
+      /* Barycentric coordinates are interpolated floats. */
+      {pulled, "!\"air.barycentric_coord\", !\"air.center\", !\"air.perspective\"",
+       "!\"air.barycentric_coord\", !\"air.perspective\"", STELA_AIR_FRAGMENT, STELA_AIR_ARGUMENT},
+      {pulled, "!\"air.center\", !\"air.perspective\", !\"air.arg_type_name\", !\"float3\"",
+       "!\"air.center\", !\"air.flat\", !\"air.arg_type_name\", !\"float3\"", STELA_AIR_FRAGMENT,
+       STELA_AIR_ARGUMENT},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
       char *text = change(cases[i].text, cases[i].old, cases[i].replacement);
@@ -436,6 +557,7 @@ main(void)
    vertex_functions_access_device_buffers();
    vertex_functions_write_clip_distances();
    fragment_functions_interpolate_and_write_targets();
+   fragment_functions_interpolate_their_interpolants();
    refuses_unrepresentable_render_io();
    glsl_type_singleton_decref();
    puts("air render io: ok");

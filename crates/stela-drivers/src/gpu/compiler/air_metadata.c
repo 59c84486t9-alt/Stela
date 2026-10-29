@@ -1369,6 +1369,11 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
                       stela_air_md_string(fields[1], "air.position");
       bool varying = render && render->entry.stage == STELA_AIR_FRAGMENT &&
                      stela_air_md_string(fields[1], "air.fragment_input");
+      bool barycentric = render && render->entry.stage == STELA_AIR_FRAGMENT &&
+                         stela_air_md_string(fields[1], "air.barycentric_coord");
+      /* Interpolated fragment inputs, which take sampling and interpolation
+       * qualifiers. */
+      bool interpolated = position || varying || barycentric;
       /* A stage-in attribute: a vertex function's, a post-tessellation
        * vertex function's per-patch one, or a kernel's. */
       bool vertex_input = render ? render->entry.stage == STELA_AIR_VERTEX &&
@@ -1382,7 +1387,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       bool payload = (object || mesh_stage) && stela_air_md_string(fields[1], "air.payload");
       bool mesh = mesh_stage && stela_air_md_string(fields[1], "air.mesh");
       bool grid = object && stela_air_md_string(fields[1], "air.mesh_grid_properties");
-      if (!buffer && !builtin && !position && !varying && !vertex_input && !texture && !sampler &&
+      if (!buffer && !builtin && !interpolated && !vertex_input && !texture && !sampler &&
           !payload && !mesh && !grid && !control_points && !in_patch)
          return fail(t, STELA_AIR_ARGUMENT, "unsupported AIR argument kind at %u", index);
       if (builtin && builtins[builtin])
@@ -1401,7 +1406,8 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
                         sampler ? STELA_AIR_STAGE_SAMPLER : payload ? STELA_AIR_PAYLOAD :
                         mesh ? STELA_AIR_MESH_OUTPUT : grid ? STELA_AIR_MESH_GRID :
                         control_points ? STELA_AIR_CONTROL_POINTS :
-                        in_patch ? STELA_AIR_POSITION_IN_PATCH : STELA_AIR_VARYING};
+                        in_patch ? STELA_AIR_POSITION_IN_PATCH :
+                        barycentric ? STELA_AIR_BARYCENTRIC : STELA_AIR_VARYING};
       }
       unsigned first_field = 2;
       if (varying) {
@@ -1497,23 +1503,26 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             if (!buffer || struct_info || f == fields_count)
                return fail(t, STELA_AIR_METADATA, "invalid structure reflection");
             struct_info = fields[f++];
-         } else if (io && (position || varying) &&
+         } else if (io && interpolated &&
                     (stela_air_md_string(key, "air.center") || stela_air_md_string(key, "air.centroid") ||
                      stela_air_md_string(key, "air.sample"))) {
             if (io->sampling) return fail(t, STELA_AIR_METADATA, "duplicate sampling qualifier");
             io->sampling = stela_air_md_string(key, "air.center") ? STELA_AIR_CENTER :
                            stela_air_md_string(key, "air.centroid") ? STELA_AIR_CENTROID : STELA_AIR_SAMPLE;
-         } else if (io && (position || varying) &&
+         } else if (io && interpolated &&
                     (stela_air_md_string(key, "air.perspective") || stela_air_md_string(key, "air.no_perspective") ||
                      stela_air_md_string(key, "air.flat"))) {
             if (io->interpolation) return fail(t, STELA_AIR_METADATA, "duplicate interpolation qualifier");
             io->interpolation = stela_air_md_string(key, "air.perspective") ? STELA_AIR_PERSPECTIVE :
                                 stela_air_md_string(key, "air.no_perspective") ? STELA_AIR_NO_PERSPECTIVE :
                                 STELA_AIR_FLAT;
-         } else if (((io && (position || varying)) || vertex_input) &&
+         } else if (((io && interpolated) || vertex_input) &&
                     stela_air_md_string(key, "air.arg_unused")) {
             if (unused) return fail(t, STELA_AIR_METADATA, "duplicate unused qualifier");
             unused = true;
+         } else if (varying && stela_air_md_string(key, "air.interpolation_function")) {
+            if (io->interpolant) return fail(t, STELA_AIR_METADATA, "duplicate interpolant qualifier");
+            io->interpolant = true;
          } else {
             return fail(t, STELA_AIR_METADATA, "unsupported argument metadata at %u", index);
          }
@@ -1586,13 +1595,25 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       } else if (position || varying) {
          bool flat = io->interpolation == STELA_AIR_FLAT;
          bool real = primitive == STELA_AIR_FLOAT || primitive == STELA_AIR_HALF;
-         if (!io->interpolation || flat == (io->sampling != STELA_AIR_SAMPLING_NONE) ||
-             !stage_varying(primitive) || (!real && !flat) ||
-             !stage_type_matches(LLVMTypeOf(param), primitive, type_components) ||
+         LLVMTypeRef type = LLVMTypeOf(param);
+         /* An interpolant is sampled where each call says, never flat. */
+         bool typed = io->interpolant ?
+            real && !flat && io->sampling == STELA_AIR_SAMPLING_NONE &&
+               LLVMGetTypeKind(type) == LLVMPointerTypeKind && LLVMGetPointerAddressSpace(type) == 1 :
+            flat == (io->sampling == STELA_AIR_SAMPLING_NONE) &&
+               stage_type_matches(type, primitive, type_components);
+         if (!io->interpolation || !typed || !stage_varying(primitive) || (!real && !flat) ||
              (position && (primitive != STELA_AIR_FLOAT || type_components != 4 ||
                            io->sampling != STELA_AIR_CENTER ||
                            io->interpolation != STELA_AIR_NO_PERSPECTIVE)))
             return fail(t, STELA_AIR_ARGUMENT, "unsupported fragment input type/interpolation");
+         components = type_components;
+      } else if (barycentric) {
+         if (!io->sampling || (io->interpolation != STELA_AIR_PERSPECTIVE &&
+                               io->interpolation != STELA_AIR_NO_PERSPECTIVE) ||
+             primitive != STELA_AIR_FLOAT || type_components > 3 ||
+             !stage_type_matches(LLVMTypeOf(param), primitive, type_components))
+            return fail(t, STELA_AIR_ARGUMENT, "barycentric coordinates are interpolated float1 to float3");
          components = type_components;
       } else if (vertex_input) {
          if (!has_location || location >= AIR_MAX_VERTEX_ATTRIBUTES || attribute_locations[location] ||
