@@ -7,7 +7,7 @@ use crate::firmware::Target;
 use crate::usb::xhci::Device;
 use alloc::{format, string::String, vec::Vec};
 use core::fmt::Write;
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 
 const CNVI_TOP: u8 = 0x10;
 const CNVR_TOP: u8 = 0x11;

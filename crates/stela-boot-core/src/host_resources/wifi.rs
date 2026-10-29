@@ -2,9 +2,9 @@
 //! copied observations and immutable LOADER_DATA regions leave this module.
 use crate::Result;
 use crate::handoff_records::Region;
-use sha2::Digest;
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 use stela_drivers::net::wifi::intel::platform::{Observation, Stage, Variable};
 use uefi_raw::Status;
 

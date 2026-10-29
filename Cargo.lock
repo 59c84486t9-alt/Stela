@@ -2208,7 +2208,7 @@ dependencies = [
 name = "stela-driver-core"
 version = "0.1.0"
 dependencies = [
- "sha2",
+ "stela-crypto",
 ]
 
 [[package]]
@@ -2221,7 +2221,6 @@ dependencies = [
  "libc",
  "object",
  "p256",
- "sha1",
  "sha2",
  "stela-crypto",
  "stela-driver-core",
@@ -2239,7 +2238,6 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
- "sha2",
  "stela-compiler",
  "stela-contracts",
  "stela-crypto",
@@ -2284,6 +2282,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "stela-contracts",
+ "stela-crypto",
  "stela-driver-core",
  "stela-engine",
  "stela-formats",
@@ -2295,7 +2294,7 @@ dependencies = [
 name = "stela-metal-input"
 version = "0.1.0"
 dependencies = [
- "sha2",
+ "stela-crypto",
 ]
 
 [[package]]
@@ -2316,7 +2315,6 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha1",
  "sha2",
  "smoltcp",
  "stela-compiler",

@@ -16,11 +16,11 @@
 
 use super::{KeyIdentity, KeyScope, PacketNumber, valid_receive_observations};
 use crate::net::wifi::{Aggregation, frame};
-use aes::{
-    Aes128, Aes256,
-    cipher::{BlockEncrypt, KeyInit},
-};
 use alloc::boxed::Box;
+use stela_crypto::{
+    Aes128, Aes256,
+    cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray},
+};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -300,7 +300,7 @@ impl Aes {
         .map_err(|_| Error::InvalidKey)
     }
     fn encrypt(&self, block: &mut [u8; 16]) {
-        let block = aes::Block::from_mut_slice(block);
+        let block = GenericArray::from_mut_slice(block);
         match self {
             Self::Aes128(cipher) => cipher.encrypt_block(block),
             Self::Aes256(cipher) => cipher.encrypt_block(block),

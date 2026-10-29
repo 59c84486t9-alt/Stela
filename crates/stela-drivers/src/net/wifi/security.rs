@@ -27,7 +27,7 @@
 
 use super::{Aggregation, frame::Mpdu};
 use crate::net::Mac;
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 
 pub mod aggregate;
 pub mod management;

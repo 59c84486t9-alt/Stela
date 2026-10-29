@@ -12,8 +12,8 @@
 //! piece's name.
 use super::{Layout, PayloadError, PayloadManifest, ReadAt, piece_name};
 use alloc::{format, vec, vec::Vec};
-use sha2::Digest;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 
 /// A run of a piece's bytes on the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

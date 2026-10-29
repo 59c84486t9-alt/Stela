@@ -13,9 +13,9 @@ use core::{
     ops::Range,
     sync::atomic::{AtomicU64, Ordering},
 };
-use sha2::Digest;
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 use stela_drivers::{
     Clock,
     bus::{
@@ -287,8 +287,8 @@ impl Prepared {
         Ok(format!(
             "INTx gsi=22 high+shared+level vector={vector:#x} first=2 second=1 hold→EOI→retrigger=verified RemoteIRR=observed/drained group_refs=released late_delivery=absent DSDT={:x} MADT={:x} FADT={:x} SCI_gsi={} SCI_polarity={:?} SCI_trigger={:?}",
             Sha256::digest(self.dsdt),
-            sha2::digest::generic_array::GenericArray::from(self.madt_hash),
-            sha2::digest::generic_array::GenericArray::from(self.fadt_hash),
+            stela_crypto::digest::generic_array::GenericArray::from(self.madt_hash),
+            stela_crypto::digest::generic_array::GenericArray::from(self.fadt_hash),
             self.sci.gsi,
             self.sci.polarity,
             self.sci.trigger

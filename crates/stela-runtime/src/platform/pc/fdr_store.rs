@@ -6,8 +6,8 @@
 //! block-device view of exactly [`FILE_BYTES`], never a whole filesystem.
 use alloc::{vec, vec::Vec};
 use core::fmt;
-use sha2::Digest;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 use stela_drivers::block::{BlockDevice, BlockError};
 
 pub const FILE_BYTES: usize = 4 << 20;

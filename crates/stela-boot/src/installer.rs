@@ -27,10 +27,10 @@ use crate::{
 };
 use alloc::string::ToString;
 use alloc::{format, string::String, vec, vec::Vec};
-use sha2::Digest;
 use stela_boot_core::screen::{disk_size as size, window};
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 use uefi::{
     Handle,
     boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol},

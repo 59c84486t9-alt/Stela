@@ -15,11 +15,11 @@ use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
-use sha2::Digest;
 use stela_boot_core::work_check_fixture as fixture;
 use stela_contracts::Refusal;
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 use stela_drivers::{
     Clock,
     platform::work::{

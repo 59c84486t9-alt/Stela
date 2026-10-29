@@ -5,7 +5,7 @@
 use super::{Image, Provenance, Provider, Requirement, Resource, Target};
 use crate::bytes::{le16, le32};
 use alloc::{format, string::String};
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 
 pub const MAX_ENTRY_BYTES: usize = 255;
 /// Native collection bound, not a maximum imposed by the SMBIOS specification.

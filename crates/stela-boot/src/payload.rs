@@ -24,9 +24,9 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use sha2::Digest;
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 use uefi::{
     CString16, Handle,
     boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol},

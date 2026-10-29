@@ -6,7 +6,7 @@ pub mod library;
 
 use core::{mem, ptr, slice};
 use library::{Air, Library};
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 
 const ABI: u32 = 1;
 const MTLB: u32 = 1;

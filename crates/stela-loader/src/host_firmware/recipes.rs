@@ -36,7 +36,7 @@ impl Artifact {
         }
     }
     pub fn verify(&self, bytes: &[u8]) -> Result<(), Error> {
-        use sha2::{Digest, Sha256};
+        use stela_crypto::{Sha256, digest::Digest};
         if bytes.len() != self.length || hex::encode(Sha256::digest(bytes)) != self.sha256 {
             return Err(Error(format!(
                 "pinned host firmware artifact differs: {}",

@@ -43,15 +43,6 @@ stela-runtime = { path = "../stela-runtime", default-features = false }
 stela-loader = { path = "../stela-loader", default-features = false }
 stela-compiler = { path = "../stela-compiler", default-features = false }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
-# The soft-float UEFI target cannot codegen the optional hardware intrinsics in the local
-# LLVM toolchain. Use the crate's real baseline SHA implementation.
-sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
-
-# LLVM cannot codegen the SHA-1 x86 intrinsics for the soft-float UEFI
-# target. Unify this existing transitive dependency on its real software
-# backend only for the boot target; hosted runtime keeps its normal selection.
-[target.'cfg(target_os = "uefi")'.dependencies]
-sha1 = { version = "0.10", default-features = false, features = ["force-soft"] }
 
 [profile.dev]
 panic = "abort"

@@ -23,8 +23,8 @@
 use super::{DeviceTree, Node};
 use crate::Result;
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
-use sha2::{Digest, Sha256};
 use stela_contracts::{refuse, require};
+use stela_crypto::{Sha256, digest::Digest};
 use stela_soc_data::board::assigned::{
     CacheId, GuestSlotId, InterruptId, Plan, PlanIdentity, StartId,
 };

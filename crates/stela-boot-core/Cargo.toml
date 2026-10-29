@@ -14,7 +14,6 @@ native-acpi = ["stela-drivers/native-acpi"]
 stela-crypto = { path = "../stela-crypto" }
 stela-drivers = { path = "../stela-drivers" }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
-sha2 = { version = "0.10", default-features = false }
 uefi-raw = "0.17"
 
 # The freestanding crates for stela.efi; on the host, as `stela setup` and
@@ -39,6 +38,8 @@ stela-soc-data = { path = "../stela-soc-data" }
 
 [dev-dependencies]
 serde_json.workspace = true
+# An independent SHA-256 the tests check digests against.
+sha2 = { version = "0.10", default-features = false }
 
 [lints]
 workspace = true

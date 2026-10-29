@@ -10,9 +10,9 @@ use super::super::power::t6000::identity::Image;
 #[cfg(test)]
 use crate::Result;
 #[cfg(test)]
-use sha2::{Digest, Sha256};
-#[cfg(test)]
 use stela_contracts::refuse;
+#[cfg(test)]
+use stela_crypto::{Sha256, digest::Digest};
 
 #[cfg(test)]
 const HEADER: usize = 0x30;

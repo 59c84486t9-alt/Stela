@@ -862,8 +862,6 @@ name = "stela-boot"
 version = "0.1.0"
 dependencies = [
  "serde_json",
- "sha1",
- "sha2",
  "stela-boot-core",
  "stela-compiler",
  "stela-contracts",
@@ -883,7 +881,6 @@ name = "stela-boot-core"
 version = "0.1.0"
 dependencies = [
  "serde_json",
- "sha2",
  "stela-compiler",
  "stela-contracts",
  "stela-crypto",
@@ -929,20 +926,18 @@ dependencies = [
 name = "stela-driver-core"
 version = "0.1.0"
 dependencies = [
- "sha2",
+ "stela-crypto",
 ]
 
 [[package]]
 name = "stela-drivers"
 version = "0.1.0"
 dependencies = [
- "aes 0.8.4",
  "cc",
  "hmac",
  "libc",
  "object",
  "p256",
- "sha1",
  "sha2",
  "stela-crypto",
  "stela-driver-core",
@@ -959,7 +954,6 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
- "sha2",
  "stela-compiler",
  "stela-contracts",
  "stela-crypto",
@@ -985,7 +979,6 @@ dependencies = [
  "miniz_oxide",
  "serde",
  "serde_json",
- "sha1",
  "sha2",
  "stela-contracts",
  "stela-crypto",
@@ -1001,6 +994,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "stela-contracts",
+ "stela-crypto",
  "stela-driver-core",
  "stela-formats",
  "stela-soc-data",
@@ -1010,7 +1004,6 @@ dependencies = [
 name = "stela-runtime"
 version = "0.1.0"
 dependencies = [
- "aes 0.8.4",
  "crypto-bigint",
  "hex",
  "hmac",
@@ -1020,7 +1013,6 @@ dependencies = [
  "p256",
  "serde",
  "serde_json",
- "sha1",
  "sha2",
  "smoltcp",
  "stela-compiler",

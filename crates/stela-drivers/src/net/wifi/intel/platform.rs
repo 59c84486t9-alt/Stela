@@ -8,7 +8,7 @@
 use super::{firmware::Family, identity::Profile};
 use crate::firmware as resources;
 use alloc::{boxed::Box, format, string::String, vec::Vec};
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 
 pub const WIFI_BT_GUID: &str = "e65d8884-d4af-4b20-8d03-772ecc3da531";
 pub const WIFI_GUID: &str = "92daaf2f-c02b-455b-b2ec-f5a3594f4aea";

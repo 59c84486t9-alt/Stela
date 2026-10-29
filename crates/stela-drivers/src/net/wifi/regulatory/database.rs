@@ -11,7 +11,7 @@
 
 use crate::firmware::{self, Provider, Requirement, Target};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 
 /// The catalog name of wireless-regdb's database, which boot places in the
 /// handoff firmware catalog from setup's pinned host firmware.

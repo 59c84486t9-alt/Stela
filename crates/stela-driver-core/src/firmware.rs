@@ -41,7 +41,7 @@ pub mod smbios;
 
 use alloc::{string::String, vec::Vec};
 use core::fmt;
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 
 /// An owned diagnostic name. Copying borrowed bytes uses a fallible reserve;
 /// OOM keeps the original byte count and SHA-256 instead of aborting. This

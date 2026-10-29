@@ -411,8 +411,8 @@ impl<'a> Source<'a> {
         profile: CpuProfile,
         host: &[native::CoreClass],
     ) -> Result<Prepared<'s>> {
-        use sha2::Digest;
         use stela_crypto::Sha256;
+        use stela_crypto::digest::Digest;
         let resources = self.resources.resources();
         if resources.slots.len() != roster.cores().len() {
             return Err(refuse!(

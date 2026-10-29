@@ -5,7 +5,7 @@
 use super::FormatError;
 use crate::bytes::le32;
 use alloc::vec::Vec;
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 const HEADER: usize = 32;
 const GLOBAL: usize = 64;
 const MAP: usize = 64;

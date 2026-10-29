@@ -17,14 +17,12 @@ use super::{
     station::wire::pmf,
 };
 use crate::net::Mac;
-use aes::{
-    Aes128,
-    cipher::{BlockDecrypt, BlockEncrypt, KeyInit},
-};
 use alloc::vec::Vec;
 use hmac::{Hmac, Mac as _};
-use sha1::Sha1;
-use sha2::Sha256;
+use stela_crypto::{
+    Aes128, Sha1, Sha256,
+    cipher::{BlockDecrypt, BlockEncrypt, KeyInit},
+};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 

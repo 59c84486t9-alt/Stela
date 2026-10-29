@@ -4,7 +4,7 @@
 use super::{Error, Result};
 use crate::{bus::pci::Address, firmware::Target};
 use alloc::{format, string::String};
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 
 pub const OTP_BYTES: usize = 0xe0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -5,8 +5,8 @@ use crate::Result;
 use crate::handoff_records::Region;
 use alloc::{format, sync::Arc, vec::Vec};
 use core::fmt;
-use sha2::Digest;
 use stela_contracts::refuse;
+use stela_crypto::digest::Digest;
 use stela_drivers::firmware::{Catalog, Provider, Requirement, Target};
 use stela_drivers::net::wifi::intel::platform::{
     CapturedVariable, Observation, Observations, VARIABLE_DESCRIPTORS,

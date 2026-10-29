@@ -23,9 +23,9 @@
 //! recovered no key is installed, so the ANS key path still refuses; this
 //! module is the interface and the verified cipher they will use.
 use crate::Result;
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
 use alloc::collections::BTreeMap;
 use stela_contracts::refuse;
+use stela_crypto::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
 use stela_crypto::{Aes128, Aes256};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -76,7 +76,7 @@ fn double_tweak(tweak: &mut [u8; BLOCK]) {
     }
 }
 
-fn xts<C: BlockEncrypt<BlockSize = aes::cipher::consts::U16> + BlockDecrypt + KeyInit>(
+fn xts<C: BlockEncrypt<BlockSize = stela_crypto::cipher::consts::U16> + BlockDecrypt + KeyInit>(
     data_key: &[u8],
     tweak_key: &[u8],
     sector: u64,
@@ -94,7 +94,8 @@ fn xts<C: BlockEncrypt<BlockSize = aes::cipher::consts::U16> + BlockDecrypt + Ke
     let mut block = GenericArray::clone_from_slice(&tweak);
     tweak_cipher.encrypt_block(&mut block);
     tweak.copy_from_slice(&block);
-    let mut blocks: [aes::cipher::Block<C>; 8] = core::array::from_fn(|_| Default::default());
+    let mut blocks: [stela_crypto::cipher::Block<C>; 8] =
+        core::array::from_fn(|_| Default::default());
     let mut masks = [[0u8; BLOCK]; 8];
     let (chunks, _) = data.as_chunks_mut::<BLOCK>();
     for group in chunks.chunks_mut(8) {

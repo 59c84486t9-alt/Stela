@@ -27,7 +27,7 @@ serde.workspace = true
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 tempfile = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
-sha1 = { version = "0.10", default-features = false }
+# SHA-384 for Image4 and SEP evidence; SHA-1/SHA-256 and AES are stela-crypto's.
 sha2 = { version = "0.10", default-features = false }
 # SEP root derivations and secret lifetime; both work without std.
 hmac = { version = "0.12", default-features = false }
@@ -36,8 +36,6 @@ zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
 p256 = { version = "0.13.2", default-features = false, features = ["arithmetic", "ecdsa"] }
 # Public RSA verification for Image4 evidence; no private-key operations.
 crypto-bigint = { version = "0.5", default-features = false }
-# The AES engine model's cipher: constant-time, no_std, AES-NI when present.
-aes = { version = "0.8", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 # Inflates deflate IPSW members in place, in no_std: no unsafe code, and the
 # same inflater flate2 and the zip crate already use on the host.
@@ -62,6 +60,8 @@ smoltcp = { version = "0.14", default-features = false, features = ["socket-udp"
 stela-drivers = { path = "../stela-drivers", features = ["ram-disk"] }
 # The reference LZFSE encoder the no_std decoder is checked against.
 lzfse_rust = "0.2"
+# An independent AES the cipher models are checked against.
+aes = { version = "0.8", default-features = false }
 
 [target.'cfg(not(target_os = "uefi"))'.dev-dependencies]
 rustls = { version = "=0.23.45", default-features = false, features = ["std", "tls12"] }

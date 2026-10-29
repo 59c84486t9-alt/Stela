@@ -7,7 +7,7 @@
 //! GPL-2.0 property-address setup semantics. No Linux execution is required.
 use super::*;
 use crate::bluetooth::hci::{self, Response};
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 
 const CALIBRATION: &str = "brcm,taurus-cal-blob";
 const BEAMFORMING: &str = "brcm,taurus-bf-cal-blob";

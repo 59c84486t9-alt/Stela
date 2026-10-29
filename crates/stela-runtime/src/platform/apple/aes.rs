@@ -82,12 +82,12 @@
 //! commands, DKey distribution, DATA bit 24 and the reserved bits of the
 //! address words are refused until their values or behavior are known.
 use crate::Result;
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use alloc::collections::VecDeque;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use stela_contracts::Refusal;
 use stela_contracts::refuse;
+use stela_crypto::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
 #[cfg(test)]
 use stela_soc_data::aes::DEFAULT_ADDRESS_WIDTH;
 #[cfg(test)]
@@ -204,7 +204,7 @@ impl Cipher {
     }
 
     fn encrypt(&self, block: &mut [u8; BLOCK]) {
-        let block = aes::Block::from_mut_slice(block);
+        let block = GenericArray::from_mut_slice(block);
         match self {
             Self::Aes128(cipher) => cipher.encrypt_block(block),
             Self::Aes192(cipher) => cipher.encrypt_block(block),
@@ -213,7 +213,7 @@ impl Cipher {
     }
 
     fn decrypt(&self, block: &mut [u8; BLOCK]) {
-        let block = aes::Block::from_mut_slice(block);
+        let block = GenericArray::from_mut_slice(block);
         match self {
             Self::Aes128(cipher) => cipher.decrypt_block(block),
             Self::Aes192(cipher) => cipher.decrypt_block(block),

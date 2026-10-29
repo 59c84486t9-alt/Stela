@@ -7,7 +7,7 @@ use super::{Configuration, FormatError, Project, Staged};
 use crate::bytes::le32;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 const HEADER: usize = 20;
 const MAX_IMAGE: usize = 4 * 1024 * 1024;
 const SNIPPETS: u32 = 1;

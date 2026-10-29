@@ -24,9 +24,9 @@
 //! the medium unchanged. NVMe 1.4 section 5.11 discards an uncommitted
 //! download on a controller-level reset, and so does the model.
 use crate::Result;
-use sha2::Digest;
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 
 pub(super) const SECTIONS: usize = 3;
 /// `BuildCommandFirmwareActivate` CDW10 for slot 0, commit action 1:

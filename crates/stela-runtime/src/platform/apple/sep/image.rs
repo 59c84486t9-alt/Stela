@@ -7,9 +7,9 @@
 pub mod signature;
 
 use alloc::vec::Vec;
-use sha2::Digest;
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 const SEQUENCE: u8 = 0x30;

@@ -5,9 +5,9 @@ mod clpc;
 mod cpus;
 use crate::Result;
 use alloc::{collections::BTreeSet, string::String, vec::Vec};
-use sha2::Digest;
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 use stela_loader::{apple_device_tree::DeviceTree, boot_bundle::ORIGINAL_DEVICE_TREE_FILE};
 use {
     stela_contracts::Chip, stela_formats::boot_bundle::Manifest,

@@ -66,9 +66,9 @@ use super::{
 };
 use crate::Result;
 use alloc::{string::String, vec, vec::Vec};
-use sha2::Digest;
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 use zeroize::Zeroizing;
 
 /// Stela's catalog ID for the service, after the xART pair.

@@ -24,8 +24,8 @@ use alloc::{
     vec::Vec,
 };
 use core::mem::size_of;
-use sha2::Digest as _;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest as _;
 
 pub const MAGIC: [u8; 8] = *b"STLTPACK";
 pub const SCHEMA: u32 = 1;

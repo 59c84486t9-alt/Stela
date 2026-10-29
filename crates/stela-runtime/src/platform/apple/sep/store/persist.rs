@@ -13,9 +13,9 @@
 use super::{Backend, Head};
 use crate::Result;
 use alloc::{boxed::Box, vec, vec::Vec};
-use sha2::Digest;
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 use stela_drivers::block::BlockDevice;
 
 const MAGIC: &[u8; 8] = b"STXARTB1";

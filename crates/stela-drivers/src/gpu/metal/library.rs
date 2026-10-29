@@ -5,7 +5,7 @@
 //! metadata and digest remain borrowed from the original input.
 use alloc::vec::Vec;
 use core::{fmt, ops::Range, str};
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 
 const HEADER_BYTES: usize = 88;
 const LLVM_WRAPPER_MAGIC: u32 = 0x0b17_c0de;

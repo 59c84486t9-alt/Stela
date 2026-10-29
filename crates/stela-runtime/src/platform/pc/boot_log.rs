@@ -41,8 +41,8 @@ use core::{
     convert::Infallible,
     fmt::{self, Write as _},
 };
-use sha2::Digest;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 use stela_drivers::block::{BlockDevice, BlockError, Finished, Request};
 use stela_soc_data::nor::CAPACITY;
 

@@ -11,7 +11,7 @@ use crate::net::wifi::{
         management::{self, ManagementCipher},
     },
 };
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

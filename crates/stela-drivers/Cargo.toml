@@ -14,7 +14,7 @@ workspace = true
 # Native x86 ACPICA interpreter; builds freestanding C with clang.
 native-acpi = ["dep:cc"]
 # Common native Linux kernel services; selecting this attaches no GPU.
-linux-kernel = ["dep:cc", "dep:stela-crypto"]
+linux-kernel = ["dep:cc"]
 # `block::RamDisk`, the in-memory disk the runtime's tests run models on.
 ram-disk = []
 # Build the implemented native NVIDIA OS hooks, not a complete GPU driver.
@@ -30,21 +30,23 @@ metal = []
 
 [dependencies]
 stela-driver-core = { path = "../stela-driver-core" }
-stela-crypto = { path = "../stela-crypto", optional = true }
-# BIP-CMAC uses the shared checked AES backend; expanded keys clear on retirement.
-aes = { version = "0.8", default-features = false, features = ["zeroize"] }
+# SHA-1, SHA-256 and AES (key wrap, BIP-CMAC/GMAC); expanded keys clear on retirement.
+stela-crypto = { path = "../stela-crypto" }
 # WPA2-Personal: PBKDF2/PRF/MIC over HMAC-SHA1 and HMAC-SHA256.
 hmac = { version = "0.12", default-features = false }
 # WPA3-Personal: SAE over P-256, hash-to-element through its simplified SWU map.
 p256 = { version = "0.13", default-features = false, features = ["arithmetic", "expose-field", "hash2curve"] }
-sha1 = { version = "0.10", default-features = false }
-sha2 = { version = "0.10", default-features = false }
 # Cryptographic MIC comparison retains an explicit optimization barrier.
 subtle = { version = "2.6", default-features = false }
 # Retained source GTK/IGTK batch material must clear after actual retirement.
 zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
 # Fallible native mapping metadata; the maintained owner supports alloc-only UEFI.
 triomphe = { version = "=0.1.16", default-features = false }
+
+[dev-dependencies]
+# Independent SHA-256 and AES the tests check fixtures and ciphers against.
+sha2 = { version = "0.10", default-features = false }
+aes = { version = "0.8", default-features = false }
 
 [build-dependencies]
 # Reuse retained shared-input/object/digest versions; no new crate fetch.
