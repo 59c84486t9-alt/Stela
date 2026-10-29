@@ -32,6 +32,8 @@ fn unified_missing_unknown_or_contradictory_nvm_abi_refuses_before_commands() {
         let ops = state.lock().unwrap().ops.len();
         let maps = domain.records.lock().unwrap().maps;
         assert!(matches!(
+            // SAFETY: The model still owns the same requester/domain and exclusive Source;
+            // unsupported ABI metadata is refused before allocating or publishing DMA.
             unsafe { init.advance(&source) },
             Err(Error::Nvm(_))
         ));
@@ -58,6 +60,8 @@ fn unified_mac_data_words_allow_all_ff_fallback_and_valid_sentinel_patterns() {
         let boot = start(&catalog, &source, &domain, &state, &drops);
         let boot = command_ready(boot, &empty, &source, &domain, &state);
         let mut init = boot.initialize_on_device_nvm();
+        // SAFETY: Source allocates exclusive RAM for this retained model initializer;
+        // its requester/domain have no asynchronous device or IRQ user.
         unsafe { init.advance(&source) }.unwrap();
         complete(
             &init.boot,
@@ -66,6 +70,8 @@ fn unified_mac_data_words_allow_all_ff_fallback_and_valid_sentinel_patterns() {
             2,
             &command_packet(Request::ExtendedConfiguration.id(), 0, &[]),
         );
+        // SAFETY: The extended-configuration ACK completed synchronously within that
+        // same retained domain; its original Source/mappings remain live.
         unsafe { init.advance(&source) }.unwrap();
         let mut packet = command_packet(Request::AccessComplete.id(), 1, &[]);
         let notification = command_packet(
@@ -80,7 +86,11 @@ fn unified_mac_data_words_allow_all_ff_fallback_and_valid_sentinel_patterns() {
         packet[64..128].copy_from_slice(&notification[..64]);
         packet[128..132].copy_from_slice(&0x55550000u32.to_le_bytes());
         complete(&init.boot, &domain, 2, 3, &packet);
+        // SAFETY: The combined access ACK/notification is published in owned model RAM;
+        // the initializer retains its source/domain through reclaim and staging.
         unsafe { init.advance(&source) }.unwrap();
+        // SAFETY: The same model owner retains the queued notification and pending DMA;
+        // Source has no competing writer while initialization advances its phase.
         unsafe { init.advance(&source) }.unwrap();
         let strap = match case {
             0 => [u32::MAX; 2],
@@ -120,6 +130,8 @@ fn unified_mac_data_words_allow_all_ff_fallback_and_valid_sentinel_patterns() {
             &command_packet(Request::GetInformation.id(), 2, &nvm_response()),
         );
         let live = domain.records.lock().unwrap().live.len();
+        // SAFETY: Only the serialized model registers/failure injection changed; the
+        // original source/domain still own all DMA while testing MAC-read outcomes.
         let result = unsafe { init.advance(&source) };
         match case {
             7 => {

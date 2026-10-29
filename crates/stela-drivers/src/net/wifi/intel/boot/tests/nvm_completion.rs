@@ -29,6 +29,8 @@ fn unified_wrong_response_and_bad_nvm_never_report_initialization() {
         let boot = start(&catalog, &source, &domain, &state, &drops);
         let boot = command_ready(boot, &empty, &source, &domain, &state);
         let mut init = boot.initialize_on_device_nvm();
+        // SAFETY: The retained model epoch/domain own all DMA allocations, and Source
+        // supplies exclusive RAM for the first initialization publication.
         unsafe { init.advance(&source) }.unwrap();
         let id = if failure == 0 {
             crate::net::wifi::intel::command::Id {
@@ -42,6 +44,8 @@ fn unified_wrong_response_and_bad_nvm_never_report_initialization() {
         complete(&init.boot, &domain, 1, 2, &command_packet(id, 0, &[]));
         if failure == 0 {
             assert!(matches!(
+                // SAFETY: The wrong response is a synchronous model completion in that same
+                // domain; Source and every pending mapping remain owned while refusing it.
                 unsafe { init.advance(&source) },
                 Err(Error::InitializationResponse {
                     command: 2,
@@ -49,6 +53,8 @@ fn unified_wrong_response_and_bad_nvm_never_report_initialization() {
                 })
             ));
         } else {
+            // SAFETY: The extended-configuration ACK is complete in retained model RAM;
+            // the original requester/domain and exclusive Source remain live.
             unsafe { init.advance(&source) }.unwrap();
             let mut packet = command_packet(Request::AccessComplete.id(), 1, &[]);
             let actual = crate::net::wifi::intel::command::Id {
@@ -60,7 +66,11 @@ fn unified_wrong_response_and_bad_nvm_never_report_initialization() {
             packet[64..128].copy_from_slice(&notification[..64]);
             packet[128..132].copy_from_slice(&0x55550000u32.to_le_bytes());
             complete(&init.boot, &domain, 2, 3, &packet);
+            // SAFETY: The combined ACK/notification bytes were published synchronously;
+            // the same initializer/domain retain their receive and command mappings.
             unsafe { init.advance(&source) }.unwrap();
+            // SAFETY: The prior completion remains in that owned model epoch while the
+            // initializer advances stages; Source has no competing device or worker.
             unsafe { init.advance(&source) }.unwrap();
             let bytes = if failure == 1 {
                 vec![0; 467]
@@ -75,6 +85,8 @@ fn unified_wrong_response_and_bad_nvm_never_report_initialization() {
                 &command_packet(Request::GetInformation.id(), 2, &bytes),
             );
             assert!(matches!(
+                // SAFETY: The malformed or rejected NVM response is synchronously completed
+                // model data; the original owner/source retain its backing during refusal.
                 unsafe { init.advance(&source) },
                 Err(Error::Nvm(_))
             ));
@@ -82,6 +94,8 @@ fn unified_wrong_response_and_bad_nvm_never_report_initialization() {
         assert_eq!(init.phase(), InitializationPhase::Failed);
         assert!(init.receipt().is_none());
         assert!(matches!(
+            // SAFETY: The failed initializer still owns its source/domain and pending RAM;
+            // this state-error reentry cannot acquire a new or unrelated DMA user.
             unsafe { init.advance(&source) },
             Err(Error::State)
         ));
@@ -116,6 +130,8 @@ fn unified_retains_actual_init_notification_across_alive_and_pnvm_buffers() {
     alive[256..260].copy_from_slice(&0x55550000u32.to_le_bytes());
     complete(&boot, &domain, 0, 1, &alive);
     boot.poll().unwrap().unwrap();
+    // SAFETY: phase_catalog belongs to this retained model profile/SKU; Source
+    // provides exclusive RAM within the same original requester/domain.
     unsafe { boot.begin_pnvm(&platform, observations, &source) }.unwrap();
     let mut pnvm = pnvm_packet(0x42);
     let side = command_packet(
@@ -137,6 +153,8 @@ fn unified_retains_actual_init_notification_across_alive_and_pnvm_buffers() {
         .registers
         .extend([(0x388, 0x02123456), (0x38c, 0x789a)]);
     let mut init = boot.initialize_on_device_nvm();
+    // SAFETY: PNVM observation retained this original model epoch and its mappings;
+    // Source remains exclusive while the initializer stages its first command.
     unsafe { init.advance(&source) }.unwrap();
     complete(
         &init.boot,
@@ -145,6 +163,8 @@ fn unified_retains_actual_init_notification_across_alive_and_pnvm_buffers() {
         3,
         &command_packet(Request::ExtendedConfiguration.id(), 0, &[]),
     );
+    // SAFETY: The extended-configuration ACK completed synchronously; its live
+    // mapping and the original Source/domain remain owned through reclaim.
     unsafe { init.advance(&source) }.unwrap();
     complete(
         &init.boot,
@@ -153,8 +173,12 @@ fn unified_retains_actual_init_notification_across_alive_and_pnvm_buffers() {
         4,
         &command_packet(Request::AccessComplete.id(), 1, &[]),
     );
+    // SAFETY: The access-complete ACK completed in that same retained model domain;
+    // the initializer keeps the original source and receive mapping alive.
     unsafe { init.advance(&source) }.unwrap();
     assert_eq!(
+        // SAFETY: The early init notification is retained by this exact model owner;
+        // Source and the pending DMA buffers have no concurrent device access.
         unsafe { init.advance(&source) }.unwrap(),
         InitializationProgress::Pending(InitializationPhase::NvmInformation)
     );
@@ -166,6 +190,8 @@ fn unified_retains_actual_init_notification_across_alive_and_pnvm_buffers() {
         &command_packet(Request::GetInformation.id(), 2, &nvm_response()),
     );
     assert_eq!(
+        // SAFETY: The NVM response was completed synchronously and its source/domain
+        // remain retained until observation and pending notifications are extracted.
         unsafe { init.advance(&source) }.unwrap(),
         InitializationProgress::Observed
     );
