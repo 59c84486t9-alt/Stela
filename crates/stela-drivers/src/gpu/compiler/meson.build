@@ -124,6 +124,22 @@ stela_threadgroup_test = executable(
 )
 test('stela_threadgroup', stela_threadgroup_test, suite : 'stela')
 
+# The Metal device's binding ABI and internal kernels own NIR only.
+stela_metal_abi = static_library(
+  'stela_metal_abi',
+  'metal_abi.c',
+  include_directories : [inc_include, inc_src, inc_gpu],
+  dependencies : [idep_nir, idep_mesautil],
+)
+stela_metal_abi_test = executable(
+  'stela_metal_abi_test',
+  'tests/metal_abi.c',
+  include_directories : [inc_include, inc_src, inc_gpu],
+  dependencies : [idep_nir, idep_mesautil],
+  link_with : stela_metal_abi,
+)
+test('stela_metal_abi', stela_metal_abi_test, suite : 'stela')
+
 if with_amd_llvm
   stela_amd_llvm_float = static_library(
     'stela_amd_llvm_float',

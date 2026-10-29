@@ -46,8 +46,8 @@ pub struct Loader {
     pub get_instance_proc_addr: vk::PFN_vkGetInstanceProcAddr,
 }
 
-/// The backend's own kernels, compiled by the AIR compiler's NIR builder
-/// for this device.
+/// The backend's own kernels: the NIR of `stela_metal_accumulate_kernel` and
+/// `stela_metal_select_kernel` (`compiler/metal_abi.h`).
 #[derive(Clone, Copy, Debug)]
 pub struct InternalKernels {
     /// Sums query results per

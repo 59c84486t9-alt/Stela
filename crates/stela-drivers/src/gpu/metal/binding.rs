@@ -21,6 +21,9 @@
 //!
 //! Encoders write a table to the command buffer's upload ring whenever its
 //! slots change and push its address before the next draw or dispatch.
+//!
+//! The compiler's side of this ABI is `compiler/metal_abi.h`, which the tests
+//! check against these layouts.
 use super::{
     capabilities::{MAX_BUFFER_BINDINGS, MAX_SAMPLER_BINDINGS, MAX_TEXTURE_BINDINGS},
     error::{Error, Result},
@@ -232,6 +235,9 @@ pub struct AccumulateArguments {
 }
 
 impl AccumulateArguments {
+    pub const RESULTS_OFFSET: u32 = 0;
+    pub const COUNT_OFFSET: u32 = 8;
+    pub const STRIDE_OFFSET: u32 = 12;
     pub const RUNS_OFFSET: u32 = 16;
     pub const RUN_BYTES: u32 = 16;
     pub const ALIGNMENT: u64 = 16;
@@ -441,6 +447,83 @@ impl DescriptorHeap {
 mod tests {
     use super::*;
     use crate::gpu::metal::nvidia::{CHIPS, fixture::nvk};
+
+    #[test]
+    fn compiler_header_matches_the_layouts() {
+        let header = include_str!("../compiler/metal_abi.h");
+        let define = |name: &str| -> u32 {
+            header
+                .lines()
+                .find_map(|line| {
+                    let value = line.strip_prefix("#define ")?.strip_prefix(name)?;
+                    value.strip_prefix(' ')?.strip_suffix('u')?.parse().ok()
+                })
+                .unwrap_or_else(|| panic!("metal_abi.h does not define {name}"))
+        };
+        let expected = [
+            ("STELA_METAL_PUSH_BYTES", PushConstants::BYTES),
+            ("STELA_METAL_PUSH_TABLES", PushConstants::TABLES_OFFSET),
+            (
+                "STELA_METAL_PUSH_ARGUMENTS",
+                PushConstants::ARGUMENTS_OFFSET,
+            ),
+            ("STELA_METAL_PUSH_GRID", PushConstants::GRID_OFFSET),
+            (
+                "STELA_METAL_PUSH_AMPLIFICATION",
+                PushConstants::AMPLIFICATION_OFFSET,
+            ),
+            (
+                "STELA_METAL_PUSH_VIEW_MAPPING",
+                PushConstants::VIEW_MAPPING_OFFSET,
+            ),
+            ("STELA_METAL_BUFFERS", MAX_BUFFER_BINDINGS),
+            (
+                "STELA_METAL_TABLE_BUFFER_ADDRESSES",
+                ArgumentTable::BUFFER_ADDRESSES_OFFSET,
+            ),
+            (
+                "STELA_METAL_TABLE_BUFFER_LENGTHS",
+                ArgumentTable::BUFFER_LENGTHS_OFFSET,
+            ),
+            ("STELA_METAL_TABLE_TEXTURES", ArgumentTable::TEXTURES_OFFSET),
+            ("STELA_METAL_TABLE_SAMPLERS", ArgumentTable::SAMPLERS_OFFSET),
+            ("STELA_METAL_TABLE_BYTES", ArgumentTable::BYTES),
+            (
+                "STELA_METAL_ACCUMULATE_RESULTS",
+                AccumulateArguments::RESULTS_OFFSET,
+            ),
+            (
+                "STELA_METAL_ACCUMULATE_COUNT",
+                AccumulateArguments::COUNT_OFFSET,
+            ),
+            (
+                "STELA_METAL_ACCUMULATE_STRIDE",
+                AccumulateArguments::STRIDE_OFFSET,
+            ),
+            (
+                "STELA_METAL_ACCUMULATE_RUNS",
+                AccumulateArguments::RUNS_OFFSET,
+            ),
+            (
+                "STELA_METAL_ACCUMULATE_RUN_BYTES",
+                AccumulateArguments::RUN_BYTES,
+            ),
+            ("STELA_METAL_SELECT_RANGE", SelectArguments::RANGE_OFFSET),
+            ("STELA_METAL_SELECT_FLAGS", SelectArguments::FLAGS_OFFSET),
+            ("STELA_METAL_SELECT_COUNT", SelectArguments::COUNT_OFFSET),
+            (
+                "STELA_METAL_KERNEL_WORKGROUP",
+                AccumulateArguments::WORKGROUP_SIZE,
+            ),
+        ];
+        for (name, value) in expected {
+            assert_eq!(define(name), value, "{name}");
+        }
+        assert_eq!(
+            AccumulateArguments::WORKGROUP_SIZE,
+            SelectArguments::WORKGROUP_SIZE
+        );
+    }
 
     #[test]
     fn table_layout_is_packed_and_aligned() {
