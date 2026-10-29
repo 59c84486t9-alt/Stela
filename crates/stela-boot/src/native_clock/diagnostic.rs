@@ -21,7 +21,7 @@ pub(crate) unsafe fn check(
     // SAFETY: real owner and unchanged retained tables/roots satisfy attach.
     let root_execution = owner.enter_root()?;
     let installed = unsafe { Installed::attach(owner, &root_execution, source)? };
-    run(installed)
+    run(installed, None)
 }
 
 /// # Safety
@@ -37,11 +37,16 @@ pub(crate) unsafe fn check_native(
     }
     // SAFETY: this actual owner supplies complete HPET/LAPIC/IDT delivery and
     // lifecycle; constructor checks exact retained Source identity and ARAT.
-    let installed = unsafe { Installed::attach_native(identity, prepared)? };
-    run(installed)
+    let installed = unsafe { Installed::attach_native(identity.clone(), prepared)? };
+    let services = installed.services()?;
+    services.check_identity(&identity)?;
+    let epoch = services.epoch()?;
+    drop(services);
+    run(installed, Some(epoch))
 }
 
-fn run(installed: Installed) -> Result<(), WorkError> {
+fn run(installed: Installed, epoch: Option<CounterEpoch>) -> Result<(), WorkError> {
+    let epoch_start = epoch.as_ref().map(CounterEpoch::sample).transpose()?;
     let observation = installed.observation()?;
     let clock = Arc::clone(&installed.clock);
     let idle = Arc::clone(&installed.idle);
@@ -142,6 +147,21 @@ fn run(installed: Installed) -> Result<(), WorkError> {
     if words.jiffies.load(Ordering::Acquire) != stopped {
         return Err(WorkError::CorruptContext);
     }
+    // This brackets real ISR-only progress and HLT wakeups, rather than a
+    // model clock or authored successful callback. Only native admission above
+    // can create the epoch; the bounded PM diagnostic has no such token.
+    let epoch_bounds = match (&epoch, &epoch_start) {
+        (Some(epoch), Some(start)) => {
+            let end = epoch.sample()?;
+            let bounds = epoch.elapsed_bounds(start, &end)?;
+            if bounds.lower_ns == 0 || bounds.upper_ns < bounds.lower_ns {
+                return Err(WorkError::CorruptContext);
+            }
+            Some(bounds)
+        }
+        (None, None) => None,
+        _ => return Err(WorkError::CorruptContext),
+    };
     drop(execution);
     drop(idle);
     drop(clock);
@@ -149,6 +169,16 @@ fn run(installed: Installed) -> Result<(), WorkError> {
     // waits/borrowed execution scopes have returned and provider clones ended.
     unsafe {
         installed.retire()?;
+    }
+    if let Some(epoch) = epoch {
+        if !matches!(epoch.sample(), Err(WorkError::Closed)) {
+            return Err(WorkError::CorruptContext);
+        }
+        let bounds = epoch_bounds.ok_or(WorkError::CorruptContext)?;
+        crate::output::arguments(format_args!(
+            "CHECK native-counter-epoch PASS elapsed_ns={}..={} retired=closed; source-bound IRQ/HLT control, physical platform qualification pending\n",
+            bounds.lower_ns, bounds.upper_ns
+        ));
     }
     crate::output::arguments(format_args!(
         "CHECK native-clock PASS busy_jiffies={busy_ticks} idle_waits={waits} guest_mux=elapsed detach=quiet source={observation:?}; authored UP fixture, original Linux and hardware unqualified\n"
