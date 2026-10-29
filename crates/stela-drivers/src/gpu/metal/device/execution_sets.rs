@@ -206,7 +206,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 let limits = limits.ok_or(Error::Unsupported("device-generated commands"))?;
                 if info.tokens.len() as u32 > limits.max_tokens {
                     return Err(Error::Unsupported(
-                        "GPU-resident indirect commands of pipelines with more vertex buffers                          than device-generated commands bind",
+                        "GPU-resident indirect commands of pipelines with more vertex buffers \
+                         than device-generated commands bind",
                     ));
                 }
                 let layout = self.backend.create_indirect_commands_layout(&info)?;
