@@ -334,10 +334,13 @@ impl SelectArguments {
     }
 }
 
-/// What the backend's internal resolve kernel reads at the push constants'
-/// `arguments` (`stela_metal_resolve_draws_kernel`): it turns each command of a
+/// What the backend's internal resolve kernels read at the push constants'
+/// `arguments`: `stela_metal_resolve_draws_kernel` turns each command of a
 /// GPU-resident render indirect command buffer into a [`GeneratedSequence`]
-/// and its counts per [`ResolveSlot`].
+/// and its counts per [`ResolveSlot`], and
+/// `stela_metal_resolve_dispatches_kernel` each command of a compute one
+/// into a [`GeneratedSequence`], reading neither counts, strides, classes,
+/// vertex buffers nor slots.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResolveArguments {
     /// The buffer's header (its `gpuResourceID`).
@@ -348,8 +351,8 @@ pub struct ResolveArguments {
     pub sequences: u64,
     /// Where thread `n` writes its `u32` count of each slot.
     pub counts: u64,
-    /// Where thread `n` writes its vertex and fragment argument tables,
-    /// unless the buffer inherits buffers.
+    /// Where thread `n` writes its vertex and fragment, or kernel, argument
+    /// tables, at `2n` and `2n + 1`, unless the buffer inherits buffers.
     pub tables: u64,
     /// The pipeline classes' static vertex strides: `u32` per class and
     /// buffer index, zero for none.
@@ -482,8 +485,11 @@ impl DispatchArguments {
 }
 
 /// The offsets of a command's device-generated sequence, which the resolve
-/// kernel writes and each indirect commands layout reads at its own token
-/// offsets.
+/// kernels write and each indirect commands layout reads at its own token
+/// offsets: the execution set index and push constants, then a render
+/// command's index buffer, vertex buffers and draws, or a compute command's
+/// dispatch and the [`DispatchArguments`] its push constants' `arguments`
+/// address.
 pub struct GeneratedSequence;
 
 impl GeneratedSequence {
@@ -499,6 +505,9 @@ impl GeneratedSequence {
     pub const DRAW_OFFSET: u32 = 576;
     /// `VkDrawIndexedIndirectCommand`.
     pub const DRAW_INDEXED_OFFSET: u32 = 592;
+    /// `VkDispatchIndirectCommand`.
+    pub const DISPATCH_OFFSET: u32 = 64;
+    pub const DISPATCH_ARGUMENTS_OFFSET: u32 = 80;
     pub const BYTES: u32 = 624;
     pub const ALIGNMENT: u64 = 16;
 }
@@ -510,6 +519,13 @@ const _: () = assert!(
             == GeneratedSequence::DRAW_OFFSET
         && GeneratedSequence::DRAW_OFFSET + 16 == GeneratedSequence::DRAW_INDEXED_OFFSET
         && GeneratedSequence::DRAW_INDEXED_OFFSET + 20 <= GeneratedSequence::BYTES
+        && GeneratedSequence::PUSH_OFFSET + PushConstants::BYTES
+            <= GeneratedSequence::DISPATCH_OFFSET
+        && GeneratedSequence::DISPATCH_OFFSET + 12 <= GeneratedSequence::DISPATCH_ARGUMENTS_OFFSET
+        && (GeneratedSequence::DISPATCH_ARGUMENTS_OFFSET as u64)
+            .is_multiple_of(DispatchArguments::ALIGNMENT)
+        && GeneratedSequence::DISPATCH_ARGUMENTS_OFFSET + DispatchArguments::BYTES
+            <= GeneratedSequence::BYTES
 );
 
 struct Writer<'a> {
@@ -702,7 +718,7 @@ mod tests {
     use super::*;
     use crate::gpu::metal::{
         abi::{TessellationFactorStepFunction, TessellationPartitionMode, Winding},
-        indirect::RecordLayout,
+        indirect::{IndirectPipeline, RecordLayout},
         nvidia::{CHIPS, fixture::nvk},
         vertex::{StageInStep, StepFunction},
     };
@@ -715,7 +731,11 @@ mod tests {
                 .lines()
                 .find_map(|line| {
                     let value = line.strip_prefix("#define ")?.strip_prefix(name)?;
-                    value.strip_prefix(' ')?.strip_suffix('u')?.parse().ok()
+                    let value = value.strip_prefix(' ')?.strip_suffix('u')?;
+                    match value.strip_prefix("0x") {
+                        Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                        None => value.parse().ok(),
+                    }
                 })
                 .unwrap_or_else(|| panic!("metal_abi.h does not define {name}"))
         };
@@ -833,6 +853,10 @@ mod tests {
                 RecordLayout::DISPATCH_THREADS,
             ),
             (
+                "STELA_METAL_RECORD_COMPUTE_PIPELINES",
+                IndirectPipeline::COMPUTE_CLASS + 1,
+            ),
+            (
                 "STELA_METAL_RESOLVE_HEADER",
                 ResolveArguments::HEADER_OFFSET,
             ),
@@ -900,6 +924,14 @@ mod tests {
                 GeneratedSequence::PIPELINE_OFFSET,
             ),
             ("STELA_METAL_SEQUENCE_PUSH", GeneratedSequence::PUSH_OFFSET),
+            (
+                "STELA_METAL_SEQUENCE_DISPATCH",
+                GeneratedSequence::DISPATCH_OFFSET,
+            ),
+            (
+                "STELA_METAL_SEQUENCE_DISPATCH_ARGUMENTS",
+                GeneratedSequence::DISPATCH_ARGUMENTS_OFFSET,
+            ),
             (
                 "STELA_METAL_SEQUENCE_INDEX_BUFFER",
                 GeneratedSequence::INDEX_BUFFER_OFFSET,

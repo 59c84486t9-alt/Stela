@@ -6,7 +6,7 @@
 use super::{BufferId, ComputePipelineId, Device, FunctionId, RenderPipelineId, Slab};
 use crate::gpu::metal::{
     abi::{FunctionType, PrimitiveTopologyClass},
-    command_buffer::{ComputePipelineState, RenderPipelineState},
+    command_buffer::{ComputePipelineState, IndirectCompute, RenderPipelineState},
     error::{Error, Result, ensure, require},
     pipeline::{
         self, ComputePipelineDescriptor, MeshRenderPipelineDescriptor, RenderPipelineDescriptor,
@@ -18,6 +18,7 @@ use crate::gpu::metal::{
     },
     vertex::{StageInputDescriptor, VertexDescriptor},
     vulkan::{
+        ShaderStages,
         backend::{Backend, Object},
         object::{ComputePipelineInfo, Pipeline, ShaderCode},
     },
@@ -164,6 +165,10 @@ pub struct ComputePipelineRequest {
     pub max_total_threads_per_threadgroup: u64,
     pub stage_input: Option<StageInputDescriptor>,
     pub linked_functions: LinkedFunctions,
+    /// `supportIndirectCommandBuffers`: GPU-resident indirect commands can
+    /// switch to the pipeline, whose threadgroup buffers then align to at
+    /// most 16 bytes.
+    pub support_indirect_command_buffers: bool,
 }
 
 /// `MTLMeshRenderPipelineDescriptor` with the device's function ids.
@@ -601,7 +606,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     pub fn destroy_render_pipeline(&mut self, id: RenderPipelineId) -> Result<()> {
         let render = self.pipelines.render.remove(id.0)?;
         let pipeline = match (render.state.indirect, render.state.pipeline) {
-            (Some(indirect), Some(pipeline)) => self.remove_indirect_render(indirect, pipeline)?,
+            (Some(indirect), Some(pipeline)) => self.remove_indirect(indirect, pipeline)?,
             (_, pipeline) => pipeline,
         };
         let variants = render.variants.into_iter().map(|(_, pipeline)| pipeline);
@@ -631,10 +636,32 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             stage_input: request.stage_input.as_ref(),
         };
         let plan = pipeline::compute_pipeline(&self.capabilities, &descriptor)?;
+        let generated = self.backend.physical_device().limits.generated_commands;
+        let bindable =
+            generated.is_some_and(|limits| limits.pipeline_stages.contains(ShaderStages::COMPUTE));
+        let indirect = if request.support_indirect_command_buffers && bindable {
+            let specialization = Specialization {
+                linking: linked.linking.clone(),
+                ..pipeline::indirect_compute_variant(&plan)
+            };
+            let subgroups = (plan.thread_execution_width as u32, plan.full_subgroups);
+            let pipeline =
+                self.create_compute_variant(function, subgroups, specialization, true)?;
+            match self.add_indirect_compute(pipeline) {
+                Ok(place) => Some(IndirectCompute { pipeline, place }),
+                Err(error) => {
+                    self.defer(Object::Pipeline(pipeline));
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         let state = ComputePipelineState {
             id: 0,
             plan,
             interface,
+            indirect,
         };
         let index = self.pipelines.compute.insert(ComputeObject {
             state,
@@ -648,6 +675,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
     pub fn compute_pipeline_state(&self, id: ComputePipelineId) -> Result<&ComputePipelineState> {
         Ok(&self.pipelines.compute.get(id.0)?.state)
+    }
+
+    /// `gpuResourceID`: the handle GPU-resident indirect commands name the
+    /// pipeline by, or zero when they cannot switch to it.
+    pub fn compute_pipeline_resource_id(&self, id: ComputePipelineId) -> Result<u64> {
+        let state = &self.pipelines.compute.get(id.0)?.state;
+        Ok(state.indirect.map_or(0, |indirect| indirect.place.handle()))
     }
 
     /// The compute pipeline for one dispatch's specialization.
@@ -666,31 +700,42 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             return Ok(*pipeline);
         }
         let plan = &compute.state.plan;
-        let (function, width, full_subgroups) = (
+        let (function, subgroups) = (
             compute.function,
-            plan.thread_execution_width as u32,
-            plan.full_subgroups,
+            (plan.thread_execution_width as u32, plan.full_subgroups),
         );
         let linked = Specialization {
             linking: compute.linked.linking.clone(),
             ..specialization.clone()
         };
-        let compiled = self.compile(function, linked)?;
-        let info = ComputePipelineInfo {
-            code: compiled.code,
-            required_subgroup_size: width,
-            full_subgroups,
-            indirect_bindable: false,
-        };
-        let pipeline = self.backend.create_compute_pipeline(&info);
-        self.compiler.release(compiled.code);
-        let pipeline = pipeline?;
+        let pipeline = self.create_compute_variant(function, subgroups, linked, false)?;
         self.pipelines
             .compute
             .get_mut(index)?
             .variants
             .push((specialization.clone(), pipeline));
         Ok(pipeline)
+    }
+
+    /// Compiles `function`, linked, into a compute pipeline of its
+    /// `(thread execution width, full subgroups)`.
+    fn create_compute_variant(
+        &mut self,
+        function: FunctionId,
+        (width, full_subgroups): (u32, bool),
+        specialization: Specialization,
+        indirect_bindable: bool,
+    ) -> Result<Pipeline> {
+        let compiled = self.compile(function, specialization)?;
+        let info = ComputePipelineInfo {
+            code: compiled.code,
+            required_subgroup_size: width,
+            full_subgroups,
+            indirect_bindable,
+        };
+        let pipeline = self.backend.create_compute_pipeline(&info);
+        self.compiler.release(compiled.code);
+        pipeline
     }
 
     /// `functionHandleWithFunction:` of a compute pipeline: `None` when it
@@ -810,7 +855,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
     pub fn destroy_compute_pipeline(&mut self, id: ComputePipelineId) -> Result<()> {
         let compute = self.pipelines.compute.remove(id.0)?;
-        for (_, pipeline) in compute.variants {
+        let indirect = match compute.state.indirect {
+            Some(indirect) => self.remove_indirect(indirect.place, indirect.pipeline)?,
+            None => None,
+        };
+        let variants = compute.variants.into_iter().map(|(_, pipeline)| pipeline);
+        for pipeline in indirect.into_iter().chain(variants) {
             self.defer(Object::Pipeline(pipeline));
         }
         Ok(())

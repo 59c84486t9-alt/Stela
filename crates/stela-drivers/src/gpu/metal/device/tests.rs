@@ -18,7 +18,7 @@ use crate::gpu::metal::{
     command_buffer::{
         BufferRef, Segment,
         counters::{COUNTER_ERROR_VALUE, CounterSample},
-        generated::GeneratedLayoutKey,
+        generated::{GeneratedLayoutKey, GeneratedWork},
         indirect::ExecutionRange,
     },
     heap::HeapDescriptor,
@@ -830,35 +830,117 @@ fn indirect_pipelines_share_execution_sets_by_state() {
 }
 
 #[test]
+fn indirect_compute_pipelines_share_the_compute_execution_set() {
+    let mut device = device();
+    let kernel = device.new_function(1, "kernel", Vec::new()).unwrap();
+    let request = ComputePipelineRequest {
+        compute_function: kernel,
+        threadgroup_size_is_multiple_of_thread_execution_width: false,
+        max_total_threads_per_threadgroup: 40,
+        stage_input: None,
+        linked_functions: LinkedFunctions::default(),
+        support_indirect_command_buffers: true,
+    };
+    let first = device.new_compute_pipeline(&request).unwrap();
+    let specialization = device.compiler.compiled.last().unwrap().clone();
+    assert!(specialization.dynamic_threadgroups);
+    assert_eq!(
+        specialization.workgroup_size,
+        Some([64, 1, 1]),
+        "the most threads, in whole SIMD-groups"
+    );
+    assert!(device.backend().compute.last().unwrap().indirect_bindable);
+    let second = device.new_compute_pipeline(&request).unwrap();
+    let plain = device
+        .new_compute_pipeline(&ComputePipelineRequest {
+            support_indirect_command_buffers: false,
+            ..request.clone()
+        })
+        .unwrap();
+
+    let handle = |device: &TestDevice, id| device.compute_pipeline_resource_id(id).unwrap();
+    assert_eq!(handle(&device, first), u64::from(u32::MAX) << 32 | 1);
+    assert_eq!(handle(&device, second), u64::from(u32::MAX) << 32 | 2);
+    assert_eq!(handle(&device, plain), 0);
+    assert_eq!(device.backend().execution_sets.len(), 1);
+
+    let variant = |device: &TestDevice, id| {
+        let state = device.compute_pipeline_state(id).unwrap();
+        state.indirect.unwrap().pipeline
+    };
+    let (initial, kept) = (variant(&device, first), variant(&device, second));
+    assert_eq!(device.indirect_compute_set().unwrap().1, initial);
+    let destroyed = |device: &mut TestDevice, pipeline| {
+        let destroyed = &device.backend().destroyed;
+        destroyed.contains(&Object::Pipeline(pipeline))
+    };
+    device.destroy_compute_pipeline(first).unwrap();
+    assert!(
+        !destroyed(&mut device, initial),
+        "the set keeps its initial pipeline"
+    );
+    assert_eq!(
+        device.indirect_compute_set().unwrap().1,
+        kept,
+        "executions bind a live pipeline"
+    );
+    device.destroy_compute_pipeline(second).unwrap();
+    assert!(destroyed(&mut device, initial) && destroyed(&mut device, kept));
+    assert!(
+        device
+            .backend()
+            .destroyed
+            .iter()
+            .any(|object| matches!(object, Object::ExecutionSet(_))),
+        "the set goes with its last pipeline"
+    );
+    assert!(device.indirect_compute_set().is_none());
+}
+
+#[test]
 fn generated_layouts_are_created_once_per_key() {
     let mut device = device();
     let key = GeneratedLayoutKey {
         stages: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
         execution_set: false,
-        indexed: true,
-        vertex_buffers: alloc::vec![0],
+        work: GeneratedWork::Draw {
+            indexed: true,
+            vertex_buffers: alloc::vec![0],
+        },
     };
     let request = MemoryRequest {
         required: MemoryProperties::HOST_VISIBLE,
         preferred: MemoryProperties::EMPTY,
         mapped: true,
     };
-    let (layout, requirements) = device.generated_layout(&key, None, request).unwrap();
+    let (layout, requirements) = device.generated_layout(&key, None, 1, request).unwrap();
     assert_eq!((requirements.size, requirements.alignment), (64, 256));
     assert_eq!(
-        device.generated_layout(&key, None, request).unwrap().0,
+        device.generated_layout(&key, None, 1, request).unwrap().0,
         layout
     );
     let wide = GeneratedLayoutKey {
-        vertex_buffers: (0..31).collect(),
+        work: GeneratedWork::Draw {
+            indexed: true,
+            vertex_buffers: (0..31).collect(),
+        },
         ..key.clone()
     };
     assert!(
         matches!(
-            device.generated_layout(&wide, None, request),
+            device.generated_layout(&wide, None, 1, request),
             Err(Error::Unsupported(_))
         ),
         "more tokens than the device takes"
+    );
+    let limit = device.backend().physical_device().limits.generated_commands;
+    let beyond = limit.unwrap().max_sequences + 1;
+    assert!(
+        matches!(
+            device.generated_layout(&key, None, beyond, request),
+            Err(Error::Unsupported(_))
+        ),
+        "more sequences than one execution runs"
     );
     assert_eq!(device.backend().layouts, [key.info()]);
 }
@@ -940,6 +1022,7 @@ fn stages_link_visible_functions_and_name_them_by_handle() {
             private_functions: Vec::new(),
             libraries: alloc::vec![7],
         },
+        support_indirect_command_buffers: false,
     };
     let pipeline = device
         .new_compute_pipeline(&request(alloc::vec![visible]))
@@ -1272,6 +1355,7 @@ fn compute_and_mesh_variants_compile_per_shape() {
             max_total_threads_per_threadgroup: 0,
             stage_input: None,
             linked_functions: LinkedFunctions::default(),
+            support_indirect_command_buffers: false,
         })
         .unwrap();
     let state = device.compute_pipeline_state(pipeline).unwrap().clone();
@@ -1791,6 +1875,7 @@ fn indirect_commands_execute_snapshots_of_their_buffer() {
             max_total_threads_per_threadgroup: 0,
             stage_input: None,
             linked_functions: LinkedFunctions::default(),
+            support_indirect_command_buffers: false,
         })
         .unwrap();
     let state = device.compute_pipeline_state(pipeline).unwrap().clone();

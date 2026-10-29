@@ -782,6 +782,22 @@ pub fn compute_pipeline(
 /// against a compute (or object/mesh) function, returning the
 /// specialization its Vulkan pipeline is compiled for. Lengths for slots the
 /// function does not use are dropped so they do not split the cache.
+/// The specialization of a compute pipeline's variant for GPU-resident
+/// indirect commands: a line of its most threads per threadgroup, rounded
+/// up to its thread execution width, in which each dispatch shapes its
+/// threadgroups and places its threadgroup buffers.
+pub fn indirect_compute_variant(plan: &ComputePipelinePlan) -> Specialization {
+    let threads = plan
+        .max_total_threads_per_threadgroup
+        .next_multiple_of(plan.thread_execution_width.max(1));
+    Specialization {
+        stage_in: plan.stage_in.clone(),
+        workgroup_size: Some([threads as u32, 1, 1]),
+        dynamic_threadgroups: true,
+        ..Specialization::default()
+    }
+}
+
 pub fn compute_variant(
     plan: &ComputePipelinePlan,
     interface: &Interface,

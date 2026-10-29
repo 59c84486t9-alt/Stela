@@ -348,6 +348,12 @@ pub enum Command {
         arguments: u64,
         count: u32,
     },
+    /// The backend's dispatch resolve kernel over `count` commands, like
+    /// [`ResolveDraws`](Self::ResolveDraws).
+    ResolveDispatches {
+        arguments: u64,
+        count: u32,
+    },
     /// `vkCmdBeginConditionalRenderingEXT`: draws and dispatches up to the
     /// end run only if the 32-bit value at `offset` is nonzero.
     BeginConditionalRendering {

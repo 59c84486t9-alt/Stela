@@ -45,7 +45,7 @@
 #define STELA_METAL_SELECT_COUNT 16u
 #define STELA_METAL_KERNEL_WORKGROUP 64u
 
-/* ResolveArguments, which the resolve kernel reads at the push constants'
+/* ResolveArguments, which the resolve kernels read at the push constants'
  * arguments address: the 64-bit addresses of an indirect command buffer
  * (its header), of its execution range (uint location, length), of the
  * sequences, counts and argument tables the kernel writes, and of the
@@ -53,7 +53,8 @@
  * for none); the uint thread count, command of thread 0, slot count, flags
  * and class count; the encoder's push constants, and its vertex buffers as
  * a sequence binds them; then the slots (uint class, action and
- * MTLPrimitiveType, and padding). */
+ * MTLPrimitiveType, and padding). Dispatches read neither counts, strides,
+ * classes, vertex buffers nor slots. */
 #define STELA_METAL_RESOLVE_HEADER 0u
 #define STELA_METAL_RESOLVE_RANGE 8u
 #define STELA_METAL_RESOLVE_SEQUENCES 16u
@@ -73,10 +74,13 @@
 #define STELA_METAL_RESOLVE_INHERIT_BUFFERS 2u
 
 /* One command's device-generated sequence, which each indirect commands
- * layout reads at its own token offsets: the uint execution set index, the
- * push constants, a VkBindIndexBufferIndirectCommandEXT, a
- * VkBindVertexBufferIndirectCommandEXT per vertex buffer index, then a
- * VkDrawIndirectCommand and a VkDrawIndexedIndirectCommand. */
+ * layout reads at its own token offsets: the uint execution set index and
+ * the push constants, then a render command's
+ * VkBindIndexBufferIndirectCommandEXT, a
+ * VkBindVertexBufferIndirectCommandEXT per vertex buffer index, a
+ * VkDrawIndirectCommand and a VkDrawIndexedIndirectCommand, or a compute
+ * command's VkDispatchIndirectCommand and the DispatchArguments its push
+ * constants' arguments address. */
 #define STELA_METAL_SEQUENCE_PIPELINE 0u
 #define STELA_METAL_SEQUENCE_PUSH 8u
 #define STELA_METAL_SEQUENCE_INDEX_BUFFER 64u
@@ -84,6 +88,8 @@
 #define STELA_METAL_SEQUENCE_VERTEX_BUFFER_BYTES 16u
 #define STELA_METAL_SEQUENCE_DRAW 576u
 #define STELA_METAL_SEQUENCE_DRAW_INDEXED 592u
+#define STELA_METAL_SEQUENCE_DISPATCH 64u
+#define STELA_METAL_SEQUENCE_DISPATCH_ARGUMENTS 80u
 #define STELA_METAL_SEQUENCE_BYTES 624u
 
 /* indirect/record.rs RecordLayout: a GPU-resident indirect command buffer
@@ -126,6 +132,9 @@
 #define STELA_METAL_RECORD_DRAW_INDEXED 2u
 #define STELA_METAL_RECORD_DISPATCH 1u
 #define STELA_METAL_RECORD_DISPATCH_THREADS 2u
+/* The high half of a compute pipeline's handle; its low half is its index
+ * in the compute execution set. */
+#define STELA_METAL_RECORD_COMPUTE_PIPELINES 0xffffffffu
 /* A buffer a shader binds in a record comes without a length; the record
  * bounds it at the most a 32-bit length states. */
 #define STELA_METAL_RECORD_UNBOUNDED 0xffffffffu
@@ -262,6 +271,20 @@ nir_shader *stela_metal_select_kernel(const nir_shader_compiler_options *options
  * Commands of a buffer that inherits pipeline state are class 0; others
  * are their pipeline handle's. */
 nir_shader *stela_metal_resolve_draws_kernel(const nir_shader_compiler_options *options);
+
+/* Thread n resolves command first + n of a GPU-resident compute indirect
+ * command buffer per the ResolveArguments into sequence n: the encoder's
+ * push constants with argument table 2n (the encoder's kernel table, with
+ * the record's buffers) unless the buffer inherits buffers, the dispatch's
+ * grid for dispatchThreads, and the address of the sequence's
+ * DispatchArguments, which hold the record's stage-in region, its
+ * threadgroup shape, and its threadgroup memory lengths' running sums,
+ * each rounded up to 16 bytes, as offsets. Its dispatch is the record's
+ * threadgroups, or the threadgroups that cover its threads, when the range
+ * holds the command and it dispatches with its buffer's inherited pipeline
+ * or a compute pipeline's handle, whose index it writes; else it
+ * dispatches no threadgroups with execution set index 0. */
+nir_shader *stela_metal_resolve_dispatches_kernel(const nir_shader_compiler_options *options);
 
 /* MTLTessellationPartitionMode, MTLTessellationFactorStepFunction and
  * MTLWinding, in their raw values. */

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* The Metal ABI's NIR shapes; the GPU behavior needs a device. */
 #include "../metal_abi.h"
+#include "air_effect_oracle.h"
 #include "util/ralloc.h"
 #include <assert.h>
 #include <math.h>
@@ -284,6 +285,162 @@ static void resolve_writes_each_command_sequence(void)
     * fields, a vertex buffer's three, the draws' one and five, and a
     * count. */
    assert(census.stores == 1 + 13 + 2 * 4 + 3 + 3 + 1 + 5 + 1);
+   ralloc_free(shader);
+}
+
+static void put32(uint8_t *bytes, uint32_t value)
+{
+   memcpy(bytes, &value, sizeof(value));
+}
+
+static void put64(uint8_t *bytes, uint64_t value)
+{
+   memcpy(bytes, &value, sizeof(value));
+}
+
+static uint32_t get32(const uint8_t *bytes)
+{
+   uint32_t value;
+   memcpy(&value, bytes, sizeof(value));
+   return value;
+}
+
+static uint64_t get64(const uint8_t *bytes)
+{
+   uint64_t value;
+   memcpy(&value, bytes, sizeof(value));
+   return value;
+}
+
+static void expect_words(const uint8_t *bytes, const uint32_t *words, unsigned count)
+{
+   for (unsigned i = 0; i < count; i++)
+      assert(get32(bytes + 4 * i) == words[i]);
+}
+
+/* The dispatch resolve's memory: a compute indirect command buffer of two
+ * commands, each with a kernel table of two slots and three threadgroup
+ * memory lengths, the encoder's kernel table, the execution range, the
+ * arguments, and the sequences and tables the kernel writes. */
+#define BASE 0x100000ull
+#define HEADER 0x0u
+#define RECORD_BYTES 128u
+#define WORDS 112u
+#define ENCODER 0x200u
+#define RANGE 0x900u
+#define ARGUMENTS 0xa00u
+#define SEQUENCES 0x1000u
+#define TABLES 0x1800u
+#define MEMORY (TABLES + 4 * STELA_METAL_TABLE_BYTES)
+
+static uint8_t memory[MEMORY];
+
+static void resolve_dispatch(nir_shader *shader, uint32_t thread, uint32_t flags)
+{
+   put32(memory + ARGUMENTS + STELA_METAL_RESOLVE_FLAGS, flags);
+   uint8_t push[STELA_METAL_PUSH_BYTES] = {0};
+   put64(push + STELA_METAL_PUSH_ARGUMENTS, BASE + ARGUMENTS);
+   const struct air_effect_environment environment = {
+      .base = BASE, .bytes = memory, .size = sizeof(memory), .push = push,
+      .push_size = sizeof(push), .local_index = thread,
+   };
+   static struct air_effect_store trace[1024];
+   struct air_effect_run run = air_effect_execute_in(shader, 1000000, trace, ARRAY_SIZE(trace),
+                                                     &environment);
+   if (run.status != AIR_EFFECT_COMPLETE)
+      fprintf(stderr, "resolve dispatches: %s\n", run.detail);
+   assert(run.status == AIR_EFFECT_COMPLETE);
+}
+
+static void resolve_dispatches_writes_each_command_sequence(void)
+{
+   nir_shader *shader = stela_metal_resolve_dispatches_kernel(NULL);
+   check_kernel(shader);
+
+   uint8_t *header = memory + HEADER;
+   const uint32_t words[] = {RECORD_BYTES, 2, STELA_METAL_RECORD_STAGE_IN + 16, 0, 2, 0, WORDS, 3};
+   for (unsigned i = 0; i < 8; i++)
+      put32(header + 4 * i, words[i]);
+   /* dispatchThreads of 100x3x1 in 32x2x1 threadgroups, stage-in region
+    * (1, 2, 3) of (4, 5, 6), with compute pipeline 5. */
+   uint8_t *record = header + STELA_METAL_INDIRECT_HEADER_BYTES;
+   put32(record + STELA_METAL_RECORD_ACTION, STELA_METAL_RECORD_DISPATCH_THREADS);
+   put64(record + STELA_METAL_RECORD_PIPELINE,
+         (uint64_t)STELA_METAL_RECORD_COMPUTE_PIPELINES << 32 | 5);
+   const uint32_t arguments[] = {100, 3, 1, 32, 2, 1, 1, 2, 3, 4, 5, 6, 1};
+   for (unsigned i = 0; i < 13; i++)
+      put32(record + STELA_METAL_RECORD_GRID + 4 * i, arguments[i]);
+   uint8_t *table = record + STELA_METAL_RECORD_STAGE_IN + 16;
+   put64(table, 0xa000);
+   put64(table + 8, 0xb000);
+   put64(table + 16, 64);
+   put64(table + 24, 128);
+   const uint32_t lengths[] = {20, 0, 48};
+   for (unsigned i = 0; i < 3; i++)
+      put32(record + WORDS + 4 * i, lengths[i]);
+   /* Six threadgroups of a render pipeline's handle. */
+   record += RECORD_BYTES;
+   put32(record + STELA_METAL_RECORD_ACTION, STELA_METAL_RECORD_DISPATCH);
+   put64(record + STELA_METAL_RECORD_PIPELINE, 1ull << 32 | 5);
+   put32(record + STELA_METAL_RECORD_GRID, 6);
+   put32(record + STELA_METAL_RECORD_GRID + 4, 1);
+   put32(record + STELA_METAL_RECORD_GRID + 8, 1);
+   put32(record + STELA_METAL_RECORD_THREADS, 64);
+
+   for (unsigned word = 0; word < STELA_METAL_TABLE_BYTES / 4; word++)
+      put32(memory + ENCODER + 4 * word, 0xe0000000u + word);
+   put32(memory + RANGE + 4, 2);
+   uint8_t *at = memory + ARGUMENTS;
+   put64(at + STELA_METAL_RESOLVE_HEADER, BASE + HEADER);
+   put64(at + STELA_METAL_RESOLVE_RANGE, BASE + RANGE);
+   put64(at + STELA_METAL_RESOLVE_SEQUENCES, BASE + SEQUENCES);
+   put64(at + STELA_METAL_RESOLVE_TABLES, BASE + TABLES);
+   put32(at + STELA_METAL_RESOLVE_COUNT, 2);
+   put64(at + STELA_METAL_RESOLVE_PUSH + STELA_METAL_PUSH_TABLES, BASE + ENCODER);
+   put32(at + STELA_METAL_RESOLVE_PUSH + STELA_METAL_PUSH_VIEW_MAPPING, 7);
+
+   resolve_dispatch(shader, 0, 0);
+   const uint8_t *sequence = memory + SEQUENCES;
+   const uint8_t *push = sequence + STELA_METAL_SEQUENCE_PUSH;
+   const uint8_t *dispatch = sequence + STELA_METAL_SEQUENCE_DISPATCH_ARGUMENTS;
+   assert(get32(sequence + STELA_METAL_SEQUENCE_PIPELINE) == 5);
+   assert(get64(push + STELA_METAL_PUSH_TABLES) == BASE + TABLES);
+   assert(get64(push + STELA_METAL_PUSH_ARGUMENTS) ==
+          BASE + SEQUENCES + STELA_METAL_SEQUENCE_DISPATCH_ARGUMENTS);
+   expect_words(push + STELA_METAL_PUSH_GRID, (const uint32_t[]){100, 3, 1}, 3);
+   assert(get32(push + STELA_METAL_PUSH_VIEW_MAPPING) == 7);
+   expect_words(sequence + STELA_METAL_SEQUENCE_DISPATCH, (const uint32_t[]){4, 2, 1}, 3);
+   expect_words(dispatch + STELA_METAL_DISPATCH_REGION, (const uint32_t[]){1, 2, 3, 4, 5, 6}, 6);
+   expect_words(dispatch + STELA_METAL_DISPATCH_SHAPE, (const uint32_t[]){32, 2, 1}, 3);
+   expect_words(dispatch + STELA_METAL_DISPATCH_OFFSETS, (const uint32_t[]){0, 32, 32, 80, 80}, 5);
+   assert(get32(dispatch + STELA_METAL_DISPATCH_OFFSETS + 4 * (STELA_METAL_BUFFERS - 1)) == 80);
+   /* The encoder's table, with the record's slots. */
+   const uint8_t *written = memory + TABLES;
+   assert(get64(written + STELA_METAL_TABLE_BUFFER_ADDRESSES) == 0xa000);
+   assert(get64(written + STELA_METAL_TABLE_BUFFER_ADDRESSES + 8) == 0xb000);
+   assert(get64(written + STELA_METAL_TABLE_BUFFER_LENGTHS + 8) == 128);
+   assert(get32(written + STELA_METAL_TABLE_BUFFER_ADDRESSES + 16) == 0xe0000004u);
+   assert(get32(written + STELA_METAL_TABLE_SAMPLERS) == 0xe0000000u + STELA_METAL_TABLE_SAMPLERS / 4);
+
+   /* A render pipeline's handle dispatches nothing. */
+   resolve_dispatch(shader, 1, 0);
+   sequence += STELA_METAL_SEQUENCE_BYTES;
+   push = sequence + STELA_METAL_SEQUENCE_PUSH;
+   assert(get32(sequence + STELA_METAL_SEQUENCE_PIPELINE) == 0);
+   assert(get64(push + STELA_METAL_PUSH_TABLES) == BASE + TABLES + 2 * STELA_METAL_TABLE_BYTES);
+   expect_words(sequence + STELA_METAL_SEQUENCE_DISPATCH, (const uint32_t[]){0, 0, 0}, 3);
+   /* Inheriting the pipeline and buffers, it dispatches its threadgroups
+    * with the encoder's table. */
+   resolve_dispatch(shader, 1, STELA_METAL_RESOLVE_INHERIT_PIPELINE |
+                               STELA_METAL_RESOLVE_INHERIT_BUFFERS);
+   assert(get64(push + STELA_METAL_PUSH_TABLES) == BASE + ENCODER);
+   expect_words(push + STELA_METAL_PUSH_GRID, (const uint32_t[]){0, 0, 0}, 3);
+   expect_words(sequence + STELA_METAL_SEQUENCE_DISPATCH, (const uint32_t[]){6, 1, 1}, 3);
+   /* Outside the execution range, nothing. */
+   put32(memory + RANGE, 0);
+   put32(memory + RANGE + 4, 1);
+   resolve_dispatch(shader, 1, STELA_METAL_RESOLVE_INHERIT_PIPELINE);
+   expect_words(sequence + STELA_METAL_SEQUENCE_DISPATCH, (const uint32_t[]){0, 0, 0}, 3);
    ralloc_free(shader);
 }
 
@@ -628,6 +785,7 @@ int main(void)
    accumulate_sums_each_run_in_a_loop();
    select_flags_each_command();
    resolve_writes_each_command_sequence();
+   resolve_dispatches_writes_each_command_sequence();
    tessellation_factors_follow_metal_rules();
    tessellation_vertex_passes_the_draw_indices();
    evaluation_stages_read_their_patch_ids();

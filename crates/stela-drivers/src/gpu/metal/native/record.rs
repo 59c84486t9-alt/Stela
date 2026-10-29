@@ -613,6 +613,12 @@ impl Recorder<'_> {
                     count,
                     ResolveArguments::WORKGROUP_SIZE,
                 ),
+                &Command::ResolveDispatches { arguments, count } => self.internal(
+                    self.backend.resolve_dispatches,
+                    arguments,
+                    count,
+                    ResolveArguments::WORKGROUP_SIZE,
+                ),
                 &Command::BeginConditionalRendering {
                     buffer: flags,
                     offset,

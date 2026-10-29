@@ -1,7 +1,7 @@
 use super::{
     blit::{BlitTexture, BufferLayout, Region},
     counters::{CounterRange, CounterSample},
-    generated::{GeneratedLayoutKey, IndirectRenderClass},
+    generated::{GeneratedLayoutKey, GeneratedWork, IndirectRenderClass},
     indirect::ExecutionRange,
     render::{PassBoundary, PatchSource, Viewport},
     *,
@@ -23,7 +23,7 @@ use crate::gpu::metal::{
     hazard::FULL,
     indirect::{
         IndirectCommandBuffer, IndirectCommandBufferDescriptor, IndirectCommandBufferId,
-        RecordLayout,
+        IndirectPipeline, RecordLayout,
     },
     nvidia::fixture::capabilities,
     pass::{AttachedTexture, AttachmentDescriptor, RenderPassDescriptor, Target, render_pass},
@@ -66,6 +66,7 @@ struct MockResolver {
     compute_states: Vec<ComputePipelineState>,
     indirect: Vec<Arc<IndirectCommandBuffer>>,
     classes: Vec<IndirectRenderClass>,
+    compute_set: Option<(ExecutionSet, Pipeline)>,
     layouts: Vec<GeneratedLayoutKey>,
 }
 
@@ -140,12 +141,17 @@ impl Resolver for MockResolver {
         self.classes.clone()
     }
 
+    fn indirect_compute_set(&mut self) -> Option<(ExecutionSet, Pipeline)> {
+        self.compute_set
+    }
+
     /// Layout `n` is the `n`th key asked for; each sequence preprocesses
     /// into 96 bytes at 64-byte alignment.
     fn generated_layout(
         &mut self,
         key: &GeneratedLayoutKey,
         _: Option<ExecutionSet>,
+        sequences: u32,
     ) -> Result<(IndirectCommandsLayout, Requirements)> {
         let index = match self.layouts.iter().position(|known| known == key) {
             Some(index) => index,
@@ -155,7 +161,7 @@ impl Resolver for MockResolver {
             }
         };
         let requirements = Requirements {
-            size: 96,
+            size: 96 * u64::from(sequences),
             alignment: 64,
             memory_types: u32::MAX,
         };
@@ -1040,6 +1046,7 @@ fn kernel_state(writes: bool) -> ComputePipelineState {
         id: 1,
         plan,
         interface: kernel.interface,
+        indirect: None,
     }
 }
 
@@ -1078,6 +1085,7 @@ fn stage_in_dispatches_pass_their_region() {
         id: 1,
         plan: compute_pipeline(&capabilities(), &descriptor).unwrap(),
         interface: kernel.interface,
+        indirect: None,
     };
     let threads = Size {
         width: 32,
@@ -2222,8 +2230,10 @@ fn resident_draws_execute_one_generated_sequence_per_slot() {
         [GeneratedLayoutKey {
             stages: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
             execution_set: false,
-            indexed: false,
-            vertex_buffers: alloc::vec![2],
+            work: GeneratedWork::Draw {
+                indexed: false,
+                vertex_buffers: alloc::vec![2],
+            },
         }]
     );
     let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
@@ -2426,8 +2436,10 @@ fn generated_layouts_read_the_sequence_at_token_offsets() {
     let key = GeneratedLayoutKey {
         stages: ShaderStages::VERTEX,
         execution_set: true,
-        indexed: true,
-        vertex_buffers: alloc::vec![1, 30],
+        work: GeneratedWork::Draw {
+            indexed: true,
+            vertex_buffers: alloc::vec![1, 30],
+        },
     };
     let info = key.info();
     assert_eq!(info.stride, GeneratedSequence::BYTES);
@@ -2448,4 +2460,224 @@ fn generated_layouts_read_the_sequence_at_token_offsets() {
             (592, IndirectToken::DrawIndexed),
         ]
     );
+}
+
+/// A compute pipeline state whose indirect variant is pipeline 77, at index
+/// 3 of the compute execution set.
+fn indirect_kernel_state() -> ComputePipelineState {
+    ComputePipelineState {
+        indirect: Some(IndirectCompute {
+            pipeline: Pipeline(77),
+            place: IndirectPipeline {
+                class: IndirectPipeline::COMPUTE_CLASS,
+                index: 3,
+            },
+        }),
+        ..kernel_state(true)
+    }
+}
+
+/// A GPU-resident buffer of `count` dispatches under `descriptor`, with
+/// `state` unless the buffer inherits it, the last after a barrier when
+/// `barrier`, in a resolver of its own.
+fn resident_dispatches(
+    descriptor: IndirectCommandBufferDescriptor,
+    count: usize,
+    state: Option<&ComputePipelineState>,
+    barrier: bool,
+) -> MockResolver {
+    let mut icb = IndirectCommandBuffer::new(&capabilities(), &descriptor, count as u64).unwrap();
+    for index in 0..count {
+        let mut command = icb.compute_command(index).unwrap();
+        if let Some(state) = state {
+            command.set_compute_pipeline_state(state).unwrap();
+        }
+        if barrier && index + 1 == count {
+            command.set_barrier().unwrap();
+        }
+        let threads = Size {
+            width: 64,
+            height: 1,
+            depth: 1,
+        };
+        command
+            .concurrent_dispatch_threadgroups([2, 1, 1], threads)
+            .unwrap();
+    }
+    let mut resolver = MockResolver {
+        indirect: alloc::vec![Arc::new(icb)],
+        ..MockResolver::default()
+    };
+    resolver
+        .indirect_records(IndirectCommandBufferId(0))
+        .unwrap();
+    resolver
+}
+
+#[test]
+fn resident_dispatches_run_concurrently_in_one_execution() {
+    let descriptor = icb_descriptor(IndirectCommandType::CONCURRENT_DISPATCH);
+    let state = indirect_kernel_state();
+    let mut resolver = resident_dispatches(descriptor, 3, Some(&state), false);
+    let id = IndirectCommandBufferId(0);
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands.begin_compute(DispatchType::Concurrent).unwrap();
+    // Without an indirect-bindable compute pipeline, no command can run.
+    commands
+        .execute_commands(&mut resolver, id, ExecutionRange::Direct(0..3))
+        .unwrap();
+    resolver.compute_set = Some((ExecutionSet(20), Pipeline(78)));
+    commands
+        .execute_commands(&mut resolver, id, ExecutionRange::Direct(0..3))
+        .unwrap();
+    commands
+        .set_compute_pipeline_state(&kernel_state(true))
+        .unwrap();
+    let threads = Size {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    commands
+        .dispatch_threadgroups(&mut resolver, [1, 1, 1], threads)
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    assert_eq!(
+        resolver.layouts,
+        [GeneratedLayoutKey {
+            stages: ShaderStages::COMPUTE,
+            execution_set: true,
+            work: GeneratedWork::Dispatch,
+        }]
+    );
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let commands = &recording.segments[0].commands;
+
+    let resolves: Vec<usize> = commands
+        .iter()
+        .enumerate()
+        .filter_map(|(index, command)| {
+            matches!(command, Command::ResolveDispatches { count: 3, .. }).then_some(index)
+        })
+        .collect();
+    assert_eq!(resolves.len(), 1);
+    let Command::ResolveDispatches { arguments, .. } = commands[resolves[0]] else {
+        unreachable!()
+    };
+    let arguments = uploaded(&recording, arguments);
+    assert_eq!(word(arguments, ResolveArguments::FLAGS_OFFSET as usize), 0);
+    assert_ne!(u64_at(arguments, ResolveArguments::TABLES_OFFSET), 0);
+    assert!(
+        commands[resolves[0]..]
+            .iter()
+            .any(|command| matches!(command, Command::Barrier(barrier)
+            if barrier.dst_stages.contains(PipelineStages::COMMAND_PREPROCESS))),
+        "the sequences are visible to preprocessing"
+    );
+    // One execution of every command, with a pipeline of the set bound.
+    let executions = generated(commands);
+    assert_eq!(executions.len(), 1);
+    let execution = executions[0];
+    assert_eq!(execution.stages, ShaderStages::COMPUTE);
+    assert_eq!(execution.set, Some(ExecutionSet(20)));
+    assert_eq!(
+        (execution.sequences, execution.size, execution.count),
+        (3, 3 * u64::from(GeneratedSequence::BYTES), None)
+    );
+    assert_eq!(execution.preprocess_size, 3 * 96);
+    let at = commands
+        .iter()
+        .position(|command| matches!(command, Command::ExecuteGeneratedCommands(_)))
+        .unwrap();
+    assert_eq!(
+        commands[at - 1],
+        Command::BindPipeline {
+            bind_point: PipelineBindPoint::Compute,
+            pipeline: Pipeline(78),
+        }
+    );
+    // The encoder's next dispatch binds its own pipeline again.
+    assert!(commands[at..].iter().any(|command| matches!(
+        command,
+        Command::BindPipeline {
+            bind_point: PipelineBindPoint::Compute,
+            pipeline: Pipeline(500),
+        }
+    )));
+}
+
+#[test]
+fn resident_dispatches_with_barriers_run_one_execution_each() {
+    let descriptor = IndirectCommandBufferDescriptor {
+        inherit_pipeline_state: true,
+        inherit_buffers: true,
+        ..icb_descriptor(IndirectCommandType::CONCURRENT_DISPATCH)
+    };
+    let mut resolver = resident_dispatches(descriptor, 2, None, true);
+    let id = IndirectCommandBufferId(0);
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands.begin_compute(DispatchType::Serial).unwrap();
+    commands
+        .set_compute_pipeline_state(&kernel_state(true))
+        .unwrap();
+    assert_eq!(
+        commands.execute_commands(&mut resolver, id, ExecutionRange::Direct(0..2)),
+        Err(Error::Invalid(
+            "the compute pipeline state does not support indirect command buffers"
+        ))
+    );
+    commands
+        .set_compute_pipeline_state(&indirect_kernel_state())
+        .unwrap();
+    commands
+        .execute_commands(&mut resolver, id, ExecutionRange::Direct(0..2))
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    assert_eq!(
+        resolver.layouts,
+        [GeneratedLayoutKey {
+            stages: ShaderStages::COMPUTE,
+            execution_set: false,
+            work: GeneratedWork::Dispatch,
+        }]
+    );
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let commands = &recording.segments[0].commands;
+    let resolve = commands
+        .iter()
+        .position(|command| matches!(command, Command::ResolveDispatches { count: 2, .. }))
+        .unwrap();
+    let Command::ResolveDispatches { arguments, .. } = commands[resolve] else {
+        unreachable!()
+    };
+    let arguments = uploaded(&recording, arguments);
+    assert_eq!(
+        word(arguments, ResolveArguments::FLAGS_OFFSET as usize),
+        ResolveArguments::INHERIT_PIPELINE | ResolveArguments::INHERIT_BUFFERS
+    );
+    assert_eq!(u64_at(arguments, ResolveArguments::TABLES_OFFSET), 0);
+    // Each command runs alone, after a full barrier, with the indirect
+    // variant of the encoder's pipeline.
+    let executions = generated(commands);
+    assert_eq!(executions.len(), 2);
+    assert!(executions.iter().all(|execution| execution.set.is_none()
+        && execution.sequences == 1
+        && execution.preprocess_size == 96));
+    assert_eq!(
+        executions[0].address + u64::from(GeneratedSequence::BYTES),
+        executions[1].address
+    );
+    assert!(commands[resolve..].contains(&Command::BindPipeline {
+        bind_point: PipelineBindPoint::Compute,
+        pipeline: Pipeline(77),
+    }));
+    for (index, command) in commands.iter().enumerate() {
+        if matches!(command, Command::ExecuteGeneratedCommands(_)) {
+            assert_eq!(
+                commands[index - 1],
+                Command::Barrier(FULL),
+                "a full barrier precedes each command"
+            );
+        }
+    }
 }

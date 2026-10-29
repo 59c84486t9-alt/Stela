@@ -237,7 +237,8 @@ static void put(struct stela_air_command_encoding *encoding, nir_def *address, n
 }
 
 /* A buffer slot of the record's table of the stage, and a vertex buffer's
- * stride word, zero for the pipeline's. */
+ * stride word, zero for the pipeline's. A kernel buffer's stride has no
+ * reader: kernels whose stage-in strides are dynamic do not compile. */
 static void bind_buffer(nir_builder *b, const struct record *record,
                         const struct stela_air_command *command,
                         struct stela_air_command_encoding *encoding)
@@ -548,6 +549,25 @@ static void resolve_vertex_buffers(nir_builder *b, nir_def *arguments, nir_def *
    pop_count(b, counter, index);
 }
 
+/* The record of the thread's command, and whether the execution range
+ * and the buffer hold the command. */
+static nir_def *resolved_record(nir_builder *b, nir_def *arguments, nir_def *header,
+                                nir_def *thread, nir_def **record)
+{
+   nir_def *command = nir_iadd(b, thread, load(b, arguments, STELA_METAL_RESOLVE_FIRST, 32));
+   nir_def *stride = load(b, header, STELA_METAL_INDIRECT_STRIDE, 32);
+   *record = nir_iadd(b, nir_iadd_imm(b, header, STELA_METAL_INDIRECT_HEADER_BYTES),
+                      nir_imul(b, nir_u2u64(b, command), nir_u2u64(b, stride)));
+   nir_def *range = load(b, arguments, STELA_METAL_RESOLVE_RANGE, 64);
+   nir_def *location = load(b, range, 0, 32);
+   /* location <= command < location + length, without the sum's overflow,
+    * and within the buffer. */
+   nir_def *in_range = nir_iand(b, nir_uge(b, command, location),
+                                nir_ult(b, nir_isub(b, command, location), load(b, range, 4, 32)));
+   return nir_iand(b, in_range,
+                   nir_ult(b, command, load(b, header, STELA_METAL_INDIRECT_COUNT, 32)));
+}
+
 nir_shader *stela_metal_resolve_draws_kernel(const nir_shader_compiler_options *options)
 {
    nir_def *arguments, *thread;
@@ -555,18 +575,8 @@ nir_shader *stela_metal_resolve_draws_kernel(const nir_shader_compiler_options *
                           &arguments, &thread);
    nir_variable *counter = nir_local_variable_create(b.impl, glsl_uint_type(), "counter");
    nir_def *header = load(&b, arguments, STELA_METAL_RESOLVE_HEADER, 64);
-   nir_def *command = nir_iadd(&b, thread, load(&b, arguments, STELA_METAL_RESOLVE_FIRST, 32));
-   nir_def *stride = load(&b, header, STELA_METAL_INDIRECT_STRIDE, 32);
-   nir_def *record = nir_iadd(&b, nir_iadd_imm(&b, header, STELA_METAL_INDIRECT_HEADER_BYTES),
-                              nir_imul(&b, nir_u2u64(&b, command), nir_u2u64(&b, stride)));
-   nir_def *range = load(&b, arguments, STELA_METAL_RESOLVE_RANGE, 64);
-   nir_def *location = load(&b, range, 0, 32);
-   /* location <= command < location + length, without the sum's overflow,
-    * and within the buffer. */
-   nir_def *in_range = nir_iand(&b, nir_uge(&b, command, location),
-                                nir_ult(&b, nir_isub(&b, command, location), load(&b, range, 4, 32)));
-   nir_def *selected = nir_iand(&b, in_range,
-                                nir_ult(&b, command, load(&b, header, STELA_METAL_INDIRECT_COUNT, 32)));
+   nir_def *record;
+   nir_def *selected = resolved_record(&b, arguments, header, thread, &record);
    nir_def *flags = load(&b, arguments, STELA_METAL_RESOLVE_FLAGS, 32);
    nir_def *inherit_pipeline = nir_test_mask(&b, flags, STELA_METAL_RESOLVE_INHERIT_PIPELINE);
    nir_def *inherit_buffers = nir_test_mask(&b, flags, STELA_METAL_RESOLVE_INHERIT_BUFFERS);
@@ -644,6 +654,91 @@ nir_shader *stela_metal_resolve_draws_kernel(const nir_shader_compiler_options *
       store(&b, nir_b2i32(&b, matches), element(&b, counts, at, 4), 0);
    }
    pop_count(&b, counter, slot);
+   return finish(&b);
+}
+
+/* The uvec3 at address + offset. */
+static nir_def *load_uvec3(nir_builder *b, nir_def *address, unsigned offset)
+{
+   return nir_vec3(b, load(b, address, offset, 32), load(b, address, offset + 4, 32),
+                   load(b, address, offset + 8, 32));
+}
+
+nir_shader *stela_metal_resolve_dispatches_kernel(const nir_shader_compiler_options *options)
+{
+   nir_def *arguments, *thread;
+   nir_builder b = kernel(options, "stela_metal_resolve_dispatches", STELA_METAL_RESOLVE_COUNT,
+                          &arguments, &thread);
+   nir_variable *counter = nir_local_variable_create(b.impl, glsl_uint_type(), "counter");
+   nir_variable *offset = nir_local_variable_create(b.impl, glsl_uint_type(), "offset");
+   nir_def *header = load(&b, arguments, STELA_METAL_RESOLVE_HEADER, 64);
+   nir_def *record;
+   nir_def *selected = resolved_record(&b, arguments, header, thread, &record);
+   nir_def *flags = load(&b, arguments, STELA_METAL_RESOLVE_FLAGS, 32);
+   nir_def *inherit_pipeline = nir_test_mask(&b, flags, STELA_METAL_RESOLVE_INHERIT_PIPELINE);
+   nir_def *inherit_buffers = nir_test_mask(&b, flags, STELA_METAL_RESOLVE_INHERIT_BUFFERS);
+   nir_def *sequence = element(&b, load(&b, arguments, STELA_METAL_RESOLVE_SEQUENCES, 64), thread,
+                               STELA_METAL_SEQUENCE_BYTES);
+   nir_def *dispatch = nir_iadd_imm(&b, sequence, STELA_METAL_SEQUENCE_DISPATCH_ARGUMENTS);
+
+   /* The encoder's push constants, with the dispatch's arguments; a command
+    * the range does not hold dispatches nothing. */
+   for (unsigned word = 0; word < STELA_METAL_PUSH_BYTES / 4; word++)
+      store(&b, load(&b, arguments, STELA_METAL_RESOLVE_PUSH + 4 * word, 32), sequence,
+            STELA_METAL_SEQUENCE_PUSH + 4 * word);
+   store(&b, dispatch, sequence, STELA_METAL_SEQUENCE_PUSH + STELA_METAL_PUSH_ARGUMENTS);
+   nir_def *none = nir_imm_ivec3(&b, 0, 0, 0);
+   store(&b, none, sequence, STELA_METAL_SEQUENCE_PUSH + STELA_METAL_PUSH_GRID);
+   store(&b, nir_imm_int(&b, 0), sequence, STELA_METAL_SEQUENCE_PIPELINE);
+   store(&b, none, sequence, STELA_METAL_SEQUENCE_DISPATCH);
+   nir_push_if(&b, selected);
+   nir_def *handle = load(&b, record, STELA_METAL_RECORD_PIPELINE, 64);
+   nir_def *action = load(&b, record, STELA_METAL_RECORD_ACTION, 32);
+   nir_def *compute = nir_ieq_imm(&b, nir_unpack_64_2x32_split_y(&b, handle),
+                                  STELA_METAL_RECORD_COMPUTE_PIPELINES);
+   nir_def *runs = nir_iand(&b, nir_ine_imm(&b, action, 0), nir_ior(&b, inherit_pipeline, compute));
+   store(&b, nir_bcsel(&b, compute, nir_unpack_64_2x32_split_x(&b, handle), nir_imm_int(&b, 0)),
+         sequence, STELA_METAL_SEQUENCE_PIPELINE);
+   nir_push_if(&b, nir_inot(&b, inherit_buffers));
+   nir_def *table = resolve_table(&b, arguments, header, record, thread, 0, counter);
+   store(&b, table, sequence, STELA_METAL_SEQUENCE_PUSH + STELA_METAL_PUSH_TABLES);
+   nir_pop_if(&b, NULL);
+
+   /* Threadgroups, or the threadgroups that cover a grid of threads, which
+    * the kernel then bounds. */
+   nir_def *grid = load_uvec3(&b, record, STELA_METAL_RECORD_GRID);
+   nir_def *threads = load_uvec3(&b, record, STELA_METAL_RECORD_THREADS);
+   nir_def *by_threads = nir_ieq_imm(&b, action, STELA_METAL_RECORD_DISPATCH_THREADS);
+   nir_def *width = nir_umax_imm(&b, threads, 1);
+   nir_def *covering = nir_iadd(&b, nir_udiv(&b, grid, width),
+                                nir_b2i32(&b, nir_ine_imm(&b, nir_umod(&b, grid, width), 0)));
+   store(&b, nir_bcsel(&b, by_threads, grid, none), sequence,
+         STELA_METAL_SEQUENCE_PUSH + STELA_METAL_PUSH_GRID);
+   store(&b, nir_bcsel(&b, runs, nir_bcsel(&b, by_threads, covering, grid), none), sequence,
+         STELA_METAL_SEQUENCE_DISPATCH);
+
+   /* The stage-in region, the shape, and each threadgroup buffer's offset:
+    * the lengths before it, each rounded up to 16 bytes. */
+   store(&b, load_uvec3(&b, record, STELA_METAL_RECORD_STAGE_IN_ORIGIN), dispatch,
+         STELA_METAL_DISPATCH_REGION);
+   store(&b, load_uvec3(&b, record, STELA_METAL_RECORD_STAGE_IN_SIZE), dispatch,
+         STELA_METAL_DISPATCH_REGION + 12);
+   store(&b, threads, dispatch, STELA_METAL_DISPATCH_SHAPE);
+   nir_def *words =
+      nir_iadd(&b, record, nir_u2u64(&b, load(&b, header, STELA_METAL_INDIRECT_WORDS, 32)));
+   nir_def *word_count = load(&b, header, STELA_METAL_INDIRECT_WORD_COUNT, 32);
+   nir_store_var(&b, offset, nir_imm_int(&b, 0), 1);
+   nir_def *index = push_count(&b, counter, nir_imm_int(&b, STELA_METAL_BUFFERS));
+   {
+      nir_def *at = nir_load_var(&b, offset);
+      store(&b, at, element(&b, dispatch, index, 4), STELA_METAL_DISPATCH_OFFSETS);
+      nir_def *length = nir_bcsel(&b, nir_ult(&b, index, word_count),
+                                  load(&b, element(&b, words, index, 4), 0, 32), nir_imm_int(&b, 0));
+      nir_def *rounded = nir_iand_imm(&b, nir_iadd_imm(&b, length, 15), ~15u);
+      nir_store_var(&b, offset, nir_iadd(&b, at, rounded), 1);
+   }
+   pop_count(&b, counter, index);
+   nir_pop_if(&b, NULL);
    return finish(&b);
 }
 

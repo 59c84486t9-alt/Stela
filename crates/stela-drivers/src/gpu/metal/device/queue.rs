@@ -893,12 +893,18 @@ impl<B: Backend, C: Compiler> Resolver for DeviceResolver<'_, B, C> {
         self.device.indirect_render_classes()
     }
 
+    fn indirect_compute_set(&mut self) -> Option<(ExecutionSet, Pipeline)> {
+        self.device.indirect_compute_set()
+    }
+
     fn generated_layout(
         &mut self,
         key: &GeneratedLayoutKey,
         set: Option<ExecutionSet>,
+        sequences: u32,
     ) -> Result<(IndirectCommandsLayout, Requirements)> {
-        self.device.generated_layout(key, set, CHUNK_MEMORY)
+        self.device
+            .generated_layout(key, set, sequences, CHUNK_MEMORY)
     }
 
     fn update_indirect_commands(

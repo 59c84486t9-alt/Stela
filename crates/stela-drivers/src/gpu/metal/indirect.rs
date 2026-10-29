@@ -47,8 +47,8 @@ mod record;
 
 pub use record::RecordLayout;
 
-/// A render pipeline's place in the device's execution sets: its state
-/// class and its index in the class's set. Its `gpuResourceID` is
+/// A pipeline's place in the device's execution sets: its state class and
+/// its index in the class's set. Its `gpuResourceID` is
 /// [`handle`](Self::handle).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct IndirectPipeline {
@@ -57,6 +57,11 @@ pub struct IndirectPipeline {
 }
 
 impl IndirectPipeline {
+    /// The class of every compute pipeline, whose handles' high half is
+    /// all ones (`STELA_METAL_RECORD_COMPUTE_PIPELINES`), which no render
+    /// class reaches.
+    pub const COMPUTE_CLASS: u32 = u32::MAX - 1;
+
     /// The class plus one in the high half and the index in the low half,
     /// so zero names no pipeline.
     pub const fn handle(self) -> u64 {
@@ -849,10 +854,9 @@ pub struct IndirectComputeCommand<'a> {
 
 impl IndirectComputeCommand<'_> {
     pub fn set_compute_pipeline_state(&mut self, state: &ComputePipelineState) -> Result<()> {
-        // Compute pipelines have no GPU-resident form yet.
         let pipeline = CommandPipeline {
             id: state.id,
-            handle: 0,
+            handle: state.indirect.map_or(0, |indirect| indirect.place.handle()),
         };
         self.target.set_pipeline(&self.descriptor, pipeline)
     }

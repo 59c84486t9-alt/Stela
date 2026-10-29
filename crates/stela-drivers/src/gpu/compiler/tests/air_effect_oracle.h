@@ -41,7 +41,8 @@ struct air_effect_value {
 
 /* What an execution reads: little-endian global memory at base, which
  * global loads read and global stores within it update, the push constants,
- * and the invocation's linear index in its workgroup and workgroup ID. */
+ * and the invocation's linear index in its workgroup and workgroup ID, from
+ * which its global ID follows. */
 struct air_effect_environment {
    uint64_t base;
    uint8_t *bytes;
@@ -229,10 +230,18 @@ air_effect_execute_in(nir_shader *shader, unsigned budget, struct air_effect_sto
          case nir_instr_type_intrinsic: {
             nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
             if (memory && (intrinsic->intrinsic == nir_intrinsic_load_local_invocation_index ||
-                           intrinsic->intrinsic == nir_intrinsic_load_workgroup_id)) {
-               bool index = intrinsic->intrinsic == nir_intrinsic_load_local_invocation_index;
+                           intrinsic->intrinsic == nir_intrinsic_load_workgroup_id ||
+                           intrinsic->intrinsic == nir_intrinsic_load_global_invocation_id)) {
+               const uint16_t *size = shader->info.workgroup_size;
+               uint32_t local[3] = {memory->local_index % size[0],
+                                    memory->local_index / size[0] % size[1],
+                                    memory->local_index / size[0] / size[1]};
                for (unsigned lane = 0; lane < dest->components; lane++) {
-                  uint32_t value = index ? memory->local_index : memory->workgroup[lane];
+                  uint32_t value = memory->workgroup[lane];
+                  if (intrinsic->intrinsic == nir_intrinsic_load_local_invocation_index)
+                     value = memory->local_index;
+                  else if (intrinsic->intrinsic == nir_intrinsic_load_global_invocation_id)
+                     value = value * size[lane] + local[lane];
                   dest->lanes[lane] = nir_const_value_for_uint(value, dest->bits);
                }
                break;

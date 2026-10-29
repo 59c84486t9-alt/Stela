@@ -80,6 +80,18 @@ pub struct ComputePipelineState {
     pub id: u64,
     pub plan: ComputePipelinePlan,
     pub interface: Interface,
+    /// Its variant for GPU-resident indirect commands, when they can
+    /// switch to it.
+    pub indirect: Option<IndirectCompute>,
+}
+
+/// A compute pipeline's variant whose dispatches shape its threadgroups
+/// ([`Specialization::dynamic_threadgroups`]), which GPU-resident indirect
+/// commands run, and its place in the compute execution set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IndirectCompute {
+    pub pipeline: Pipeline,
+    pub place: IndirectPipeline,
 }
 
 /// Device services encoding needs.
@@ -129,13 +141,18 @@ pub trait Resolver: ChunkSource {
     /// The live state classes of indirect-bindable render pipelines.
     fn indirect_render_classes(&mut self) -> Vec<generated::IndirectRenderClass>;
 
+    /// The compute execution set and a live pipeline of it, while any
+    /// indirect-bindable compute pipeline lives.
+    fn indirect_compute_set(&mut self) -> Option<(ExecutionSet, Pipeline)>;
+
     /// The indirect commands layout of `key`, created on first use, and the
-    /// preprocess memory one sequence of it needs with `set` in upload
-    /// memory.
+    /// preprocess memory `sequences` sequences of it need with `set` in
+    /// upload memory.
     fn generated_layout(
         &mut self,
         key: &generated::GeneratedLayoutKey,
         set: Option<ExecutionSet>,
+        sequences: u32,
     ) -> Result<(IndirectCommandsLayout, Requirements)>;
 
     /// The layout and buffer of an indirect command buffer's records,
