@@ -2443,25 +2443,40 @@ mod tests {
 
     #[test]
     fn native_bus_peer_dma_runs_and_wakes_a_waiting_pe_without_mmio() {
-        let devices = Board {
-            dma: Some(1000),
-            ..Board::default()
-        };
-        let mut machine = board(&[WFI], devices, Vec::new());
-        assert_eq!(machine.devices.deadline(machine.host.now), None);
-        machine.waiting = Some(Wait {
-            kind: WaitKind::Interrupt,
-            timeout: None,
-            down: false,
-        });
-        machine.schedule().unwrap();
-        assert!(machine.waiting.is_none());
-        assert!(machine.host.now >= 1000);
-        let mut bytes = [0; 3];
-        assert!(machine.host.read_ram(BASE + 0x100, &mut bytes));
-        assert_eq!(&bytes, b"USB");
-        assert!(machine.devices.irq[0]);
-        assert_eq!(machine.devices.dma_deadline(), None);
+        struct NoKick;
+        impl super::super::parallel::Kick for NoKick {
+            fn kick(&self, _: usize) {}
+        }
+        for parallel in [true, false] {
+            let devices = Board {
+                dma: Some(1000),
+                ..Board::default()
+            };
+            let identities = if parallel {
+                alloc::vec![identity(0), identity(1)]
+            } else {
+                Vec::new()
+            };
+            let mut machine = board(&[WFI], devices, identities);
+            if parallel {
+                let hub = super::super::parallel::Hub::new(2, NoKick);
+                machine.enter_parallel(hub).unwrap();
+            }
+            assert_eq!(machine.devices.deadline(machine.host.now), None);
+            machine.waiting = Some(Wait {
+                kind: WaitKind::Interrupt,
+                timeout: None,
+                down: false,
+            });
+            machine.schedule().unwrap();
+            assert!(machine.waiting.is_none());
+            assert!(machine.host.now >= 1000);
+            let mut bytes = [0; 3];
+            assert!(machine.host.read_ram(BASE + 0x100, &mut bytes));
+            assert_eq!(&bytes, b"USB");
+            assert!(machine.devices.irq[0]);
+            assert_eq!(machine.devices.dma_deadline(), None);
+        }
     }
 
     #[test]
