@@ -31,8 +31,8 @@ use crate::gpu::metal::{
     resource::TextureDescriptor,
     sampler::SamplerDescriptor,
     shader::{
-        Access, BufferUse, CompiledShader, FunctionConstant, Interface, Linking, Patch,
-        PatchDomain, Provenance, Reflection, Scalar, Specialization, Stage, Tessellation,
+        Access, BufferUse, CompiledShader, FunctionConstant, Interface, LinkedFunction, Linking,
+        Patch, PatchDomain, Provenance, Reflection, Scalar, Specialization, Stage, Tessellation,
         TessellationStages, Varying, tests::interface,
     },
     sparse::{MappingUpdate, SparseRegion},
@@ -1007,7 +1007,8 @@ fn stages_link_visible_functions_and_name_them_by_handle() {
     let mut device = device();
     let kernel = device.new_function(1, "kernel", Vec::new()).unwrap();
     let visible = device.new_function(1, "visible", Vec::new()).unwrap();
-    let tinted = device.new_function(1, "tinted", Vec::new()).unwrap();
+    let tint = alloc::vec![(0, 1.0f32.to_le_bytes().to_vec())];
+    let tinted = device.new_function(1, "tinted", tint.clone()).unwrap();
     assert_eq!(device.function_type(visible), Ok(FunctionType::Visible));
     assert_eq!(device.function_type(kernel), Ok(FunctionType::Kernel));
     assert!(device.function_interface(visible).is_err());
@@ -1042,7 +1043,11 @@ fn stages_link_visible_functions_and_name_them_by_handle() {
     assert_eq!(
         device.compiler.compiled.last().unwrap().linking,
         Linking {
-            functions: alloc::vec![(1, String::from("visible"))],
+            functions: alloc::vec![LinkedFunction {
+                library: 1,
+                entry: String::from("visible"),
+                constants: Vec::new(),
+            }],
             private_functions: Vec::new(),
             libraries: alloc::vec![7],
         }
@@ -1051,11 +1056,20 @@ fn stages_link_visible_functions_and_name_them_by_handle() {
         device.new_compute_pipeline(&request(alloc::vec![kernel])),
         Err(Error::Invalid("linked functions are visible functions"))
     );
+    // A specialized function links with its values.
+    let pipeline = device
+        .new_compute_pipeline(&request(alloc::vec![tinted]))
+        .unwrap();
+    device
+        .compute_variant(u64::from(pipeline.0), &dispatch)
+        .unwrap();
     assert_eq!(
-        device.new_compute_pipeline(&request(alloc::vec![tinted])),
-        Err(Error::Unsupported(
-            "linked functions with function constants"
-        ))
+        device.compiler.compiled.last().unwrap().linking.functions,
+        [LinkedFunction {
+            library: 1,
+            entry: String::from("tinted"),
+            constants: tint,
+        }]
     );
 
     let vertex = device.new_function(1, "vertex", Vec::new()).unwrap();

@@ -143,7 +143,7 @@ struct stela_metal_specialization {
    uint32_t module_count, linked_function_count;
 };
 #define STELA_METAL_SPECIALIZATION_BYTES 104u
-#define STELA_METAL_MODULE_BYTES 16u
+#define STELA_METAL_MODULE_BYTES 32u
 #define STELA_METAL_LINKED_FUNCTION_BYTES 16u
 /* The metal_abi.h layouts it points to. */
 #define STELA_METAL_PIPELINE_TESSELLATION_BYTES 24u

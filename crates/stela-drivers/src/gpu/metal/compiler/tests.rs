@@ -8,7 +8,7 @@ use crate::gpu::metal::{
     },
     library::tests::{dynamic_fixture, fixture},
     nvidia::{CHIPS, fixture::nvk},
-    shader::{Linking, Patch, PatchDomain},
+    shader::{LinkedFunction, Linking, Patch, PatchDomain},
     vertex::{STRIDE_DYNAMIC, StageInputDescriptor, VertexDescriptor},
 };
 use alloc::vec;
@@ -29,9 +29,26 @@ struct Compiled {
     stage_in: Vec<[u32; 7]>,
     /// The stage-in's index bytes and buffer.
     stage_in_indices: Option<(u32, u32)>,
-    /// The bytes of each linked module.
-    modules: Vec<usize>,
+    /// The bytes of each linked module and its function constant values.
+    modules: Vec<(usize, Option<Values>)>,
     linked_functions: Vec<String>,
+}
+
+/// Function constant values by index.
+type Values = Vec<(u32, Vec<u8>)>;
+
+/// Function constant values the service was given, copied.
+fn values(constants: &[ffi::ConstantValue]) -> Values {
+    constants
+        .iter()
+        .map(|constant| {
+            // SAFETY: the service's caller keeps each value's bytes alive
+            // for the call.
+            let value =
+                unsafe { slice::from_raw_parts(constant.bytes.cast::<u8>(), constant.size) };
+            (constant.index, value.to_vec())
+        })
+        .collect()
 }
 
 /// A refusal's kind, instruction and detail.
@@ -174,7 +191,13 @@ unsafe extern "C" fn compile(
             // SAFETY: as above.
             let air = unsafe { slice::from_raw_parts(module.bitcode.cast::<u8>(), module.size) };
             assert!(air.starts_with(b"BC\xc0\xde"), "modules are bitcode");
-            air.len()
+            let constants = (!module.constants.is_null()).then(|| {
+                // SAFETY: as above.
+                values(unsafe {
+                    slice::from_raw_parts(module.constants, module.constant_count as usize)
+                })
+            });
+            (air.len(), constants)
         })
         .collect();
     let linked_functions = linked_functions
@@ -186,15 +209,7 @@ unsafe extern "C" fn compile(
             String::from(str::from_utf8(name).unwrap())
         })
         .collect();
-    let constants = constants
-        .iter()
-        .map(|constant| {
-            // SAFETY: as above.
-            let value =
-                unsafe { slice::from_raw_parts(constant.bytes.cast::<u8>(), constant.size) };
-            (constant.index, value.to_vec())
-        })
-        .collect();
+    let constants = values(constants);
     let varyings = varyings
         .iter()
         .map(|varying| {
@@ -657,25 +672,77 @@ fn linked_modules_reach_the_service_once_each() {
     reflecting(|r| r.stage = 3);
     let (mut compiler, library) = with_library();
     let dynamic = compiler.add_library(dynamic_fixture()).unwrap();
-    let kernel = || (library, String::from("kernel"));
+    let function = |library, entry: &str, constants| LinkedFunction {
+        library,
+        entry: String::from(entry),
+        constants,
+    };
+    let kernel = || function(library, "kernel", Vec::new());
     let linked = |linking| Specialization {
         linking,
         ..Specialization::default()
     };
-    // The function's own module and the dynamic library's, linked twice.
+    let modules = || FAKE.with_borrow(|fake| fake.compiled.last().unwrap().modules.clone());
+    // The function's own module and the dynamic library's, linked twice:
+    // with the values of the function linked from it.
+    let tint = vec![(1, vec![0, 0, 0x80, 0x3f]), (0, vec![1])];
     let specialization = linked(Linking {
         functions: vec![kernel(), kernel()],
-        private_functions: vec![(dynamic, String::from("kernel"))],
+        private_functions: vec![function(dynamic, "kernel", tint.clone())],
         libraries: vec![dynamic],
     });
     compiler
         .compile(library, "kernel", &specialization)
         .unwrap();
+    assert_eq!(modules(), [(8, Some(tint.clone()))]);
     FAKE.with_borrow(|fake| {
-        let compiled = fake.compiled.last().unwrap();
-        assert_eq!(compiled.modules.len(), 1);
-        assert_eq!(compiled.linked_functions, ["kernel", "kernel"]);
+        assert_eq!(
+            fake.compiled.last().unwrap().linked_functions,
+            ["kernel", "kernel"]
+        );
     });
+    // A dynamic library's module alone has no values.
+    let preloaded = linked(Linking {
+        libraries: vec![dynamic],
+        ..Linking::default()
+    });
+    compiler.compile(library, "kernel", &preloaded).unwrap();
+    assert_eq!(modules(), [(8, None)]);
+    // A module compiles with one set of values, in any order.
+    let mut reordered = tint.clone();
+    reordered.reverse();
+    let twice = |second| {
+        linked(Linking {
+            private_functions: vec![
+                function(dynamic, "kernel", tint.clone()),
+                function(dynamic, "kernel", second),
+            ],
+            ..Linking::default()
+        })
+    };
+    compiler
+        .compile(library, "kernel", &twice(reordered))
+        .unwrap();
+    assert_eq!(modules(), [(8, Some(tint.clone()))]);
+    assert_eq!(
+        compiler.compile(library, "kernel", &twice(Vec::new())),
+        Err(Error::Unsupported(
+            "linking one module with two sets of function constant values"
+        ))
+    );
+    assert_eq!(
+        compiler.compile(
+            library,
+            "kernel",
+            &linked(Linking {
+                functions: vec![function(library, "kernel", tint)],
+                ..Linking::default()
+            })
+        ),
+        Err(Error::Unsupported(
+            "linking a function's own module with other function constant values"
+        ))
+    );
     assert_eq!(
         compiler.compile(
             library,
@@ -692,7 +759,7 @@ fn linked_modules_reach_the_service_once_each() {
             library,
             "kernel",
             &linked(Linking {
-                private_functions: vec![(dynamic, String::from("missing"))],
+                private_functions: vec![function(dynamic, "missing", Vec::new())],
                 ..Linking::default()
             })
         ),

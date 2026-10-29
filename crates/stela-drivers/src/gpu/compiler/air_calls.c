@@ -17,6 +17,7 @@
  * of the call's type, which inlining then expands in place. */
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_calls.h"
+#include "air_constants.h"
 #include "llvm-c/Analysis.h"
 #include "llvm-c/BitReader.h"
 #include "llvm-c/Linker.h"
@@ -150,9 +151,11 @@ stela_air_inline_calls(struct stela_air_metadata *m)
    return true;
 }
 
-/* Whether module is valid AIR compiled as m's module was. */
+/* Whether module is valid AIR compiled as m's module was, after
+ * specializing its function constants with values. */
 static bool
-compatible(struct stela_air_metadata *m, LLVMModuleRef module)
+prepared(struct stela_air_metadata *m, LLVMModuleRef module,
+         const struct stela_air_constant_value *values, unsigned count)
 {
    struct stela_air_error error = {0};
    struct stela_air_metadata linked = {.module = module, .error = &error, .render = true};
@@ -168,8 +171,13 @@ compatible(struct stela_air_metadata *m, LLVMModuleRef module)
        linked.fast_math != m->fast_math || linked.ident_bytes != m->ident_bytes ||
        (m->ident_bytes && memcmp(linked.ident, m->ident, m->ident_bytes)))
       return fail(m, STELA_AIR_INPUT, "a linked module was compiled differently");
-   if (LLVMGetNamedMetadataNumOperands(module, "air.function_constants"))
-      return fail(m, STELA_AIR_INPUT, "linked modules with function constants are unsupported");
+   if (!LLVMGetNamedMetadataNumOperands(module, "air.function_constants"))
+      return true;
+   if (!values)
+      return fail(m, STELA_AIR_INPUT, "a linked module's function constants have no values");
+   if (!stela_air_specialize_constants(&linked, values, count) ||
+       !stela_air_construct_constants(&linked))
+      return fail(m, error.kind, error.detail);
    return true;
 }
 
@@ -193,7 +201,7 @@ stela_air_link_modules(struct stela_air_metadata *m, const struct stela_air_modu
          LLVMDisposeMemoryBuffer(buffer);
       if (!parsed || m->error->kind != STELA_AIR_OK)
          return fail(m, STELA_AIR_BITCODE, "LLVM refused a linked module");
-      if (!compatible(m, module)) {
+      if (!prepared(m, module, linked->constants, linked->constant_count)) {
          LLVMDisposeModule(module);
          return false;
       }

@@ -215,6 +215,9 @@ pub(super) struct ConstantValue {
 pub(super) struct Module {
     pub bitcode: *const c_void,
     pub size: usize,
+    /// Null for a module without values.
+    pub constants: *const ConstantValue,
+    pub constant_count: u32,
 }
 
 /// `struct stela_air_linked_function`.

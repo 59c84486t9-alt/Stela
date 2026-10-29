@@ -45,10 +45,20 @@ enum stela_air_buffer_access {
    STELA_AIR_READ_WRITE = 3,
 };
 
-/* An AIR module linked with the input's. */
+/* A MTLFunctionConstantValues value, laid out as Metal's: its lanes packed,
+ * each bool one byte, a three-lane vector optionally padded to four. */
+struct stela_air_constant_value {
+   unsigned index;
+   const void *bytes;
+   size_t size;
+};
+/* An AIR module linked with the input's, and the values of its function
+ * constants: NULL for a module that declares none. */
 struct stela_air_module {
    const void *bitcode;
    size_t size;
+   const struct stela_air_constant_value *constants;
+   unsigned constant_count;
 };
 /* A function a visible function table's handle calls, by name. */
 struct stela_air_linked_function {

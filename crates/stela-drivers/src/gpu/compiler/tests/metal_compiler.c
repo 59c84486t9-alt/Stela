@@ -256,6 +256,31 @@ static const char *linked =
    "define i64 @wide(i64 %x) {\nret i64 %x\n}\n"
    "!air.visible = !{}\n";
 
+/* Stores the external function of its bias constant: a library with an
+ * offset constant of the same index defines it, adding the offset. */
+static const char *biased =
+   "@bias = external addrspace(2) constant i32\n"
+   "declare i32 @external(i32)\n"
+   "define void @biased(ptr addrspace(1) %data) {\n"
+   "%b = load i32, ptr addrspace(2) @bias, align 4\n"
+   "%w = call i32 @external(i32 %b)\n"
+   "store i32 %w, ptr addrspace(1) %data, align 4\nret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @biased, !3, !4}\n!3 = !{}\n!4 = !{!40}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"
+   "!air.function_constants = !{!50}\n"
+   "!50 = !{ptr addrspace(2) @bias, !\"int\", !\"bias\", i32 0, i1 true}\n";
+static const char *offsets =
+   "@offset = external addrspace(2) constant i32\n"
+   "define i32 @external(i32 %x) {\n"
+   "%o = load i32, ptr addrspace(2) @offset, align 4\n"
+   "%y = add i32 %x, %o\nret i32 %y\n}\n"
+   "!air.visible = !{}\n"
+   "!air.function_constants = !{!90}\n"
+   "!90 = !{ptr addrspace(2) @offset, !\"int\", !\"offset\", i32 0, i1 true}\n";
+
 /* A kernel that makes one call on command 0 of an argument buffer's
  * indirect command buffer. */
 #define COMMANDS(command) \
@@ -834,6 +859,65 @@ linked_functions_resolve_tables_and_externals(void)
    assert(!compile_linked(tables, "tables", twice, 2, functions, 3, &error));
 }
 
+/* Whether the shader stores the constant value. */
+static bool
+stores_constant(nir_shader *shader, uint32_t value)
+{
+   nir_opt_constant_folding(shader);
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *store = nir_instr_as_intrinsic(instr);
+            if (store->intrinsic == nir_intrinsic_store_global &&
+                nir_src_is_const(store->src[0]) && nir_src_as_uint(store->src[0]) == value)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
+/* compile() of biased, linking offsets with values, or NULL for none. */
+static nir_shader *
+compile_biased(const struct stela_air_constant_value *offset, unsigned offset_count,
+               struct stela_air_error *error)
+{
+   const uint32_t five = 5;
+   const struct stela_air_constant_value bias = {0, &five, sizeof(five)};
+   LLVMMemoryBufferRef buffer = bitcode(offsets);
+   const struct stela_air_module module = {LLVMGetBufferStart(buffer), LLVMGetBufferSize(buffer),
+                                           offset, offset_count};
+   const struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .constant_count = 1, .constants = &bias,
+      .modules = &module, .module_count = 1,
+   };
+   nir_shader *shader = compile(biased, "biased", &specialization, error);
+   LLVMDisposeMemoryBuffer(buffer);
+   return shader;
+}
+
+/* A linked module takes its own function constant values, apart from the
+ * function's. */
+static void
+linked_modules_specialize_their_function_constants(void)
+{
+   struct stela_air_error error;
+   const uint32_t seven = 7;
+   const struct stela_air_constant_value offset = {0, &seven, sizeof(seven)};
+   nir_shader *shader = compile_biased(&offset, 1, &error);
+   if (!shader)
+      fprintf(stderr, "biased: %u %s\n", error.kind, error.detail);
+   assert(shader && stores_constant(shader, 5 + 7));
+   stela_metal_release(shader);
+
+   assert(!compile_biased(NULL, 0, &error) && error.kind == STELA_AIR_INPUT &&
+          strstr(error.detail, "have no values"));
+   assert(!compile_biased(&offset, 0, &error) && error.kind == STELA_AIR_ARGUMENT &&
+          strstr(error.detail, "required function constant"));
+}
+
 /* Kernels that encode indirect commands reflect so, and whether they may
  * set a command's barrier. */
 static void
@@ -961,6 +1045,7 @@ main(void)
    arrays_reflect_each_slot();
    defined_functions_inline_into_their_callers();
    linked_functions_resolve_tables_and_externals();
+   linked_modules_specialize_their_function_constants();
    command_encoding_reflects_barriers();
    glsl_type_singleton_decref();
    puts("metal compiler: ok");

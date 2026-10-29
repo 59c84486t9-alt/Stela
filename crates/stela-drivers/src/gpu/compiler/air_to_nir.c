@@ -4301,9 +4301,9 @@ translate(const void *bitcode, size_t size, const char *entry,
    }
    t.metadata = (struct stela_air_metadata){.module = t.module, .error = error, .render = stage != NULL};
    if (!stela_air_metadata_layout(&t.metadata) || !stela_air_metadata_validate(&t.metadata) ||
-       !stela_air_link_modules(&t.metadata, options->modules, options->module_count) ||
        !stela_air_specialize_constants(&t.metadata, options->constants, options->constant_count) ||
        !stela_air_construct_constants(&t.metadata) ||
+       !stela_air_link_modules(&t.metadata, options->modules, options->module_count) ||
        !stela_air_dispatch_tables(&t.metadata, options->linked_functions,
                                   options->linked_function_count) ||
        !stela_air_inline_calls(&t.metadata))

@@ -11,8 +11,9 @@
 bool stela_air_defined_function(LLVMValueRef fn);
 
 /* Links modules into m's, after checking each is AIR compiled as m's was,
- * so one profile translates them, and has no function constants, which
- * would need their own library's values. */
+ * so one profile translates them, and specializing each with its own
+ * function constant values. m's own are specialized first, since linking
+ * merges the modules' function constant metadata. */
 bool stela_air_link_modules(struct stela_air_metadata *m, const struct stela_air_module *modules,
                             unsigned count);
 

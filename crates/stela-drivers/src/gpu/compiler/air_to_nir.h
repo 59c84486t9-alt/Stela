@@ -243,14 +243,6 @@ typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_de
 typedef nir_def *(*stela_air_fetch_attribute)(nir_builder *, unsigned location, nir_def *at,
                                               nir_def *point, bool integer, void *binding_data);
 
-/* A MTLFunctionConstantValues value, laid out as Metal's: its lanes packed,
- * each bool one byte, a three-lane vector optionally padded to four. */
-struct stela_air_constant_value {
-   unsigned index;
-   const void *bytes;
-   size_t size;
-};
-
 struct stela_air_options {
    unsigned workgroup_size[3]; /* Exact nonzero pipeline specialization. */
    unsigned max_instructions; /* Nonzero caller-supplied compilation budget. */
@@ -314,8 +306,9 @@ struct stela_air_options {
     * not declare are ignored. */
    const struct stela_air_constant_value *constants;
    unsigned constant_count;
-   /* Modules linked with the input's, compiled as it was and without
-    * function constants of their own, which define its external functions.
+   /* Modules linked with the input's, compiled as it was and each
+    * specialized with its own constant values, which define its external
+    * functions.
     * A visible function table's handle i + 1 calls linked_functions[i],
     * which the input or a module defines; any other handle calls none, and
     * a call through it returns zero. */

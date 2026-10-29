@@ -16,9 +16,10 @@
 //! and the service synthesizes the stages ahead of it.
 //!
 //! A stage's [`Linking`] reaches the service as the AIR modules of its
-//! functions and of every function of its dynamic libraries, each module
-//! once and none that is the function's own, with the names of the
-//! functions visible function tables call.
+//! functions, with their function constant values, and of every function
+//! of its dynamic libraries, without, each module once and none that is the
+//! function's own, with the names of the functions visible function tables
+//! call.
 pub mod ffi;
 #[cfg(test)]
 mod tests;
@@ -26,7 +27,7 @@ mod tests;
 use super::{
     abi::{DataType, FunctionType, IndexType, TessellationControlPointIndexType, TextureType},
     capabilities::ShaderFeatures,
-    error::{Error, Result, ensure},
+    error::{Error, Result, ensure, require},
     library::{Air, Header, Library},
     shader::{
         Access, AttributeUse, BufferUse, ColorOutput, CompiledShader, Compiler, FunctionConstant,
@@ -279,19 +280,34 @@ impl AirCompiler {
             return Err(Error::Invalid("a visible function is not a pipeline stage"));
         };
         let linking = &specialization.linking;
-        let modules: Vec<_> = linked_modules(&self.libraries, linking, &selected.slice_hash)?
-            .into_iter()
-            .map(|air| ffi::Module {
-                bitcode: air.as_ptr().cast(),
-                size: air.len(),
-            })
+        let own = (selected.slice_hash, specialization.constants.as_slice());
+        let linked = linked_modules(&self.libraries, linking, own)?;
+        let values: Vec<_> = linked
+            .iter()
+            .map(|module| module.constants.map(constant_values))
             .collect();
+        let modules = linked
+            .iter()
+            .zip(&values)
+            .map(|(module, values)| {
+                Ok(ffi::Module {
+                    bitcode: module.bitcode.as_ptr().cast(),
+                    size: module.bitcode.len(),
+                    constants: values
+                        .as_ref()
+                        .map_or(ptr::null(), |values| values.as_ptr()),
+                    constant_count: values.as_ref().map_or(Ok(0), |values| {
+                        u32::try_from(values.len()).map_err(|_| MALFORMED)
+                    })?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let functions: Vec<_> = linking
             .functions
             .iter()
-            .map(|(_, name)| ffi::LinkedFunction {
-                name: name.as_ptr().cast(),
-                name_bytes: name.len(),
+            .map(|function| ffi::LinkedFunction {
+                name: function.entry.as_ptr().cast(),
+                name_bytes: function.entry.len(),
             })
             .collect();
         let lengths = specialization
@@ -312,15 +328,7 @@ impl AirCompiler {
                 per_primitive: varying.per_primitive.into(),
             })
             .collect();
-        let constants: Vec<_> = specialization
-            .constants
-            .iter()
-            .map(|(index, value)| ffi::ConstantValue {
-                index: *index,
-                bytes: value.as_ptr().cast(),
-                size: value.len(),
-            })
-            .collect();
+        let constants = constant_values(&specialization.constants);
         let count = |len: usize| u32::try_from(len).map_err(|_| MALFORMED);
         let raw = ffi::Specialization {
             workgroup_size: specialization.workgroup_size.unwrap_or_default(),
@@ -453,24 +461,72 @@ impl ffi::StageIn {
     }
 }
 
-/// The AIR modules `linking` adds to the function whose module has
-/// `own`: each once, by digest.
+/// Function constant values as the service takes them, borrowing their
+/// bytes.
+fn constant_values(constants: &[(u32, Vec<u8>)]) -> Vec<ffi::ConstantValue> {
+    constants
+        .iter()
+        .map(|(index, value)| ffi::ConstantValue {
+            index: *index,
+            bytes: value.as_ptr().cast(),
+            size: value.len(),
+        })
+        .collect()
+}
+
+/// An AIR module a function links, with the function constant values of
+/// the functions linked from it, or none for a dynamic library's.
+struct LinkedModule<'a> {
+    digest: [u8; 32],
+    bitcode: &'a [u8],
+    constants: Option<&'a [(u32, Vec<u8>)]>,
+}
+
+/// Whether two sets of function constant values, each with one value per
+/// index, specialize a module alike.
+fn same_values(a: Option<&[(u32, Vec<u8>)]>, b: Option<&[(u32, Vec<u8>)]>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.len() == b.len() && a.iter().all(|value| b.contains(value)),
+        _ => true,
+    }
+}
+
+/// The AIR modules `linking` adds to the function whose module has `own`
+/// digest and values: each once, by digest. A module links with one set of
+/// values; a dynamic library's takes those of a function linked from it.
 fn linked_modules<'a>(
     libraries: &'a BTreeMap<u64, Vec<u8>>,
-    linking: &Linking,
-    own: &[u8; 32],
-) -> Result<Vec<&'a [u8]>> {
-    let mut digests = alloc::vec![*own];
-    let mut modules = Vec::new();
-    let mut add = |digest: [u8; 32], air: Air<'a>| {
-        if !digests.contains(&digest) {
-            digests.push(digest);
-            modules.push(air.bitcode);
+    linking: &'a Linking,
+    own: ([u8; 32], &'a [(u32, Vec<u8>)]),
+) -> Result<Vec<LinkedModule<'a>>> {
+    let mut modules: Vec<LinkedModule<'a>> = Vec::new();
+    let mut add = |digest: [u8; 32], air: Air<'a>, constants| {
+        if digest == own.0 {
+            return require(
+                same_values(Some(own.1), constants),
+                "linking a function's own module with other function constant values",
+            );
         }
+        match modules.iter_mut().find(|module| module.digest == digest) {
+            Some(module) => {
+                require(
+                    same_values(module.constants, constants),
+                    "linking one module with two sets of function constant values",
+                )?;
+                module.constants = module.constants.or(constants);
+            }
+            None => modules.push(LinkedModule {
+                digest,
+                bitcode: air.bitcode,
+                constants,
+            }),
+        }
+        Ok(())
     };
-    for (library, entry) in linking.functions.iter().chain(&linking.private_functions) {
-        let selected = select(libraries, *library, entry)?;
-        add(selected.slice_hash, selected.air);
+    for function in linking.functions.iter().chain(&linking.private_functions) {
+        let selected = select(libraries, function.library, &function.entry)?;
+        let constants = Some(function.constants.as_slice());
+        add(selected.slice_hash, selected.air, constants)?;
     }
     let invalid = |_| Error::Invalid("Metal library");
     for library in &linking.libraries {
@@ -483,7 +539,7 @@ fn linked_modules<'a>(
             "a preloaded library that is not dynamic",
         )?;
         for function in parsed.functions() {
-            add(*function.digest, function.air().map_err(invalid)?);
+            add(*function.digest, function.air().map_err(invalid)?, None)?;
         }
     }
     Ok(modules)

@@ -13,8 +13,8 @@ use crate::gpu::metal::{
         RenderTargets, TessellatedVertex, TessellationDescriptor,
     },
     shader::{
-        CompiledShader, Compiler, Interface, Linking, Reflection, Specialization, Stage,
-        Tessellation, TessellationStages, Varying,
+        CompiledShader, Compiler, Interface, LinkedFunction, Linking, Reflection, Specialization,
+        Stage, Tessellation, TessellationStages, Varying,
     },
     vertex::{StageInputDescriptor, VertexDescriptor},
     vulkan::{
@@ -829,17 +829,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 matches!(function.reflection, Reflection::Visible { .. }),
                 "linked functions are visible functions",
             )?;
-            // The compiler links a module without its library's values.
-            require(
-                function.reflection.constants().is_empty(),
-                "linked functions with function constants",
-            )?;
         }
-        let entries = |ids: &[FunctionId]| -> Result<Vec<(u64, String)>> {
+        let entries = |ids: &[FunctionId]| -> Result<Vec<LinkedFunction>> {
             ids.iter()
                 .map(|id| {
                     let function = self.pipelines.functions.get(id.0)?;
-                    Ok((function.library, function.entry.clone()))
+                    let mut constants = function.constants.clone();
+                    constants.sort_unstable_by_key(|&(index, _)| index);
+                    Ok(LinkedFunction {
+                        library: function.library,
+                        entry: function.entry.clone(),
+                        constants,
+                    })
                 })
                 .collect()
         };

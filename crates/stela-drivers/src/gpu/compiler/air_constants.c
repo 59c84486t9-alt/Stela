@@ -19,6 +19,7 @@
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_constants.h"
 #include "llvm-c/Transforms/PassBuilder.h"
+#include "util/macros.h"
 #include <stdio.h>
 #include <string.h>
 

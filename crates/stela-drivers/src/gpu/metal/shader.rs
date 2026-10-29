@@ -458,16 +458,26 @@ pub struct Specialization {
 }
 
 /// What a pipeline stage links into its function (`MTLLinkedFunctions` and
-/// `preloadedLibraries`): visible functions as (library, entry), and
-/// dynamic libraries. Calls of external functions resolve to any of them.
+/// `preloadedLibraries`): visible functions and dynamic libraries. Calls of
+/// external functions resolve to any of them.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Linking {
     /// The functions visible function tables call: handle `i + 1` calls
     /// the `i`-th, and handle zero none.
-    pub functions: Vec<(u64, String)>,
+    pub functions: Vec<LinkedFunction>,
     /// Functions only external calls reach (`privateFunctions`).
-    pub private_functions: Vec<(u64, String)>,
+    pub private_functions: Vec<LinkedFunction>,
     pub libraries: Vec<u64>,
+}
+
+/// A visible function a stage links: its library, its entry and its
+/// function constant values by index, in index order, with which its
+/// module compiles.
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct LinkedFunction {
+    pub library: u64,
+    pub entry: String,
+    pub constants: Vec<(u32, Vec<u8>)>,
 }
 
 impl Linking {
