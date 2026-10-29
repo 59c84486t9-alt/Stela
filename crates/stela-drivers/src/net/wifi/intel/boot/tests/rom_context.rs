@@ -134,6 +134,8 @@ fn ax210_all_prepublication_faults_release_and_each_partial_stop_can_retry() {
             });
             let state = ax210_state();
             let drops = Arc::new(AtomicUsize::new(0));
+            // SAFETY: Source/Domain own fresh exclusive RAM for this sole AX210 model epoch;
+            // prepublication faults are serialized, with no IRQ worker, SAP owner or real DMA.
             let result = unsafe {
                 RomBoot::start_ax210(
                     awake_profile(state.clone(), drops.clone(), ax210_profile()),

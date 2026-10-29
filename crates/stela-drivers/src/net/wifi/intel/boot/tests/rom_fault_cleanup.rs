@@ -23,6 +23,8 @@ fn every_allocation_map_and_visibility_failure_before_pointer_publication_releas
             });
             let state = Arc::new(Mutex::new(ModelState::default()));
             let drops = Arc::new(AtomicUsize::new(0));
+            // SAFETY: This iteration owns exclusive Source RAM in its modeled Domain;
+            // allocation/map/visibility faults are serialized and occur before pointer publication.
             let result = unsafe {
                 Ax200Boot::start(
                     awake(state.clone(), drops.clone()),
@@ -91,6 +93,8 @@ fn failed_csr_read_sentinels_and_cpu_visibility_never_become_alive() {
             let drops = Arc::new(AtomicUsize::new(0));
             let power = awake(state.clone(), drops.clone());
             state.lock().unwrap().sentinel = Some((index, value));
+            // SAFETY: The new model epoch exclusively owns Source/Domain and its register data;
+            // injected sentinel reads introduce no asynchronous device or competing reset owner.
             let result = unsafe {
                 Ax200Boot::start(
                     power,

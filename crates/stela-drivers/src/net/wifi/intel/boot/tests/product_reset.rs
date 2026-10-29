@@ -44,6 +44,8 @@ fn ax210_product_reset_uses_explicit_unmanaged_policy_and_refuses_managed_withou
     let power = awake_profile(state.clone(), drops.clone(), ax210_profile());
     let before = state.lock().unwrap().ops.len();
     let step = crate::net::wifi::intel::platform::load_step(observation, &step_catalog).unwrap();
+    // SAFETY: This model has fresh exclusive Source/Domain RAM and no active SAP user;
+    // ManagedSap is deliberately refused before publication rather than fabricating a provider.
     let result = unsafe {
         RomBoot::start_ax210(
             power,

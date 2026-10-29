@@ -28,6 +28,8 @@ fn ax210_wrong_protocol_missing_oversized_iml_and_unqualified_inputs_do_no_io_or
         let drops = Arc::new(AtomicUsize::new(0));
         let power = awake_profile(state.clone(), drops.clone(), ax210_profile());
         let staged = crate::net::wifi::intel::identity::stage(&ax210_profile(), &catalog).unwrap();
+        // SAFETY: Only the serialized Model can access fresh Source RAM in this Domain;
+        // the absent domain/protocol/size variants are refused before publication to any device.
         let result = unsafe {
             if mode == 4 {
                 RomBoot::start(power, staged, &source, Some(domain.clone()), 32)
@@ -90,6 +92,8 @@ fn missing_domain_invalid_ring_size_and_unwoken_epoch_allocate_nothing() {
         } else {
             awake(state, drops.clone())
         };
+        // SAFETY: Source provides fresh exclusive model RAM with no physical DMA or IRQ;
+        // missing domain, invalid ring size and unwoken power are checked before allocation.
         let result = unsafe {
             Ax200Boot::start(
                 power,
@@ -173,6 +177,8 @@ fn staged_profile_diagnostic_name_board_and_driver_swaps_refuse_before_io_or_dma
         let state = Arc::new(Mutex::new(ModelState::default()));
         let drops = Arc::new(AtomicUsize::new(0));
         let power = awake(state.clone(), drops.clone());
+        // SAFETY: The model retains its original Source/Domain and has no concurrent user;
+        // swapped firmware metadata is deliberately refused before I/O or DMA publication.
         let result = unsafe { Ax200Boot::start(power, staged, &source, Some(domain.clone()), 32) };
         assert!(matches!(result, Err(Error::FirmwareBinding)), "swap{mode}");
         assert_eq!(source.calls.load(Ordering::Relaxed), 0);
