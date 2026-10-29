@@ -61,14 +61,21 @@ pub struct Handoff {
     pub clock: Clock,
     /// Verified host-device firmware; sharing a handoff never copies image bytes.
     pub firmware: Option<Arc<firmware::Catalog>>,
-    /// Owned pre-EBS Intel Bluetooth board-variable observation and diagnostics.
-    pub bluetooth_platform: usb::bluetooth::intel::DsbrCapture,
-    /// Copied status metadata; raw bytes belong to the permanent firmware catalog.
-    pub wifi_platform: net::wifi::intel::platform::Observations,
     /// The message a disk sends when it completes a command, where the
     /// engine takes one: it wakes the core that looks for completions
     /// ([`block::BlockDevice::signals`]). `None` leaves every disk polled.
     pub completion: Option<bus::irq::MsiMessage>,
+}
+
+/// The UEFI variables `stela.efi` reads for the drivers before it leaves
+/// boot services; copies only, no firmware service or heap borrow.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlatformCaptures {
+    /// Intel Bluetooth's DSBR board variable, with its diagnostics.
+    pub bluetooth: usb::bluetooth::intel::DsbrCapture,
+    /// Intel Wi-Fi's variables' status; their bytes belong to the firmware
+    /// catalog.
+    pub wifi: net::wifi::intel::platform::Observations,
 }
 
 impl Handoff {
@@ -355,8 +362,6 @@ mod tests {
     fn mapped_ranges_must_contain_the_whole_range() {
         let handoff = Handoff {
             firmware: None,
-            bluetooth_platform: Default::default(),
-            wifi_platform: Default::default(),
             completion: None,
             ecam: Vec::new(),
             mapped: vec![0x1000..0x3000, 0x8000..0x9000],
@@ -382,8 +387,6 @@ mod tests {
                 ticks_per_microsecond: 1,
             },
             firmware: Some(catalog.clone()),
-            bluetooth_platform: Default::default(),
-            wifi_platform: Default::default(),
             completion: None,
         };
         let cloned = handoff.clone();

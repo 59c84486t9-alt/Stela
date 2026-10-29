@@ -24,7 +24,7 @@ use core::{
 };
 use stela_contracts::refuse;
 use stela_drivers::{
-    Handoff,
+    Handoff, PlatformCaptures,
     block::{
         BlockDevice, BlockError, CallbackStats, Command, Direction, Finished, Identity, Shared,
         Window,
@@ -397,9 +397,9 @@ impl HostDisks {
     }
 }
 
-/// The partitions [`open`] opens, each named explicitly.
+/// What [`open`] opens and brings up, each named explicitly.
 #[derive(Clone, Copy)]
-pub struct Partitions<'a> {
+pub struct Selection<'a> {
     /// The guest's disks, in order: one service each.
     pub targets: &'a [&'a Target],
     /// The install medium, by its GUID.
@@ -412,6 +412,13 @@ pub struct Partitions<'a> {
     pub log: Option<Guid>,
     /// Required host-owned durable FDR file volume, when explicitly staged.
     pub fdr: Option<Guid>,
+    /// Whole USB disks for the guest, by serial number.
+    pub usb_disks: &'a [String],
+    /// The Wi-Fi network to join; without one a Wi-Fi adapter stays down.
+    pub wifi: Option<&'a stela_drivers::probe::WifiConfig>,
+    /// With `--external-disks`, the guest hub's free ports, which every disk
+    /// left over fills in probe order.
+    pub external: Option<usize>,
 }
 
 /// Open the explicitly selected partitions in the loader's identity root
@@ -428,21 +435,22 @@ pub struct Partitions<'a> {
 /// acquiring that non-reentrant guard again is forbidden.
 pub unsafe fn open(
     handoff: &Handoff,
+    captures: PlatformCaptures,
     root: u64,
     services: Option<&dyn NativeServices>,
-    partitions: &Partitions<'_>,
-    usb_disks: &[String],
-    wifi: Option<&stela_drivers::probe::WifiConfig>,
-    external: Option<usize>,
+    selection: &Selection<'_>,
 ) -> Result<Opened> {
-    let Partitions {
+    let Selection {
         targets,
         medium,
         preboot,
         store,
         log,
         fdr,
-    } = *partitions;
+        usb_disks,
+        wifi,
+        external,
+    } = *selection;
     if let Some(serial) = usb_disks
         .iter()
         .find(|serial| targets.iter().any(|target| &target.serial == *serial))
@@ -456,7 +464,8 @@ pub unsafe fn open(
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
     let firmware = stela_drivers::probe::handoff_provider(handoff);
     // SAFETY: the loader mapped these ranges uncached and identity-mapped.
-    let mut devices = unsafe { probe_with_provider(handoff, &mut dma, firmware, services, wifi) };
+    let mut devices =
+        unsafe { probe_with_provider(handoff, captures, &mut dma, firmware, services, wifi) };
     // The owners native attachments keep, and those of failed ones, stay
     // for the boot: their mappings and DMA domains outlive the devices.
     Vec::leak(core::mem::take(&mut devices.owners));

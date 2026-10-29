@@ -187,8 +187,6 @@ fn unmapped_or_overlapping_segment_windows_are_not_scanned() {
     };
     let mut handoff = Handoff {
         firmware: None,
-        bluetooth_platform: Default::default(),
-        wifi_platform: Default::default(),
         completion: None,
         ecam: vec![window],
         mapped: vec![window.range()],

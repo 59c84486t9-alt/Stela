@@ -288,14 +288,13 @@ pub fn take_over(
     if !crate::storage::split(text)?.2.is_empty() {
         return Err(refuse!("stela.cfg names options that need --system"));
     }
-    let wifi_platform = host_firmware.wifi_observations();
+    let captures = crate::storage::captures(host_firmware.wifi_observations());
     // SAFETY: standalone mount keeps identity mappings and this allocator.
     let host_firmware = unsafe { crate::host_firmware::identity_catalog(&host_firmware) }?;
-    let storage =
-        crate::storage::prepare(&options, host_firmware, wifi_platform)?.ok_or(refuse!(
-            "stela.cfg starts with neither --system nor --host-check and names no install or \
+    let storage = crate::storage::prepare(&options, host_firmware, captures)?.ok_or(refuse!(
+        "stela.cfg starts with neither --system nor --host-check and names no install or \
          storage check"
-        ))?;
+    ))?;
     let guard = pages(STACK_PAGES + 1)?;
     let image = Image::loaded()?;
     let screen = Framebuffer::from_firmware();

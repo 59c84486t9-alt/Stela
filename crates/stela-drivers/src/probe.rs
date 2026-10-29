@@ -2,7 +2,7 @@
 //! ECAM window goes to the driver of its class, and what each driver found
 //! or refused is collected in [`Devices`].
 use crate::{
-    Handoff,
+    Clock, Handoff, PlatformCaptures,
     block::{BlockDevice, BlockError},
     bus::{
         dma::DmaAllocator,
@@ -454,9 +454,14 @@ impl Devices {
 /// `handoff` must describe the running machine after ExitBootServices,
 /// with its ranges mapped as it says, and nothing else may drive these
 /// controllers afterwards.
-pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Devices {
+pub unsafe fn probe(
+    handoff: &Handoff,
+    captures: PlatformCaptures,
+    dma: &mut dyn DmaAllocator,
+) -> Devices {
+    let firmware = handoff_provider(handoff);
     // SAFETY: the caller granted the complete machine/controller contract.
-    unsafe { probe_with_provider(handoff, dma, handoff_provider(handoff), None, None) }
+    unsafe { probe_with_provider(handoff, captures, dma, firmware, None, None) }
 }
 
 /// The handoff's firmware catalog as the provider [`probe_with_provider`]
@@ -472,8 +477,16 @@ pub fn handoff_provider(handoff: &Handoff) -> &'static crate::firmware::HandoffP
     Box::leak(Box::new(crate::firmware::HandoffProvider::new(catalog)))
 }
 
-/// Attach the Intel Wi-Fi function at `address` for `network`, reading its
-/// ACPI companion, once the regulatory database loaded.
+/// What every Intel Wi-Fi attach in one probe shares.
+struct WifiInputs<'a> {
+    clock: Clock,
+    observations: net::wifi::intel::platform::Observations,
+    firmware: &'static dyn crate::firmware::Provider,
+    network: &'a WifiConfig,
+}
+
+/// Attach the Intel Wi-Fi function at `address` for `wifi.network`, reading
+/// its ACPI companion, once the regulatory database loaded.
 ///
 /// # Safety
 /// [`NativeServices`]' contract holds for `services`, and nothing else
@@ -485,9 +498,7 @@ pub fn handoff_provider(handoff: &Handoff) -> &'static crate::firmware::HandoffP
 unsafe fn intel_wifi(
     services: &dyn NativeServices,
     address: Address,
-    handoff: &Handoff,
-    firmware: &'static dyn crate::firmware::Provider,
-    network: &WifiConfig,
+    wifi: &WifiInputs<'_>,
     regulatory: &Option<
         Result<
             crate::net::wifi::regulatory::database::Database,
@@ -500,6 +511,12 @@ unsafe fn intel_wifi(
     let Some(Ok(database)) = regulatory else {
         return Err((Error::IntelWifi(AttachError::NoRegulatoryDatabase), None));
     };
+    let WifiInputs {
+        clock,
+        observations,
+        firmware,
+        network,
+    } = *wifi;
     #[cfg(feature = "native-acpi")]
     {
         let session = services.acpi();
@@ -511,14 +528,14 @@ unsafe fn intel_wifi(
                 session,
                 companion,
                 firmware,
-                handoff.wifi_platform,
+                observations,
             )
         };
         let inputs = net::wifi::intel::link::Inputs {
             firmware,
-            observations: handoff.wifi_platform,
+            observations,
             pages: services.pages(),
-            clock: handoff.clock,
+            clock,
             bios,
             database: database.clone(),
             network: network.clone(),
@@ -530,7 +547,14 @@ unsafe fn intel_wifi(
     #[cfg(not(feature = "native-acpi"))]
     {
         let _ = (
-            services, address, handoff, firmware, network, database, bridges,
+            services,
+            address,
+            clock,
+            observations,
+            firmware,
+            network,
+            database,
+            bridges,
         );
         Err((Error::IntelWifi(AttachError::NoNamespace), None))
     }
@@ -554,16 +578,23 @@ unsafe fn intel_wifi(
 /// the firmware it returned.
 pub unsafe fn probe_with_provider(
     handoff: &Handoff,
+    captures: PlatformCaptures,
     dma: &mut dyn DmaAllocator,
     firmware: &'static dyn crate::firmware::Provider,
     services: Option<&dyn NativeServices>,
     wifi: Option<&WifiConfig>,
 ) -> Devices {
     let mut devices = Devices {
-        bluetooth_platform: handoff.bluetooth_platform,
+        bluetooth_platform: captures.bluetooth,
         native_services: services.is_some(),
         ..Devices::default()
     };
+    let wifi_inputs = wifi.map(|network| WifiInputs {
+        clock: handoff.clock,
+        observations: captures.wifi,
+        firmware,
+        network,
+    });
     // Intel ISHs, attached once the scan has looked for a Mehlow host bridge.
     let mut sensor_hubs = Vec::new();
     let mut mehlow = false;
@@ -639,21 +670,13 @@ pub unsafe fn probe_with_provider(
                         continue;
                     }
                     native::Kind::IntelWifi => {
-                        let Some(network) = wifi else {
+                        let Some(wifi) = &wifi_inputs else {
                             continue;
                         };
                         // SAFETY: as for tg3 below; the companion is this
                         // function's own.
                         match unsafe {
-                            intel_wifi(
-                                services,
-                                address,
-                                handoff,
-                                firmware,
-                                network,
-                                &devices.regulatory,
-                                &bridges,
-                            )
+                            intel_wifi(services, address, wifi, &devices.regulatory, &bridges)
                         } {
                             Ok(link) => devices.nics.push(link),
                             Err((error, kept)) => {
@@ -1006,8 +1029,6 @@ mod tests {
                 ticks_per_microsecond: 1,
             },
             firmware: None,
-            bluetooth_platform: Default::default(),
-            wifi_platform: Default::default(),
             completion: None,
         };
         let firmware = handoff_provider(&handoff);
@@ -1023,8 +1044,20 @@ mod tests {
             function: 0,
         };
         // SAFETY: the refusing services cannot grant hardware access.
-        let result =
-            unsafe { intel_wifi(&services, address, &handoff, firmware, &network, &None, &[]) };
+        let result = unsafe {
+            intel_wifi(
+                &services,
+                address,
+                &WifiInputs {
+                    clock: handoff.clock,
+                    observations: Default::default(),
+                    firmware,
+                    network: &network,
+                },
+                &None,
+                &[],
+            )
+        };
         assert!(matches!(
             result,
             Err((

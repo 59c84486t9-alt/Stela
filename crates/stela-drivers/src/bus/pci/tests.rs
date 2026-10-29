@@ -319,8 +319,6 @@ fn an_unmapped_msix_table_falls_back_to_msi() {
     function.enable_polled();
     let handoff = crate::Handoff {
         firmware: None,
-        bluetooth_platform: Default::default(),
-        wifi_platform: Default::default(),
         completion: None,
         ecam: Vec::new(),
         mapped: Vec::new(),

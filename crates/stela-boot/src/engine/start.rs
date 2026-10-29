@@ -1949,6 +1949,7 @@ fn start_devices(
             let heap = handoff.heap.physical..handoff.heap.physical + handoff.heap.bytes;
             let tsc_hz = handoff.tsc_hz;
             let host_clock = storage_handoff.clock;
+            let captures = handoff.storage.captures;
             let mmio = *native_mmio;
             let medium_partition = options.install_source;
             let log_partition = handoff.log_partition.map(Guid);
@@ -1964,21 +1965,22 @@ fn start_devices(
                 unsafe {
                     storage::open(
                         &storage_handoff,
+                        captures,
                         root,
                         native
                             .as_ref()
                             .map(|native| native as &dyn stela_drivers::probe::NativeServices),
-                        &storage::Partitions {
+                        &storage::Selection {
                             targets: &targets,
                             medium: medium_partition,
                             preboot: owned_preboot.as_ref(),
                             store: translation_store,
                             log: log_partition,
                             fdr: fdr_partition,
+                            usb_disks: &owned_usb,
+                            wifi: owned_wifi.as_ref(),
+                            external,
                         },
-                        &owned_usb,
-                        owned_wifi.as_ref(),
-                        external,
                     )
                 }
             });

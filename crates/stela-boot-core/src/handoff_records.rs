@@ -1,5 +1,5 @@
 //! Fixed-size records the loader phase hands the engine phase: physical
-//! regions, boot-bundle files and the storage drivers' handoff.
+//! regions, boot-bundle files and the storage drivers' handoff and captures.
 use crate::Result;
 use alloc::vec::Vec;
 use stela_contracts::refuse;
@@ -40,8 +40,9 @@ impl File {
     }
 }
 
-/// The host storage drivers' handoff (`stela_drivers::Handoff`) in
-/// fixed arrays, for `--preboot`; `present` is false otherwise.
+/// The host storage drivers' handoff (`stela_drivers::Handoff`) in fixed
+/// arrays plus the pre-ExitBootServices platform captures, for `--preboot`;
+/// `present` is false otherwise.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Storage {
@@ -53,9 +54,8 @@ pub struct Storage {
     pub mapped_count: usize,
     pub dma: Region,
     pub ticks_per_microsecond: u64,
-    /// Copy-only pre-EBS board capture; no firmware service/heap borrow.
-    pub bluetooth_platform: stela_drivers::usb::bluetooth::intel::DsbrCapture,
-    pub wifi_platform: stela_drivers::net::wifi::intel::platform::Observations,
+    /// Copy-only board captures; no firmware service or heap borrow.
+    pub captures: stela_drivers::PlatformCaptures,
 }
 
 impl Storage {
@@ -73,12 +73,14 @@ impl Storage {
             mapped_count: 0,
             dma: Region::default(),
             ticks_per_microsecond: 0,
-            bluetooth_platform: Default::default(),
-            wifi_platform: Default::default(),
+            captures: Default::default(),
         }
     }
 
-    pub fn new(handoff: &stela_drivers::Handoff) -> Result<Self> {
+    pub fn new(
+        handoff: &stela_drivers::Handoff,
+        captures: stela_drivers::PlatformCaptures,
+    ) -> Result<Self> {
         if handoff.ecam.len() > MAX_ECAM || handoff.mapped.len() > MAX_MAPPED {
             return Err(refuse!("too many storage ranges for the engine handoff"));
         }
@@ -98,16 +100,13 @@ impl Storage {
             bytes: handoff.dma.end - handoff.dma.start,
         };
         storage.ticks_per_microsecond = handoff.clock.ticks_per_microsecond;
-        storage.bluetooth_platform = handoff.bluetooth_platform;
-        storage.wifi_platform = handoff.wifi_platform;
+        storage.captures = captures;
         Ok(storage)
     }
 
     pub fn handoff(&self) -> Option<stela_drivers::Handoff> {
         self.present.then(|| stela_drivers::Handoff {
             firmware: None,
-            bluetooth_platform: self.bluetooth_platform,
-            wifi_platform: self.wifi_platform,
             completion: None,
             ecam: self.ecam[..self.ecam_count].to_vec(),
             mapped: self.mapped[..self.mapped_count]
@@ -125,6 +124,7 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stela_drivers::PlatformCaptures;
     use stela_drivers::usb::bluetooth::intel::{DsbrCapture, DsbrInput};
     #[test]
     fn storage_wire_keeps_wifi_status_metadata_after_source_owner_drops() {
@@ -158,16 +158,18 @@ mod tests {
                 },
             );
         }
+        let captures = PlatformCaptures {
+            wifi: expected,
+            ..Default::default()
+        };
         let physical = {
             let mut record = Storage::absent();
             record.present = true;
-            record.wifi_platform = expected;
             let temporary = record.handoff().unwrap();
-            Storage::new(&temporary).unwrap()
+            Storage::new(&temporary, captures).unwrap()
         };
-        assert_eq!(physical.wifi_platform, expected);
-        assert_eq!(physical.handoff().unwrap().wifi_platform, expected);
-        assert_eq!(Storage::absent().wifi_platform, Observations::default());
+        assert_eq!(physical.captures.wifi, expected);
+        assert_eq!(Storage::absent().captures.wifi, Observations::default());
     }
     #[test]
     fn physical_storage_record_preserves_owned_board_capture_after_source_drop() {
@@ -187,19 +189,21 @@ mod tests {
                     bytes: 0x1000,
                 };
                 record.ticks_per_microsecond = 3;
-                record.bluetooth_platform = capture;
                 let source = record.handoff().unwrap();
-                let physical = Storage::new(&source).unwrap();
-                copied = physical;
+                let captures = PlatformCaptures {
+                    bluetooth: capture,
+                    ..Default::default()
+                };
+                copied = Storage::new(&source, captures).unwrap();
             }
+            assert_eq!(copied.captures.bluetooth, capture);
+            assert_eq!(copied.captures.bluetooth.input(), capture.input());
             let rebuilt = copied.handoff().unwrap();
-            assert_eq!(rebuilt.bluetooth_platform, capture);
-            assert_eq!(rebuilt.bluetooth_platform.input(), capture.input());
             assert_eq!(rebuilt.dma, 0x1000..0x2000);
             assert_eq!(rebuilt.clock.ticks_per_microsecond, 3);
         }
         let absent = Storage::absent();
         assert!(absent.handoff().is_none());
-        assert_eq!(absent.bluetooth_platform.input(), DsbrInput::Unavailable);
+        assert_eq!(absent.captures.bluetooth.input(), DsbrInput::Unavailable);
     }
 }
