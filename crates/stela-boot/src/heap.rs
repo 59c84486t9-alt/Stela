@@ -19,6 +19,9 @@ use core::{
     ptr,
     sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize, Ordering},
 };
+#[path = "heap/failure.rs"]
+mod failure;
+
 const WORD: usize = core::mem::align_of::<usize>();
 const PAGE_BYTES: usize = 4096;
 #[repr(C)]
@@ -91,6 +94,7 @@ pub struct Usage {
 }
 pub struct Heap {
     held: AtomicBool,
+    failure_reported: AtomicBool,
     state: UnsafeCell<State>,
     caches: [UnsafeCell<Cache>; CPUS],
     /// Each core's bytes allocated from its cache less those freed to it,
@@ -117,6 +121,7 @@ impl Heap {
     pub const fn new() -> Self {
         Self {
             held: AtomicBool::new(false),
+            failure_reported: AtomicBool::new(false),
             caches: [const { UnsafeCell::new(Cache::EMPTY) }; CPUS],
             cached: [const { AtomicIsize::new(0) }; CPUS],
             own: [const { AtomicIsize::new(0) }; CPUS],
@@ -487,6 +492,12 @@ impl Heap {
         // SAFETY: the retained guard excludes metadata writers throughout
         // this free-list walk; no state reference escapes the guard.
         let state = unsafe { &*self.state.get() };
+        self.usage_locked(state)
+    }
+
+    // The caller retains the actual metadata guard; CPU cache counters remain
+    // relaxed estimates even while this free-list metadata is exclusively read.
+    fn usage_locked(&self, state: &State) -> Usage {
         let mut largest = 0;
         let mut node = state.first;
         while !node.is_null() {
@@ -608,6 +619,10 @@ unsafe impl GlobalAlloc for Heap {
             if !block.is_null() {
                 self.count_own((SMALLEST << class) as isize);
             }
+            #[cfg(target_os = "uefi")]
+            if block.is_null() {
+                failure::report(self, layout);
+            }
             return block;
         }
         let block = {
@@ -620,6 +635,10 @@ unsafe impl GlobalAlloc for Heap {
         };
         if !block.is_null() {
             self.count_own(class(layout).map_or(layout.size(), |class| SMALLEST << class) as isize);
+        }
+        #[cfg(target_os = "uefi")]
+        if block.is_null() {
+            failure::report(self, layout);
         }
         block
     }

@@ -23,7 +23,9 @@ use stela_drivers::block::{BlockDevice, BlockError, Submission};
 use stela_runtime::pc::boot_log::{PENDING_BYTES, Pending, Unkept, Writer};
 
 /// `isa-debug-exit` under QEMU; an unused port on a PC.
-const EXIT_PORT: u16 = 0xf4;
+mod terminal;
+use terminal::EXIT_PORT;
+pub(crate) use terminal::panic;
 
 /// One engine-wide value. The mount runs on one processor and its handlers
 /// only print; every access is a `try_borrow`, so output that arrives while
@@ -690,21 +692,5 @@ fn stopped(message: &str) {
 pub fn fatal(message: &str) -> ! {
     arguments(format_args!("\nSTELA FATAL {message}\n"));
     stopped(message);
-    terminate(0x11)
-}
-
-pub fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    let message = info.message();
-    // Logged before anything allocates: the panic may be the heap running
-    // out.
-    match info.location() {
-        Some(at) => arguments(format_args!(
-            "\nSTELA PANIC at {}:{}: {message}\n",
-            at.file(),
-            at.line()
-        )),
-        None => arguments(format_args!("\nSTELA PANIC: {message}\n")),
-    }
-    stopped(&alloc::format!("internal error: {message}"));
     terminate(0x11)
 }
