@@ -12,7 +12,6 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
 };
 pub use stela_drivers::{bus, firmware, gpu::intel::activation};
 
@@ -151,10 +150,25 @@ struct Owner {
     resource: Resource,
     memory: Arc<Memory>,
     counts: Arc<Counts>,
-    start: Instant,
+    clock_ns: AtomicU64,
     thread: std::thread::ThreadId,
     device: u16,
 }
+impl Owner {
+    /// Advance only this isolated register model's coherent logical clock.
+    fn advance_clock(&self, nanoseconds: u64) -> i64 {
+        let previous = self
+            .clock_ns
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current
+                    .checked_add(nanoseconds)
+                    .filter(|next| *next <= i64::MAX as u64)
+            })
+            .expect("model nanosecond counter remains representable");
+        previous as i64
+    }
+}
+
 impl Drop for Owner {
     fn drop(&mut self) {
         self.counts.dropped.fetch_add(1, Ordering::SeqCst);
@@ -317,18 +331,15 @@ unsafe impl ProbeOwner for Owner {
         }
     }
     fn now_ns(&self) -> i64 {
-        i64::try_from(self.start.elapsed().as_nanos()).unwrap()
+        // One modeled observation advances the delay hook's microsecond unit.
+        // Zero-delay polling therefore expires without host scheduling/time.
+        self.advance_clock(1_000)
     }
-    fn delay_us(&self, min: u32, max: u32, atomic: bool) {
+    fn delay_us(&self, min: u32, max: u32, _atomic: bool) {
         assert!(min <= max);
-        if atomic {
-            let start = Instant::now();
-            while start.elapsed() < Duration::from_micros(u64::from(min)) {
-                std::hint::spin_loop();
-            }
-        } else {
-            std::thread::sleep(Duration::from_micros(u64::from(min)));
-        }
+        // Both paths are nonblocking RAM-model events, not native timing or
+        // permission to sleep in an atomic context. Preserve the minimum delay.
+        self.advance_clock(u64::from(min) * 1_000);
     }
     fn report(&self, domains: u32, _: bool, status: i32, _: u32) {
         assert_eq!(domains, 1);
@@ -408,7 +419,7 @@ fn owner_with_registers(
             resource,
             memory,
             counts: counts.clone(),
-            start: Instant::now(),
+            clock_ns: AtomicU64::new(0),
             thread: std::thread::current().id(),
             device,
         }),
