@@ -9,8 +9,8 @@
 //! needs only global memory barriers.
 use super::{
     AttachmentLoadOp, AttachmentStoreOp, CompareOp, CullMode, Filter, FrontFace, ImageAspects,
-    IndexType, PipelineStages, PolygonMode, PrimitiveTopology, ResolveModes, SampleCounts,
-    StencilOp,
+    IndexType, PipelineBindPoint, PipelineStages, PolygonMode, PrimitiveTopology, ResolveModes,
+    SampleCounts, StencilOp,
     object::{Buffer, Image, ImageView, Pipeline, QueryPool},
 };
 use crate::gpu::metal::{binding::PushConstants, pass::ClearValue};
@@ -139,7 +139,10 @@ pub enum Command {
     Barrier(Barrier),
     BeginRendering(Rendering),
     EndRendering,
-    BindPipeline(Pipeline),
+    BindPipeline {
+        bind_point: PipelineBindPoint,
+        pipeline: Pipeline,
+    },
     PushConstants(PushConstants),
     SetViewports(Vec<Viewport>),
     SetScissors(Vec<Rect>),

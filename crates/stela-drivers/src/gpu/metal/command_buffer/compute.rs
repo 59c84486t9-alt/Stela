@@ -15,7 +15,7 @@ use crate::gpu::metal::{
     hazard::Use,
     pipeline::compute_variant,
     shader::Stage,
-    vulkan::{Access, PipelineStages, command::Command, object::Pipeline},
+    vulkan::{Access, PipelineBindPoint, PipelineStages, command::Command, object::Pipeline},
 };
 use alloc::{boxed::Box, vec::Vec};
 
@@ -275,7 +275,10 @@ impl CommandBuffer {
             (Some(_), None) => return Err(Error::Invalid("no stage-in region is set")),
         };
         if rebind {
-            self.recorder.push(Command::BindPipeline(variant));
+            self.recorder.push(Command::BindPipeline {
+                bind_point: PipelineBindPoint::Compute,
+                pipeline: variant,
+            });
         }
         self.bindings.constants.arguments = match stage_in {
             None => self.bindings.constants.arguments,

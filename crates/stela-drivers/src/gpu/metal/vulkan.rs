@@ -488,6 +488,14 @@ raw_enum! {
 }
 
 raw_enum! {
+    /// `VkPipelineBindPoint`.
+    pub enum PipelineBindPoint: u32 {
+        Graphics = 0,
+        Compute = 1,
+    }
+}
+
+raw_enum! {
     /// `VkPolygonMode`.
     pub enum PolygonMode: u32 {
         Fill = 0,

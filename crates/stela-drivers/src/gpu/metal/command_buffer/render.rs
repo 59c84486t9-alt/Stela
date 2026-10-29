@@ -30,7 +30,8 @@ use crate::gpu::metal::{
     shader::{MAX_PATCH_CONTROL_POINTS, Stage},
     vulkan::{
         Access, AttachmentLoadOp, AttachmentStoreOp, CullMode, FrontFace, IndexType,
-        PipelineStages, PolygonMode, PrimitiveTopology, SampleCounts, ShaderStages,
+        PipelineBindPoint, PipelineStages, PolygonMode, PrimitiveTopology, SampleCounts,
+        ShaderStages,
         command::{
             Attachment, Barrier, Command, DepthStencil, Rect, Rendering, VertexBuffer,
             Viewport as VkViewport,
@@ -465,7 +466,10 @@ impl CommandBuffer {
             if let Some(pipeline) = state.pipeline {
                 render.topology = None;
                 render.restart = None;
-                self.recorder.push(Command::BindPipeline(pipeline));
+                self.recorder.push(Command::BindPipeline {
+                    bind_point: PipelineBindPoint::Graphics,
+                    pipeline,
+                });
             }
             self.recorder
                 .push(Command::SetRasterizerDiscard(!plan.rasterization_enabled));
@@ -1243,7 +1247,10 @@ impl CommandBuffer {
             "mesh threadgroups have at least one thread",
         )?;
         let pipeline = resolver.mesh_pipeline(state, object_threads, mesh_threads)?;
-        self.recorder.push(Command::BindPipeline(pipeline));
+        self.recorder.push(Command::BindPipeline {
+            bind_point: PipelineBindPoint::Graphics,
+            pipeline,
+        });
         self.bindings.constants.grid = grid;
         self.begin_query(resolver)?;
         self.bindings.flush(

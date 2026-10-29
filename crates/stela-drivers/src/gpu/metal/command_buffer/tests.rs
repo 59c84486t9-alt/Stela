@@ -34,7 +34,7 @@ use crate::gpu::metal::{
         VertexDescriptor, VertexFormat,
     },
     vulkan::{
-        Access, AttachmentLoadOp, AttachmentStoreOp, PipelineStages,
+        Access, AttachmentLoadOp, AttachmentStoreOp, PipelineBindPoint, PipelineStages,
         command::{Barrier, BufferCopy},
         object::{Image, ImageView, ShaderCode},
     },
@@ -412,7 +412,10 @@ fn a_draw_binds_state_buffers_and_tables() {
         crate::gpu::metal::vulkan::PrimitiveTopology::TriangleStrip
     )));
     assert!(commands.contains(&Command::SetPrimitiveRestart(true)));
-    assert!(commands.contains(&Command::BindPipeline(Pipeline(42))));
+    assert!(commands.contains(&Command::BindPipeline {
+        bind_point: PipelineBindPoint::Graphics,
+        pipeline: Pipeline(42),
+    }));
     let flipped = commands.iter().find_map(|command| match command {
         Command::SetViewports(viewports) if viewports[0].height < 0.0 => Some(viewports[0]),
         _ => None,
