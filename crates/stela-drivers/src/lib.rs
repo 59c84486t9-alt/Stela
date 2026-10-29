@@ -1,36 +1,21 @@
-//! Stela's host PC drivers, organized by device class. The mount runs
-//! them after ExitBootServices, when the firmware's drivers are gone.
+//! Stela's native PC drivers, organized by device class. The UEFI mount runs
+//! them after ExitBootServices, when firmware drivers no longer own the devices.
 //!
-//! Each driver backs an emulated Apple device: a host disk becomes the
-//! Mac's internal SSD or a USB disk, a host keyboard or pointer the native
-//! USB peripheral, a host network adapter the mount's own client or the
-//! guest's Ethernet. macOS never sees these drivers; it keeps Apple's stock
-//! drivers for the Apple devices. Polling and the reserved DMA region are
-//! implementation choices of the current boot drivers, not requirements
-//! for this crate. Native C/C++ ports belong behind explicit ABI wrappers;
-//! driver requirements determine allocation and interrupt services.
+//! Native backends supply physical operations for Apple-compatible guest
+//! devices and the mount's own clients. macOS keeps its guest drivers. Backend
+//! attachment, guest integration and physical qualification are separate facts.
+//! Native C/C++ ports use explicit ABI wrappers and the driver requirements
+//! determine their allocation, DMA, interrupt and lifecycle services.
 //!
-//! `stela.efi` records the ACPI MCFG windows, a block of DMA pages below
-//! 4 GiB, the MMIO ranges it mapped uncached and a TSC rate in a [`Handoff`]
-//! before it leaves boot services. [`probe::probe`] then enumerates PCI
-//! through ECAM ([`bus`]) and brings up every driver, one folder per device
-//! class: disks ([`storage`], behind [`block::BlockDevice`]), keyboards and
-//! pointers ([`input`]), raw Ethernet links ([`net`]) and the USB devices
-//! behind xHCI controllers ([`usb`]), reporting the functions it cannot take.
-//! Before any driver binds, it takes every USB host controller from firmware
-//! ([`usb::handoff`]). With the mount's [`probe::NativeServices`] it also
-//! attaches the i8042 keyboard and mouse and the I²C-HID devices and
-//! touchpads the ACPI namespace lists, NVMe disks behind Intel VMD, Intel
-//! ISH and AMD SFH sensor hubs, the embedded controller, batteries, AC
-//! adapter and lid, and the Broadcom tg3 and Aquantia AQtion adapters.
+//! The mount passes PCI windows, mappings, firmware, clocks and owned native
+//! services through [`Handoff`] and [`probe::NativeServices`]. [`probe::probe`]
+//! records devices, refusals and retained owners. [`firmware`] supplies its
+//! device image catalog.
 //!
-//! [`firmware`] holds the device firmware catalog drivers load from.
-//! [`gpu`] inventories display controllers; its feature-gated vendor ports
-//! are support libraries that initialize no GPU. [`audio`] drives HD Audio
-//! for the mount's audio check only. Intel Wi-Fi has a `probe` attachment
-//! route; connection, carrier operation and end-to-end acceptance remain in
-//! progress. Other Wi-Fi libraries in [`net::wifi`], USB4/Thunderbolt and
-//! SMBus in [`bus`] and Type-C in [`usb::typec`] are not attached by `probe` yet.
+//! The generated [hardware route table](https://github.com/tylertms/Stela/blob/main/docs/design/hardware.md)
+//! is the shared inventory of attached, check-only and planned routes. It is
+//! derived from probe admission and actual dispatch, with per-route limits;
+//! an ID match or library implementation grants no operational support claim.
 #![no_std]
 #![cfg_attr(not(test), warn(clippy::undocumented_unsafe_blocks))]
 #[macro_use]
