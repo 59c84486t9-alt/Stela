@@ -1,10 +1,11 @@
 /* SPDX-License-Identifier: MIT */
-/* Atomics, barriers, fences and SIMD-group functions. Original LLVM IR
- * fixtures in the forms air_to_nir.c and air_simd.c document; no Apple
- * output. */
+/* Atomics, barriers, fences, SIMD-group functions and SIMD-group matrices.
+ * Original LLVM IR fixtures in the forms air_to_nir.c, air_simd.c and
+ * air_matrix.c document; no Apple output. */
 #include "../metal_abi.h"
 #include "compiler/air_to_nir.h"
 #include "air_test_fixture.h"
+#include "util/half_float.h"
 #include "util/ralloc.h"
 #include <assert.h>
 #include <stdio.h>
@@ -67,13 +68,17 @@ kernel(const char *declarations, const char *body, struct stela_air_error *error
    return translate(declarations, body, &nir_options, stela_metal_bind_buffer, error);
 }
 
-#ifdef STELA_AIR_TEST_NAK
-/* NAK takes lowered push constants, so its compiles bind a fixed address. */
+/* The fixed address NAK's compiles and the SIMD-group runs bind the buffer
+ * at; NAK takes lowered push constants. */
+#define BUFFER 0x100000
+
 static nir_def *
 fixed_buffer(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
 {
-   return nir_imm_int64(b, 0x100000); /* Compile fixture only. */
+   return nir_imm_int64(b, BUFFER); /* Fixture only. */
 }
+
+#ifdef STELA_AIR_TEST_NAK
 
 struct fixture {
    const char *declarations, *body;
@@ -433,6 +438,329 @@ simd_functions_lower_to_subgroup_operations(void)
            "%a = call i32 @air.simd_shuffle.i32(i32 1, i16 3)\nret void\n", STELA_AIR_INSTRUCTION);
 }
 
+enum { SIMD_LANES = 32, MAX_SHUFFLES = 128 };
+
+/* Rewrites a lane's uses of `def` with the `bits` constant `value`; whether
+ * it had any. */
+static bool
+fold_use(nir_def *def, uint64_t value)
+{
+   if (nir_def_is_unused(def))
+      return false;
+   nir_builder b = nir_builder_at(nir_after_instr(nir_def_instr(def)));
+   nir_def_rewrite_uses(def, nir_imm_intN_t(&b, value, def->bit_size));
+   return true;
+}
+
+/* A lane's shuffle as witnesses constant folding leaves alone: its data and
+ * source lane stored to scratch, and its result loaded from scratch. */
+struct shuffle {
+   nir_intrinsic_instr *data, *source, *result;
+};
+
+/* Runs `body` on one SIMD-group of 32 lanes over `memory`, the buffer at
+ * BUFFER: each lane is a clone given its index, whose global loads read
+ * `memory` and whose shuffles read the other lanes' values, folded until
+ * every one is known. Each lane's stores then write `memory`. */
+static void
+run_simdgroup(const char *declarations, const char *body, uint8_t *memory, size_t size)
+{
+   struct stela_air_error error;
+   nir_shader *shader = translate(declarations, body, &nir_options, fixed_buffer, &error);
+   assert(shader);
+#ifdef STELA_AIR_TEST_NAK
+   stela_air_test_nak(nak_translate, &(struct fixture){declarations, body});
+#endif
+   nir_shader *lanes[SIMD_LANES];
+   static struct shuffle shuffles[SIMD_LANES][MAX_SHUFFLES];
+   unsigned count = 0;
+   for (unsigned l = 0; l < SIMD_LANES; l++) {
+      lanes[l] = nir_shader_clone(NULL, shader);
+      count = 0;
+      nir_foreach_function_impl(impl, lanes[l]) {
+         nir_builder b = nir_builder_create(impl);
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr_safe(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+               if (intrinsic->intrinsic == nir_intrinsic_load_subgroup_invocation) {
+                  fold_use(&intrinsic->def, l);
+               } else if (intrinsic->intrinsic == nir_intrinsic_shuffle) {
+                  assert(count < MAX_SHUFFLES && intrinsic->def.bit_size == 32 &&
+                         intrinsic->def.num_components == 1);
+                  b.cursor = nir_before_instr(instr);
+                  struct shuffle *s = &shuffles[l][count];
+                  nir_def *offset = nir_imm_int(&b, 8 * count++);
+                  s->data = nir_store_scratch(&b, intrinsic->src[0].ssa, offset, .align_mul = 4);
+                  s->source = nir_store_scratch(&b, intrinsic->src[1].ssa, nir_iadd_imm(&b, offset, 4),
+                                                .align_mul = 4);
+                  nir_def *result = nir_load_scratch(&b, 1, 32, offset, .align_mul = 4);
+                  s->result = nir_instr_as_intrinsic(nir_def_instr(result));
+                  nir_def_replace(&intrinsic->def, result);
+               }
+            }
+         }
+      }
+   }
+   ralloc_free(shader);
+   for (bool progress = true; progress;) {
+      progress = false;
+      for (unsigned l = 0; l < SIMD_LANES; l++) {
+         while (nir_opt_constant_folding(lanes[l]) | nir_opt_dead_cf(lanes[l]))
+            ;
+         nir_foreach_function_impl(impl, lanes[l]) {
+            nir_foreach_block(block, impl) {
+               nir_foreach_instr(instr, block) {
+                  if (instr->type != nir_instr_type_intrinsic)
+                     continue;
+                  nir_intrinsic_instr *load = nir_instr_as_intrinsic(instr);
+                  if (load->intrinsic != nir_intrinsic_load_global || !nir_src_is_const(load->src[0]))
+                     continue;
+                  uint64_t offset = nir_src_as_uint(load->src[0]) - BUFFER, value = 0;
+                  assert(load->def.num_components == 1 && offset + load->def.bit_size / 8 <= size);
+                  memcpy(&value, memory + offset, load->def.bit_size / 8);
+                  progress |= fold_use(&load->def, value);
+               }
+            }
+         }
+      }
+      for (unsigned l = 0; l < SIMD_LANES; l++) {
+         for (unsigned k = 0; k < count; k++) {
+            const struct shuffle *s = &shuffles[l][k];
+            if (!nir_src_is_const(s->source->src[0]))
+               continue;
+            unsigned source = nir_src_as_uint(s->source->src[0]);
+            assert(source < SIMD_LANES);
+            nir_src *data = &shuffles[source][k].data->src[0];
+            if (nir_src_is_const(*data))
+               progress |= fold_use(&s->result->def, nir_src_as_uint(*data));
+         }
+      }
+   }
+   for (unsigned l = 0; l < SIMD_LANES; l++) {
+      nir_foreach_function_impl(impl, lanes[l]) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *store = nir_instr_as_intrinsic(instr);
+               if (store->intrinsic != nir_intrinsic_store_global)
+                  continue;
+               if (!nir_src_is_const(store->src[0]) || !nir_src_is_const(store->src[1]))
+                  nir_print_shader(lanes[l], stderr);
+               assert(nir_src_is_const(store->src[0]) && nir_src_is_const(store->src[1]));
+               uint64_t value = nir_src_as_uint(store->src[0]);
+               uint64_t offset = nir_src_as_uint(store->src[1]) - BUFFER;
+               unsigned bytes = store->src[0].ssa->bit_size / 8;
+               assert(store->src[0].ssa->num_components == 1 && offset + bytes <= size);
+               memcpy(memory + offset, &value, bytes);
+            }
+         }
+      }
+      ralloc_free(lanes[l]);
+   }
+}
+
+static float
+float_at(const uint8_t *memory, size_t index)
+{
+   float value;
+   memcpy(&value, memory + 4 * index, sizeof(value));
+   return value;
+}
+
+static void
+put_float(uint8_t *memory, size_t index, float value)
+{
+   memcpy(memory + 4 * index, &value, sizeof(value));
+}
+
+#define MATRIX_DECLARATIONS                                                                        \
+   "declare <64 x float> @air.simdgroup_matrix_8x8_load.v64f32.p1f32(ptr addrspace(1), i64,"      \
+   " <2 x i64>, i1)\n"                                                                             \
+   "declare void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float>, ptr addrspace(1),"    \
+   " i64, <2 x i64>, i1)\n"                                                                        \
+   "declare <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(float)\n"               \
+   "declare <64 x float> @air.simdgroup_matrix_8x8_init_diag.v64f32.f32(float)\n"                 \
+   "declare <64 x float> @air.simdgroup_matrix_8x8_multiply_accumulate"                           \
+   ".v64f32.v64f32.v64f32.v64f32(<64 x float>, <64 x float>, <64 x float>)\n"
+
+/* a * b + 0.5, row-major at stride 8, against the same product on the
+ * CPU. */
+static void
+matrix_products_follow_rows_and_columns(void)
+{
+   uint8_t memory[1024] = {0};
+   for (unsigned i = 0; i < 64; i++) {
+      put_float(memory, i, (float)(i % 11) - 3.0f);
+      put_float(memory, 64 + i, (float)(i % 7) * 0.5f);
+   }
+   run_simdgroup(MATRIX_DECLARATIONS,
+                 "%a = call <64 x float> @air.simdgroup_matrix_8x8_load.v64f32.p1f32(ptr addrspace(1)"
+                 " %out, i64 8, <2 x i64> zeroinitializer, i1 false)\n"
+                 "%pb = getelementptr float, ptr addrspace(1) %out, i64 64\n"
+                 "%b = call <64 x float> @air.simdgroup_matrix_8x8_load.v64f32.p1f32(ptr addrspace(1)"
+                 " %pb, i64 8, <2 x i64> zeroinitializer, i1 false)\n"
+                 "%c = call <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(float 0.5)\n"
+                 "%d = call <64 x float> @air.simdgroup_matrix_8x8_multiply_accumulate"
+                 ".v64f32.v64f32.v64f32.v64f32(<64 x float> %a, <64 x float> %b, <64 x float> %c)\n"
+                 "%pd = getelementptr float, ptr addrspace(1) %out, i64 128\n"
+                 "call void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float> %d,"
+                 " ptr addrspace(1) %pd, i64 8, <2 x i64> zeroinitializer, i1 false)\n"
+                 "ret void\n",
+                 memory, sizeof(memory));
+   for (unsigned r = 0; r < 8; r++) {
+      for (unsigned c = 0; c < 8; c++) {
+         float sum = 0.5f;
+         for (unsigned k = 0; k < 8; k++)
+            sum += float_at(memory, 8 * r + k) * float_at(memory, 64 + 8 * k + c);
+         assert(float_at(memory, 128 + 8 * r + c) == sum);
+      }
+   }
+}
+
+/* Loads and stores place the matrix at their origin's column x and row y in
+ * rows of their stride, transposed when asked; a diagonal is the identity
+ * scaled. */
+static void
+matrix_memory_takes_origins_strides_and_transposes(void)
+{
+   uint8_t memory[2048] = {0};
+   for (unsigned i = 0; i < 160; i++)
+      put_float(memory, i, (float)i);
+   run_simdgroup(MATRIX_DECLARATIONS,
+                 "%b = call <64 x float> @air.simdgroup_matrix_8x8_load.v64f32.p1f32(ptr addrspace(1)"
+                 " %out, i64 16, <2 x i64> <i64 1, i64 2>, i1 true)\n"
+                 "%i = call <64 x float> @air.simdgroup_matrix_8x8_init_diag.v64f32.f32(float 1.0)\n"
+                 "%d = call <64 x float> @air.simdgroup_matrix_8x8_multiply_accumulate"
+                 ".v64f32.v64f32.v64f32.v64f32(<64 x float> %i, <64 x float> %b,"
+                 " <64 x float> zeroinitializer)\n"
+                 "%pd = getelementptr float, ptr addrspace(1) %out, i64 192\n"
+                 "call void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float> %d,"
+                 " ptr addrspace(1) %pd, i64 12, <2 x i64> <i64 3, i64 1>, i1 true)\n"
+                 "%t = call <64 x float> @air.simdgroup_matrix_8x8_init_diag.v64f32.f32(float 3.0)\n"
+                 "%pt = getelementptr float, ptr addrspace(1) %out, i64 320\n"
+                 "call void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float> %t,"
+                 " ptr addrspace(1) %pt, i64 8, <2 x i64> zeroinitializer, i1 false)\n"
+                 "ret void\n",
+                 memory, sizeof(memory));
+   for (unsigned r = 0; r < 8; r++) {
+      for (unsigned c = 0; c < 8; c++) {
+         /* Element (r, c) loads from row 2 + c, column 1 + r and stores to
+          * row 1 + c, column 3 + r. */
+         assert(float_at(memory, 192 + (1 + c) * 12 + 3 + r) == (float)((2 + c) * 16 + 1 + r));
+         assert(float_at(memory, 320 + 8 * r + c) == (r == c ? 3.0f : 0.0f));
+      }
+   }
+}
+
+/* Half and bfloat products accumulate in single precision; a half result
+ * rounds once; a thread's elements 0 and 1 are its storage's. */
+static void
+matrix_elements_and_narrow_types(void)
+{
+   uint8_t memory[2048] = {0};
+   for (unsigned i = 0; i < 64; i++) {
+      uint16_t half = _mesa_float_to_half((float)(i % 5) - 2.0f);
+      float wide = (float)(i % 3) + 1.0f;
+      uint32_t bits;
+      memcpy(&bits, &wide, sizeof(bits));
+      uint16_t bfloat = bits >> 16;
+      memcpy(memory + 2 * i, &half, 2);
+      memcpy(memory + 128 + 2 * i, &bfloat, 2);
+   }
+   run_simdgroup(
+      "declare <64 x half> @air.simdgroup_matrix_8x8_load.v64f16.p1f16(ptr addrspace(1), i64,"
+      " <2 x i64>, i1)\n"
+      "declare <64 x bfloat> @air.simdgroup_matrix_8x8_load.v64bf16.p1bf16(ptr addrspace(1), i64,"
+      " <2 x i64>, i1)\n"
+      "declare <64 x float> @air.simdgroup_matrix_8x8_multiply_accumulate"
+      ".v64f32.v64f16.v64f16.v64f32(<64 x half>, <64 x half>, <64 x float>)\n"
+      "declare <64 x float> @air.simdgroup_matrix_8x8_multiply_accumulate"
+      ".v64f32.v64bf16.v64bf16.v64f32(<64 x bfloat>, <64 x bfloat>, <64 x float>)\n"
+      "declare <64 x half> @air.simdgroup_matrix_8x8_init_diag.v64f16.f16(half)\n"
+      "declare <64 x half> @air.simdgroup_matrix_8x8_multiply_accumulate"
+      ".v64f16.v64f16.v64f16.v64f16(<64 x half>, <64 x half>, <64 x half>)\n"
+      "declare void @air.simdgroup_matrix_8x8_store.v64f16.p1f16(<64 x half>, ptr addrspace(1),"
+      " i64, <2 x i64>, i1)\n"
+      "declare void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float>, ptr addrspace(1),"
+      " i64, <2 x i64>, i1)\n",
+      "%a = call <64 x half> @air.simdgroup_matrix_8x8_load.v64f16.p1f16(ptr addrspace(1) %out,"
+      " i64 8, <2 x i64> zeroinitializer, i1 false)\n"
+      "%pb = getelementptr i8, ptr addrspace(1) %out, i64 128\n"
+      "%b = call <64 x bfloat> @air.simdgroup_matrix_8x8_load.v64bf16.p1bf16(ptr addrspace(1) %pb,"
+      " i64 8, <2 x i64> zeroinitializer, i1 false)\n"
+      "%aa = call <64 x float> @air.simdgroup_matrix_8x8_multiply_accumulate"
+      ".v64f32.v64f16.v64f16.v64f32(<64 x half> %a, <64 x half> %a, <64 x float> zeroinitializer)\n"
+      "%d = call <64 x float> @air.simdgroup_matrix_8x8_multiply_accumulate"
+      ".v64f32.v64bf16.v64bf16.v64f32(<64 x bfloat> %b, <64 x bfloat> %b, <64 x float> %aa)\n"
+      "%e = extractelement <64 x float> %d, i64 1\n"
+      "%f = insertelement <64 x float> %d, float %e, i64 0\n"
+      "%pd = getelementptr i8, ptr addrspace(1) %out, i64 512\n"
+      "call void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float> %f, ptr addrspace(1) %pd,"
+      " i64 8, <2 x i64> zeroinitializer, i1 false)\n"
+      "%i = call <64 x half> @air.simdgroup_matrix_8x8_init_diag.v64f16.f16(half 0xH3C00)\n"
+      "%h = call <64 x half> @air.simdgroup_matrix_8x8_multiply_accumulate"
+      ".v64f16.v64f16.v64f16.v64f16(<64 x half> %a, <64 x half> %i, <64 x half> zeroinitializer)\n"
+      "%ph = getelementptr i8, ptr addrspace(1) %out, i64 1024\n"
+      "call void @air.simdgroup_matrix_8x8_store.v64f16.p1f16(<64 x half> %h, ptr addrspace(1) %ph,"
+      " i64 8, <2 x i64> zeroinitializer, i1 false)\n"
+      "ret void\n",
+      memory, sizeof(memory));
+   for (unsigned r = 0; r < 8; r++) {
+      for (unsigned c = 0; c < 8; c++) {
+         float sum = 0.0f;
+         for (unsigned k = 0; k < 8; k++) {
+            float a = (float)((8 * r + k) % 5) - 2.0f, x = (float)((8 * k + c) % 5) - 2.0f;
+            float b = (float)((8 * r + k) % 3) + 1.0f, y = (float)((8 * k + c) % 3) + 1.0f;
+            sum += a * x + b * y;
+         }
+         /* Each even column took its odd neighbour's element. */
+         float expected = sum;
+         if (!(c & 1)) {
+            expected = 0.0f;
+            for (unsigned k = 0; k < 8; k++) {
+               float a = (float)((8 * r + k) % 5) - 2.0f, x = (float)((8 * k + c + 1) % 5) - 2.0f;
+               float b = (float)((8 * r + k) % 3) + 1.0f, y = (float)((8 * k + c + 1) % 3) + 1.0f;
+               expected += a * x + b * y;
+            }
+         }
+         assert(float_at(memory, 128 + 8 * r + c) == expected);
+         uint16_t half;
+         memcpy(&half, memory + 1024 + 2 * (8 * r + c), 2);
+         assert(half == _mesa_float_to_half((float)((8 * r + c) % 5) - 2.0f));
+      }
+   }
+}
+
+static void
+refuses_misused_matrices(void)
+{
+   const char *refusals[][3] = {
+      /* A thread holds two elements. */
+      {MATRIX_DECLARATIONS,
+       "%m = call <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(float 1.0)\n"
+       "%e = extractelement <64 x float> %m, i64 2\nret void\n", "instruction"},
+      {MATRIX_DECLARATIONS,
+       "%m = call <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(float 1.0)\n"
+       "%e = shufflevector <64 x float> %m, <64 x float> poison, <2 x i32> <i32 0, i32 64>\n"
+       "ret void\n", "instruction"},
+      /* Matrices are stored to device or threadgroup memory. */
+      {"declare void @air.simdgroup_matrix_8x8_store.v64f32.p2f32(<64 x float>, ptr addrspace(2),"
+       " i64, <2 x i64>, i1)\n",
+       "call void @air.simdgroup_matrix_8x8_store.v64f32.p2f32(<64 x float> zeroinitializer,"
+       " ptr addrspace(2) null, i64 8, <2 x i64> zeroinitializer, i1 false)\nret void\n", "type"},
+      /* A fill is of the matrix's element. */
+      {"declare <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(half)\n",
+       "%m = call <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(half 0xH3C00)\n"
+       "ret void\n", "type"},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(refusals); i++)
+      refused(refusals[i][0], refusals[i][1],
+              refusals[i][2][0] == 'i' ? STELA_AIR_INSTRUCTION : STELA_AIR_TYPE);
+}
+
 int
 main(void)
 {
@@ -442,6 +770,10 @@ main(void)
    refuses_unqualified_atomics();
    barriers_and_fences_follow_their_flags();
    simd_functions_lower_to_subgroup_operations();
+   matrix_products_follow_rows_and_columns();
+   matrix_memory_takes_origins_strides_and_transposes();
+   matrix_elements_and_narrow_types();
+   refuses_misused_matrices();
    glsl_type_singleton_decref();
    puts("air sync: ok");
    return 0;

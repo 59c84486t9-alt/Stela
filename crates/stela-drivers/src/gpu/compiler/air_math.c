@@ -569,7 +569,7 @@ lower(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef ca
    } else {
       *result = floating_value(b, operation, s, &second);
    }
-   if (second && !c->store(c->translator, LLVMGetOperand(call, count - 1), second))
+   if (second && !c->store(c->translator, LLVMGetOperand(call, count - 1), NULL, second))
       return STELA_AIR_CALL_FAILED;
    return STELA_AIR_CALL_LOWERED;
 }

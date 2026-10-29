@@ -5,6 +5,7 @@
 #include "air_commands.h"
 #include "air_constants.h"
 #include "air_math.h"
+#include "air_matrix.h"
 #include "air_simd.h"
 #include "air_texture.h"
 #include "llvm-c/Analysis.h"
@@ -392,6 +393,8 @@ get_value(struct translator *t, LLVMValueRef llvm)
    if (LLVMIsAGlobalVariable(llvm))
       return module_global(t, llvm);
    unsigned components, bits;
+   if (stela_air_matrix_type(LLVMTypeOf(llvm), &bits) && LLVMIsAConstantAggregateZero(llvm))
+      return nir_imm_zero(&t->b, 2, bits);
    if (!value_shape(LLVMTypeOf(llvm), &components, &bits)) {
       fail(t, STELA_AIR_TYPE, "unsupported AIR operand type");
       return NULL;
@@ -1721,6 +1724,42 @@ vector_instruction(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
    return put_lanes(t, inst, lanes, n, a->bits);
 }
 
+/* A SIMD-group matrix's thread elements, its storage's elements 0 and 1,
+ * read and written by extractelement and insertelement, or gathered into a
+ * vector by shufflevector. */
+static bool
+matrix_elements(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
+{
+   nir_def *matrix = get_value(t, LLVMGetOperand(inst, 0));
+   if (!matrix)
+      return false;
+   if (op == LLVMShuffleVector) {
+      unsigned n = LLVMGetNumMaskElements(inst), components, bits;
+      if (!value_shape(LLVMTypeOf(inst), &components, &bits))
+         return fail(t, STELA_AIR_TYPE, "SIMD-group matrix shuffles gather a vector of thread elements");
+      nir_def *lanes[4] = {0};
+      for (unsigned i = 0; i < n; i++) {
+         int mask = LLVMGetMaskValue(inst, i);
+         if (mask > 1)
+            return fail(t, STELA_AIR_INSTRUCTION, "SIMD-group matrix shuffle beyond the thread elements");
+         if (mask >= 0)
+            lanes[i] = nir_channel(&t->b, matrix, (unsigned)mask);
+      }
+      return put_lanes(t, inst, lanes, n, bits);
+   }
+   LLVMValueRef index = LLVMGetOperand(inst, op == LLVMInsertElement ? 2 : 1);
+   if (LLVMIsAConstantInt(index) && LLVMConstIntGetZExtValue(index) > 1)
+      return fail(t, STELA_AIR_INSTRUCTION, "SIMD-group matrix index beyond the thread elements");
+   nir_def *lane = get_value(t, index);
+   if (!lane)
+      return false;
+   lane = nir_u2u32(&t->b, lane);
+   if (op == LLVMExtractElement)
+      return put_value(t, inst, nir_vector_extract(&t->b, matrix, lane), 0);
+   nir_def *element = get_value(t, LLVMGetOperand(inst, 1));
+   return element && put_value(t, inst, nir_vector_insert(&t->b, matrix, element, lane), 0);
+}
+
 /* The varying map's row for a varying. */
 static const struct stela_air_varying_slot *
 varying_slot(struct translator *t, const struct stela_air_stage_io *io)
@@ -2448,15 +2487,37 @@ math_environment(void *translator)
    return fp_environment(translator);
 }
 
+/* A library function's access of a value at `offset` bytes from `pointer`,
+ * aligned to its element; `stored` makes it a store. */
+static nir_def *
+call_access(struct translator *t, LLVMValueRef pointer, nir_def *offset, nir_def *stored,
+            unsigned components, unsigned bits)
+{
+   const struct value *base = pointer_value(t, pointer);
+   unsigned required = stored ? STELA_AIR_WRITE : STELA_AIR_READ;
+   if (!base || !(base->access & required)) {
+      fail(t, STELA_AIR_MEMORY, "function pointer operand lacks %s access", stored ? "write" : "read");
+      return NULL;
+   }
+   struct value address = *base;
+   if (offset) {
+      address.def = nir_iadd(&t->b, base->def, nir_u2uN(&t->b, offset, base->def->bit_size));
+      pointer_offset(&address, base, 0, bits / 8);
+   }
+   return memory_access(t, &address, stored, NULL, 0, components, bits, bits / 8);
+}
+
+static nir_def *
+call_load(void *translator, LLVMValueRef pointer, nir_def *offset, unsigned bits)
+{
+   return call_access(translator, pointer, offset, NULL, 1, bits);
+}
+
 static bool
-math_store(void *translator, LLVMValueRef pointer, nir_def *value)
+call_store(void *translator, LLVMValueRef pointer, nir_def *offset, nir_def *value)
 {
    struct translator *t = translator;
-   const struct value *address = pointer_value(t, pointer);
-   if (!address || !(address->access & STELA_AIR_WRITE))
-      return fail(t, STELA_AIR_MEMORY, "math function result pointer is not writable");
-   memory_access(t, address, value, NULL, 0, value->num_components, value->bit_size,
-                 value->bit_size / 8);
+   call_access(t, pointer, offset, value, value->num_components, value->bit_size);
    return t->error->kind == STELA_AIR_OK;
 }
 
@@ -3328,10 +3389,14 @@ instruction(struct translator *t, LLVMValueRef inst)
       return argument_load(t, inst);
    if (t->stage_options && (op == LLVMInsertValue || op == LLVMExtractValue))
       return aggregate_instruction(t, inst, op);
+   if ((op == LLVMShuffleVector || op == LLVMExtractElement || op == LLVMInsertElement) &&
+       stela_air_matrix_type(LLVMTypeOf(LLVMGetOperand(inst, 0)), &bits))
+      return matrix_elements(t, inst, op);
    if (op == LLVMShuffleVector || op == LLVMExtractElement || op == LLVMInsertElement)
       return vector_instruction(t, inst, op);
    if (op != LLVMStore && op != LLVMGetElementPtr && op != LLVMBitCast && op != LLVMCall &&
-       !value_shape(LLVMTypeOf(inst), &components, &bits))
+       !value_shape(LLVMTypeOf(inst), &components, &bits) &&
+       !(op == LLVMSelect && stela_air_matrix_type(LLVMTypeOf(inst), &bits)))
       return fail(t, STELA_AIR_TYPE, "unsupported AIR instruction result type (opcode %u)", op);
    if (op == LLVMGetElementPtr) {
       const struct value *origin;
@@ -3462,8 +3527,17 @@ instruction(struct translator *t, LLVMValueRef inst)
       const struct stela_air_call_context math_context = {
          .b = &t->b, .error = t->error, .translator = t,
          .fragment = t->stage_options && t->stage_options->stage == STELA_AIR_FRAGMENT,
-         .operand = texture_operand, .fp_environment = math_environment, .store = math_store,
+         .operand = texture_operand, .fp_environment = math_environment, .load = call_load,
+         .store = call_store,
       };
+      switch (stela_air_matrix_call(&math_context, inst, callee, name, name_length, &math)) {
+      case STELA_AIR_CALL_OTHER:
+         break;
+      case STELA_AIR_CALL_FAILED:
+         return false;
+      case STELA_AIR_CALL_LOWERED:
+         return !math || put_value(t, inst, math, 0);
+      }
       switch (stela_air_simd_call(&math_context, inst, callee, name, name_length, &math)) {
       case STELA_AIR_CALL_OTHER:
          break;
@@ -3990,7 +4064,8 @@ cfg_phi_shape(struct translator *t, LLVMTypeRef type, unsigned *leaves)
 {
    unsigned components, bits;
    *leaves = 0;
-   if (value_shape(type, &components, &bits) || pointer_space(type))
+   if (value_shape(type, &components, &bits) || stela_air_matrix_type(type, &bits) ||
+       pointer_space(type))
       return true;
    if (!t->stage_options || LLVMGetTypeKind(type) != LLVMStructTypeKind ||
        LLVMIsOpaqueStruct(type) || !LLVMIsPackedStruct(type) ||
@@ -4011,6 +4086,8 @@ cfg_phi_leaf(struct translator *t, LLVMTypeRef type)
    if (pointer_space(type)) {
       components = 1;
       bits = 64;
+   } else if (stela_air_matrix_type(type, &bits)) {
+      components = 2;
    } else if (!value_shape(type, &components, &bits)) {
       fail(t, STELA_AIR_TYPE, "unsupported PHI leaf type");
       return NULL;
