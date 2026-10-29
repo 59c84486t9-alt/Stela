@@ -18,22 +18,13 @@ pub mod msix;
 pub mod native;
 pub mod owned;
 pub mod power;
+pub mod regs;
 pub mod requester;
 pub use aspm::{disable_aspm_l1_2_link, disable_aspm_link, native as native_aspm};
 pub use capability::{
     Capabilities, Capability, CapabilityError, ExtendedCapabilities, ExtendedCapability, Layout,
 };
 
-const VENDOR: u16 = 0x00;
-const COMMAND: u16 = 0x04;
-const CLASS: u16 = 0x08;
-const HEADER_TYPE: u16 = 0x0e;
-const BAR0: u16 = 0x10;
-
-const COMMAND_IO: u16 = 1 << 0;
-const COMMAND_MEMORY: u16 = 1 << 1;
-const COMMAND_BUS_MASTER: u16 = 1 << 2;
-const COMMAND_INTX_DISABLE: u16 = 1 << 10;
 /// MSI-X Message Control: enable, and mask every vector.
 const MSIX_ENABLE: u16 = 1 << 15;
 const MSIX_FUNCTION_MASK: u16 = 1 << 14;
@@ -364,11 +355,11 @@ impl<C: ConfigSpace> Function<C> {
     /// Return the config owner on absent/CRS responses. No device
     /// quiescence or mapping-retirement permission follows from either value.
     pub fn try_new(address: Address, config: C) -> Result<Self, C> {
-        let id = config.read32(VENDOR);
+        let id = config.read32(regs::VENDOR_ID);
         if matches!(id as u16, 0xffff | VENDOR_NOT_READY) {
             return Err(config);
         }
-        let class = config.read32(CLASS);
+        let class = config.read32(regs::CLASS_REVISION);
         Ok(Self {
             address,
             vendor: id as u16,
@@ -394,7 +385,7 @@ impl<C: ConfigSpace> Function<C> {
                 continue;
             };
             let mut observe = |function: Self| -> Result<(bool, u8), E> {
-                let multi = function.config.read8(HEADER_TYPE) & 0x80 != 0;
+                let multi = function.config.read8(regs::HEADER_TYPE) & 0x80 != 0;
                 let next = if scan == BusScan::Ari {
                     function
                         .extended_capability(EXTENDED_ARI)
@@ -469,7 +460,7 @@ impl<C: ConfigSpace> Function<C> {
     }
 
     fn header_type(&self) -> u8 {
-        self.config.read8(HEADER_TYPE) & 0x7f
+        self.config.read8(regs::HEADER_TYPE) & 0x7f
     }
 
     /// Decode and size every BAR of a type 0 header. Decoding is off while
@@ -480,12 +471,14 @@ impl<C: ConfigSpace> Function<C> {
         if self.header_type() != 0 {
             return bars;
         }
-        let command = self.config.read16(COMMAND);
-        self.config
-            .write16(COMMAND, command & !(COMMAND_IO | COMMAND_MEMORY));
+        let command = self.config.read16(regs::COMMAND);
+        self.config.write16(
+            regs::COMMAND,
+            command & !(regs::COMMAND_IO | regs::COMMAND_MEMORY),
+        );
         let mut index = 0;
         while index < BARS {
-            let offset = BAR0 + 4 * index as u16;
+            let offset = regs::BASE_ADDRESS_0 + 4 * index as u16;
             let (low, low_mask) = self.size_register(offset);
             if low & BAR_IO != 0 {
                 let size = bar_size(u64::from(low_mask & !3));
@@ -518,7 +511,7 @@ impl<C: ConfigSpace> Function<C> {
             }
             index += if wide { 2 } else { 1 };
         }
-        self.config.write16(COMMAND, command);
+        self.config.write16(regs::COMMAND, command);
         bars
     }
 
@@ -576,7 +569,8 @@ impl<C: ConfigSpace> Function<C> {
         if state == 0 {
             return Ok(());
         }
-        let bars: [u32; BARS] = core::array::from_fn(|i| self.config.read32(BAR0 + 4 * i as u16));
+        let bars: [u32; BARS] =
+            core::array::from_fn(|i| self.config.read32(regs::BASE_ADDRESS_0 + 4 * i as u16));
         self.config.write16(control, 0);
         delay(match state {
             D3HOT => D3HOT_DELAY_US,
@@ -588,7 +582,8 @@ impl<C: ConfigSpace> Function<C> {
         }
         if state == D3HOT && value & PM_NO_SOFT_RESET == 0 && self.header_type() == 0 {
             for (index, bar) in bars.into_iter().enumerate() {
-                self.config.write32(BAR0 + 4 * index as u16, bar);
+                self.config
+                    .write32(regs::BASE_ADDRESS_0 + 4 * index as u16, bar);
             }
         }
         Ok(())
@@ -638,23 +633,25 @@ impl<C: ConfigSpace> Function<C> {
     /// leaves the Status register's write-one-to-clear bits alone, and report
     /// whether the function reads back exactly that Command value.
     pub fn set_bus_master(&mut self, enabled: bool) -> bool {
-        let previous = self.config.read16(COMMAND);
+        let previous = self.config.read16(regs::COMMAND);
         let desired = if enabled {
-            previous | COMMAND_BUS_MASTER
+            previous | regs::COMMAND_MASTER
         } else {
-            previous & !COMMAND_BUS_MASTER
+            previous & !regs::COMMAND_MASTER
         };
-        self.config.write16(COMMAND, desired);
-        self.config.read16(COMMAND) == desired
+        self.config.write16(regs::COMMAND, desired);
+        self.config.read16(regs::COMMAND) == desired
     }
 
     /// Enable memory decoding and bus mastering without changing interrupt
     /// controls. The driver must first establish its DMA and interrupt policy.
     /// This does not program MSI/MSI-X routes or install interrupt handlers.
     pub fn enable_memory_and_bus_master(&mut self) {
-        let command = self.config.read16(COMMAND);
-        self.config
-            .write16(COMMAND, command | COMMAND_MEMORY | COMMAND_BUS_MASTER);
+        let command = self.config.read16(regs::COMMAND);
+        self.config.write16(
+            regs::COMMAND,
+            command | regs::COMMAND_MEMORY | regs::COMMAND_MASTER,
+        );
     }
 
     /// Enable a polling driver: memory decoding and bus mastering on,
@@ -671,10 +668,10 @@ impl<C: ConfigSpace> Function<C> {
             self.config
                 .write16(u16::from(msix.offset) + 2, control & !(1 << 15));
         }
-        let command = self.config.read16(COMMAND);
+        let command = self.config.read16(regs::COMMAND);
         self.config.write16(
-            COMMAND,
-            command | COMMAND_MEMORY | COMMAND_BUS_MASTER | COMMAND_INTX_DISABLE,
+            regs::COMMAND,
+            command | regs::COMMAND_MEMORY | regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
         );
     }
 
@@ -872,7 +869,7 @@ impl Function {
                     for device in 0..devices {
                         for function in 0..8u8 {
                             let (address, config) = at(bus, device, function);
-                            let multifunction = config.read8(HEADER_TYPE) & 0x80 != 0;
+                            let multifunction = config.read8(regs::HEADER_TYPE) & 0x80 != 0;
                             match Function::new(address, config) {
                                 Some(present) => functions.push(present),
                                 None if function == 0 => break,

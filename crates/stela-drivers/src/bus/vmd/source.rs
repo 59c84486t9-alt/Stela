@@ -4,6 +4,7 @@
 //! is inferred from a VMD mask, a BDF, or a caller-set software stopped flag.
 use super::*;
 use crate::bus::irq::{Handler, IrqError, MsiMessage, Route, RouteRequest, Source};
+use crate::bus::pci::regs;
 use alloc::{boxed::Box, rc::Rc, sync::Arc};
 use core::cell::RefCell;
 
@@ -153,12 +154,12 @@ unsafe impl<R: Registers> Source for ParentSource<R> {
         let command = self
             .host()?
             .io()
-            .parent_read(COMMAND, 2)
+            .parent_read(regs::COMMAND, 2)
             .map_err(|_| IrqError::FailedRead)?;
         if command == u32::from(u16::MAX) {
             return Err(IrqError::FailedRead);
         }
-        if command & u32::from(BUS_MASTER) == 0 {
+        if command & u32::from(regs::COMMAND_MASTER) == 0 {
             return Err(IrqError::Unsupported);
         }
         // SAFETY: exact programmed parent range with live registration.

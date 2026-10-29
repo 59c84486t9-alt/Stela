@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! PCI MSI admission fixtures.
 use super::*;
+use crate::bus::pci::regs;
 
 #[test]
 fn capability_admission_preflight() {
@@ -85,7 +86,7 @@ fn capability_admission_preflight() {
 }
 #[test]
 fn failed_admission_returns_original_owners() {
-    for (offset, width) in [(0, 4), (STATUS, 2), (0x50, 2), (0x52, 2)] {
+    for (offset, width) in [(0, 4), (regs::STATUS, 2), (0x50, 2), (0x52, 2)] {
         let f = fixture(false, false);
         f.model.lock().unwrap().fail_read = Some((offset, width));
         let (error, owners) = match

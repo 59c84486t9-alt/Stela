@@ -8,10 +8,10 @@
 //! Copyright 1993 -- 1997 Drew Eckhardt, Frederic Potter, David Mosberger-Tang
 //! Copyright 1997 -- 2000 Martin Mares <mj@ucw.cz>
 use super::{
-    AttachError, COMMAND_INTX_DISABLE, COMMAND_MASTER, COMMAND_MEMORY, PCI_BAR0, PCI_CLASS,
-    PCI_COMMAND, PCI_HEADER, PCI_ID, PM_NO_SOFT_RESET, PM_PME_ENABLE, PM_PME_STATUS, PM_STATE,
-    PciRegisters, capabilities, delay, registers::associated,
+    AttachError, PM_NO_SOFT_RESET, PM_PME_ENABLE, PM_PME_STATUS, PM_STATE, PciRegisters,
+    capabilities, delay, registers::associated,
 };
+use crate::bus::pci::regs;
 use crate::{
     audio::{
         Error, Phase,
@@ -75,18 +75,19 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
         let pm = caps.pm.ok_or(AttachError::UnsupportedPowerManagement)?;
         let flags = config.read16(pm + 2);
         let state = config.read16(pm + 4);
-        let command = config.read16(PCI_COMMAND);
+        let command = config.read16(regs::COMMAND);
         if flags == u16::MAX
             || !(1..=3).contains(&(flags & 7))
             || state == u16::MAX
             || state & PM_STATE != 0
             || command == u16::MAX
-            || command & (COMMAND_MEMORY | COMMAND_MASTER) != COMMAND_MEMORY | COMMAND_MASTER
+            || command & (regs::COMMAND_MEMORY | regs::COMMAND_MASTER)
+                != regs::COMMAND_MEMORY | regs::COMMAND_MASTER
         {
             return Err(AttachError::PowerNotReady.into());
         }
         let snapshot = Snapshot {
-            bars: core::array::from_fn(|i| config.read32(PCI_BAR0 + i as u16 * 4)),
+            bars: core::array::from_fn(|i| config.read32(regs::BASE_ADDRESS_0 + i as u16 * 4)),
             pm,
             command,
         };
@@ -120,9 +121,10 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
         // Retaining the snapshot before the first write permits safe recovery.
         self.registers.suspended = Some(snapshot);
         let config = self.registers.function.config();
-        let disabled = snapshot.command & !(COMMAND_MASTER | COMMAND_MEMORY) | COMMAND_INTX_DISABLE;
-        config.write16(PCI_COMMAND, disabled);
-        let observed = config.read16(PCI_COMMAND);
+        let disabled = snapshot.command & !(regs::COMMAND_MASTER | regs::COMMAND_MEMORY)
+            | regs::COMMAND_INTX_DISABLE;
+        config.write16(regs::COMMAND, disabled);
+        let observed = config.read16(regs::COMMAND);
         if observed == u16::MAX || observed != disabled {
             return Err(AttachError::ConfigurationRejected.into());
         }
@@ -155,11 +157,11 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
             return Err(AttachError::IdentityChanged.into());
         }
         let config = r.function.config();
-        let id = config.read32(PCI_ID);
-        let class = config.read32(PCI_CLASS);
+        let id = config.read32(regs::VENDOR_ID);
+        let class = config.read32(regs::CLASS_REVISION);
         if id != u32::from(r.identity.vendor) | (u32::from(r.identity.device) << 16)
             || [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8] != super::CLASS
-            || config.read8(PCI_HEADER) & 0x7f != 0
+            || config.read8(regs::HEADER_TYPE) & 0x7f != 0
         {
             return Err(AttachError::IdentityChanged.into());
         }
@@ -177,9 +179,10 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
             return Err(AttachError::PowerNotReady.into());
         }
         // Never restore a BAR with a possible live decoder or bus master.
-        let disabled = snapshot.command & !(COMMAND_MASTER | COMMAND_MEMORY) | COMMAND_INTX_DISABLE;
-        config.write16(PCI_COMMAND, disabled);
-        let observed = config.read16(PCI_COMMAND);
+        let disabled = snapshot.command & !(regs::COMMAND_MASTER | regs::COMMAND_MEMORY)
+            | regs::COMMAND_INTX_DISABLE;
+        config.write16(regs::COMMAND, disabled);
+        let observed = config.read16(regs::COMMAND);
         if observed == u16::MAX || observed != disabled {
             return Err(AttachError::ConfigurationRejected.into());
         }
@@ -202,17 +205,17 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
                 .bars
                 .iter()
                 .enumerate()
-                .any(|(i, saved)| config.read32(PCI_BAR0 + i as u16 * 4) != *saved)
+                .any(|(i, saved)| config.read32(regs::BASE_ADDRESS_0 + i as u16 * 4) != *saved)
         {
             for (index, value) in snapshot.bars.iter().enumerate() {
-                config.write32(PCI_BAR0 + index as u16 * 4, *value);
+                config.write32(regs::BASE_ADDRESS_0 + index as u16 * 4, *value);
             }
         }
         if snapshot
             .bars
             .iter()
             .enumerate()
-            .any(|(i, saved)| config.read32(PCI_BAR0 + i as u16 * 4) != *saved)
+            .any(|(i, saved)| config.read32(regs::BASE_ADDRESS_0 + i as u16 * 4) != *saved)
         {
             return Err(AttachError::InvalidBar.into());
         }
@@ -234,11 +237,11 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
                 }
             }
         }
-        let enabled = disabled | COMMAND_MEMORY | COMMAND_MASTER;
-        config.write16(PCI_COMMAND, enabled);
-        let observed = config.read16(PCI_COMMAND);
+        let enabled = disabled | regs::COMMAND_MEMORY | regs::COMMAND_MASTER;
+        config.write16(regs::COMMAND, enabled);
+        let observed = config.read16(regs::COMMAND);
         if observed == u16::MAX || observed != enabled {
-            config.write16(PCI_COMMAND, disabled);
+            config.write16(regs::COMMAND, disabled);
             return Err(AttachError::ConfigurationRejected.into());
         }
         r.suspended = None;

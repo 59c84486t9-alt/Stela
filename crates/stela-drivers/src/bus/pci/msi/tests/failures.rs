@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! PCI MSI failures fixtures.
 use super::*;
+use crate::bus::pci::regs;
 
 #[test]
 fn programming_faults_revoke_authorization() {
-    for (offset, width) in [(COMMAND, 2), (0x52, 2), (0x54, 4), (0x58, 2)] {
+    for (offset, width) in [(regs::COMMAND, 2), (0x52, 2), (0x54, 4), (0x58, 2)] {
         let (mut helper, model) = attach(fixture(false, false));
         model.lock().unwrap().fail_read = Some((offset, width));
         assert_eq!(
@@ -27,7 +28,7 @@ fn programming_faults_revoke_authorization() {
             unsafe { helper.release() }.unwrap(),
         );
     }
-    for (offset, width) in [(COMMAND, 2), (0x54, 4), (0x58, 2)] {
+    for (offset, width) in [(regs::COMMAND, 2), (0x54, 4), (0x58, 2)] {
         let (mut helper, model) = attach(fixture(false, false));
         model.lock().unwrap().block_write = Some((offset, width));
         assert_eq!(
@@ -68,7 +69,7 @@ fn enable_and_mask_faults_keep_owners() {
         Err(MsiError::Readback { offset: 0x52 })
     );
     model.lock().unwrap().block_write = None;
-    model.lock().unwrap().fail_read = Some((COMMAND, 2));
+    model.lock().unwrap().fail_read = Some((regs::COMMAND, 2));
     assert!(
         // SAFETY: The isolated model has no async users or DMA; the injected read fault
         // makes release fail while keeping both owners.

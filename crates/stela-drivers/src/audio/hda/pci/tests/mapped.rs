@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! mapped behavior tests.
 use super::*;
+use crate::bus::pci::regs;
 
 #[test]
 fn modern_profile_requires_mapped_preflight() {
@@ -59,8 +60,8 @@ fn pci_preflight_precedes_mmio() {
             2 => function.config().words[2] = 0x0401_0000,
             3 => function.config().words[2] = 0x0403_8000,
             4 => function.config().set16(0x54, 3),
-            5 => function.config().set16(PCI_COMMAND, 0),
-            6 => function.config().set16(PCI_COMMAND, u16::MAX),
+            5 => function.config().set16(regs::COMMAND, 0),
+            6 => function.config().set16(regs::COMMAND, u16::MAX),
             7 => function.config().words[18] = u32::MAX,
             8 => {
                 function.config().words[13] = 0x48;
@@ -235,7 +236,7 @@ fn failed_interrupt_reads_rejected() {
                     .all(|(off, _, _, _)| *off != offset + 2)
             );
             if after_preflight {
-                assert_eq!(config.get16(PCI_COMMAND) & COMMAND_MASTER, 0);
+                assert_eq!(config.get16(regs::COMMAND) & regs::COMMAND_MASTER, 0);
                 assert!(config.writes.iter().any(|(off, _, _, _)| *off == TCSEL));
             } else {
                 assert!(config.writes.is_empty());

@@ -5,6 +5,7 @@
 //! Endpoint PCI PM, with stable main power supplied by the producer.
 //! PMCSR sequences follow Linux pci.c at cc9de5d4b5ab6459f5774946aa3195ad51236fa8.
 //! This owns real configuration effects, not platform rails or a wake route.
+use super::regs;
 use super::{CapabilityError, ConfigSpace, Function, Layout, msi::MsiConfigSpace};
 
 const STATE: u16 = 3;
@@ -12,8 +13,6 @@ const NO_SOFT_RESET: u16 = 8;
 const PME_ENABLE: u16 = 0x100;
 const PME_STATUS: u16 = 0x8000;
 const DATA_SELECT: u16 = 0x1e00;
-const BUS_MASTER: u16 = 4;
-const INTX_DISABLE: u16 = 0x400;
 const D3_DELAY: u64 = 10_000;
 const READY_TIMEOUT: u64 = 60_000_000;
 
@@ -292,7 +291,7 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
                 return Err(error);
             }
         };
-        if command & BUS_MASTER != 0 {
+        if command & regs::COMMAND_MASTER != 0 {
             return Err(Error::BusMaster);
         }
         let bars = core::array::from_fn(|i| c.read32(bar_offset(i)));
@@ -304,7 +303,7 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
             return Err(Error::Bars);
         }
         self.bars = bars;
-        self.command = command | INTX_DISABLE;
+        self.command = command | regs::COMMAND_INTX_DISABLE;
         self.state = State::Unknown;
         c.write16(4, self.command & !3);
         if word(c, 4)? != self.command & !3 {
@@ -363,11 +362,11 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
             return Err(Error::Readback(self.capability + 4));
         }
         let command = word(c, 4)?;
-        if command & BUS_MASTER != 0 {
+        if command & regs::COMMAND_MASTER != 0 {
             return Err(Error::BusMaster);
         }
-        c.write16(4, (command & !3) | INTX_DISABLE);
-        if word(c, 4)? != (command & !3) | INTX_DISABLE {
+        c.write16(4, (command & !3) | regs::COMMAND_INTX_DISABLE);
+        if word(c, 4)? != (command & !3) | regs::COMMAND_INTX_DISABLE {
             return Err(Error::Readback(4));
         }
         if csr & NO_SOFT_RESET == 0 {

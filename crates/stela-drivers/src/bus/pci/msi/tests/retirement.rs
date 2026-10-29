@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! PCI MSI retirement fixtures.
 use super::*;
+use crate::bus::pci::regs;
 
 #[test]
 fn terminal_stop_releases_original_owners() {
@@ -28,21 +29,24 @@ fn terminal_stop_releases_original_owners() {
             {
                 let m = model.lock().unwrap();
                 assert_eq!(m.get(0x52, 2) & u32::from(ENABLE), 0);
-                assert_ne!(m.get(COMMAND, 2) & u32::from(INTX_DISABLE), 0);
-                assert_eq!(m.get(STATUS, 2), 0xa510);
+                assert_ne!(
+                    m.get(regs::COMMAND, 2) & u32::from(regs::COMMAND_INTX_DISABLE),
+                    0
+                );
+                assert_eq!(m.get(regs::STATUS, 2), 0xa510);
             }
             // SAFETY: synchronous config model, no device/IRQ users;
             // this is the single terminal stop, with no BM/MSI re-enable.
             let original = unsafe {
                 terminal.with_device_stop(|config| {
-                    let command = config.read16(COMMAND);
-                    config.write16(COMMAND, command & !4);
+                    let command = config.read16(regs::COMMAND);
+                    config.write16(regs::COMMAND, command & !4);
                     command
                 })
             }
             .unwrap();
             assert_ne!(original & 4, 0);
-            assert_eq!(model.lock().unwrap().get(COMMAND, 2) & 4, 0);
+            assert_eq!(model.lock().unwrap().get(regs::COMMAND, 2) & 4, 0);
             // The original config transport can now be inaccessible.
             model.lock().unwrap().transport_dead = true;
             let before = model.lock().unwrap().events.len();
@@ -131,15 +135,15 @@ fn stop_unwind_prevents_replay_and_release() {
         // deliberate post-effect unwind; no configuration escape/re-enable.
         unsafe {
             terminal.with_device_stop::<()>(|config| {
-                config.write16(COMMAND, INTX_DISABLE);
+                config.write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE);
                 panic!("modeled caller unwind after actual stop effect");
             })
         }
     }));
     assert!(result.is_err());
     assert_eq!(
-        model.lock().unwrap().get(COMMAND, 2),
-        u32::from(INTX_DISABLE)
+        model.lock().unwrap().get(regs::COMMAND, 2),
+        u32::from(regs::COMMAND_INTX_DISABLE)
     );
     let before = model.lock().unwrap().events.len();
     assert_eq!(
@@ -167,8 +171,8 @@ fn owned_mapping_retirement_and_abandonment() {
         };
         let (mut config, counters) = owned_fixture(address);
         config.write32(0, 0x1234_8086);
-        config.write16(COMMAND, 0x107);
-        config.write16(STATUS, CAP_LIST);
+        config.write16(regs::COMMAND, 0x107);
+        config.write16(regs::STATUS, regs::STATUS_CAP_LIST);
         config.write8(0x34, 0x50);
         config.write16(0x50, u16::from(MSI));
         config.write16(0x52, WIDE | MASK_CAPABLE);
@@ -186,9 +190,9 @@ fn owned_mapping_retirement_and_abandonment() {
         // SAFETY: single synchronous stop of this isolated owner.
         let stopped = unsafe {
             terminal.with_device_stop(|config| {
-                let command = config.read16(COMMAND);
-                config.write16(COMMAND, command & !4);
-                config.read16(COMMAND) & 4 == 0
+                let command = config.read16(regs::COMMAND);
+                config.write16(regs::COMMAND, command & !4);
+                config.read16(regs::COMMAND) & 4 == 0
             })
         }
         .unwrap();
@@ -229,7 +233,7 @@ fn failed_stop_keeps_owners() {
     // caller-visible, and supplies no quiescence or release authorization.
     let original: Result<(), u32> = unsafe {
         terminal.with_device_stop(|config| {
-            config.write16(COMMAND, INTX_DISABLE);
+            config.write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE);
             Err(0x4377_00ff)
         })
     }

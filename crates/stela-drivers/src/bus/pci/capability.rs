@@ -8,11 +8,8 @@
 //! (`PCI_CAP_*_SIZEOF`, `PCI_EXT_CAP_*_SIZEOF`). A pointer with its reserved
 //! low two bits set ends the walk.
 use super::ConfigSpace;
+use super::regs;
 
-const STATUS: u16 = 0x06;
-const STATUS_CAPABILITIES: u16 = 1 << 4;
-const HEADER_TYPE: u16 = 0x0e;
-const POINTER: u16 = 0x34;
 const STANDARD_START: u16 = 0x40;
 const STANDARD_END: u16 = 0x100;
 const EXTENDED_START: u16 = 0x100;
@@ -269,10 +266,12 @@ impl<R: CapabilityRead> Capabilities<R> {
     }
 
     fn first(&mut self) -> Result<Option<u16>, R::Error> {
-        if self.read16(STATUS)? & STATUS_CAPABILITIES == 0 {
+        if self.read16(regs::STATUS)? & regs::STATUS_CAP_LIST == 0 {
             return Ok(None);
         }
-        Ok(Some(self.read.read(POINTER, 1)? as u16 & 0xff))
+        Ok(Some(
+            self.read.read(regs::CAPABILITY_LIST, 1)? as u16 & 0xff,
+        ))
     }
 
     fn entry(&mut self, offset: u16) -> Result<(Capability, u16), R::Error> {
@@ -381,7 +380,7 @@ impl<R: CapabilityRead> Capabilities<R> {
         if let Some(kind) = self.header_type {
             return Ok(kind);
         }
-        let kind = self.read.read(HEADER_TYPE, 1)? as u8 & 0x7f;
+        let kind = self.read.read(regs::HEADER_TYPE, 1)? as u8 & 0x7f;
         self.header_type = Some(kind);
         Ok(kind)
     }

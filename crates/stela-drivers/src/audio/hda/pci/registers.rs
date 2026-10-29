@@ -5,9 +5,10 @@
 //! Copyright (c) 2004 Takashi Iwai <tiwai@suse.de>
 //!                     PeiSen Hou <pshou@realtek.com.tw>
 use super::{
-    AttachError, CGCTL, CGCTL_MISCBDCGE, CLASS, Config, Identity, MmioRegisters, PCI_BAR0,
-    PCI_CLASS, PCI_ID, Prepared, Registers, ResetPolicy, bar_matches,
+    AttachError, CGCTL, CGCTL_MISCBDCGE, CLASS, Config, Identity, MmioRegisters, Prepared,
+    Registers, ResetPolicy, bar_matches,
 };
+use crate::bus::pci::regs;
 use crate::{
     audio::Error,
     bus::pci::{Address, ConfigSpace, Function},
@@ -35,11 +36,11 @@ pub(super) fn associated<C: ConfigSpace>(
         return false;
     }
     let config = function.config();
-    let id = config.read32(PCI_ID);
-    let class = config.read32(PCI_CLASS);
+    let id = config.read32(regs::VENDOR_ID);
+    let class = config.read32(regs::CLASS_REVISION);
     id == u32::from(identity.vendor) | (u32::from(identity.device) << 16)
         && [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8] == CLASS
-        && bar_matches(config, base, config.read32(PCI_BAR0) & 4 != 0)
+        && bar_matches(config, base, config.read32(regs::BASE_ADDRESS_0) & 4 != 0)
 }
 
 impl Prepared {
@@ -129,7 +130,7 @@ impl<R: Registers, C: ConfigSpace> Registers for PciRegisters<'_, R, C> {
         {
             return Err(Error::InvalidConfiguration);
         }
-        let subsystem = self.function.config().read32(super::PCI_SUBSYSTEM);
+        let subsystem = self.function.config().read32(regs::SUBSYSTEM_VENDOR_ID);
         if subsystem == u32::MAX {
             return Err(Error::InvalidConfiguration);
         }

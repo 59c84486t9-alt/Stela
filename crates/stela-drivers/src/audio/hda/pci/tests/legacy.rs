@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! legacy behavior tests.
 use super::*;
+use crate::bus::pci::regs;
 
 #[test]
 fn legacy_profile_admission() {
@@ -40,8 +41,8 @@ fn d3hot_restores_bars_after_delay() {
     assert_eq!(config.words[5], 0x1234_0000);
     assert_eq!(config.words[17], 0x5ac3_a5f0);
     assert_eq!(config.get16(0x54), PM_PME_STATUS);
-    assert_eq!(config.get16(PCI_STATUS), 0xf910);
-    assert_eq!(config.get16(PCI_COMMAND) & 0x406, 0x406);
+    assert_eq!(config.get16(regs::STATUS), 0xf910);
+    assert_eq!(config.get16(regs::COMMAND) & 0x406, 0x406);
     assert_eq!(config.get16(0x62) & 1, 0);
     assert_eq!(config.get16(0x72) & 0x8000, 0);
     assert_eq!(
@@ -224,13 +225,18 @@ fn final_enable_failure_attempts_cleanup() {
     );
     let config = function.config();
     assert!(
-        config.writes.iter().any(
-            |(off, _, value, _)| *off == PCI_COMMAND && *value & u32::from(COMMAND_MASTER) != 0
-        )
+        config
+            .writes
+            .iter()
+            .any(|(off, _, value, _)| *off == regs::COMMAND
+                && *value & u32::from(regs::COMMAND_MASTER) != 0)
     );
     let (offset, width, value, _) = config.writes.last().unwrap();
-    assert_eq!((*offset, *width), (PCI_COMMAND, 2));
-    assert_eq!(*value & u32::from(COMMAND_MASTER | COMMAND_MEMORY), 0);
+    assert_eq!((*offset, *width), (regs::COMMAND, 2));
+    assert_eq!(
+        *value & u32::from(regs::COMMAND_MASTER | regs::COMMAND_MEMORY),
+        0
+    );
 }
 
 #[test]
@@ -257,7 +263,7 @@ fn rejected_decode_stops_preparation() {
             .config()
             .writes
             .iter()
-            .all(|(offset, width, _, _)| *offset == PCI_COMMAND && *width == 2)
+            .all(|(offset, width, _, _)| *offset == regs::COMMAND && *width == 2)
     );
     assert_eq!(timer.now_us(), 0);
 }
@@ -270,7 +276,9 @@ fn rejected_controls_disable_mastering() {
             0 => function.config().reject_power = true,
             1 => function.config().reject_vendor_control = true,
             _ => {
-                function.config().set16(PCI_COMMAND, COMMAND_INTX_DISABLE);
+                function
+                    .config()
+                    .set16(regs::COMMAND, regs::COMMAND_INTX_DISABLE);
                 function.config().reject_command = true;
             }
         }
@@ -284,7 +292,7 @@ fn rejected_controls_disable_mastering() {
             }
         );
         assert_eq!(
-            function.config().get16(PCI_COMMAND) & (COMMAND_MASTER | COMMAND_MEMORY),
+            function.config().get16(regs::COMMAND) & (regs::COMMAND_MASTER | regs::COMMAND_MEMORY),
             0
         );
     }

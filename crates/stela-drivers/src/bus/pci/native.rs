@@ -10,6 +10,7 @@ use crate::bus::dma::{
     mapping::{DmaDomain, DmaError},
     memory::PageSource,
 };
+use crate::bus::pci::regs;
 use alloc::{boxed::Box, rc::Rc, sync::Arc};
 use core::{any::Any, cell::RefCell, mem::ManuallyDrop};
 
@@ -324,8 +325,8 @@ impl NativeFunction {
             if old == u16::MAX {
                 return self.latch(Err(Error::Unavailable));
             }
-            let gates = super::COMMAND_IO | super::COMMAND_MEMORY | super::COMMAND_BUS_MASTER;
-            if (old ^ next) & !gates != 0 || next & super::COMMAND_INTX_DISABLE == 0 {
+            let gates = regs::COMMAND_IO | regs::COMMAND_MEMORY | regs::COMMAND_MASTER;
+            if (old ^ next) & !gates != 0 || next & regs::COMMAND_INTX_DISABLE == 0 {
                 return Err(self.deny(offset, width, value));
             }
             // Refused operations changed no configuration. Keep readiness

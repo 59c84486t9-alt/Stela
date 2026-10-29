@@ -1,4 +1,5 @@
 use super::*;
+use crate::bus::pci::regs;
 
 #[test]
 fn borrowed_owned_transport_keeps_original_mapping_and_refuses_owner_recovery() {
@@ -128,8 +129,8 @@ fn native_ecam_narrow_stores_preserve_adjacent_status_and_vendor_bytes() {
     assert_eq!(config.read32(0x44), 0xa5c3_5a78);
     config.write8(0x47, 0x12);
     assert_eq!(config.read32(0x44), 0x12c3_5a78);
-    config.write16(COMMAND, 0x0406);
-    assert_eq!(config.read32(COMMAND), 0xa5c3_0406);
+    config.write16(regs::COMMAND, 0x0406);
+    assert_eq!(config.read32(regs::COMMAND), 0xa5c3_0406);
 }
 
 /// A configuration space whose BAR registers keep only their writable
@@ -189,7 +190,7 @@ fn fake() -> Fake {
 #[test]
 fn bars_decode_and_size_every_kind() {
     let mut config = fake();
-    // BAR0: 16 KiB 32-bit memory; BAR1: 256-byte I/O; BAR2+3: 64-bit
+    // regs::BASE_ADDRESS_0: 16 KiB 32-bit memory; BAR1: 256-byte I/O; BAR2+3: 64-bit
     // prefetchable 1 MiB above 4 GiB; BAR4 unimplemented; BAR5 4 KiB.
     config.words[4] = 0xfebf_0000;
     config.bar_masks[0] = 0xffff_c000;
@@ -237,7 +238,7 @@ fn bars_decode_and_size_every_kind() {
     // Sizing restores every BAR and the command register.
     assert_eq!(function.config().words[4], 0xfebf_0000);
     assert_eq!(function.config().words[7], 0x80);
-    assert_eq!(function.config().read16(COMMAND), 0x0007);
+    assert_eq!(function.config().read16(regs::COMMAND), 0x0007);
     assert_eq!(function.class, [1, 8, 2]);
 }
 
@@ -269,7 +270,7 @@ fn interrupts_are_discovered_and_left_off() {
     function.enable_polled();
     assert_eq!(function.config().words[16] >> 31, 0);
     assert_eq!(function.config().words[20] >> 16 & 1, 0);
-    let command = function.config().read16(COMMAND);
+    let command = function.config().read16(regs::COMMAND);
     assert_eq!(command & 0x406, 0x406);
 }
 
@@ -344,7 +345,7 @@ fn an_unmapped_msix_table_falls_back_to_msi() {
 
 #[test]
 fn memory_enable_does_not_choose_an_interrupt_policy() {
-    for intx in [0, COMMAND_INTX_DISABLE] {
+    for intx in [0, regs::COMMAND_INTX_DISABLE] {
         let mut config = fake();
         config.words[1] = (config.words[1] & !0xffff) | u32::from(intx);
         config.words[16] |= 1 << 31;
@@ -353,8 +354,8 @@ fn memory_enable_does_not_choose_an_interrupt_policy() {
         function.enable_memory_and_bus_master();
         let config = function.config();
         assert_eq!(
-            config.read16(COMMAND),
-            intx | COMMAND_MEMORY | COMMAND_BUS_MASTER
+            config.read16(regs::COMMAND),
+            intx | regs::COMMAND_MEMORY | regs::COMMAND_MASTER
         );
         assert_eq!(config.words[16] >> 31, 1);
         assert_eq!(config.words[20] >> 16 & 1, 1);
@@ -372,7 +373,7 @@ fn a_looping_capability_list_stops_at_the_loop() {
 #[test]
 fn bar_sizes_come_from_the_lowest_writable_address_bit() {
     let mut config = fake();
-    // BAR0+1: 64-bit 1 MiB whose upper dword is read-only zero; BAR2:
+    // regs::BASE_ADDRESS_0+1: 64-bit 1 MiB whose upper dword is read-only zero; BAR2:
     // 32-bit range ending at 4 GiB; BAR5: 64-bit type with no upper register.
     config.words[4] = 0xfe00_0004;
     config.bar_masks[0] = 0xfff0_0000;
@@ -456,7 +457,7 @@ fn power_up_leaves_d3hot_and_restores_soft_reset_bars() {
             .unwrap();
         assert_eq!(delays, [D3HOT_DELAY_US]);
         assert_eq!(function.config().read16(0x64), 0);
-        assert_eq!(function.config().read32(BAR0), 0xfebf_0000);
+        assert_eq!(function.config().read32(regs::BASE_ADDRESS_0), 0xfebf_0000);
     }
 }
 

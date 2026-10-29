@@ -2,6 +2,7 @@
 //! PCI MSI configuration model and shared fixtures.
 extern crate std;
 use super::*;
+use crate::bus::pci::regs;
 use alloc::vec::Vec;
 use std::sync::Mutex;
 
@@ -62,7 +63,7 @@ impl Config {
     }
     fn write(&mut self, offset: u16, width: u8, value: u32) {
         assert!(
-            !(offset == COMMAND && width == 4),
+            !(offset == regs::COMMAND && width == 4),
             "dword Command RMW would replay adjacent Status W1C"
         );
         let mut m = self.model.lock().unwrap();
@@ -134,8 +135,8 @@ fn fixture(wide: bool, mask: bool) -> Fixture {
         transport_dead: false,
     };
     model.put(0, 4, 0x1234_8086);
-    model.put(COMMAND, 2, 0x107); // BM, IO, memory and unrelated SERR bit.
-    model.put(STATUS, 2, 0xa510); // includes live W1C bits and CapList.
+    model.put(regs::COMMAND, 2, 0x107); // BM, IO, memory and unrelated SERR bit.
+    model.put(regs::STATUS, 2, 0xa510); // includes live W1C bits and CapList.
     model.put(0x34, 1, 0x50);
     model.put(0x50, 2, u32::from(MSI));
     model.put(

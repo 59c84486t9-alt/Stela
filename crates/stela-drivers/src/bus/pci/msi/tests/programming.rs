@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! PCI MSI programming fixtures.
 use super::*;
+use crate::bus::pci::regs;
 
 #[test]
 fn programming_order_and_register_widths() {
@@ -31,14 +32,14 @@ fn programming_order_and_register_widths() {
                         }
                     })
                     .collect();
-                assert_eq!(writes[0], (COMMAND, 2, 0x507));
+                assert_eq!(writes[0], (regs::COMMAND, 2, 0x507));
                 let disabled = writes
                     .iter()
                     .position(|(o, w, v)| *o == 0x52 && *w == 2 && v & u32::from(ENABLE) == 0)
                     .unwrap();
                 let address = writes.iter().position(|(o, _, _)| *o == 0x54).unwrap();
                 assert!(disabled < address);
-                assert_eq!(m.get(STATUS, 2), 0xa510);
+                assert_eq!(m.get(regs::STATUS, 2), 0xa510);
                 assert_eq!(m.get(0x52, 2) & u32::from(ENABLE | MME), 0);
                 assert_eq!(m.get(0x52, 2) & u32::from(MMC), 5 << 1);
                 assert_eq!(m.get(0x54, 4), message.address as u32);

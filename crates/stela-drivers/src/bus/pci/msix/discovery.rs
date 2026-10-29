@@ -2,6 +2,7 @@
 //! MSI-X capability discovery: where the table and pending-bit array sit.
 use super::*;
 use crate::bus::pci::ConfigSpace;
+use crate::bus::pci::regs;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Layout {
@@ -101,7 +102,7 @@ pub(super) fn discover<C: MsiConfigSpace, B: BarAccess>(
     if !matches!(header_type, 0 | 1) {
         return Err(MsiError::Unsupported.into());
     }
-    if word(config, COMMAND)? & 2 == 0 {
+    if word(config, regs::COMMAND)? & 2 == 0 {
         return Err(Error::MemoryDisabled);
     }
     // The walk reads Status; without a capability list nothing is found.

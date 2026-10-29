@@ -3,9 +3,9 @@
 // 1994 Drew Eckhardt and 1997-1999 Martin Mares; see bus/THIRD_PARTY.md.
 //! Immutable firmware topology, exclusive child config and ordered Command I/O.
 use super::{capabilities::Capabilities, *};
+use crate::bus::pci::regs;
 
-const IO: u16 = 1;
-const DECODE: u16 = IO | MEMORY;
+const DECODE: u16 = regs::COMMAND_IO | regs::COMMAND_MEMORY;
 
 #[derive(Clone)]
 struct Function {
@@ -100,7 +100,7 @@ fn word<R: Registers>(config: &mut ChildConfig<'_, R>, offset: u16) -> Result<u1
         .ok_or(Error::ReadFailed)
 }
 fn parent_command<R: Registers>(host: &mut Host<R>) -> Result<u16, Error> {
-    let value = host.io().parent_read(COMMAND, 2)? as u16;
+    let value = host.io().parent_read(regs::COMMAND, 2)? as u16;
     (value != u16::MAX)
         .then_some(value)
         .ok_or(Error::ReadFailed)
@@ -144,8 +144,8 @@ fn child_command<R: Registers>(
     // lifecycle's real-domain grant. Ordinary ChildConfig still rejects BM.
     let result = (|| {
         host.io()
-            .child_write(base + usize::from(COMMAND), 2, u32::from(value))?;
-        if host.io().child_read(base + usize::from(COMMAND), 2)? != u32::from(value) {
+            .child_write(base + usize::from(regs::COMMAND), 2, u32::from(value))?;
+        if host.io().child_read(base + usize::from(regs::COMMAND), 2)? != u32::from(value) {
             return Err(Error::Readback);
         }
         Ok(())
@@ -161,7 +161,9 @@ fn capture<R: Registers>(host: &mut Host<R>, child: Child) -> Result<Function, E
         if !matches!(child.header, 0 | 1) || (bridge && child.class != [6, 4, 0]) {
             return Err(Error::UnsupportedDevice);
         }
-        if word(config, COMMAND)? & (BUS_MASTER | INTX_DISABLE) != INTX_DISABLE {
+        if word(config, regs::COMMAND)? & (regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE)
+            != regs::COMMAND_INTX_DISABLE
+        {
             return Err(Error::ActiveChild);
         }
         let capabilities = Capabilities::inspect(config, bridge)?;
@@ -202,7 +204,7 @@ impl Hierarchy {
         parent_d0(host)?;
         if host.domain != bar.domain
             || host.programmed_vectors.is_some()
-            || parent_command(host)? & BUS_MASTER != 0
+            || parent_command(host)? & regs::COMMAND_MASTER != 0
         {
             return Err(Error::ActiveChild);
         }
@@ -338,7 +340,8 @@ impl Hierarchy {
             return Err(Error::InvalidResource);
         }
         let parent = parent_command(host)?;
-        if parent & BUS_MASTER != if enabled { BUS_MASTER } else { 0 } || parent & INTX_DISABLE == 0
+        if parent & regs::COMMAND_MASTER != if enabled { regs::COMMAND_MASTER } else { 0 }
+            || parent & regs::COMMAND_INTX_DISABLE == 0
         {
             return Err(Error::ActiveChild);
         }
@@ -351,10 +354,10 @@ impl Hierarchy {
                 return Err(Error::InvalidResource);
             }
             config(host, saved.child.address, |config| {
-                let command = word(config, COMMAND)?;
+                let command = word(config, regs::COMMAND)?;
                 let dma = enabled && (index == self.selected || self.path.contains(&index));
-                if command & (BUS_MASTER | INTX_DISABLE)
-                    != (INTX_DISABLE | if dma { BUS_MASTER } else { 0 })
+                if command & (regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE)
+                    != (regs::COMMAND_INTX_DISABLE | if dma { regs::COMMAND_MASTER } else { 0 })
                 {
                     return Err(Error::ActiveChild);
                 }
@@ -414,51 +417,67 @@ impl Hierarchy {
             self.recheck(host, false)?;
         }
         for (index, function) in self.children.iter().enumerate() {
-            let command = config(host, function.child.address, |config| word(config, COMMAND))?;
-            let decode = if order.contains(&index) { MEMORY } else { 0 };
+            let command = config(host, function.child.address, |config| {
+                word(config, regs::COMMAND)
+            })?;
+            let decode = if order.contains(&index) {
+                regs::COMMAND_MEMORY
+            } else {
+                0
+            };
             child_command(
                 host,
                 function.child.address,
-                (command | INTX_DISABLE) & !(DECODE | BUS_MASTER) | decode,
+                (command | regs::COMMAND_INTX_DISABLE) & !(DECODE | regs::COMMAND_MASTER) | decode,
             )?;
         }
         let command = parent_command(host)?;
-        host.parent_write_checked(COMMAND, (command | MEMORY | INTX_DISABLE) & !BUS_MASTER)?;
+        host.parent_write_checked(
+            regs::COMMAND,
+            (command | regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE) & !regs::COMMAND_MASTER,
+        )?;
         self.recheck(host, false)
     }
     pub(super) fn enable<R: Registers>(&mut self, host: &mut Host<R>) -> Result<(), Error> {
         self.recheck(host, false)?;
         let command = parent_command(host)?;
-        if command & MEMORY == 0 {
+        if command & regs::COMMAND_MEMORY == 0 {
             return Err(Error::ActiveChild);
         }
-        host.parent_write_checked(COMMAND, command | BUS_MASTER)?;
+        host.parent_write_checked(regs::COMMAND, command | regs::COMMAND_MASTER)?;
         let mut order = self.path.clone();
         order.push(self.selected);
         for index in order {
             let address = self.children[index].child.address;
-            let command = config(host, address, |config| word(config, COMMAND))?;
-            if command & MEMORY == 0 {
+            let command = config(host, address, |config| word(config, regs::COMMAND))?;
+            if command & regs::COMMAND_MEMORY == 0 {
                 return Err(Error::ActiveChild);
             }
-            child_command(host, address, command | BUS_MASTER)?;
+            child_command(host, address, command | regs::COMMAND_MASTER)?;
         }
         self.recheck(host, true)
     }
     pub(super) fn disable<R: Registers>(&mut self, host: &mut Host<R>) -> Result<(), Error> {
         // Do not require an enabled shape: attach can fail before first enable.
         // Identity/assignment checks still precede every containment.
-        let enabled = parent_command(host)? & BUS_MASTER != 0;
+        let enabled = parent_command(host)? & regs::COMMAND_MASTER != 0;
         self.recheck(host, enabled)?;
         let mut order = self.path.clone();
         order.push(self.selected);
         for &index in order.iter().rev() {
             let address = self.children[index].child.address;
-            let command = config(host, address, |config| word(config, COMMAND))?;
-            child_command(host, address, (command | INTX_DISABLE) & !BUS_MASTER)?;
+            let command = config(host, address, |config| word(config, regs::COMMAND))?;
+            child_command(
+                host,
+                address,
+                (command | regs::COMMAND_INTX_DISABLE) & !regs::COMMAND_MASTER,
+            )?;
         }
         let command = parent_command(host)?;
-        host.parent_write_checked(COMMAND, (command | INTX_DISABLE) & !BUS_MASTER)?;
+        host.parent_write_checked(
+            regs::COMMAND,
+            (command | regs::COMMAND_INTX_DISABLE) & !regs::COMMAND_MASTER,
+        )?;
         self.recheck(host, false)
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::bus::pci::regs;
 use alloc::vec::Vec;
 
 struct Space([u8; 4096]);
@@ -6,7 +7,7 @@ struct Space([u8; 4096]);
 impl Space {
     fn new() -> Self {
         let mut space = Self([0; 4096]);
-        space.put16(STATUS, STATUS_CAPABILITIES);
+        space.put16(regs::STATUS, regs::STATUS_CAP_LIST);
         space
     }
     fn put16(&mut self, offset: u16, value: u16) {
@@ -63,7 +64,7 @@ fn walks_sized_bodies_in_list_order() {
 #[test]
 fn status_without_capability_list_is_empty() {
     let mut space = Space::new();
-    space.put16(STATUS, 0);
+    space.put16(regs::STATUS, 0);
     space.0[0x34] = 0x40;
     space.standard(0x40, 0x01, 0);
     assert!(space.walk().is_empty());

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Stateful software models, authored UNRUN under the driver-stream build lease.
 use super::*;
+use crate::bus::pci::regs;
 use alloc::{collections::BTreeMap, sync::Arc};
 use core::sync::atomic::AtomicUsize;
 extern crate std;
@@ -318,7 +319,7 @@ fn scan_honors_multifunction_and_never_enables_child_dma() {
     assert_eq!(children[1].class, [1, 8, 2]);
     let mut config = host.config(0, 0, 7).unwrap();
     assert_eq!(config.acpi_address(), Some(0x8007_ffff));
-    assert_eq!(config.write(COMMAND, 2, 4), Err(Error::ActiveChild));
+    assert_eq!(config.write(regs::COMMAND, 2, 4), Err(Error::ActiveChild));
     assert_eq!(config.read(4095, 2), Err(Error::Address));
 }
 
@@ -340,7 +341,7 @@ fn a_child_bar_is_sized_with_decode_off_and_restored() {
     let mut config = host.config(0, 0, 0).unwrap();
     assert_eq!(config.read(0x10, 4), Ok(0x8000_4004));
     assert_eq!(config.read(0x14, 4), Ok(0));
-    assert_eq!(config.read(COMMAND, 2), Ok(0x0402));
+    assert_eq!(config.read(regs::COMMAND, 2), Ok(0x0402));
     let writes = &host.registers.as_ref().unwrap().writes;
     let sizing = writes
         .iter()
@@ -522,9 +523,9 @@ fn child_providers_gate_parent_owner_return_and_uncertain_stop_retention() {
         // Production exposes no bus-master-enabling API before that permission
         // exists. This assignment supplies no hardware validation.
         host.io().set(
-            usize::from(COMMAND),
+            usize::from(regs::COMMAND),
             2,
-            u32::from(MEMORY | BUS_MASTER | INTX_DISABLE),
+            u32::from(regs::COMMAND_MEMORY | regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE),
         );
         // SAFETY: the model device, its pages and its domain belong to this test alone; no other
         // driver, worker or DMA touches them.

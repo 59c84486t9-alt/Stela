@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 use super::*;
 use crate::bus::pci::Address;
+use crate::bus::pci::regs;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
 
@@ -43,7 +44,10 @@ impl ConfigSpace for Model {
     fn read32(&self, offset: u16) -> u32 {
         let value = self.words[usize::from(offset / 4)];
         if self.failed_interrupt_read == Some(offset)
-            && self.writes.iter().any(|(off, _, _, _)| *off == PCI_COMMAND)
+            && self
+                .writes
+                .iter()
+                .any(|(off, _, _, _)| *off == regs::COMMAND)
         {
             return u32::MAX;
         }
@@ -56,10 +60,10 @@ impl ConfigSpace for Model {
         {
             return u32::MAX;
         }
-        if offset == PCI_COMMAND
+        if offset == regs::COMMAND
             && self.fail_after_enable
             && self.writes.iter().any(|(off, _, value, _)| {
-                *off == PCI_COMMAND && *value & u32::from(COMMAND_MASTER) != 0
+                *off == regs::COMMAND && *value & u32::from(regs::COMMAND_MASTER) != 0
             })
         {
             return u32::MAX;
@@ -80,10 +84,10 @@ impl ConfigSpace for Model {
             return;
         }
         // Other dword writes attachment needs are saved BAR restores.
-        assert!((PCI_BAR0..PCI_BAR0 + 24).contains(&offset));
+        assert!((regs::BASE_ADDRESS_0..regs::BASE_ADDRESS_0 + 24).contains(&offset));
         assert!(self.now.get() >= self.ready_at);
         assert_eq!(
-            self.get16(PCI_COMMAND) & (COMMAND_MEMORY | COMMAND_MASTER),
+            self.get16(regs::COMMAND) & (regs::COMMAND_MEMORY | regs::COMMAND_MASTER),
             0
         );
         self.writes.push((offset, 4, value, self.now.get()));
@@ -95,7 +99,7 @@ impl ConfigSpace for Model {
             TCSEL | ATI_SNOOP_CONTROL | NVIDIA_TRANSREG | NVIDIA_ISTRM_COH | NVIDIA_OSTRM_COH
         ));
         assert_eq!(
-            self.get16(PCI_COMMAND) & (COMMAND_MEMORY | COMMAND_MASTER),
+            self.get16(regs::COMMAND) & (regs::COMMAND_MEMORY | regs::COMMAND_MASTER),
             0
         );
         self.writes
@@ -110,24 +114,24 @@ impl ConfigSpace for Model {
     fn write16(&mut self, offset: u16, value: u16) {
         assert!(matches!(
             offset,
-            PCI_COMMAND | 0x54 | 0x62 | 0x72 | 0xb2 | SCH_HDA_DEVC
+            regs::COMMAND | 0x54 | 0x62 | 0x72 | 0xb2 | SCH_HDA_DEVC
         ));
         self.writes
             .push((offset, 2, u32::from(value), self.now.get()));
         if offset == SCH_HDA_DEVC {
             assert_eq!(
-                self.get16(PCI_COMMAND) & (COMMAND_MEMORY | COMMAND_MASTER),
+                self.get16(regs::COMMAND) & (regs::COMMAND_MEMORY | regs::COMMAND_MASTER),
                 0
             );
             if self.reject_snoop {
                 return;
             }
         }
-        if offset == PCI_COMMAND {
+        if offset == regs::COMMAND {
             if self.reject_command {
                 return;
             }
-            if value & COMMAND_MASTER != 0 {
+            if value & regs::COMMAND_MASTER != 0 {
                 assert!(self.now.get() >= self.ready_at);
             }
         }

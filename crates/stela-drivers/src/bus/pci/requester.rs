@@ -8,17 +8,13 @@
 //! Stopped PCI endpoints. A claim grants neither alias isolation nor
 //! a remapping-unit takeover. Engine/IRQ/work drainage and physical
 //! function identity are unsafe producer obligations, not config-bit inferences.
+use super::regs;
 use super::{
     Address, CapabilityError, ConfigSpace, Function,
     owned::{ConfigRetention, OwnedConfig},
 };
 use crate::bus::mmio::owned::{Error as MappingError, Mapping};
 
-const COMMAND: u16 = 4;
-const STATUS: u16 = 6;
-const BUS_MASTER: u16 = 4;
-const INTX_DISABLE: u16 = 1 << 10;
-const CAP_LIST: u16 = 1 << 4;
 const PM: u16 = 1;
 const MSI: u16 = 5;
 const PCIX: u16 = 7;
@@ -199,7 +195,7 @@ impl From<CapabilityError> for ClaimError {
 }
 
 fn standard<C: ConfigSpace>(config: &C, status: u16) -> Result<(), ClaimError> {
-    if status & CAP_LIST == 0 {
+    if status & regs::STATUS_CAP_LIST == 0 {
         return Ok(());
     }
     let mut singleton = 0u32;
@@ -327,10 +323,12 @@ fn validate_stopped<C: ConfigSpace>(function: &mut Function<C>) -> Result<(), Cl
     if header & 0x7f != 0 {
         return Err(ClaimError::UnsupportedHeader(header & 0x7f));
     }
-    if inactive(config, COMMAND, BUS_MASTER)? & INTX_DISABLE == 0 {
-        return Err(ClaimError::Active { offset: COMMAND });
+    if inactive(config, regs::COMMAND, regs::COMMAND_MASTER)? & regs::COMMAND_INTX_DISABLE == 0 {
+        return Err(ClaimError::Active {
+            offset: regs::COMMAND,
+        });
     }
-    standard(config, read16(config, STATUS)?)?;
+    standard(config, read16(config, regs::STATUS)?)?;
     extended(config)?;
     // A second identity read catches observed removal/reset during traversal.
     // The kept epoch grant, not this observation, excludes concurrent change.

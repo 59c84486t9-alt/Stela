@@ -2,6 +2,7 @@
 // Copyright (c) 2015, Intel Corporation.
 //! Configuration access to devices on a VMD child bus.
 use super::*;
+use crate::bus::pci::regs;
 
 /// Exclusive child configuration borrow. This supplies no
 /// `pci::Address`: a 32-bit VMD domain cannot be truncated to an ACPI segment.
@@ -39,8 +40,8 @@ impl<R: Registers> ChildConfig<'_, R> {
         let absolute = self.offset(offset, width)?;
         // Until the shared requester permission accepts synthetic domains, no
         // safe configuration API may enable child DMA. Also catch a byte write
-        // of COMMAND and DWORD writes covering COMMAND/Status.
-        if offset == COMMAND && value & u32::from(BUS_MASTER) != 0 {
+        // of regs::COMMAND and DWORD writes covering regs::COMMAND/Status.
+        if offset == regs::COMMAND && value & u32::from(regs::COMMAND_MASTER) != 0 {
             return Err(Error::ActiveChild);
         }
         let result = self.host.io().child_write(absolute, width, value);
@@ -66,8 +67,12 @@ impl<R: Registers> Host<R> {
     /// all ones, then the BAR and command register restored.
     pub fn memory_bar_bytes(&mut self, child: Address) -> Result<u64, Error> {
         let mut config = self.config(child.bus, child.device, child.function)?;
-        let command = config.read(COMMAND, 2)?;
-        config.write(COMMAND, 2, command & !u32::from(MEMORY | 1))?;
+        let command = config.read(regs::COMMAND, 2)?;
+        config.write(
+            regs::COMMAND,
+            2,
+            command & !u32::from(regs::COMMAND_MEMORY | 1),
+        )?;
         let size = |config: &mut ChildConfig<'_, R>, offset: u16| -> Result<(u32, u32), Error> {
             let value = config.read(offset, 4)?;
             config.write(offset, 4, u32::MAX)?;
@@ -88,7 +93,7 @@ impl<R: Registers> Host<R> {
             let writable = u64::from(high_mask) << 32 | u64::from(low_mask & !15);
             Ok(writable.isolate_lowest_one())
         })();
-        config.write(COMMAND, 2, command)?;
+        config.write(regs::COMMAND, 2, command)?;
         let bytes = sized?;
         if bytes == 0 {
             return Err(Error::InvalidResource);

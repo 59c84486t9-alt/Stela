@@ -17,8 +17,6 @@ mod capability;
 
 const CONFIG_LIMIT: u16 = 256;
 const CAP_LIMIT: usize = 48;
-#[cfg(test)]
-const STATUS_CAPABILITIES: u16 = 1 << 4;
 const SECURE_DEVICE: u8 = 0x0f;
 const IOMMU_TYPE: u32 = 3;
 const IOMMU_REVISION: u32 = 1;

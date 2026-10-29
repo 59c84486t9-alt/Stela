@@ -1,6 +1,7 @@
 //! amdgpu's PCI probe admission, run by the unchanged amdgpu_drv.c. This binds
 //! the result to a borrowed PCI function; it neither reserves resources
 //! nor initializes, enables or claims the device.
+use crate::bus::pci::regs;
 use crate::bus::pci::{Address, ConfigSpace, Function};
 use core::ffi::c_int;
 
@@ -175,11 +176,11 @@ pub unsafe fn identify<C: ConfigSpace>(
     if ids as u16 == u16::MAX {
         return Err(Error::Absent);
     }
-    if config.read8(0x0e) & 0x7f != 0 {
+    if config.read8(regs::HEADER_TYPE) & 0x7f != 0 {
         return Err(Error::UnsupportedHeader);
     }
-    let class_revision = config.read32(8);
-    let subsystem = config.read32(0x2c);
+    let class_revision = config.read32(regs::CLASS_REVISION);
+    let subsystem = config.read32(regs::SUBSYSTEM_VENDOR_ID);
     let observed = ConfigIdentity {
         vendor: u32::from(ids as u16),
         device: ids >> 16,

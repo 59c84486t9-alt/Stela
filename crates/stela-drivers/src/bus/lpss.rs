@@ -11,6 +11,7 @@ use super::{
     mmio::owned::{CacheAttribute, Mapping, Protection},
     pci::{ConfigSpace, Function, owned::OwnedConfig, requester::StoppedRequester},
 };
+use crate::bus::pci::regs;
 
 mod child;
 pub mod spi;
@@ -24,10 +25,6 @@ const REMAP_HIGH: usize = REMAP_LOW + 4;
 const CAPS: usize = PRIVATE + 0xfc;
 const CAPS_TYPE: u32 = 0xf << 4;
 const RESET_FUNCTION_AND_IDMA: u32 = 7;
-const PCI_COMMAND: u16 = 4;
-const PCI_BUS_MASTER: u16 = 1 << 2;
-const PCI_MEMORY: u16 = 1 << 1;
-const PCI_INTX_DISABLE: u16 = 1 << 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -224,10 +221,11 @@ impl NativeRegisters {
                 return Err(Error::Mapping);
             }
             // Keep the source's memory decode, with no DMA or interrupt publish.
-            let command = config.read16(PCI_COMMAND);
+            let command = config.read16(regs::COMMAND);
             if command == u16::MAX
-                || command & (PCI_BUS_MASTER | PCI_MEMORY | PCI_INTX_DISABLE)
-                    != PCI_MEMORY | PCI_INTX_DISABLE
+                || command
+                    & (regs::COMMAND_MASTER | regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE)
+                    != regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE
             {
                 return Err(Error::Configuration);
             }

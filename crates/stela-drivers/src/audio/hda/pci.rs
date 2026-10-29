@@ -18,6 +18,7 @@ use super::{
     Config, CorbReset, MmioRegisters, PositionPolicy, ProbePolicy, Registers, ResetPolicy,
     StreamTagPolicy,
 };
+use crate::bus::pci::regs;
 use crate::bus::{
     i2c::Timer,
     pci::{Address, Bar, ConfigSpace, Function, Layout},
@@ -51,17 +52,6 @@ const INTEL_LBG_IDS: &[u16] = &[0xa1f0, 0xa270];
 const ATI: u16 = 0x1002;
 const AMD: u16 = 0x1022;
 const NVIDIA: u16 = 0x10de;
-const PCI_ID: u16 = 0;
-const PCI_COMMAND: u16 = 4;
-const PCI_STATUS: u16 = 6;
-const PCI_CLASS: u16 = 8;
-const PCI_HEADER: u16 = 0x0e;
-const PCI_BAR0: u16 = 0x10;
-const PCI_SUBSYSTEM: u16 = 0x2c;
-const COMMAND_MEMORY: u16 = 1 << 1;
-const COMMAND_MASTER: u16 = 1 << 2;
-const COMMAND_INTX_DISABLE: u16 = 1 << 10;
-const STATUS_CAPABILITIES: u16 = 1 << 4;
 const CAP_PM: u8 = 1;
 const CAP_MSI: u8 = 5;
 const CAP_MSIX: u8 = 0x11;
@@ -350,7 +340,7 @@ fn check_subsystem<C: ConfigSpace>(
     if identity.vendor != AMD || !matches!(identity.device, 0x1457 | 0x1487 | 0x15e3) {
         return Ok(());
     }
-    let subsystem = config.read32(PCI_SUBSYSTEM);
+    let subsystem = config.read32(regs::SUBSYSTEM_VENDOR_ID);
     if subsystem == u32::MAX {
         return Err(AttachError::SubsystemUnavailable);
     }
@@ -449,7 +439,7 @@ fn capabilities<C: ConfigSpace>(
     reset_policy: ResetPolicy,
 ) -> Result<Capabilities, AttachError> {
     let mut found = Capabilities::default();
-    if config.read16(PCI_STATUS) & STATUS_CAPABILITIES == 0 {
+    if config.read16(regs::STATUS) & regs::STATUS_CAP_LIST == 0 {
         return if controls.contains(&PCH_SNOOP) {
             Err(AttachError::InvalidCapabilities)
         } else {
@@ -525,14 +515,14 @@ fn delay(timer: &impl Timer, us: u64) {
 }
 
 fn bar_matches<C: ConfigSpace>(config: &C, base: u64, wide: bool) -> bool {
-    let low = config.read32(PCI_BAR0);
+    let low = config.read32(regs::BASE_ADDRESS_0);
     let expected_type = if wide { 4 } else { 0 };
     if low & 15 != expected_type {
         return false;
     }
     let actual = u64::from(low & !15)
         | if wide {
-            u64::from(config.read32(PCI_BAR0 + 4)) << 32
+            u64::from(config.read32(regs::BASE_ADDRESS_0 + 4)) << 32
         } else {
             0
         };
@@ -593,14 +583,14 @@ pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
     }
     let selected = identify(function)?;
     let config = function.config();
-    let id = config.read32(PCI_ID);
-    let class = config.read32(PCI_CLASS);
+    let id = config.read32(regs::VENDOR_ID);
+    let class = config.read32(regs::CLASS_REVISION);
     let actual = identity(
         id as u16,
         (id >> 16) as u16,
         [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8],
     )?;
-    if actual != selected || config.read8(PCI_HEADER) & 0x7f != 0 {
+    if actual != selected || config.read8(regs::HEADER_TYPE) & 0x7f != 0 {
         return Err(AttachError::IdentityChanged);
     }
     check_subsystem(config, selected, BoardIdentity::Unknown)?;
@@ -609,8 +599,8 @@ pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
         return Err(AttachError::InvalidBar);
     }
     let caps = capabilities(config, selected.setup.controls(), selected.reset_policy)?;
-    let command = config.read16(PCI_COMMAND);
-    if command == u16::MAX || command & COMMAND_MEMORY == 0 {
+    let command = config.read16(regs::COMMAND);
+    if command == u16::MAX || command & regs::COMMAND_MEMORY == 0 {
         return Err(AttachError::PowerNotReady);
     }
     if let Some(pm) = caps.pm {
@@ -744,14 +734,14 @@ unsafe fn prepare_inner<C: ConfigSpace>(
     let selected = identify(function)?;
     let address = function.address;
     let config = function.config();
-    let id = config.read32(PCI_ID);
-    let class = config.read32(PCI_CLASS);
+    let id = config.read32(regs::VENDOR_ID);
+    let class = config.read32(regs::CLASS_REVISION);
     let actual = identity(
         id as u16,
         (id >> 16) as u16,
         [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8],
     )?;
-    if actual != selected || config.read8(PCI_HEADER) & 0x7f != 0 {
+    if actual != selected || config.read8(regs::HEADER_TYPE) & 0x7f != 0 {
         return Err(AttachError::IdentityChanged);
     }
     if selected.requires_mapped_preflight() && !mapped_preflight {
@@ -772,15 +762,16 @@ unsafe fn prepare_inner<C: ConfigSpace>(
     }
     // Save resources before a D3hot exit can reset them. Disable decode/mastering
     // before restoring any BAR; PCI status is never written by command updates.
-    let bars: [u32; 6] = core::array::from_fn(|i| config.read32(PCI_BAR0 + i as u16 * 4));
-    let command = config.read16(PCI_COMMAND);
+    let bars: [u32; 6] =
+        core::array::from_fn(|i| config.read32(regs::BASE_ADDRESS_0 + i as u16 * 4));
+    let command = config.read16(regs::COMMAND);
     if command == u16::MAX {
         return Err(AttachError::ConfigurationRejected);
     }
-    let command = command & !(COMMAND_MEMORY | COMMAND_MASTER);
-    config.write16(PCI_COMMAND, command | COMMAND_INTX_DISABLE);
+    let command = command & !(regs::COMMAND_MEMORY | regs::COMMAND_MASTER);
+    config.write16(regs::COMMAND, command | regs::COMMAND_INTX_DISABLE);
     let result = (|| {
-        if config.read16(PCI_COMMAND) & (COMMAND_MEMORY | COMMAND_MASTER) != 0 {
+        if config.read16(regs::COMMAND) & (regs::COMMAND_MEMORY | regs::COMMAND_MASTER) != 0 {
             return Err(AttachError::ConfigurationRejected);
         }
         if let Some((offset, _, value)) = pmcsr {
@@ -799,9 +790,9 @@ unsafe fn prepare_inner<C: ConfigSpace>(
                 return Err(AttachError::PowerTransition);
             }
             if state == 3 && value & PM_NO_SOFT_RESET == 0 {
-                config.write16(PCI_COMMAND, command | COMMAND_INTX_DISABLE);
+                config.write16(regs::COMMAND, command | regs::COMMAND_INTX_DISABLE);
                 for (index, value) in bars.iter().enumerate() {
-                    config.write32(PCI_BAR0 + index as u16 * 4, *value);
+                    config.write32(regs::BASE_ADDRESS_0 + index as u16 * 4, *value);
                 }
             }
         }
@@ -825,12 +816,13 @@ unsafe fn prepare_inner<C: ConfigSpace>(
                 }
             }
         }
-        let enabled = command | COMMAND_MEMORY | COMMAND_MASTER | COMMAND_INTX_DISABLE;
-        config.write16(PCI_COMMAND, enabled);
-        let readback = config.read16(PCI_COMMAND);
+        let enabled =
+            command | regs::COMMAND_MEMORY | regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE;
+        config.write16(regs::COMMAND, enabled);
+        let readback = config.read16(regs::COMMAND);
         if readback == u16::MAX
-            || readback & (COMMAND_MEMORY | COMMAND_MASTER | COMMAND_INTX_DISABLE)
-                != COMMAND_MEMORY | COMMAND_MASTER | COMMAND_INTX_DISABLE
+            || readback & (regs::COMMAND_MEMORY | regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE)
+                != regs::COMMAND_MEMORY | regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE
         {
             return Err(AttachError::ConfigurationRejected);
         }
@@ -842,7 +834,7 @@ unsafe fn prepare_inner<C: ConfigSpace>(
         })
     })();
     if result.is_err() {
-        config.write16(PCI_COMMAND, command | COMMAND_INTX_DISABLE);
+        config.write16(regs::COMMAND, command | regs::COMMAND_INTX_DISABLE);
     }
     result
 }

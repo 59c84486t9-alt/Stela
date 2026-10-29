@@ -118,6 +118,7 @@ fn capability_bytes(entry: &Capability, header: u32) -> Result<u16, Error> {
 mod tests {
     extern crate std;
     use super::*;
+    use crate::bus::pci::regs;
     use std::sync::Mutex;
     const CAP: u16 = 0x40;
     struct Config {
@@ -138,8 +139,8 @@ mod tests {
             words: [0; 64],
             reads: Mutex::new(Vec::new()),
         };
-        config.words[1] = u32::from(STATUS_CAPABILITIES) << 16;
-        config.words[0x34 / 4] = u32::from(CAP);
+        config.words[1] = u32::from(regs::STATUS_CAP_LIST) << 16;
+        config.words[usize::from(regs::CAPABILITY_LIST / 4)] = u32::from(CAP);
         config.words[usize::from(CAP / 4)] = header;
         config
     }

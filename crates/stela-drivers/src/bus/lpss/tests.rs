@@ -1,4 +1,5 @@
 use super::*;
+use crate::bus::pci::regs;
 use crate::bus::pci::{
     Address,
     owned::tests::{Counters, fixture},
@@ -207,7 +208,10 @@ pub(super) fn native_fixture_for(device: u16) -> NativeFixture {
     assert!(physical <= u64::from(u32::MAX));
     config.write32(0, u32::from(device) << 16 | 0x8086);
     config.write32(8, 0x1180_0000);
-    config.write16(PCI_COMMAND, PCI_MEMORY | PCI_INTX_DISABLE);
+    config.write16(
+        regs::COMMAND,
+        regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE,
+    );
     // A real owned RAM mapping stands in for the exclusive BAR.
     // Its CPU pointer and symbolic physical address are distinct.
     config.write32(0x10, physical as u32 | 4);
@@ -385,7 +389,9 @@ fn concrete_native_rejections_return_exact_unmodified_mapping_and_config_owners(
         match scenario {
             0 => function.config().write32(0x10, 0x1234_0004),
             1 => function.config().write32(0x10, 1),
-            2 => function.config().write16(PCI_COMMAND, PCI_INTX_DISABLE),
+            2 => function
+                .config()
+                .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE),
             3 => function.config().write32(0x14, u32::MAX),
             4 => {
                 // SAFETY: no register user/engine exists; the retired

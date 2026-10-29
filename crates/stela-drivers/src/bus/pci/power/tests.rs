@@ -1,5 +1,6 @@
 use super::*;
 use crate::bus::pci::Address;
+use crate::bus::pci::regs;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::RefCell;
 
@@ -250,12 +251,12 @@ fn repeated_real_d3_reset_restores_bars_and_stopped_decoding() {
     for _ in 0..3 {
         suspend(&mut power).unwrap();
         assert_eq!(power.state(), State::D3hot);
-        assert_eq!(d.borrow().word(4), INTX_DISABLE);
+        assert_eq!(d.borrow().word(4), regs::COMMAND_INTX_DISABLE);
         assert_eq!(d.borrow().word(CSR) & (STATE | PME_STATUS), 3 | PME_STATUS);
         power.resume().unwrap();
         assert_eq!(power.state(), State::D0);
         let mut d = d.borrow_mut();
-        assert_eq!(d.word(4), 3 | INTX_DISABLE);
+        assert_eq!(d.word(4), 3 | regs::COMMAND_INTX_DISABLE);
         assert_eq!(d.word(6), 0xa510, "adjacent status W1C untouched");
         assert_eq!(d.word(CSR) & (STATE | PME_ENABLE | PME_STATUS), PME_STATUS);
         for (i, value) in BARS.iter().copied().enumerate() {
@@ -446,7 +447,7 @@ fn every_failed_configuration_observation_refuses_or_reestablishes_readiness() {
             // the subsequent complete identity/capability/PMCSR/BAR checks.
             assert_eq!(power.state(), State::D0);
             let mut d = d.borrow_mut();
-            assert_eq!(d.word(4), 3 | INTX_DISABLE);
+            assert_eq!(d.word(4), 3 | regs::COMMAND_INTX_DISABLE);
             for (i, value) in BARS.iter().copied().enumerate() {
                 assert_eq!(d.read(bar_offset(i), 4), value);
             }
@@ -594,7 +595,7 @@ fn owned_native_config_is_the_same_original_mapping_through_d0_release() {
     let mut power = unsafe { Power::attach(function, timer, Platform(d), D3_DELAY) }
         .unwrap_or_else(|_| panic!("valid original native owner"));
     // SAFETY: keep the function, change only native Command.
-    unsafe { power.with_d0(|f| f.config().write16(4, INTX_DISABLE)) }.unwrap();
+    unsafe { power.with_d0(|f| f.config().write16(4, regs::COMMAND_INTX_DISABLE)) }.unwrap();
     assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
     let (function, _, _) = power.release().unwrap_or_else(|_| panic!("verified D0"));
     let mut mapping = function.into_config().into_mapping();

@@ -1,5 +1,6 @@
 extern crate std;
 use super::*;
+use crate::bus::pci::regs;
 use crate::bus::{
     mmio::owned::{
         AddressSpace, Authority, InstalledMapping, MapFailure, MapRequest, MappingPlatform,
@@ -149,7 +150,7 @@ fn make_function(caps: &[(u16, u64, u32)], msix: bool) -> Function<OwnedConfig> 
     let (mut config, _) = fixture(ADDRESS);
     config.write32(0, 0x1234_1022);
     config.write32(8, 0x0806_0001);
-    config.write16(6, STATUS_CAPABILITIES);
+    config.write16(regs::STATUS, regs::STATUS_CAP_LIST);
     config.write8(0x34, caps[0].0 as u8);
     for (index, &(offset, base, extra)) in caps.iter().enumerate() {
         let next = caps

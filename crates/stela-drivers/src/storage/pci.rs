@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Strict native PCI admission shared by polled storage controllers.
+use crate::bus::pci::regs;
 use crate::{
     block::BlockError,
     bus::pci::{ConfigSpace, Function, Layout, capability},
 };
 use alloc::vec::Vec;
 
-const PCI_COMMAND: u16 = 0x04;
-const PCI_MEMORY: u16 = 1 << 1;
-const PCI_BUS_MASTER: u16 = 1 << 2;
-const PCI_INTX_DISABLE: u16 = 1 << 10;
 const PCI_CAP_CONTROL: u16 = 2;
-const PCI_HEADER_TYPE: u16 = 0x0e;
 const PCI_PM: u8 = 0x01;
 const PCI_VPD: u8 = 0x03;
 const PCI_VENDOR: u8 = 0x09;
@@ -70,7 +66,7 @@ fn checked_capabilities<C: ConfigSpace>(
     target: Option<u8>,
 ) -> Result<([Option<u16>; 2], Option<u16>), BlockError> {
     let malformed = BlockError::Unsupported("storage malformed PCI capability chain");
-    if config.read8(PCI_HEADER_TYPE) & 0x7f != 0 {
+    if config.read8(regs::HEADER_TYPE) & 0x7f != 0 {
         return Err(malformed);
     }
     let mut controls = [None; 2];
@@ -180,14 +176,19 @@ pub(super) fn set_pio_command<C: ConfigSpace>(
     function: &mut Function<C>,
     grant_memory: bool,
 ) -> Result<(), BlockError> {
-    let command = (function.config().read16(PCI_COMMAND) & !(PCI_BUS_MASTER | PCI_MEMORY))
-        | PCI_INTX_DISABLE
-        | if grant_memory { PCI_MEMORY } else { 0 };
+    let command = (function.config().read16(regs::COMMAND)
+        & !(regs::COMMAND_MASTER | regs::COMMAND_MEMORY))
+        | regs::COMMAND_INTX_DISABLE
+        | if grant_memory {
+            regs::COMMAND_MEMORY
+        } else {
+            0
+        };
     // Clear DMA ownership before power-up/BAR probing; grant memory only after
     // every register mapping has been validated. Neither phase grants DMA.
-    function.config().write16(PCI_COMMAND, command);
-    let mask = PCI_BUS_MASTER | PCI_MEMORY | PCI_INTX_DISABLE;
-    if function.config().read16(PCI_COMMAND) & mask != command & mask {
+    function.config().write16(regs::COMMAND, command);
+    let mask = regs::COMMAND_MASTER | regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE;
+    if function.config().read16(regs::COMMAND) & mask != command & mask {
         return Err(BlockError::Unsupported(
             "storage PIO PCI command did not acknowledge",
         ));

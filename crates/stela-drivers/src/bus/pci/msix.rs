@@ -18,11 +18,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 mod discovery;
 mod mapped;
+use super::regs;
 use discovery::{Layout, discover};
 pub use mapped::MappedBar;
 
-const COMMAND: u16 = 4;
-const INTX_DISABLE: u16 = 1 << 10;
 const ENABLE: u16 = 1 << 15;
 const FUNCTION_MASK: u16 = 1 << 14;
 const ENTRY_BYTES: u64 = 16;
@@ -291,11 +290,20 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
         Ok(())
     }
     fn begin_mask(&mut self, control: u16) -> Result<(), Error> {
-        let command = self.owners.as_mut().unwrap().0.config().read16(COMMAND);
+        let command = self
+            .owners
+            .as_mut()
+            .unwrap()
+            .0
+            .config()
+            .read16(regs::COMMAND);
         if command == u16::MAX {
-            return Err(MsiError::FailedRead { offset: COMMAND }.into());
+            return Err(MsiError::FailedRead {
+                offset: regs::COMMAND,
+            }
+            .into());
         }
-        self.config_write(COMMAND, command | INTX_DISABLE)?;
+        self.config_write(regs::COMMAND, command | regs::COMMAND_INTX_DISABLE)?;
         // Linux enables MSI-X under Function Mask before accessing table RAM:
         // some devices do not decode that RAM until MSI-X Enable is set.
         self.config_write(self.layout.offset + 2, control | ENABLE | FUNCTION_MASK)

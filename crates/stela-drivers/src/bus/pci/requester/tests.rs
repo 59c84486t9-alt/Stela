@@ -1,6 +1,7 @@
 extern crate std;
 use super::super::owned::tests::{Counters, fixture};
 use super::*;
+use crate::bus::pci::regs;
 use alloc::sync::Arc;
 use core::{cell::Cell, sync::atomic::Ordering};
 
@@ -27,7 +28,7 @@ impl ConfigSpace for Config {
 fn configure<C: ConfigSpace>(config: &mut C) {
     config.write32(0, 0x2c02_10de);
     config.write32(8, 0x0300_0000);
-    config.write16(COMMAND, INTX_DISABLE);
+    config.write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE);
 }
 fn endpoint() -> Function<Config> {
     let mut config = Config {
@@ -38,7 +39,9 @@ fn endpoint() -> Function<Config> {
     Function::new(ADDRESS, config).unwrap()
 }
 fn cap(function: &mut Function<Config>, offset: u16, id: u16, next: u16) {
-    function.config().write16(STATUS, CAP_LIST);
+    function
+        .config()
+        .write16(regs::STATUS, regs::STATUS_CAP_LIST);
     function.config().write8(0x34, offset as u8);
     function.config().write16(offset, id | next << 8);
     if id == PM {
@@ -157,19 +160,29 @@ fn binding_recheck_refusal_returns_the_unchanged_original_function() {
             Err((error, _)) => panic!("fixture claim: {error:?}"),
         };
     // Private test access models a changed hardware observation.
-    claim
-        .function
-        .config()
-        .write16(COMMAND, INTX_DISABLE | BUS_MASTER);
+    claim.function.config().write16(
+        regs::COMMAND,
+        regs::COMMAND_INTX_DISABLE | regs::COMMAND_MASTER,
+    );
     let (error, claim) = match claim.into_dma_binding() {
         Err(error) => error,
         Ok(_) => panic!("active requester accepted"),
     };
-    assert_eq!(error, ClaimError::Active { offset: COMMAND });
+    assert_eq!(
+        error,
+        ClaimError::Active {
+            offset: regs::COMMAND
+        }
+    );
     let mut function = claim.into_function();
     assert_eq!(function.address, ADDRESS);
-    assert_eq!(function.config().read16(COMMAND), INTX_DISABLE | BUS_MASTER);
-    function.config().write16(COMMAND, INTX_DISABLE);
+    assert_eq!(
+        function.config().read16(regs::COMMAND),
+        regs::COMMAND_INTX_DISABLE | regs::COMMAND_MASTER
+    );
+    function
+        .config()
+        .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE);
     release(function, &counters);
 }
 
@@ -291,7 +304,9 @@ fn msi_layouts_pcie_versions_and_no_snoop_require_complete_extents() {
 fn linked_zero_cycles_overlaps_unknowns_and_unmasked_pointers_are_refused() {
     for pointer in [0x3f, 0x41, 0xff] {
         let mut function = endpoint();
-        function.config().write16(STATUS, CAP_LIST);
+        function
+            .config()
+            .write16(regs::STATUS, regs::STATUS_CAP_LIST);
         function.config().write8(0x34, pointer);
         assert!(matches!(
             validate_stopped(&mut function),

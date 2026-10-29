@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! amd behavior tests.
 use super::*;
+use crate::bus::pci::regs;
 
 #[test]
 fn profile_selects_fifo_and_dma_policy() {
@@ -49,7 +50,8 @@ fn excluded_subsystems_rejected() {
     ] {
         let (mut function, timer, bar) = fixture(0);
         set_identity(&mut function, AMD, device);
-        function.config().words[usize::from(PCI_SUBSYSTEM / 4)] = subvendor | (subdevice << 16);
+        function.config().words[usize::from(regs::SUBSYSTEM_VENDOR_ID / 4)] =
+            subvendor | (subdevice << 16);
         assert_eq!(
             prepare_model(&mut function, &timer, bar).unwrap_err(),
             error
@@ -64,7 +66,8 @@ fn excluded_subsystems_rejected() {
     ] {
         let (mut function, timer, bar) = fixture(0);
         set_identity(&mut function, AMD, device);
-        function.config().words[usize::from(PCI_SUBSYSTEM / 4)] = subvendor | (subdevice << 16);
+        function.config().words[usize::from(regs::SUBSYSTEM_VENDOR_ID / 4)] =
+            subvendor | (subdevice << 16);
         prepare_model(&mut function, &timer, bar).unwrap();
     }
 }
@@ -105,7 +108,7 @@ fn board_exclusion_uses_dmi_identity() {
     ] {
         let (mut function, timer, bar) = fixture(0);
         set_identity(&mut function, AMD, 0x15e3);
-        function.config().words[usize::from(PCI_SUBSYSTEM / 4)] = 0xee59_1462;
+        function.config().words[usize::from(regs::SUBSYSTEM_VENDOR_ID / 4)] = 0xee59_1462;
         // SAFETY: modeled target firmware strings, no real platform state.
         let result = unsafe {
             prepare_with_board(
@@ -166,7 +169,8 @@ fn rejected_snoop_keeps_mastering_disabled() {
         } else {
             assert_eq!(result, AttachError::ConfigurationRejected);
             assert_eq!(
-                function.config().get16(PCI_COMMAND) & (COMMAND_MEMORY | COMMAND_MASTER),
+                function.config().get16(regs::COMMAND)
+                    & (regs::COMMAND_MEMORY | regs::COMMAND_MASTER),
                 0
             );
         }
@@ -187,7 +191,7 @@ fn failed_controls_rejected_before_updates() {
         if vendor_fault {
             function.config().words[17] |= 0xff;
         } else {
-            function.config().set16(PCI_COMMAND, u16::MAX);
+            function.config().set16(regs::COMMAND, u16::MAX);
         }
         assert_eq!(
             prepare_model(&mut function, &timer, bar).unwrap_err(),

@@ -5,14 +5,11 @@
 // Copyright (C) 2005-2018 Broadcom
 //! Unmanaged core reset: no DMA rings or packet-ready state is implied.
 use super::*;
+use crate::bus::pci::regs;
 use crate::bus::pci::{Capabilities, capability::Transport};
 
-const PCI_COMMAND: u16 = 4;
 const PCI_STATUS_CAP_LIST: u32 = 1 << 20;
 const PCI_EXPRESS: u8 = 0x10;
-const PCI_MASTER: u16 = 4;
-const PCI_MWI: u16 = 0x10;
-const PCI_MEMORY: u16 = 2;
 const GRC_MISC_CFG: u32 = 0x6804;
 const GRC_MODE: u32 = 0x6800;
 const GRC_FASTBOOT_PC: u32 = 0x6894;
@@ -48,7 +45,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.core_reset_complete && self.failure.is_none()
     }
     pub(super) fn pcie_capability(&mut self) -> Result<u16, Error> {
-        let command_status = Self::checked(self.regs().config_read32(PCI_COMMAND)?)?;
+        let command_status = Self::checked(self.regs().config_read32(regs::COMMAND)?)?;
         if command_status & PCI_STATUS_CAP_LIST == 0 {
             return Err(Error::UnsupportedPcie);
         }
@@ -130,8 +127,8 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         let result = (|| {
             self.unmanaged()?;
             let pcie = self.pcie_capability()?;
-            let command = Self::checked(self.regs().config_read32(PCI_COMMAND)?)? as u16;
-            if command & PCI_MEMORY == 0 {
+            let command = Self::checked(self.regs().config_read32(regs::COMMAND)?)? as u16;
+            if command & regs::COMMAND_MEMORY == 0 {
                 return Err(Error::ConfigDidNotLatch);
             }
             if !self.stopped {
@@ -140,9 +137,9 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             // No new requester DMA can start while reset/bootcode state is
             // being rebuilt. The source saves/restores command using WORD
             // writes, never acknowledging PCI status with a dword RMW.
-            let command = command & !(PCI_MASTER | PCI_MWI);
-            self.regs().config_write16(PCI_COMMAND, command)?;
-            if self.regs().config_read32(PCI_COMMAND)? as u16 != command {
+            let command = command & !(regs::COMMAND_MASTER | regs::COMMAND_INVALIDATE);
+            self.regs().config_write16(regs::COMMAND, command)?;
+            if self.regs().config_read32(regs::COMMAND)? as u16 != command {
                 return Err(Error::ConfigDidNotLatch);
             }
             self.sram(FIRMWARE_MBOX, Some(FIRMWARE_MAGIC))?;
@@ -176,7 +173,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             // restored. The source requires both 120-us waits/config flush.
             self.write(GRC_MISC_CFG, CORE_RESET | RESET_PCIE_CLOCK)?;
             self.wait(120)?;
-            Self::checked(self.regs().config_read32(PCI_COMMAND)?)?;
+            Self::checked(self.regs().config_read32(regs::COMMAND)?)?;
             self.wait(120)?;
             let control = Self::checked(self.regs().config_read32(pcie + 8)?)? as u16;
             self.regs().config_write16(pcie + 8, control & !0x0810)?;
@@ -193,8 +190,8 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             {
                 return Err(Error::ConfigDidNotLatch);
             }
-            self.regs().config_write16(PCI_COMMAND, command)?;
-            if self.regs().config_read32(PCI_COMMAND)? as u16 != command {
+            self.regs().config_write16(regs::COMMAND, command)?;
+            if self.regs().config_read32(regs::COMMAND)? as u16 != command {
                 return Err(Error::ConfigDidNotLatch);
             }
             let arbiter = self.read(MEMARB_MODE)?;

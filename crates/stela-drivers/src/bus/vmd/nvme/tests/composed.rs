@@ -3,6 +3,7 @@
 //! All effects run synchronously in one thread. No MappingPlatform callback is
 //! treated as a register-access hook, and no raw device memory races CPU memory.
 use super::*;
+use crate::bus::pci::regs;
 use crate::{block::BlockDevice, storage::nvme::owned::protocol};
 use protocol::{Fault, Protocol};
 
@@ -15,17 +16,17 @@ impl protocol::Access for Configuration {
         let state = self.0.lock().unwrap();
         // Observe stored posted-write effects, not Lifecycle::phase or
         // the requested Command value. All three PM capabilities exist here.
-        state.parent(COMMAND, 2) & u32::from(MEMORY) != 0
+        state.parent(regs::COMMAND, 2) & u32::from(regs::COMMAND_MEMORY) != 0
             && PATH.into_iter().all(|base| {
-                state.child(base + COMMAND_OFFSET, 2) & u32::from(MEMORY) != 0
+                state.child(base + COMMAND_OFFSET, 2) & u32::from(regs::COMMAND_MEMORY) != 0
                     && state.child(base + 0x84, 2) & 3 == 0
             })
     }
     fn dma_enabled(&self) -> bool {
         let state = self.0.lock().unwrap();
-        state.parent(COMMAND, 2) & u32::from(BUS_MASTER) != 0
+        state.parent(regs::COMMAND, 2) & u32::from(regs::COMMAND_MASTER) != 0
             && PATH.into_iter().all(|base| {
-                state.child(base + COMMAND_OFFSET, 2) & u32::from(BUS_MASTER) != 0
+                state.child(base + COMMAND_OFFSET, 2) & u32::from(regs::COMMAND_MASTER) != 0
                     && state.child(base + 0x84, 2) & 3 == 0
             })
     }
@@ -281,7 +282,7 @@ fn composed_bridge_nvme_identify_prp_read_write_flush_and_original_hierarchy_ret
             .iter()
             .enumerate()
             .filter_map(|(i, event)| match event {
-                Event::Parent(value) if value & BUS_MASTER == 0 => Some(i),
+                Event::Parent(value) if value & regs::COMMAND_MASTER == 0 => Some(i),
                 _ => None,
             })
             .find(|i| *i > stop)
@@ -291,7 +292,9 @@ fn composed_bridge_nvme_identify_prp_read_write_flush_and_original_hierarchy_ret
         let registers = last(Event::Nvme("retire_regs"));
         let release = events
             .iter()
-            .rposition(|event| matches!(event, Event::Parent(value) if value & MEMORY == 0))
+            .rposition(
+                |event| matches!(event, Event::Parent(value) if value & regs::COMMAND_MEMORY == 0),
+            )
             .unwrap();
         assert!(
             stop < parent_bm_clear
@@ -365,7 +368,7 @@ fn composed_failed_d0_and_posted_bme_readback_never_issue_queue_dma() {
             // The posted BME write really happened; only its equality readback
             // was corrupted. No CC.EN or queue doorbell may follow that failure.
             assert_ne!(
-                f.state.lock().unwrap().child(BRIDGE + 4, 2) & u32::from(BUS_MASTER),
+                f.state.lock().unwrap().child(BRIDGE + 4, 2) & u32::from(regs::COMMAND_MASTER),
                 0
             );
         }

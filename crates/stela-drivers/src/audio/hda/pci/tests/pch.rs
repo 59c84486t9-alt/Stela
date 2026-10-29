@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! pch behavior tests.
 use super::*;
+use crate::bus::pci::regs;
 
 #[test]
 fn hsw_bdw_snoop_preserves_status() {
@@ -154,7 +155,7 @@ fn malformed_snoop_capabilities_rejected() {
             }
             _ => {
                 // Absent capabilities cannot establish Device Control.
-                function.config().words[1] &= !(u32::from(STATUS_CAPABILITIES) << 16);
+                function.config().words[1] &= !(u32::from(regs::STATUS_CAP_LIST) << 16);
             }
         }
         assert_eq!(
@@ -180,7 +181,7 @@ fn snoop_failure_attempts_cleanup() {
         );
         let config = function.config();
         assert_eq!(
-            config.get16(PCI_COMMAND) & (COMMAND_MASTER | COMMAND_MEMORY),
+            config.get16(regs::COMMAND) & (regs::COMMAND_MASTER | regs::COMMAND_MEMORY),
             0
         );
         if variant == 0 {
@@ -199,17 +200,17 @@ fn snoop_failure_attempts_cleanup() {
             assert!(
                 config.writes[failed_access + 1..]
                     .iter()
-                    .any(|(offset, width, value, _)| *offset == PCI_COMMAND
+                    .any(|(offset, width, value, _)| *offset == regs::COMMAND
                         && *width == 2
-                        && *value & u32::from(COMMAND_MASTER | COMMAND_MEMORY) == 0)
+                        && *value & u32::from(regs::COMMAND_MASTER | regs::COMMAND_MEMORY) == 0)
             );
         }
         assert!(
             !config
                 .writes
                 .iter()
-                .any(|(offset, _, value, _)| *offset == PCI_COMMAND
-                    && *value & u32::from(COMMAND_MASTER) != 0)
+                .any(|(offset, _, value, _)| *offset == regs::COMMAND
+                    && *value & u32::from(regs::COMMAND_MASTER) != 0)
         );
         assert_eq!(config.words[30] >> 16, 0xf91f);
     }

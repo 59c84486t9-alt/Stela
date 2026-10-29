@@ -7,6 +7,7 @@
 //! requester aliases and native child-driver attachment require the platform's
 //! independently owned VMD DMA domain; this module never invents an identity
 //! domain or enables a child bus master on the strength of a numeric BDF.
+use crate::bus::pci::regs;
 use crate::bus::pci::{Capabilities, Capability, CapabilityError, capability::Transport};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -23,10 +24,6 @@ pub use source::{ChildSource, ParentSource, RetiredHandle};
 const VMCAP: u16 = 0x40;
 const VMCONFIG: u16 = 0x44;
 const VMLOCK: u16 = 0x70;
-const COMMAND: u16 = 4;
-const MEMORY: u16 = 2;
-const BUS_MASTER: u16 = 4;
-const INTX_DISABLE: u16 = 1 << 10;
 const MSI_BYPASS: u16 = 2;
 const VENDOR_CAPABILITY: u8 = 9;
 const SHADOW_SIGNATURE_BYTES: u16 = 8;
@@ -249,8 +246,8 @@ impl<R: Registers> Host<R> {
             if cfgbytes < BUS_BYTES || !cfgbytes.is_multiple_of(BUS_BYTES) {
                 return Err(Error::InvalidResource);
             }
-            let command = registers.parent_read(COMMAND, 2)? as u16;
-            if command == u16::MAX || command & BUS_MASTER != 0 {
+            let command = registers.parent_read(regs::COMMAND, 2)? as u16;
+            if command == u16::MAX || command & regs::COMMAND_MASTER != 0 {
                 return Err(Error::ActiveChild);
             }
             let domain = NEXT_DOMAIN
@@ -285,7 +282,10 @@ impl<R: Registers> Host<R> {
             remap_layout: None,
         };
         let result = (|| {
-            host.parent_write_checked(COMMAND, command | MEMORY | INTX_DISABLE)?;
+            host.parent_write_checked(
+                regs::COMMAND,
+                command | regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE,
+            )?;
             host.discover()?;
             // Remapping remains enabled until a parent MSI-X/domain
             // owner is attached. No child IRQ may be unmasked by this host.
@@ -505,11 +505,15 @@ impl<R: Registers> Host<R> {
         let result = (|| {
             self.disable_parent_vectors()?;
             self.set_remapping(true)?;
-            let command = self.io().parent_read(COMMAND, 2)? as u16;
+            let command = self.io().parent_read(regs::COMMAND, 2)? as u16;
             if command == u16::MAX {
                 return Err(Error::ReadFailed);
             }
-            self.parent_write_checked(COMMAND, (command | INTX_DISABLE) & !(MEMORY | BUS_MASTER))
+            self.parent_write_checked(
+                regs::COMMAND,
+                (command | regs::COMMAND_INTX_DISABLE)
+                    & !(regs::COMMAND_MEMORY | regs::COMMAND_MASTER),
+            )
         })();
         if result.is_err() {
             self.poisoned = true;
@@ -547,11 +551,14 @@ impl<R: Registers> Host<R> {
                     return Err(Error::InvalidResource);
                 }
             }
-            let command = self.io().parent_read(COMMAND, 2)? as u16;
-            if command == u16::MAX || command & BUS_MASTER != 0 {
+            let command = self.io().parent_read(regs::COMMAND, 2)? as u16;
+            if command == u16::MAX || command & regs::COMMAND_MASTER != 0 {
                 return Err(Error::ActiveChild);
             }
-            self.parent_write_checked(COMMAND, command | MEMORY | INTX_DISABLE)?;
+            self.parent_write_checked(
+                regs::COMMAND,
+                command | regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE,
+            )?;
             self.first_bus = 0;
             self.discover()?;
             if self.windows != old_windows || (self.first_bus, self.last_bus) != old_buses {
@@ -594,11 +601,15 @@ impl<R: Registers> Host<R> {
         let result = (|| {
             self.disable_parent_vectors()?;
             self.set_remapping(true)?;
-            let command = self.io().parent_read(COMMAND, 2)? as u16;
+            let command = self.io().parent_read(regs::COMMAND, 2)? as u16;
             if command == u16::MAX {
                 return Err(Error::ReadFailed);
             }
-            self.parent_write_checked(COMMAND, (command | INTX_DISABLE) & !(MEMORY | BUS_MASTER))
+            self.parent_write_checked(
+                regs::COMMAND,
+                (command | regs::COMMAND_INTX_DISABLE)
+                    & !(regs::COMMAND_MEMORY | regs::COMMAND_MASTER),
+            )
         })();
         if let Err(e) = result {
             self.poisoned = true;

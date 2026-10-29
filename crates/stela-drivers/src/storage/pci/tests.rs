@@ -1,5 +1,6 @@
 use super::*;
 use crate::Clock;
+use crate::bus::pci::regs;
 use alloc::{rc::Rc, vec, vec::Vec};
 use core::cell::RefCell;
 #[test]
@@ -30,7 +31,7 @@ fn owned_pio_activation_never_grants_dma_or_writes_adjacent_pci_status() {
         fn write16(&mut self, at: u16, value: u16) {
             assert!(matches!(at, 0x04 | 0x52 | 0x62 | 0x92 | 0xa2));
             if at == 0x04 {
-                assert_eq!(value & PCI_BUS_MASTER, 0, "transient DMA grant");
+                assert_eq!(value & regs::COMMAND_MASTER, 0, "transient DMA grant");
             }
             self.writes.borrow_mut().push((at, 2, u32::from(value)));
             let at = usize::from(at);

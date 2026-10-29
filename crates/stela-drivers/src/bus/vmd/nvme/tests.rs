@@ -21,13 +21,14 @@ use core::{
 };
 use owned::Lifecycle as _;
 extern crate std;
+use crate::bus::pci::regs;
 use std::sync::Mutex;
 
 const ROOT: usize = 1 << 15;
 const BRIDGE: usize = 1 << 20;
 const NVME: usize = 2 << 20;
 const NVME_BASE: u64 = 0x8000_4000;
-const COMMAND_OFFSET: usize = COMMAND as usize;
+const COMMAND_OFFSET: usize = regs::COMMAND as usize;
 
 // The same finite counter scale as the shared independent NVMe peer. This is
 // an admitted software-test budget, not a measured physical CPU calibration.
@@ -87,12 +88,12 @@ impl State {
         }
     }
     fn any_master(&self) -> bool {
-        self.parent(COMMAND, 2) & u32::from(BUS_MASTER) != 0
+        self.parent(regs::COMMAND, 2) & u32::from(regs::COMMAND_MASTER) != 0
             || self
                 .child
                 .keys()
                 .filter(|offset| **offset & 0xfff == COMMAND_OFFSET)
-                .any(|offset| self.child(*offset, 2) & u32::from(BUS_MASTER) != 0)
+                .any(|offset| self.child(*offset, 2) & u32::from(regs::COMMAND_MASTER) != 0)
     }
     fn add_function(&mut self, base: usize, class: u32, header: u8, kind: u8) {
         for offset in 0..4096 {
@@ -101,7 +102,11 @@ impl State {
         self.set(base, 4, 0x1234_8086);
         self.set(base + 8, 4, class);
         self.set(base + 0xe, 1, u32::from(header));
-        self.set(base + COMMAND_OFFSET, 2, u32::from(INTX_DISABLE));
+        self.set(
+            base + COMMAND_OFFSET,
+            2,
+            u32::from(regs::COMMAND_INTX_DISABLE),
+        );
         self.set(base + 6, 2, 0x10);
         self.set(base + 0x34, 1, 0x40);
         self.set(base + 0x40, 2, 0x10);
@@ -142,7 +147,7 @@ impl Model {
             state.parent.insert(offset, 0);
         }
         state.set_parent(0, 4, 0x28c0_8086);
-        state.set_parent(COMMAND, 2, u32::from(INTX_DISABLE));
+        state.set_parent(regs::COMMAND, 2, u32::from(regs::COMMAND_INTX_DISABLE));
         for (index, (base, prefetch)) in [
             (0x4000_0000u64, false),
             (0x8000_0000, false),
@@ -179,8 +184,8 @@ unsafe impl Registers for Model {
     fn parent_read(&mut self, offset: u16, width: u8) -> Result<u32, Error> {
         let state = self.state.lock().unwrap();
         let value = state.parent(offset, width);
-        Ok(if state.release_failure && offset == COMMAND {
-            value | u32::from(MEMORY)
+        Ok(if state.release_failure && offset == regs::COMMAND {
+            value | u32::from(regs::COMMAND_MEMORY)
         } else {
             value
         })
@@ -189,8 +194,8 @@ unsafe impl Registers for Model {
         let mut state = self.state.lock().unwrap();
         let old = state.parent(offset, width);
         state.set_parent(offset, width, value);
-        if offset == COMMAND {
-            if (old | value) & u32::from(BUS_MASTER) != 0 {
+        if offset == regs::COMMAND {
+            if (old | value) & u32::from(regs::COMMAND_MASTER) != 0 {
                 state.drained = false;
             }
             state.events.push(Event::Parent(value as u16));
@@ -218,7 +223,8 @@ unsafe impl Registers for Model {
             if [ROOT, BRIDGE, NVME]
                 .into_iter()
                 .any(|base| posted == base + COMMAND_OFFSET)
-                && (state.child(posted, posted_width) | value) & u32::from(BUS_MASTER) != 0
+                && (state.child(posted, posted_width) | value) & u32::from(regs::COMMAND_MASTER)
+                    != 0
             {
                 state.drained = false;
             }
@@ -241,7 +247,7 @@ unsafe impl Registers for Model {
         }
         let value = state.child(offset, width);
         Ok(if state.ack_failure == Some(offset) {
-            value & !u32::from(BUS_MASTER)
+            value & !u32::from(regs::COMMAND_MASTER)
         } else {
             value
         })
@@ -475,8 +481,10 @@ fn posted_commands_complete_before_payload_unmap() {
         .events
         .iter()
         .filter_map(|event| match event {
-            Event::Parent(command) if command & BUS_MASTER != 0 => Some(usize::MAX),
-            Event::Posted(offset, 2, value) if value & u32::from(BUS_MASTER) != 0 => Some(*offset),
+            Event::Parent(command) if command & regs::COMMAND_MASTER != 0 => Some(usize::MAX),
+            Event::Posted(offset, 2, value) if value & u32::from(regs::COMMAND_MASTER) != 0 => {
+                Some(*offset)
+            }
             _ => None,
         })
         .collect();
@@ -499,7 +507,9 @@ fn posted_commands_complete_before_payload_unmap() {
     let release = state
         .events
         .iter()
-        .rposition(|event| matches!(event, Event::Parent(command) if command & MEMORY == 0))
+        .rposition(
+            |event| matches!(event, Event::Parent(command) if command & regs::COMMAND_MEMORY == 0),
+        )
         .unwrap();
     assert!(drain < unmap && unmap < release);
 }
@@ -580,7 +590,7 @@ fn failed_posted_bus_master_ack_keeps_original_hierarchy_and_domain() {
     assert_eq!(life.phase, Phase::Quarantined);
     // The posted write occurred despite the failed equality readback.
     assert_ne!(
-        state.lock().unwrap().child(BRIDGE + 4, 2) & u32::from(BUS_MASTER),
+        state.lock().unwrap().child(BRIDGE + 4, 2) & u32::from(regs::COMMAND_MASTER),
         0
     );
     assert_eq!(
@@ -787,7 +797,11 @@ fn malformed_capabilities_active_translation_and_bar_profiles_are_refused() {
                     state.set(NVME + 0x106, 2, 0x8000);
                 }
                 3 => state.set(NVME + 0x100, 4, 0x0001_0010), // Unqualified SR-IOV.
-                _ => state.set(NVME + 4, 2, u32::from(INTX_DISABLE | BUS_MASTER)),
+                _ => state.set(
+                    NVME + 4,
+                    2,
+                    u32::from(regs::COMMAND_INTX_DISABLE | regs::COMMAND_MASTER),
+                ),
             }
         }
         let (mut host, bar) = fixture(model);

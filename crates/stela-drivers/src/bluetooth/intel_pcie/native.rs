@@ -4,6 +4,7 @@
 //! The real source stops before IRQ retirement. A hard-IRQ callback only masks
 //! this source and requests serialized service; it never invents completion.
 use super::{Identity, Platform, Result as DriverResult, registers::*};
+use crate::bus::pci::regs;
 use crate::{
     Clock,
     bus::{
@@ -25,6 +26,7 @@ use core::{
 };
 
 const REGISTER_BYTES: usize = IVAR + 0x26;
+const MEMORY_AND_MASTER: u16 = regs::COMMAND_MEMORY | regs::COMMAND_MASTER;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Requirement(&'static str),
@@ -298,13 +300,16 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
             let f = &mut inputs.function;
             if f.vendor != 0x8086
                 || !super::DEVICE_IDS.contains(&f.device)
-                || f.config().read32(0) != u32::from(f.vendor) | (u32::from(f.device) << 16)
+                || f.config().read32(regs::VENDOR_ID)
+                    != u32::from(f.vendor) | (u32::from(f.device) << 16)
             {
                 return Err(Error::Requirement(
                     "actual source Intel PCIe Function identity",
                 ));
             }
-            if inputs.clock.ticks_per_microsecond == 0 || f.config().read16(4) & 6 != 6 {
+            if inputs.clock.ticks_per_microsecond == 0
+                || f.config().read16(regs::COMMAND) & MEMORY_AND_MASTER != MEMORY_AND_MASTER
+            {
                 return Err(Error::Requirement(
                     "qualified clock and acknowledged PCI memory/bus mastering",
                 ));

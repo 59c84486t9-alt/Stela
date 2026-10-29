@@ -9,6 +9,7 @@
 extern crate std;
 use super::*;
 use crate::bus::pci::ConfigSpace;
+use crate::bus::pci::regs;
 use alloc::{sync::Arc, vec, vec::Vec};
 use std::sync::Mutex;
 
@@ -435,11 +436,20 @@ mod original {
         }
         fn mask_inner(&mut self) -> Result<(), Error> {
             let control = self.checked()?;
-            let command = self.owners.as_mut().unwrap().0.config().read16(COMMAND);
+            let command = self
+                .owners
+                .as_mut()
+                .unwrap()
+                .0
+                .config()
+                .read16(regs::COMMAND);
             if command == u16::MAX {
-                return Err(MsiError::FailedRead { offset: COMMAND }.into());
+                return Err(MsiError::FailedRead {
+                    offset: regs::COMMAND,
+                }
+                .into());
             }
-            self.config_write(COMMAND, command | INTX_DISABLE)?;
+            self.config_write(regs::COMMAND, command | regs::COMMAND_INTX_DISABLE)?;
             // Linux enables MSI-X under Function Mask before accessing table RAM:
             // some devices do not decode that RAM until MSI-X Enable is set.
             self.config_write(self.layout.offset + 2, control | ENABLE | FUNCTION_MASK)?;

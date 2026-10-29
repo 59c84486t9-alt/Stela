@@ -7,6 +7,7 @@
 //! Register layouts and narrow message programming follow Linux PCI MSI at
 //! a804c5742bff224d4cb4d25dd383554d598be32b. Ownership, validation, readback and
 //! quarantine are Stela integration. This is not an IRQ controller or DMA stop.
+use super::regs;
 use super::{Address, ConfigSpace, EcamConfig, Function, capability, capability::CapabilityError};
 use crate::bus::irq::MsiMessage;
 use alloc::sync::Arc;
@@ -18,12 +19,6 @@ use core::{
 mod retirement;
 pub use retirement::DisabledMsiConfig;
 
-const COMMAND: u16 = 4;
-#[cfg(test)]
-const STATUS: u16 = 6;
-const INTX_DISABLE: u16 = 1 << 10;
-#[cfg(test)]
-const CAP_LIST: u16 = 1 << 4;
 const MSI: u8 = 5;
 const MSIX: u8 = 0x11;
 const ENABLE: u16 = 1;
@@ -272,8 +267,8 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
         let c = self.config()?;
         // Establish INTxDisable before clearing MSI Enable: clearing Enable
         // first can expose fallback legacy INTx while route state is changing.
-        let command = read16(c, COMMAND)?;
-        write16(c, COMMAND, command | INTX_DISABLE)?;
+        let command = read16(c, regs::COMMAND)?;
+        write16(c, regs::COMMAND, command | regs::COMMAND_INTX_DISABLE)?;
         if let Some(offset) = layout.mask() {
             let mask = c.read32(offset);
             // All-ones is a valid mask bitmap. Presence/control reads check
