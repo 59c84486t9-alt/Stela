@@ -160,6 +160,33 @@ static const char *arrays =
    " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
    " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n";
 
+/* A kernel calling a [[noinline]] helper, which calls a visible function, and
+ * one calling a function that recurses. */
+static const char *calls =
+   "define i32 @doubled(i32 %x) {\n%y = shl i32 %x, 1\nret i32 %y\n}\n"
+   "define internal i32 @helper(i32 %x) noinline {\n"
+   "%d = call i32 @doubled(i32 %x)\n%y = add i32 %d, 1\nret i32 %y\n}\n"
+   "define internal i32 @countdown(i32 %x) noinline {\n"
+   "entry:\n%zero = icmp eq i32 %x, 0\nbr i1 %zero, label %done, label %next\n"
+   "next:\n%less = sub i32 %x, 1\n%r = call i32 @countdown(i32 %less)\nbr label %done\n"
+   "done:\n%v = phi i32 [0, %entry], [%r, %next]\nret i32 %v\n}\n"
+   "define void @calls(ptr addrspace(1) %data, i32 %tid) {\n"
+   "%v = call i32 @helper(i32 %tid)\n"
+   "store i32 %v, ptr addrspace(1) %data, align 4\nret void\n}\n"
+   "define void @recurses(ptr addrspace(1) %data, i32 %tid) {\n"
+   "%v = call i32 @countdown(i32 %tid)\n"
+   "store i32 %v, ptr addrspace(1) %data, align 4\nret void\n}\n"
+   "!air.kernel = !{!2, !5}\n!air.visible = !{!6}\n"
+   "!2 = !{ptr @calls, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n!5 = !{ptr @recurses, !3, !4}\n"
+   "!6 = !{ptr @doubled, !7, !8}\n!7 = !{!70}\n!8 = !{!80}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n"
+   "!70 = !{!\"air.visible_output\", !\"air.arg_type_name\", !\"int\"}\n"
+   "!80 = !{i32 0, !\"air.visible_input\", !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"x\"}\n";
+
 #define VERTEX_RESULT "<{ <4 x float>, <2 x float> }>"
 
 static const char *vertex =
@@ -636,6 +663,25 @@ arrays_reflect_each_slot(void)
    stela_metal_release(shader);
 }
 
+/* Calls to the module's functions are inlined; recursion is refused. */
+static void
+defined_functions_inline_into_their_callers(void)
+{
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   assert(reflect(calls, "calls", &reflection, &error) && reflection.buffer_count == 1);
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   nir_shader *shader = compile(calls, "calls", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "calls: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   stela_metal_release(shader);
+
+   assert(reflect(calls, "recurses", &reflection, &error));
+   assert(!compile(calls, "recurses", &specialization, &error) &&
+          error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "recursive"));
+}
+
 int
 main(void)
 {
@@ -648,6 +694,7 @@ main(void)
    function_constants_reflect_and_specialize();
    derived_constants_are_constructed_from_their_function_constants();
    arrays_reflect_each_slot();
+   defined_functions_inline_into_their_callers();
    glsl_type_singleton_decref();
    puts("metal compiler: ok");
    return 0;

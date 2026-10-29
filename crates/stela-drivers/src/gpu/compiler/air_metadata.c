@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_metadata.h"
+#include "air_calls.h"
 #include "llvm-c/Analysis.h"
 #include "llvm-c/BitReader.h"
 #include <stdarg.h>
@@ -322,7 +323,7 @@ stela_air_metadata_validate(struct stela_air_metadata *t)
       size_t size;
       const char *name = LLVMGetNamedMetadataName(node, &size);
       const char *allowed[] = {"air.version", "air.language_version",
-                              "air.compile_options", "air.kernel", "llvm.ident",
+                              "air.compile_options", "air.kernel", "air.visible", "llvm.ident",
                               "llvm.module.flags", "air.function_constants"};
       const char *render[] = {"air.vertex", "air.fragment", "air.object", "air.mesh"};
       bool found = false;
@@ -2158,7 +2159,8 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
       fail(&m, STELA_AIR_TARGET, "unsupported target/globals/inline assembly");
       goto done;
    }
-   if (!stela_air_metadata_layout(&m) || !stela_air_metadata_validate(&m))
+   if (!stela_air_metadata_layout(&m) || !stela_air_metadata_validate(&m) ||
+       !stela_air_inline_calls(&m))
       goto done;
    char prefix[40];
    snprintf(prefix, sizeof(prefix), "air64_v2%u-apple-macosx", m.air_minor);

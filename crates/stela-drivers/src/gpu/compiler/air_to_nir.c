@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_to_nir.h"
+#include "air_calls.h"
 #include "air_constants.h"
 #include "air_math.h"
 #include "air_simd.h"
@@ -3033,6 +3034,9 @@ instruction(struct translator *t, LLVMValueRef inst)
    }
    if (op == LLVMCall) {
       LLVMValueRef callee = LLVMGetCalledValue(inst);
+      /* Inlining leaves only the calls that can reach recursion. */
+      if (stela_air_defined_function(callee))
+         return fail(t, STELA_AIR_INSTRUCTION, "recursive function calls are unsupported");
       if (LLVMIsAFunction(callee)) {
          bool lowered;
          if (!memory_intrinsic(t, inst, LLVMGetIntrinsicID(callee), &lowered))
@@ -4042,7 +4046,7 @@ translate(const void *bitcode, size_t size, const char *entry,
    t.metadata = (struct stela_air_metadata){.module = t.module, .error = error, .render = stage != NULL};
    if (!stela_air_metadata_layout(&t.metadata) || !stela_air_metadata_validate(&t.metadata) ||
        !stela_air_specialize_constants(&t.metadata, options->constants, options->constant_count) ||
-       !stela_air_construct_constants(&t.metadata))
+       !stela_air_construct_constants(&t.metadata) || !stela_air_inline_calls(&t.metadata))
       goto done;
    t.layout = t.metadata.layout;
    t.air_minor = t.metadata.air_minor;
