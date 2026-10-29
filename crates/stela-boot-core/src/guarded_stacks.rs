@@ -3,7 +3,9 @@
 //! These records describe layout only. They confer no allocation, CPU, mapping,
 //! initialization, or invocation authority; the native owner proves those.
 pub mod mappings;
+mod mixed;
 use core::ops::Range;
+pub use mixed::{Geometry, MixedLayout};
 const PAGE: u64 = 4096;
 const MAX_STACKS: usize = 64;
 
