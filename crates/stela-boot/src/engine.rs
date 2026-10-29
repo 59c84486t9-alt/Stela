@@ -2280,6 +2280,13 @@ fn run_machine<H: Host>(
         },
     );
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
+    // The home Engine has returned with its materialized state. Report its
+    // completed phase maxima before taking host services or persisting disks.
+    if options.profile
+        && let Some(timing) = machine.step_timing()
+    {
+        profile_lifetime_maxima(timing, handoff.tsc_hz, "guest-stop");
+    }
     let mut service = service::take().expect("the run's service");
     if options.profile {
         service.power().disks().report_callbacks(handoff.tsc_hz);
@@ -2353,6 +2360,26 @@ fn profile_report(timing: &step_timing::StepTiming, sliced: u64, elapsed: u64, t
         ));
     }
     output::arguments(format_args!("{line}\n"));
+}
+
+/// Completed intervals of this owned home machine only. Other PEs' state
+/// is not inspected; an unfinished phase has no completed maximum yet.
+fn profile_lifetime_maxima(timing: &step_timing::StepTiming, tsc_hz: u64, report: &str) {
+    for phase in step_timing::Phase::ALL {
+        let maximum = timing.lifetime_maxima[phase as usize];
+        if maximum.ticks == 0 {
+            continue;
+        }
+        output::arguments(format_args!(
+            "PROFILE MAX observer=home report={report} phase={} scope=lifetime counter_hz={tsc_hz} ticks={} finished_ticks={} pc_after={:#x} el_after={} daif_after={:#x} snapshot=materialized-after completed-only=true precise_pc=false cost_bound=false\n",
+            phase.name(),
+            maximum.ticks,
+            maximum.finished_ticks,
+            maximum.pc_after,
+            maximum.el_after,
+            maximum.daif_after,
+        ));
+    }
 }
 
 fn level_name(guarded: bool) -> &'static str {

@@ -2406,7 +2406,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let now = self.host.profile_ticks();
         if let Some(timing) = &mut self.step_timing {
-            timing.phases[phase as usize] += now.wrapping_sub(since);
+            let spent = now.wrapping_sub(since);
+            timing.phases[phase as usize] += spent;
+            timing.lifetime_maxima[phase as usize].observe(
+                spent,
+                now,
+                self.cpu.pc,
+                self.cpu.pstate.el,
+                self.cpu.pstate.daif,
+            );
         }
         now
     }
@@ -2421,6 +2429,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Some(timing) = &mut self.step_timing {
             let spent = now.wrapping_sub(since);
             timing.phases[step_timing::Phase::Exit as usize] += spent;
+            timing.lifetime_maxima[step_timing::Phase::Exit as usize].observe(
+                spent,
+                now,
+                self.cpu.pc,
+                self.cpu.pstate.el,
+                self.cpu.pstate.daif,
+            );
             if let Some(exit) = timing.exits.get_mut(slot) {
                 *exit = (exit.0 + 1, exit.1 + spent);
             }
@@ -7231,6 +7246,9 @@ mod tests {
         }
         fn tsc_counter(&self) -> Option<(u64, u64)> {
             self.tsc_counter
+        }
+        fn profile_ticks(&mut self) -> u64 {
+            self.counter()
         }
         fn counter(&mut self) -> u64 {
             self.counter_reads += 1;
