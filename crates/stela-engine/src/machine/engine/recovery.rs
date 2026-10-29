@@ -72,6 +72,7 @@ pub struct SourceRecord {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeFailureReason {
+    CanonicalDomain { pe: usize, retired_before: u64 },
     UnknownCode,
     CodeExtent,
     CodeReadback,

@@ -1916,7 +1916,7 @@ pub struct Machine<H: Host, D: Devices> {
     /// Actual native-worker publication inventory; absent in the serial lane.
     native_publication: Option<processors::publication::WorkerPublications>,
     /// Identity of this Machine's persistent checked PE memory/event owners.
-    native_memory_identity: Arc<()>,
+    native_memory_identity: Arc<shared_memory::ExecutionDomain>,
     /// Every assigned worker, held while the BSP executes all canonical PEs
     /// in turn through chained native blocks (`run_serialized`).
     serial_hold: Option<processors::publication::StoppedWorkers>,
@@ -2112,7 +2112,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             peers: Vec::new(),
             processor_power,
             native_publication: None,
-            native_memory_identity: Arc::new(()),
+            native_memory_identity: Arc::new(shared_memory::ExecutionDomain::new()),
             serial_hold: None,
             parallel: None,
             attached: None,
@@ -3466,6 +3466,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Run within block and optional host-time limits, yielding between
     /// engine steps. An entered native chain or host callback may overrun.
     pub fn run_with_budget(&mut self, budget: RunBudget) -> Stop {
+        self.latch_canonical_native_failure();
         if let Some(failure) = &self.native_failure {
             return Stop::NativeFailure(failure.summary.clone());
         }
@@ -3490,6 +3491,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     pub(super) fn run_blocks_with_budget(&mut self, budget: RunBudget) -> Stop {
+        self.latch_canonical_native_failure();
         if let Some(failure) = &self.native_failure {
             return Stop::NativeFailure(failure.summary.clone());
         }
@@ -5708,6 +5710,33 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     _ => "LDRA operands or authentication".into(),
                 },
             })),
+        }
+    }
+
+    fn latch_canonical_native_failure(&mut self) {
+        if self.native_failure.is_some() {
+            return;
+        }
+        if let Some(capture) = self.native_memory_identity.failure() {
+            let summary = Arc::new(NativeFailure {
+                pc: capture.pc,
+                code: Some(capture.code),
+                native_offset: capture.fault.offset,
+                address: capture.fault.address,
+                origin: capture.fault.origin,
+                trap: capture.fault.trap,
+                error_code: capture.fault.error_code,
+                unsettled_chain: None,
+                reason: NativeFailureReason::CanonicalDomain {
+                    pe: capture.pe,
+                    retired_before: capture.retired,
+                },
+                source_record: None,
+            });
+            self.native_failure = Some(recovery::CapturedFailure {
+                summary,
+                capture: capture.fault,
+            });
         }
     }
 

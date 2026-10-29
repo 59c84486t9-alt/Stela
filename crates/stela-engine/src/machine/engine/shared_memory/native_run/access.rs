@@ -31,7 +31,10 @@ impl<const WRITE: bool> RecoveredAccess<WRITE> {
             self.source.retired,
         )
     }
-    pub(in crate::machine::engine) fn machine_matches(&self, identity: &Arc<()>) -> bool {
+    pub(in crate::machine::engine) fn machine_matches(
+        &self,
+        identity: &Arc<ExecutionDomain>,
+    ) -> bool {
         Arc::ptr_eq(&self.source.machine, identity)
     }
     pub(in crate::machine::engine) fn controls(&self) -> Option<&str> {

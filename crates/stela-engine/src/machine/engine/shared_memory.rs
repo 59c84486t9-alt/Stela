@@ -7,6 +7,8 @@ mod lifecycle;
 mod native_run;
 mod policy;
 mod scheduler;
+mod terminal;
+pub(super) use terminal::ExecutionDomain;
 #[cfg(feature = "native-profile")]
 mod source_profile;
 pub use host::{HeldRamService, NativeTransport, ServiceHost, ServiceTransport};
@@ -39,7 +41,7 @@ pub struct SharedMemory {
     memory: MemoryThread<Policy>,
     ram: Arc<RegisteredSystemRam>,
     pe: usize,
-    machine: Arc<()>,
+    machine: Arc<ExecutionDomain>,
     event: crate::system::events::EventEndpoint,
     artifacts: native_run::ArtifactCache,
     #[cfg(feature = "native-profile")]

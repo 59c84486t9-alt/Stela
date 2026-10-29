@@ -412,7 +412,7 @@ pub struct Observation {
 /// diagnostic fields. It is consumed once by stopped source settlement.
 #[derive(Debug)]
 pub(super) struct Settlement {
-    pub(super) machine: Arc<()>,
+    pub(super) machine: Arc<ExecutionDomain>,
     pub(super) binding: publication::WorkerBinding,
     pub(super) generation: u64,
     pub(super) pc: u64,
@@ -465,6 +465,9 @@ impl NativeRun<'_> {
         host: &mut dyn Host,
         observation: &mut Observation,
     ) -> Result<(), MemoryStatus> {
+        if self.memory.machine.quarantined() {
+            return Err(MemoryStatus::Domain);
+        }
         if host.native_worker() != Some(self.worker) {
             return Err(MemoryStatus::Unsupported);
         }
@@ -500,6 +503,9 @@ impl NativeRun<'_> {
         artifact: Arc<Artifact>,
         observation: &mut Observation,
     ) -> Result<bool, MemoryStatus> {
+        if self.memory.machine.quarantined() {
+            return Err(MemoryStatus::Domain);
+        }
         #[cfg(feature = "native-profile")]
         let measured = host.native_timing_work_start(Work::CodeInstallation);
         let installed = match host.install_immutable(&artifact.code) {
@@ -559,6 +565,15 @@ impl NativeRun<'_> {
             entry.with_checked_view(|view| {
                 let mut context_loan = ContextLoan::memory(&mut context, view);
                 let result = host.execute_context(code, self.state, context_loan.context());
+                if let Some(NativeExit::Fault(fault)) = result {
+                    self.memory.machine.record(super::terminal::FailureCapture {
+                        pe: artifact_slot.identity.pe,
+                        pc: *self.pc,
+                        retired: *self.retired,
+                        code,
+                        fault,
+                    });
+                }
                 // Authority/domain admission can fail before the callback, and
                 // Host None explicitly refuses before native effects. Only an
                 // actual Some exit/fault replaces the preceding body's identity.
@@ -715,7 +730,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         &'a mut self,
         binding: publication::WorkerBinding,
     ) -> Result<NativeRun<'a>, MemoryStatus> {
-        if self.native_failure.is_some() {
+        if self.native_failure.is_some() || self.native_memory_identity.quarantined() {
             return Err(MemoryStatus::Domain);
         }
         let memory = self
@@ -778,6 +793,18 @@ fn prepare<'a>(
         source_bytes,
         translation_generation,
     } = boundary;
+    if cpu
+        .canonical_memory
+        .as_ref()
+        .is_some_and(|memory| memory.machine.quarantined())
+    {
+        return Err(PreparationFailure::at(
+            "terminal canonical execution domain",
+            MemoryStatus::Domain,
+            (pe, cpu.pc, cpu.pstate.el),
+            None,
+        ));
+    }
     let location = (pe, cpu.pc, cpu.pstate.el);
     let at = |stage, status| PreparationFailure::at(stage, status, location, None);
     if binding.pe != pe || cpu.monitor.is_some() {
@@ -1121,7 +1148,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         bindings: &[publication::WorkerBinding],
         runnable_only: bool,
     ) -> Result<Cohort<'a, H>, PreparationFailure> {
-        if self.native_failure.is_some() {
+        if self.native_failure.is_some() || self.native_memory_identity.quarantined() {
             return Err(MemoryStatus::Domain.into());
         }
         if bindings.len() != self.peers.len() || (!runnable_only && self.waiting.is_some()) {
@@ -1314,7 +1341,7 @@ mod artifact_tests {
         pe: 0,
         worker: publication::WorkerId(0),
     };
-    fn fixture() -> (Machine<FakeHost, NoDevices>, Arc<RegisteredSystemRam>) {
+    pub(super) fn fixture() -> (Machine<FakeHost, NoDevices>, Arc<RegisteredSystemRam>) {
         let (mut machine, ram, events) = super::super::tests::machine();
         machine
             .install_shared_memory_for_processors(Arc::clone(&ram), &events)
@@ -2493,3 +2520,6 @@ mod artifact_tests {
         assert!(matches!(run.warm_successor(&execution), Ok(Ok(_))));
     }
 }
+
+#[cfg(test)]
+mod terminal_tests;

@@ -214,6 +214,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// # Safety
     /// The complete [`Self::run_serialized`] contract applies.
     pub unsafe fn run_serialized_with_budget(&mut self, budget: super::super::RunBudget) -> Stop {
+        self.latch_canonical_native_failure();
         if let Some(failure) = &self.native_failure {
             return Stop::NativeFailure(failure.summary.clone());
         }
@@ -708,6 +709,10 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             return Err(self.unsupported(RequirementKind::Native(
                 "stale/foreign native source settlement",
             )));
+        }
+        self.latch_canonical_native_failure();
+        if let Some(failure) = &self.native_failure {
+            return Err(Stop::NativeFailure(failure.summary.clone()));
         }
         self.native_source_pe(settlement.binding)?;
         if self.cpu.pc != settlement.pc || self.cpu.retired != settlement.retired {
