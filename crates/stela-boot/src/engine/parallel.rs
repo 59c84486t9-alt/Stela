@@ -15,11 +15,11 @@ use stela_engine::machine::Host;
 use stela_engine::machine::Machine;
 use stela_engine::machine::Stop;
 use stela_engine::machine::ctrr;
-pub(crate) use stela_engine::machine::engine::{Counts, RunBudget};
 use stela_engine::machine::engine::Kick;
 use stela_engine::machine::engine::SharedDevices;
 pub(crate) use stela_engine::machine::engine::SourcePhase;
 use stela_engine::machine::engine::publication::WorkerBinding;
+pub(crate) use stela_engine::machine::engine::{Counts, RunBudget};
 use stela_engine::machine::exception::Pstate;
 use stela_runtime::machine::apple::AppleDevices;
 
