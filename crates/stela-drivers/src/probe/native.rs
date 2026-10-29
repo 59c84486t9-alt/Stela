@@ -6,11 +6,13 @@ use super::{Error, NativeServices, ServiceError};
 use crate::net::wifi;
 use crate::{
     Clock,
+    bluetooth::intel_pcie,
     bus::{
-        dma::mapping::DmaDomain,
+        dma::{DomainAllocator, mapping::DmaDomain},
         mmio::owned::{CacheAttribute, Mapping, Protection},
         pci::{
             Address, Bar, Function,
+            msix::MappedBar,
             owned::OwnedConfig,
             requester::{FunctionRole, StoppedRequester},
         },
@@ -66,6 +68,8 @@ pub(super) enum Kind {
     Ish,
     /// An Intel Wi-Fi function, which `iwl_pci_probe` identifies further.
     IntelWifi,
+    /// An Intel PCIe Bluetooth function, as `btintel_pcie_table` lists them.
+    IntelBluetooth,
 }
 
 impl Kind {
@@ -84,6 +88,8 @@ impl Kind {
             Some(Self::Ish)
         } else if function.vendor == 0x8086 && function.class[..2] == [2, 0x80] {
             Some(Self::IntelWifi)
+        } else if function.vendor == 0x8086 && intel_pcie::DEVICE_IDS.contains(&function.device) {
+            Some(Self::IntelBluetooth)
         } else {
             None
         }
@@ -552,6 +558,94 @@ fn claim_sized(services: &dyn NativeServices, address: Address) -> Result<Sized,
     Ok((requester, domain, bars))
 }
 
+/// An Intel PCIe Bluetooth transport over its owned BAR0, whose MSI-X table
+/// entry 0 delivers its interrupts.
+pub type IntelBluetooth = intel_pcie::Transport<
+    intel_pcie::native::NativePlatform<OwnedConfig, MappedBar, intel_pcie::native::MappedRegisters>,
+>;
+
+/// An attached PCIe Bluetooth controller and its one firmware initialization
+/// attempt. A kept success is not radio or guest readiness.
+pub struct PcieHci {
+    pub location: String,
+    pub transport: IntelBluetooth,
+    pub initialization: Result<intel_pcie::firmware::Report, intel_pcie::firmware::Error>,
+}
+
+/// Attach an Intel PCIe Bluetooth function and start its ROM transport, as
+/// `btintel_pcie_probe` does before downloading firmware. Its reset is the
+/// function's own, so it needs no coordination with the Wi-Fi function of the
+/// same module, as in Linux.
+///
+/// # Safety
+/// As for [`sfh`].
+#[allow(
+    clippy::result_large_err,
+    reason = "a failed attach hands back the owners that must outlive the device"
+)]
+pub(super) unsafe fn intel_bluetooth(
+    services: &dyn NativeServices,
+    address: Address,
+    clock: Clock,
+) -> Result<IntelBluetooth, Failure> {
+    use intel_pcie::native::{self as native, Inputs, NativePlatform};
+    let refused = |error: ServiceError| (Error::Native(error), None);
+    let failed =
+        |error: intel_pcie::Error, kept: Box<dyn Any>| (Error::IntelBluetooth(error), Some(kept));
+    let (requester, domain, bars) = claim_sized(services, address)?;
+    let interrupts = services.interrupts().map_err(refused)?;
+    let authority = services.authority().map_err(refused)?;
+    let Some(bar @ Bar::Memory { .. }) = bars[0] else {
+        return Err(refused(ServiceError::Refused("missing memory BAR")));
+    };
+    let mapping = services.map_bar(address, bar).map_err(refused)?;
+    let full = match mapping.physical_span() {
+        Ok(span) => span,
+        Err(error) => {
+            return Err(failed(
+                native::Error::Mapping(error).into(),
+                Box::new(mapping),
+            ));
+        }
+    };
+    // SAFETY: the mount mapped exactly BAR0 uncached, and the registers below
+    // keep that mapping for as long as the MSI-X table is used.
+    let table = match unsafe { MappedBar::new(full, [Some(&mapping), None]) } {
+        Ok(table) => table,
+        Err(error) => return Err(failed(native::Error::Msix(error).into(), Box::new(mapping))),
+    };
+    // SAFETY: as above; no other driver maps this BAR.
+    let registers = unsafe { native::MappedRegisters::new(full, mapping) }
+        .map_err(|(error, mapping)| failed(error.into(), Box::new(mapping)))?;
+    let mut function = requester.into_function();
+    // btintel_pcie_probe: memory decoding and bus mastering before MSI-X.
+    function.enable_polled();
+    let mut msix = [const { None }; 6];
+    msix[0] = Some(table);
+    let inputs = Inputs {
+        function,
+        retained: Arc::new(authority),
+        bars: msix,
+        registers,
+        clock,
+        interrupts,
+    };
+    // SAFETY: the mount claimed the stopped function with its interrupts
+    // drained, mapped its BAR0 and gave its domain and MSI controller; the
+    // function reset is this function's own.
+    let platform = unsafe { NativePlatform::new(inputs) }
+        .map_err(|(error, inputs)| failed(error.into(), Box::new(inputs)))?;
+    // SAFETY: the mount's domain isolates this requester and its pages are
+    // kept for the boot; the controller addresses 64 bits.
+    let mut dma = unsafe { DomainAllocator::new(services.pages(), domain, u64::MAX) };
+    let mut transport = intel_pcie::Transport::new(platform, &mut dma)
+        .map_err(|error| (Error::IntelBluetooth(error), None))?;
+    match transport.start() {
+        Ok(()) => Ok(transport),
+        Err(error) => Err(failed(error, Box::new(transport))),
+    }
+}
+
 /// Attach an AMD Sensor Fusion Hub and enable its sensors.
 ///
 /// # Safety
@@ -680,6 +774,12 @@ mod tests {
             vmd,
             Err((Error::Native(ServiceError::Unavailable), None))
         ));
-        assert_eq!(*services.requests.borrow(), [address(); 3]);
+        // SAFETY: as above.
+        let bluetooth = unsafe { intel_bluetooth(&services, address(), clock) };
+        assert!(matches!(
+            bluetooth,
+            Err((Error::Native(ServiceError::Unavailable), None))
+        ));
+        assert_eq!(*services.requests.borrow(), [address(); 4]);
     }
 }

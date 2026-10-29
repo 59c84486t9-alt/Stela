@@ -52,6 +52,7 @@ pub enum Error {
     Sfh(input::sfh::Error),
     Ish(input::ish::Error),
     IntelWifi(net::wifi::intel::attach::AttachError),
+    IntelBluetooth(crate::bluetooth::intel_pcie::Error),
 }
 
 impl fmt::Display for Error {
@@ -66,6 +67,7 @@ impl fmt::Display for Error {
             Self::Sfh(error) => write!(f, "AMD SFH: {error:?}"),
             Self::Ish(error) => write!(f, "Intel ISH: {error:?}"),
             Self::IntelWifi(error) => write!(f, "iwlwifi: {error}"),
+            Self::IntelBluetooth(error) => write!(f, "btintel_pcie: {error}"),
         }
     }
 }
@@ -335,7 +337,7 @@ fn unsupported(class: [u8; 3]) -> Option<&'static str> {
         }
         [0x0c, 0x0a, _] => Some("USB4/Thunderbolt host (not attached yet)"),
         [0x08, 0x05, _] => Some("SD host controller without standard SDHCI interface"),
-        [0x0d, 0x11, _] => Some("PCIe Bluetooth controller"),
+        [0x0d, 0x11, _] => Some("PCIe Bluetooth controller other than Intel's"),
         _ => None,
     }
 }
@@ -368,6 +370,8 @@ pub struct Devices {
     /// USB HCI transports with kept device-specific initialization results.
     /// Historical evidence does not establish radio or guest readiness.
     pub bluetooth: Vec<UsbHci>,
+    /// PCIe HCI transports with their kept firmware initialization result.
+    pub pcie_bluetooth: Vec<native::PcieHci>,
     /// Raw firmware uploaders awaiting USB removal/fresh enumeration.
     pub bluetooth_bootloaders: Vec<crate::usb::bluetooth::ath3k::UsbBootloader>,
     /// Exact pre-EBS board-variable observation, including unavailable diagnostics.
@@ -421,13 +425,11 @@ pub struct Devices {
 }
 
 impl Devices {
-    /// Failures from attempted native vendor initialization. Unknown
-    /// vendors remain raw, unverified transports; they are not failed attempts
-    /// of a backend implemented here.
-    pub fn bluetooth_failures(
-        &self,
-    ) -> impl Iterator<Item = (&str, &crate::usb::bluetooth::InitializationError)> {
-        self.bluetooth.iter().filter_map(|device| {
+    /// Failures from attempted native vendor initialization, USB and PCIe.
+    /// Unknown USB vendors remain raw, unverified transports; they are not
+    /// failed attempts of a backend implemented here.
+    pub fn bluetooth_failures(&self) -> impl Iterator<Item = (&str, &dyn fmt::Display)> {
+        let usb = self.bluetooth.iter().filter_map(|device| {
             let Err(error) = device.initialization()? else {
                 return None;
             };
@@ -437,8 +439,16 @@ impl Devices {
             ) {
                 return None;
             }
-            Some((device.binding().device().location.as_str(), error))
-        })
+            Some((
+                device.binding().device().location.as_str(),
+                error as &dyn fmt::Display,
+            ))
+        });
+        let pcie = self.pcie_bluetooth.iter().filter_map(|hci| {
+            let error = hci.initialization.as_ref().err()?;
+            Some((hci.location.as_str(), error as &dyn fmt::Display))
+        });
+        usb.chain(pcie)
     }
 }
 
@@ -666,6 +676,29 @@ pub unsafe fn probe_with_provider(
                     }
                     native::Kind::Ish => {
                         sensor_hubs.push(address);
+                        continue;
+                    }
+                    native::Kind::IntelBluetooth => {
+                        // SAFETY: as for tg3 below.
+                        match unsafe { native::intel_bluetooth(services, address, handoff.clock) } {
+                            Ok(mut transport) => {
+                                let initialization =
+                                    crate::bluetooth::intel_pcie::firmware::initialize(
+                                        &mut transport,
+                                        firmware,
+                                        devices.bluetooth_platform.platform_inputs(),
+                                    );
+                                devices.pcie_bluetooth.push(native::PcieHci {
+                                    location: alloc::format!("{address}"),
+                                    transport,
+                                    initialization,
+                                });
+                            }
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.owners.extend(kept);
+                            }
+                        }
                         continue;
                     }
                     native::Kind::IntelWifi => {
