@@ -20,7 +20,10 @@ pub(super) use identity::{Identity, identify};
 use registers::*;
 
 /// Exact endpoint-zero transfers shared by both ASIX register protocols.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "These are the USB control setup fields and bounded data length/direction plus the current device-access guard"
+)]
 fn request<C: Control>(
     io: &mut C,
     accessible: &mut bool,

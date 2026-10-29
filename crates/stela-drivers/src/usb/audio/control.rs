@@ -523,7 +523,6 @@ impl Width {
 /// left at its maximum; otherwise RES doubles until a step past the current
 /// value reads back, and the current value is restored. UAC2 and UAC3 use
 /// the first RANGE triplet.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn probe_range<C: Control>(
     io: &mut C,
     protocol: u8,
