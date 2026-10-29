@@ -109,7 +109,7 @@ impl IshInput {
     pub fn set_leds(&mut self, leds: u16) -> Result<()> {
         for (id, translator) in &self.clients {
             if let Some((_, report)) = translator.led_report(leds) {
-                self.native.set_feature(*id, &report)?;
+                self.native.set_output(*id, &report)?;
             }
         }
         Ok(())

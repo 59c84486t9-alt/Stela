@@ -1190,3 +1190,39 @@ fn native_large_descriptor_declared_feature_fragments_once_per_credit_without_bu
  {
     large_feature_transfer();
 }
+
+#[test]
+fn native_led_output_uses_set_report_and_keeps_feature_validation_distinct() {
+    let mut f = prepared();
+    let descriptor = vec![
+        0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x85, 1, 0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0,
+        0x25, 1, 0x75, 1, 0x95, 8, 0x81, 2, 0x75, 8, 0x95, 1, 0x81, 1, 0x19, 0, 0x29, 0x65, 0x15,
+        0, 0x25, 0x65, 0x75, 8, 0x95, 6, 0x81, 0, 0x05, 8, 0x19, 1, 0x29, 5, 0x15, 0, 0x25, 1,
+        0x75, 1, 0x95, 5, 0x91, 2, 0x75, 3, 0x95, 1, 0x91, 1, 0xc0,
+    ];
+    {
+        let mut state = f.peer.state.lock().unwrap();
+        state.descriptor = descriptor.clone();
+        state.feature_wire_bytes = 2;
+    }
+    f.driver.start().unwrap();
+    let translator = Translator::describe(&descriptor).unwrap();
+    assert!(translator.is_keyboard_or_pointer());
+    let (_, report) = translator.led_report(3).unwrap();
+    assert_eq!(report, [1, 3]);
+    let messages = f.peer.state.lock().unwrap().host_messages.len();
+    let accesses = f.peer.state.lock().unwrap().events.len();
+    assert!(f.driver.set_feature(7, &report).is_err());
+    assert!(f.driver.get_report(7, ReportKind::Output, 1).is_err());
+    assert!(f.driver.set_output(7, &[1]).is_err());
+    assert!(f.driver.set_output(7, &[2, 3]).is_err());
+    assert_eq!(f.peer.state.lock().unwrap().host_messages.len(), messages);
+    assert_eq!(f.peer.state.lock().unwrap().events.len(), accesses);
+    assert_eq!(f.driver.failure(), None);
+    assert_eq!(f.driver.set_output(7, &report).unwrap(), [0xaa, 0xbb]);
+    assert_eq!(
+        f.peer.state.lock().unwrap().host_messages.last().unwrap(),
+        &[3, 7, 0, 0, 0, 0, 1, 3]
+    );
+    retained(&f);
+}

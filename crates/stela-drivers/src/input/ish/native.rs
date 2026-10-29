@@ -666,6 +666,14 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
     /// Return the actual bounded acknowledgement payload, including nonempty
     /// firmware acknowledgements; do not invent an empty-response requirement.
     pub fn set_feature(&mut self, device: u8, bytes: &[u8]) -> Result<Vec<u8>> {
+        self.set_report(device, ReportKind::Feature, bytes)
+    }
+    /// Send a descriptor-qualified HID Output report through ISHTP SET_REPORT.
+    /// Output and Feature reports share command 3; their layouts stay distinct.
+    pub fn set_output(&mut self, device: u8, bytes: &[u8]) -> Result<Vec<u8>> {
+        self.set_report(device, ReportKind::Output, bytes)
+    }
+    fn set_report(&mut self, device: u8, kind: ReportKind, bytes: &[u8]) -> Result<Vec<u8>> {
         self.usable()?;
         if !self.running {
             return Err(Error::Requirement("running native HID transport"));
@@ -676,7 +684,7 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             .iter()
             .find(|d| d.id == device)
             .ok_or(Error::Protocol("unknown HID device"))?;
-        descriptor::validate(&d.reports, ReportKind::Feature, bytes)?;
+        descriptor::validate(&d.reports, kind, bytes)?;
         self.engine.request_ready()?;
         let result = self.exchange(3, device, None, bytes);
         self.record(result)
