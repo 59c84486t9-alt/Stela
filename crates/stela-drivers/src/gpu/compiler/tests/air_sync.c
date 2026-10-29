@@ -10,9 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #ifdef STELA_AIR_TEST_NAK
-#include "nouveau/compiler/nak.h"
-#include "nouveau/headers/nv_device_info.h"
-#include "targets/nvidia.h"
+#include "air_test_nak.h"
 #endif
 #ifdef NDEBUG
 #error "These tests require active assertions"
@@ -77,24 +75,16 @@ fixed_buffer(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
    return nir_imm_int64(b, 0x100000); /* Compile fixture only. */
 }
 
-/* The NVIDIA backend compiles what the frontend lowers, for every target. */
-static void
-nak_compiles(const char *declarations, const char *body)
+struct fixture {
+   const char *declarations, *body;
+};
+
+static nir_shader *
+nak_translate(const nir_shader_compiler_options *options, void *data)
 {
-   for (unsigned i = 0; i < ARRAY_SIZE(stela_nvidia_sms); i++) {
-      const struct nv_device_info device = {.sm = stela_nvidia_sms[i], .max_warps_per_mp = 32};
-      struct nak_compiler *compiler = nak_compiler_create(&device);
-      assert(compiler);
-      struct stela_air_error error;
-      nir_shader *shader = translate(declarations, body, nak_nir_options(compiler), fixed_buffer, &error);
-      assert(shader);
-      nak_preprocess_nir(shader, compiler);
-      struct nak_shader_bin *bin = nak_compile_shader(shader, false, compiler, 0, NULL, false);
-      assert(bin && bin->code_size && bin->info.sm == stela_nvidia_sms[i]);
-      nak_shader_bin_destroy(bin);
-      ralloc_free(shader);
-      nak_compiler_destroy(compiler);
-   }
+   const struct fixture *fixture = data;
+   struct stela_air_error error;
+   return translate(fixture->declarations, fixture->body, options, fixed_buffer, &error);
 }
 #endif
 
@@ -105,7 +95,7 @@ lowered(const char *declarations, const char *body)
    nir_shader *shader = kernel(declarations, body, &error);
    assert(shader && error.kind == STELA_AIR_OK);
 #ifdef STELA_AIR_TEST_NAK
-   nak_compiles(declarations, body);
+   stela_air_test_nak(nak_translate, &(struct fixture){declarations, body});
 #endif
    return shader;
 }

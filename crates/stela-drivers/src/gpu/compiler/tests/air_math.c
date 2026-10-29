@@ -9,6 +9,9 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef STELA_AIR_TEST_NAK
+#include "air_test_nak.h"
+#endif
 #ifdef NDEBUG
 #error "These tests require active assertions"
 #endif
@@ -36,27 +39,54 @@ static const char *kernel_metadata =
 static struct stela_metal_stage primary = {.table = STELA_METAL_TABLE_PRIMARY};
 
 static nir_shader *
-kernel(const char *declarations, const char *type, const char *expression,
-       struct stela_air_error *error)
+translate(const char *declarations, const char *body, const nir_shader_compiler_options *options,
+          stela_air_bind_buffer bind, struct stela_air_error *error)
 {
-   char body[2048], all[2048];
-   snprintf(body, sizeof(body),
-            "define void @kernel(ptr addrspace(1) %%out) {\n%%r = %s\n"
-            "store %s %%r, ptr addrspace(1) %%out, align 2\nret void\n}\n",
-            expression, type);
+   char definition[2048], all[2048];
+   snprintf(definition, sizeof(definition), "define void @kernel(ptr addrspace(1) %%out) {\n%s}\n", body);
    snprintf(all, sizeof(all), "%s%s", kernel_metadata, versions);
-   LLVMMemoryBufferRef input =
-      stela_air_test_custom_bitcode(module, declarations, body, all);
+   LLVMMemoryBufferRef input = stela_air_test_custom_bitcode(module, declarations, definition, all);
    const struct stela_air_options o = {
       .workgroup_size = {1, 1, 1}, .max_instructions = 10000,
-      .bind_buffer = stela_metal_bind_buffer, .binding_data = &primary,
+      .bind_buffer = bind, .binding_data = &primary,
       .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41,
    };
    nir_shader *shader = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
-                                         "kernel", &nir_options, &o, error);
+                                         "kernel", options, &o, error);
    LLVMDisposeMemoryBuffer(input);
    return shader;
 }
+
+static nir_shader *
+kernel(const char *declarations, const char *type, const char *expression,
+       struct stela_air_error *error)
+{
+   char body[1024];
+   snprintf(body, sizeof(body), "%%r = %s\nstore %s %%r, ptr addrspace(1) %%out, align 2\nret void\n",
+            expression, type);
+   return translate(declarations, body, &nir_options, stela_metal_bind_buffer, error);
+}
+
+#ifdef STELA_AIR_TEST_NAK
+/* NAK takes lowered push constants, so its compiles bind a fixed address. */
+static nir_def *
+fixed_buffer(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
+{
+   return nir_imm_int64(b, 0x100000); /* Compile fixture only. */
+}
+
+struct fixture {
+   const char *declarations, *body;
+};
+
+static nir_shader *
+nak_translate(const nir_shader_compiler_options *options, void *data)
+{
+   const struct fixture *fixture = data;
+   struct stela_air_error error;
+   return translate(fixture->declarations, fixture->body, options, fixed_buffer, &error);
+}
+#endif
 
 /* The bits the kernel stores for `expression`, a call of `declaration`. */
 static uint64_t
@@ -251,6 +281,93 @@ half_declares_its_float_controls(void)
    }
 }
 
+/* Every kind of function lowers, and compiles with NAK, on loaded values the
+ * compiler cannot fold: %a, %b and %c of the operand type. */
+static void
+functions_compile(void)
+{
+   static const struct {
+      const char *declaration, *operand, *result, *expression;
+   } functions[] = {
+      {"declare float @air.fast_sin.f32(float)\n", "float", "float", "call float @air.fast_sin.f32(float %a)"},
+      {"declare float @air.fast_tanh.f32(float)\n", "float", "float", "call float @air.fast_tanh.f32(float %a)"},
+      {"declare float @air.fast_acosh.f32(float)\n", "float", "float", "call float @air.fast_acosh.f32(float %a)"},
+      {"declare float @air.fast_exp10.f32(float)\n", "float", "float", "call float @air.fast_exp10.f32(float %a)"},
+      {"declare float @air.fast_cospi.f32(float)\n", "float", "float", "call float @air.fast_cospi.f32(float %a)"},
+      {"declare float @air.fast_atan2.f32(float, float)\n", "float", "float",
+       "call float @air.fast_atan2.f32(float %a, float %b)"},
+      {"declare float @air.fast_pow.f32(float, float)\n", "float", "float",
+       "call float @air.fast_pow.f32(float %a, float %b)"},
+      {"declare float @air.fast_fmod.f32(float, float)\n", "float", "float",
+       "call float @air.fast_fmod.f32(float %a, float %b)"},
+      {"declare float @air.fract.f32(float)\n", "float", "float", "call float @air.fract.f32(float %a)"},
+      {"declare float @air.round.f32(float)\n", "float", "float", "call float @air.round.f32(float %a)"},
+      {"declare float @air.rint.f32(float)\n", "float", "float", "call float @air.rint.f32(float %a)"},
+      {"declare float @air.fdim.f32(float, float)\n", "float", "float",
+       "call float @air.fdim.f32(float %a, float %b)"},
+      {"declare float @air.fmedian3.f32(float, float, float)\n", "float", "float",
+       "call float @air.fmedian3.f32(float %a, float %b, float %c)"},
+      {"declare float @air.mix.f32(float, float, float)\n", "float", "float",
+       "call float @air.mix.f32(float %a, float %b, float %c)"},
+      {"declare float @llvm.fma.f32(float, float, float)\n", "float", "float",
+       "call float @llvm.fma.f32(float %a, float %b, float %c)"},
+      {"", "float", "float", "frem fast float %a, %b"},
+      {"", "float", "float", "fdiv fast float %a, %b"},
+      {"declare half @air.sin.f16(half)\n", "half", "half", "call half @air.sin.f16(half %a)"},
+      {"declare half @air.sqrt.f16(half)\n", "half", "half", "call half @air.sqrt.f16(half %a)"},
+      {"declare half @air.fma.f16(half, half, half)\n", "half", "half",
+       "call half @air.fma.f16(half %a, half %b, half %c)"},
+      {"", "half", "half", "fdiv fast half %a, %b"},
+      {"declare float @air.dot.v3f32(<3 x float>, <3 x float>)\n", "<3 x float>", "float",
+       "call float @air.dot.v3f32(<3 x float> %a, <3 x float> %b)"},
+      {"declare <3 x float> @air.cross.v3f32(<3 x float>, <3 x float>)\n", "<3 x float>", "<3 x float>",
+       "call <3 x float> @air.cross.v3f32(<3 x float> %a, <3 x float> %b)"},
+      {"declare <3 x float> @air.fast_normalize.v3f32(<3 x float>)\n", "<3 x float>", "<3 x float>",
+       "call <3 x float> @air.fast_normalize.v3f32(<3 x float> %a)"},
+      {"declare float @air.fast_distance.v4f32(<4 x float>, <4 x float>)\n", "<4 x float>", "float",
+       "call float @air.fast_distance.v4f32(<4 x float> %a, <4 x float> %b)"},
+      {"declare i32 @air.clz.i32(i32, i1)\n", "i32", "i32", "call i32 @air.clz.i32(i32 %a, i1 false)"},
+      {"declare i64 @air.ctz.i64(i64, i1)\n", "i64", "i64", "call i64 @air.ctz.i64(i64 %a, i1 false)"},
+      {"declare i16 @air.popcount.i16(i16)\n", "i16", "i16", "call i16 @air.popcount.i16(i16 %a)"},
+      {"declare i8 @air.reverse_bits.i8(i8)\n", "i8", "i8", "call i8 @air.reverse_bits.i8(i8 %a)"},
+      {"declare i64 @air.mul_hi.u.i64(i64, i64)\n", "i64", "i64",
+       "call i64 @air.mul_hi.u.i64(i64 %a, i64 %b)"},
+      {"declare i16 @air.add_sat.s.i16(i16, i16)\n", "i16", "i16",
+       "call i16 @air.add_sat.s.i16(i16 %a, i16 %b)"},
+      {"declare i8 @air.sub_sat.u.i8(i8, i8)\n", "i8", "i8", "call i8 @air.sub_sat.u.i8(i8 %a, i8 %b)"},
+      {"declare i32 @air.clamp.u.i32(i32, i32, i32)\n", "i32", "i32",
+       "call i32 @air.clamp.u.i32(i32 %a, i32 %b, i32 %c)"},
+      {"declare half @air.convert.f.f16.s.i32(i32)\n", "i32", "half",
+       "call half @air.convert.f.f16.s.i32(i32 %a)"},
+      {"", "half", "i16", "fptosi half %a to i16"},
+      {"", "float", "i64", "fptoui float %a to i64"},
+      {"", "i64", "float", "uitofp i64 %a to float"},
+      {"", "<2 x half>", "<2 x float>", "fpext <2 x half> %a to <2 x float>"},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(functions); i++) {
+      const char *t = functions[i].operand;
+      char body[1024];
+      snprintf(body, sizeof(body),
+               "%%a = load %s, ptr addrspace(1) %%out, align 16\n"
+               "%%pb = getelementptr i8, ptr addrspace(1) %%out, i64 16\n"
+               "%%b = load %s, ptr addrspace(1) %%pb, align 16\n"
+               "%%pc = getelementptr i8, ptr addrspace(1) %%out, i64 32\n"
+               "%%c = load %s, ptr addrspace(1) %%pc, align 16\n"
+               "%%r = %s\nstore %s %%r, ptr addrspace(1) %%out, align 16\nret void\n",
+               t, t, t, functions[i].expression, functions[i].result);
+      struct stela_air_error error = {0};
+      nir_shader *shader = translate(functions[i].declaration, body, &nir_options,
+                                     stela_metal_bind_buffer, &error);
+      if (!shader)
+         fprintf(stderr, "%s: %u %s\n", functions[i].expression, error.kind, error.detail);
+      assert(shader);
+      ralloc_free(shader);
+#ifdef STELA_AIR_TEST_NAK
+      stela_air_test_nak(nak_translate, &(struct fixture){functions[i].declaration, body});
+#endif
+   }
+}
+
 static void
 fragments_take_derivatives_and_discard(void)
 {
@@ -312,6 +429,7 @@ main(void)
    conversions_follow_their_names();
    refuses_misnamed_and_misplaced_functions();
    half_declares_its_float_controls();
+   functions_compile();
    fragments_take_derivatives_and_discard();
    glsl_type_singleton_decref();
    puts("air math: ok");

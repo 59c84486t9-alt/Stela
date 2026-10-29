@@ -289,8 +289,9 @@ if stela_air_llvm != ''
     'stela_air_math_test',
     'tests/air_math.c',
     include_directories : [inc_include, inc_src, inc_gpu],
-    dependencies : [idep_stela_air],
-    link_with : stela_metal_abi,
+    dependencies : stela_air_test_dependencies,
+    link_with : [stela_metal_abi, stela_air_test_links],
+    c_args : stela_air_test_args,
     build_rpath : fs.parent(stela_air_llvm),
   )
   test('stela_air_math', stela_air_math_test, suite : 'stela')
