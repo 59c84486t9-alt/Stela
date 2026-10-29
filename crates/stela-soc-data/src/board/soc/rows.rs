@@ -100,7 +100,7 @@ pub(in crate::board) const PMGR2_ARCH: &str = "pmgr2,arch";
 /// T8152 physical groups below the generic PMGRv2 interface (original J873g ADT).
 pub(in crate::board) const PMGR2_IMPLEMENTATION: &str = "pmgr2,t8152";
 
-/// The CPU start registers' offsets from the PMGR's `reg[0]` ([`cpu_start`]),
+/// The CPU start registers' offsets from the PMGR's `reg[0]` (`crate::board::power_registers::cpu_start`),
 /// m1n1 `src/smp.c` `CPU_START_OFF_*` and the chips its `smp_init` gives
 /// each. The M6's is also its `/arm-io/pmgr-child` `misc-cores-offset`,
 /// which the 26A434 J873GAP `AppleT8152PMGR` `HAL::initRegGroups` reads as
@@ -303,7 +303,7 @@ pub(in crate::board) const SOCS: [Soc; 22] = [
         clusters: Some(T8112_CLUSTERS),
         aon_fuses: Some(36),
         cpu_start: Some(CPU_START_T8112),
-        // setAPWakeupSources: RegMap 0x42 -> reg[4], kernel file
+        // setAPWakeupSources: RegMap 0x42 -> `reg[4]`, kernel file
         // 0x2fa31bc..0x2fa3620. Compiled valid masks at 0x7957ec;
         // the DeviceTree does not carry this capability bitmap.
         wake_masks: Some(WakeLayout {

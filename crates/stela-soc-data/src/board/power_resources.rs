@@ -311,13 +311,13 @@ impl ResourceInventory<'_> {
 
 /// Die field of a `clock-gates`/`power-gates` word. 26A434 mac14j
 /// `ApplePMGRFunctionClockGate::callFunction` takes the die as the word's
-/// bits [31:28] (`lsr w22, w20, #28`, KC VA 0xfffffe0009b7e1b0) and the
+/// bits `31:28` (`lsr w22, w20, #28`, KC VA 0xfffffe0009b7e1b0) and the
 /// device as the rest (`and x1, x20, #0xfffffff`, 0xfffffe0009b7e25c);
 /// `ApplePMGRNub::_enableDeviceStatusChangeNotifications` splits it the same
 /// way and passes only `& 0xffff` (0xfffffe0009b8b7d8, 0xfffffe0009b8b82c) to
 /// the per-die `(device, die)` entry points such as `_enableDeviceGated`.
 const GATE_DIE_SHIFT: u32 = 28;
-/// Bits [27:16] reach no 16-bit device record; no qualified meaning.
+/// Bits `27:16` reach no 16-bit device record; no qualified meaning.
 const GATE_RESERVED: u32 = 0x0fff_0000;
 
 /// Decode each gate word into its die-qualified device. The record tables

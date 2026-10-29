@@ -5,7 +5,7 @@ use alloc::format;
 
 /// The PMP's DT placement: `reg[0]` is the ASC wrapper and its four
 /// interrupts the mailbox lines. Its nub is `user-power-managed`; the
-/// PTD bank that `ptd-update-reg-index` names is [`MemoryCache`]'s.
+/// PTD bank that `ptd-update-reg-index` names is [`super::MemoryCache`]'s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PmpController {
     pub wrapper: (u64, u64),

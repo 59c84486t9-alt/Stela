@@ -28,7 +28,7 @@ pub struct DcpController {
     pub interrupts: [u32; 4],
     pub quiesced: bool,
     pub regions: Vec<(&'static str, (u64, u64))>,
-    /// The [`Board::darts`] index and stream of its `iommu-parent`
+    /// The [`super::Board::darts`] index and stream of its `iommu-parent`
     /// (`mapper-dcpext`, dart-dcpext stream 5 on J473AP).
     pub iommu: usize,
     pub stream: u32,
@@ -36,8 +36,8 @@ pub struct DcpController {
     /// hands the coprocessor only a DVA's low 32 bits
     /// (`AppleA7IOP::_restrictDVA`, kernel file 0x1bb1424).
     pub window: Option<u64>,
-    /// The [`Board::darts`] index and stream the swap surfaces are read
-    /// through: the visible display pipe's ([`DISPEXT`]) first
+    /// The [`super::Board::darts`] index and stream the swap surfaces are read
+    /// through: the visible display pipe's ([`super::DISPEXT`]) first
     /// `iommu-parent` (J473AP `mapper-dispext0`, dart-dispext0 stream 0, the
     /// framebuffer mapping Linux `plane.c` gives the display DART; the second,
     /// `mapper-dispext0-piodma`, is the pipe's programmed-I/O DMA).

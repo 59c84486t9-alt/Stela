@@ -284,7 +284,7 @@ pub const PMU: &str = "pmu,spmi";
 pub const SYSCFG: &str = "diagnostic-data,format1";
 
 /// SEP's wrapper and native nub, from the J473AP IPSW DeviceTree. Admitted
-/// through [`models::ROLE_MODELS`] (matched by `role = SEP`), so the loader keeps the
+/// through [`model_children`] (matched by `role = SEP`), so the loader keeps the
 /// sep node and its nub and `AppleSEPManager` binds and boots the native SEP.
 pub const SEP: &str = "iop-sep,ascwrap-v4";
 pub const SEP_NUB: &str = "iop-nub,sep";
@@ -292,7 +292,7 @@ pub const SEP_NUB: &str = "iop-nub,sep";
 /// The J473AP HDMI display pipeline the engine models at its AP-facing
 /// protocols (`platform::apple::dcp`, `display`,
 /// `docs/research/display-gpu.md` section 8): the `dcpext` coprocessor (the
-/// shared ASC [`ASC`] with `role` `DCPEXT`, admitted through [`models::ROLE_MODELS`])
+/// shared ASC [`ASC`] with `role` `DCPEXT`, admitted through [`model_children`])
 /// and the display pipe `dispext0` ([`DISPEXT`], kept so `AppleCLCD2`, an
 /// `IOMobileFramebufferAP`, matches), whose DART `dart-dispext0` the
 /// coprocessor reads swap surfaces through ([`DcpController::surface`]).
@@ -481,7 +481,7 @@ pub struct Board {
     /// AOP wake masks and reporting source IDs.
     pub wake_masks: Option<WakeBank>,
     /// The CPU start registers' guest PA and the clusters they start, where
-    /// the SoC row places them ([`cpu_start`]).
+    /// the SoC row places them (`power_registers::cpu_start`).
     pub cpu_start: Option<(u64, u8)>,
     /// Visible SPMI controllers and the PMUs on them.
     pub spmis: Vec<SpmiController>,
@@ -689,7 +689,7 @@ fn place_coresight(cpu: usize, pairs: &[(u64, u64)]) -> Result<CoreSight, String
 /// devices the engine models, each of which must be `compatible` with its
 /// model. An `/arm-io` child's `reg` is translated through `/arm-io`
 /// `ranges`; the AIC's inputs and dies are those its vectors name
-/// ([`aic_vectors`], [`aic_inputs`]).
+/// (`aic_vectors`, `aic_inputs`).
 pub fn board(tree: &[u8]) -> Result<Board, String> {
     let root = Node::root_exact(tree).ok_or("DeviceTree has no root or is malformed")?;
     let chip_id = root

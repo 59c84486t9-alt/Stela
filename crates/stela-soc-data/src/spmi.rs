@@ -3,8 +3,8 @@
 //! 26A434 mac13j SHA256 5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90:
 //! Gen1 init VA fffffe0009d499c4; Gen2 init 9d49f8c. Both use the same
 //! request/response/interrupt queue bank. Gen1 fault counters instead use
-//! independently mapped reg[2] (init 9d49afc..9b40 and table 82a8f78).
-//! Controller::start reads response vector from interrupts[0] at 9d4cf28
+//! independently mapped `reg[2]` (init 9d49afc..9b40 and table 82a8f78).
+//! Controller::start reads response vector from `interrupts[0]` at 9d4cf28
 //! and queue-depth byte counts at 9d4d230..264. The latter become words
 //! through division by four at 9d52698..69c, not one word per DT byte.
 //!
@@ -16,7 +16,7 @@
 //! - Gen3 (`initHandler` fffffe0009e385f8) keeps Gen2's bank A and fault
 //!   FIFO, moves the six fault latches to B+0x200..0x214 (`clearInterrupt`
 //!   fffffe0009e38c08, table fffffe0008315be8) and the 37 counters to
-//!   B+0x400.. (table fffffe0008315998), and fails without reg[2], whose
+//!   B+0x400.. (table fffffe0008315998), and fails without `reg[2]`, whose
 //!   +0x20 `resetArbiter` (fffffe0009e38800) pulses only after a queue
 //!   reset that left the FIFOs non-empty (`resetQueueBase` fffffe0009e3f6c0).
 //! - Gen4 (`initHandler` fffffe0009e38eac, offsets from the constant pool at
@@ -25,7 +25,7 @@
 //!   bit 31), request A+0x210, response A+0x220, enable/status A+0x400/0x600.
 //!   The fault FIFO is B+0x200 (empty bit 30) with its pop at B+0x220, the
 //!   latches B+0x1200..0x1214 (table fffffe0008316040) and the counters
-//!   B+0x1400.. (table fffffe0008315df0). It also requires reg[2], with the
+//!   B+0x1400.. (table fffffe0008315df0). It also requires `reg[2]`, with the
 //!   same `resetArbiter` (fffffe0009e390ec). `getQueueDepths`
 //!   (fffffe0009e39084) reads both FIFO depths from A+0x48, request words in
 //!   bits 25:16 and response words in bits 9:0, and returns true, so
@@ -113,14 +113,14 @@ impl Profile {
             Self::Gen2 | Self::Gen3 | Self::Gen4 => 0x4000,
         }
     }
-    /// The size of Gen1's separate fault-counter view in reg[2].
+    /// The size of Gen1's separate fault-counter view in `reg[2]`.
     pub const fn counter_bytes(self) -> Option<u64> {
         match self {
             Self::Gen1 => Some(0x78),
             Self::Gen2 | Self::Gen3 | Self::Gen4 => None,
         }
     }
-    /// Does the handler always map reg[2] as a full bank, the arbiter's?
+    /// Does the handler always map `reg[2]` as a full bank, the arbiter's?
     pub const fn arbiter_bank(self) -> bool {
         matches!(self, Self::Gen3 | Self::Gen4)
     }

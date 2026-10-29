@@ -13,7 +13,7 @@ pub const MAX_ENTRIES: usize = 256 * 8;
 
 /// Complete physical bank/update-alias agreement, shared by the AP and PMP.
 /// Both T6000 and T8112 originals publish 16-byte entries and update them
-/// through 8-byte slots; J473's update reg[3] is only 0x4000 bytes. The
+/// through 8-byte slots; J473's update `reg[3]` is only 0x4000 bytes. The
 /// fourth word of a range record remains a separate interrupt resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {

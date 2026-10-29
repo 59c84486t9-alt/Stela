@@ -78,13 +78,13 @@ const SEP_NUB_MODEL: ChildModel = ChildModel {
 /// `/arm-io/ans` properties is missing (0x3dbfeec..0x3dbff40). The IPSW
 /// DeviceTree has none of them, so the boot chain supplies them. Each is a
 /// list of 24-byte entries: register offset, width (4), mask and value.
-/// The command accelerator's offsets are relative to reg[3] + 0x20000. The
-/// others are relative to reg[4], reg[5] and reg[6]
+/// The command accelerator's offsets are relative to `reg[3]` + 0x20000. The
+/// others are relative to `reg[4]`, `reg[5]` and `reg[6]`
 /// (`mapDeviceMemoryWithIndex` 4..6 at 0x3dbf36c..0x3dbf448).
 /// `ApplyTunablesFromData` (0x3dbf914) accepts an empty list without any
 /// access. Emulated die: Stela's choice. The die has no analog or fabric
 /// trim to set, so each list is empty. The ECC and parity shadow lists are
-/// read only when reg[7], reg[8] or `gib-pcie-up` exist, and J473AP has none
+/// read only when `reg[7]`, `reg[8]` or `gib-pcie-up` exist, and J473AP has none
 /// of them. The `tunable-table-bundle` is unrelated: it names the restore
 /// updater's NAND tables, which reach the MSP through tunnel commands
 /// (`AppleNVMeUpdateUC::TunableTableDownload`, selector 14).

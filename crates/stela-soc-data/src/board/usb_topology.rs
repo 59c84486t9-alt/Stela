@@ -29,9 +29,9 @@ const I2C_COMPATIBLES: &[&str] = &["i2c,t8101", "i2c,t6000", "i2c,t6020"];
 
 /// USB DRD families whose nine-view layout is qualified. The original
 /// 26A434 ADTs give M1/T6000
-/// a 0x1800-byte reg[2], versus 0x5800 on M2/T6020 and M3/T8122. In each,
-/// reg[2] begins at reg[0]+0xc000 and reg[8] at reg[0]+0xd000.
-/// Later families move reg[8] or add a tenth view and are not aliases.
+/// a 0x1800-byte `reg[2]`, versus 0x5800 on M2/T6020 and M3/T8122. In each,
+/// `reg[2]` begins at `reg[0]`+0xc000 and `reg[8]` at `reg[0]`+0xd000.
+/// Later families move `reg[8]` or add a tenth view and are not aliases.
 const USB_DRD_LAYOUTS: &[(&str, u64)] = &[
     ("usb-drd,t8103", 0x1800),
     ("usb-drd,t6000", 0x1800),
@@ -130,7 +130,7 @@ fn usb_alias_bytes(node: &Node<'_>) -> Option<u64> {
 }
 
 /// Nine ADT windows, five interrupt inputs and the mapper-selected DMA
-/// stream. Apple reg[2]/reg[8] overlap reg[0]; preserve their physical alias.
+/// stream. Apple `reg[2]`/`reg[8]` overlap `reg[0]`; preserve their physical alias.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsbController {
     pub ranges: [(u64, u64); 9],

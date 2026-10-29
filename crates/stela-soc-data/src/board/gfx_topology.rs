@@ -29,7 +29,7 @@ pub struct GfxController {
     /// The GPU's TTBAT as the boot stage publishes it (`gptbat-ready`,
     /// `ttbat-phys-addr-base` in 16 KiB pages; the loader sets it to
     /// `gpu-region-base`): the MMU is handed off rooted there
-    /// ([`agx::sgx::Sgx::handed_off`]).
+    /// (stateful `Sgx::handed_off`).
     pub ttbat: u64,
     /// The shared TTBR1 window's page-directory page (`gfx-shared-l2-region`,
     /// one page, as SPTM's `uat_bootstrap_parse_dt` requires).

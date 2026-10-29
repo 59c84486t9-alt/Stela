@@ -19,7 +19,7 @@ use rows::SOCS;
 /// ADT's `aic-iack-offset`, as Linux `arch/arm64/boot/dts/apple` places it
 /// (0x8000 in `t8112.dtsi`, 0xc000 in `t600x-die0.dtsi` and
 /// `t602x-die0.dtsi`, 0x40000 in `t8122.dtsi`, `t6030.dtsi`,
-/// `t6031-die0.dtsi` and `t8132.dtsi`) and [`AIC3_EVENT`] states for the
+/// `t6031-die0.dtsi` and `t8132.dtsi`) and [`rows::AIC3_EVENT`] states for the
 /// later SoCs. `dram_base` is where the SoC places DRAM: the constant every
 /// 26A434 iBoot of the SoC writes to `/chosen dram-base` (payload file
 /// offsets: T8103 J274 0x15950 and T8112 J473 0x23904, 0x8_0000_0000; T6000
@@ -36,12 +36,12 @@ use rows::SOCS;
 /// `lockdown` is
 /// the CONTROL offset of the lockdown registers in each PE's `cpu-impl-reg`
 /// and each cluster's `cpm-impl-reg` (`platform::apple::lockdown`), on the
-/// SoCs whose SPTM writes them ([`LOCKDOWN`]); the M4 and later SPTMs write
+/// SoCs whose SPTM writes them ([`rows::LOCKDOWN`]); the M4 and later SPTMs write
 /// none, so their boards map no lockdown block.
 /// `operating_points` is each cluster type's core clocks in MHz, lowest
 /// first, in each [`CoreType`]: the opp tables of Linux
 /// `arch/arm64/boot/dts/apple/t8112.dtsi` (`ecluster_opp`, `pcluster_opp`)
-/// and the other files [`M1_POINTS`] names, including the P states they
+/// and the other files [`rows::M1_POINTS`] names, including the P states they
 /// leave disabled until CPU deep sleep. The highest paces the
 /// cycle counter of Apple's performance monitor (`machine::pmu`), and the
 /// bundle publishes them as iBoot's `voltage-states` tables, which the IPSW
@@ -55,7 +55,7 @@ use rows::SOCS;
 /// (`platform::apple::fuse`): the T8112's 26A434 `ApplePMGR::
 /// readPMGRAONFuseReg` reads `reg[36]`. `cpu_start` is the offset of the
 /// CPU start registers (`platform::apple::cpustart`) from the PMGR node's
-/// `reg[0]` ([`CPU_START_T8112`] and its siblings). Each [`CoreType`] also
+/// `reg[0]` ([`rows::CPU_START_T8112`] and its siblings). Each [`CoreType`] also
 /// holds its cache geometry ([`CoreCaches`]), where known.
 pub(super) struct Soc {
     pub(super) chip_id: u32,
@@ -301,7 +301,7 @@ pub fn operating_points(chip_id: u32) -> Option<Vec<(u8, &'static [u32])>> {
 }
 
 /// The observed core types and their configured or unknown CPU requirements,
-/// for an ApChipID with one row ([`only_row`]). The number of types does not
+/// for an ApChipID with one row (`only_row`). The number of types does not
 /// define the number of physical clusters.
 pub fn core_types(chip_id: u32) -> Option<&'static [CoreType]> {
     Some(only_row(chip_id)?.cores)
@@ -326,7 +326,7 @@ pub fn template_variant(chip_id: u32) -> Option<&'static str> {
 }
 
 /// The `product-soc-name` of the SoC with `chip_id`, for an ApChipID with one
-/// row ([`only_row`]).
+/// row (`only_row`).
 pub fn name(chip_id: u32) -> Option<&'static str> {
     Some(only_row(chip_id)?.name)
 }

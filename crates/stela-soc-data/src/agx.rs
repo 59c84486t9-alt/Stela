@@ -3,7 +3,7 @@
 pub mod generation;
 pub mod registers;
 pub mod uat;
-/// A GPU's identification registers ([`super::generation`] states each
+/// A GPU's identification registers ([`generation`] states each
 /// SoC's values and their sources).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Identity {

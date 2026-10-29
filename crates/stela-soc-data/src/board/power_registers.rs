@@ -336,7 +336,7 @@ fn validate_clusters(reg: &[Option<(u64, u64)>], clusters: &[CpuCluster]) -> Res
 }
 
 /// The CPU start registers' guest PA and the clusters they start, where the
-/// SoC row gives their offset ([`CPU_START_T8112`] and its siblings) from
+/// SoC row gives their offset ([`super::soc::rows::CPU_START_T8112`] and its siblings) from
 /// `reg[0]` of the PMGR node: `/arm-io/pmgr`, or `/arm-io/pmgr-child` where
 /// `/arm-io/pmgr` is the generic `pmgr2,arch` (m1n1 `pmgr.c`
 /// `pmgr_adt_path_offset_trace`; the 26A434 ApplePMGR "Looked up under

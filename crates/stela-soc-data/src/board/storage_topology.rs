@@ -159,7 +159,7 @@ pub(super) fn spi_nor(
 
 /// The AES engine: its block and key-disable register ranges, from
 /// version 5 its DKey range, its `aes-version`, `address-width` and
-/// key-disable layout, its AIC input, and the [`Board::darts`] index and
+/// key-disable layout, its AIC input, and the [`super::Board::darts`] index and
 /// stream of its `iommu-parent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AesEngine {
@@ -708,7 +708,7 @@ mod tests {
                 device: 125
             }]
         );
-        // reg[13] is SPTM's VDMA cache only under nvme-vdma-wa.
+        // `reg[13]` is SPTM's VDMA cache only under nvme-vdma-wa.
         assert_eq!(placed.vdma, None);
         let vdma = flagged(&["nvme-vdma-wa"], 3, 0x8e, 4);
         let placed = ans_controller(
