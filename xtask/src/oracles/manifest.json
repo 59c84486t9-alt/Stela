@@ -85,7 +85,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_acp3x_acp5x_dma_configuration",
-    "source": "crates/stela-drivers/src/audio/acp_i2s.rs",
+    "source": "crates/stela-drivers/src/audio/acp_i2s/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_ACP_I2S_ORACLE"
@@ -115,7 +115,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_cnl_host_done_notification_acknowledgement",
-    "source": "crates/stela-drivers/src/audio/intel_dsp.rs",
+    "source": "crates/stela-drivers/src/audio/intel_dsp/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_INTEL_SOF_ORACLE"
