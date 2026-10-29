@@ -1661,17 +1661,16 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          positions_in_patch = true;
          components = type_components;
       } else if (!control_points) {
+         /* A scalar, or a vector of two lanes or more. */
          LLVMTypeRef type = LLVMTypeOf(param);
-         components = 1;
-         if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
-            components = LLVMGetVectorSize(type);
-            type = LLVMGetElementType(type);
-         }
+         bool vector = LLVMGetTypeKind(type) == LLVMVectorTypeKind;
+         components = vector ? LLVMGetVectorSize(type) : 1;
+         type = vector ? LLVMGetElementType(type) : type;
          unsigned width = LLVMGetTypeKind(type) == LLVMIntegerTypeKind ? LLVMGetIntTypeWidth(type) : 0;
          bool typed = builtin == STELA_AIR_FRONT_FACING ? width == 1 :
                       builtin == STELA_AIR_POINT_COORD ? LLVMGetTypeKind(type) == LLVMFloatTypeKind :
                       width == 16 || width == 32;
-         if (components > lanes || !typed)
+         if (components > lanes || (vector && components < 2) || !typed)
             return fail(t, STELA_AIR_ARGUMENT, "unsupported builtin type at %u", index);
       }
       if (io) {
