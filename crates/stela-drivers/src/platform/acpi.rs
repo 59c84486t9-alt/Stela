@@ -71,6 +71,11 @@ pub struct PciId {
     pub function: u16,
 }
 
+/// Version of the complete Rust/C OSL callback table. Format validation grants
+/// no hardware capability; each callback still requires its actual ownership.
+pub const SERVICES_ABI_VERSION: u32 = 2;
+pub const SERVICES_ABI_BYTES: u32 = core::mem::size_of::<Services>() as u32;
+
 /// Owned C-ABI native service provider. All functions are mandatory.
 ///
 /// # Safety
@@ -101,6 +106,8 @@ pub struct PciId {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Services {
+    pub abi_version: u32,
+    pub abi_bytes: u32,
     pub context: *mut c_void,
     pub root: u64,
     pub capabilities: u64,
@@ -120,7 +127,9 @@ pub struct Services {
     pub remove_interrupt: unsafe extern "C" fn(*mut c_void, u32, Interrupt) -> Status,
     pub thread_id: unsafe extern "C" fn(*mut c_void) -> u64,
     pub execute: unsafe extern "C" fn(*mut c_void, u32, Work, *mut c_void) -> Status,
-    pub drain_work: unsafe extern "C" fn(*mut c_void),
+    /// Complete SCI synchronization and the GPE then Notify entry-boundary
+    /// flushes. Failure reaches a nonreturning C poison/fatal boundary.
+    pub drain_work: unsafe extern "C" fn(*mut c_void) -> Status,
     pub sleep: unsafe extern "C" fn(*mut c_void, u64),
     pub stall: unsafe extern "C" fn(*mut c_void, u32),
     pub read_port: unsafe extern "C" fn(*mut c_void, u64, *mut u32, u32) -> Status,
@@ -138,6 +147,9 @@ pub struct Services {
     /// Mandatory fail-closed kernel fatal path; called when pre-delete callback
     /// quiescence fails. It must never return, unwind, or fabricate completion.
     pub fatal: unsafe extern "C" fn(*mut c_void, Status) -> !,
+    /// Side-effect-free actual-context/role check before C removal starts.
+    /// Success is neither a durable permission nor completion of either flush.
+    pub preflight_wait_events: unsafe extern "C" fn(*mut c_void) -> Status,
 }
 
 #[repr(C)]
@@ -156,6 +168,7 @@ struct RawBuffer {
 unsafe extern "C" {
     fn stela_acpi_start(services: *const Services, hardware: u8) -> Status;
     fn stela_acpi_stop() -> Status;
+    fn stela_acpi_preflight_wait_events() -> Status;
     fn stela_acpi_enable_hardware() -> Status;
     fn stela_acpi_guard_enter(out: *mut *mut c_void, epoch: *mut u64) -> Status;
     fn stela_acpi_guard_leave(guard: *mut c_void);
@@ -235,9 +248,10 @@ unsafe extern "C" {
     fn stela_acpi_layout(field: u32) -> u64;
 }
 const _: () = {
-    assert!(size_of::<Services>() == 280);
-    assert!(core::mem::offset_of!(Services, fatal) == 272);
-    assert!(core::mem::offset_of!(Services, destroy) == 264);
+    assert!(size_of::<Services>() == 296);
+    assert!(core::mem::offset_of!(Services, fatal) == 280);
+    assert!(core::mem::offset_of!(Services, destroy) == 272);
+    assert!(core::mem::offset_of!(Services, preflight_wait_events) == 288);
     assert!(size_of::<RawObject>() == 24);
     assert!(size_of::<RawBuffer>() == 16);
     assert!(size_of::<PciId>() == 8);
@@ -284,14 +298,17 @@ impl Session {
         {
             return Err(ALREADY_EXISTS);
         }
-        if services.root == 0
+        let valid_abi = services.abi_version == SERVICES_ABI_VERSION
+            && services.abi_bytes == SERVICES_ABI_BYTES;
+        if !valid_abi
+            || services.root == 0
             || (mode == Mode::Hardware
                 && services.capabilities & FULL_CAPABILITIES != FULL_CAPABILITIES)
         {
             // SAFETY: ownership transferred by caller; no C state was initialized.
             unsafe { (services.destroy)(services.context) };
             RESERVED.store(false, Ordering::Release);
-            return Err(if services.root == 0 {
+            return Err(if !valid_abi || services.root == 0 {
                 BAD_PARAMETER
             } else {
                 SUPPORT
@@ -1105,6 +1122,9 @@ impl<'a> Handle<'a> {
     /// provider must synchronize external region callbacks before freeing context.
     pub unsafe fn remove_region(self, space: u32, handler: Region) -> Result<(), Error> {
         let guard = self.session.guard()?;
+        // SAFETY: this live namespace lease precedes removal. The provider
+        // checks the real current role without mutating C registration state.
+        checked(unsafe { stela_acpi_preflight_wait_events() })?;
         // SAFETY: covered by this function's own safety contract.
         checked(unsafe { acpi_remove_address_space_handler(self.raw, space, handler) })?;
         // SAFETY: called from process context with no namespace lock held by this thread.
@@ -1210,6 +1230,8 @@ impl Notification<'_> {
         let kind = self
             .context
             .map_or(DEVICE_NOTIFY, |context| unsafe { &*context }.kind);
+        // SAFETY: immediate provider role check precedes the test's real C removal.
+        checked(unsafe { stela_acpi_preflight_wait_events() })?;
         // SAFETY: the actual live node and callback belong to this registration.
         checked(unsafe { acpi_remove_notify_handler(self.handle.raw, kind, notify_trampoline) })?;
         // SAFETY: test process context; drain the real provider work queue.
@@ -1224,6 +1246,9 @@ impl Notification<'_> {
         let kind = unsafe { &*context }.kind;
         let result = (|| {
             let guard = self.handle.session.guard()?;
+            // SAFETY: actual role eligibility is checked before ACPICA removes
+            // this registration. Refusal retains its callback in Session.
+            checked(unsafe { stela_acpi_preflight_wait_events() })?;
             // Only a live namespace lease may pass this node into ACPICA.
             // SAFETY: the namespace guard keeps this node live.
             checked(unsafe {
@@ -1370,6 +1395,9 @@ pub(crate) mod tests {
         destroyed: AtomicBool,
         memory: AtomicU64,
         port_writes: AtomicUsize,
+        preflight_status: AtomicU32,
+        flush_status: AtomicU32,
+        flush_calls: AtomicUsize,
         ledger: Mutex<BTreeMap<usize, usize>>,
     }
     struct TestPlatform {
@@ -1603,11 +1631,18 @@ pub(crate) mod tests {
             .push_back((callback, context as usize));
         0
     }
-    unsafe extern "C" fn drain_work(p: *mut c_void) {
+    unsafe extern "C" fn drain_work(p: *mut c_void) -> Status {
+        // SAFETY: this fixture retains its TestPlatform until core shutdown.
+        let state = unsafe { platform(p) };
+        state.counts.flush_calls.fetch_add(1, Ordering::SeqCst);
+        let failure = state.counts.flush_status.load(Ordering::Acquire);
+        if failure != 0 {
+            return failure;
+        }
         loop {
             let next = unsafe { platform(p) }.work.lock().unwrap().pop_front();
             let Some((callback, context)) = next else {
-                return;
+                return 0;
             };
             unsafe { callback(context as *mut c_void) };
         }
@@ -1696,8 +1731,14 @@ pub(crate) mod tests {
         unsafe { platform(p) }
             .quiescing
             .store(true, Ordering::Release);
-        unsafe { drain_work(p) };
-        0
+        unsafe { drain_work(p) }
+    }
+    unsafe extern "C" fn preflight_wait_events(p: *mut c_void) -> Status {
+        // SAFETY: the singleton fixture owns this live provider context.
+        unsafe { platform(p) }
+            .counts
+            .preflight_status
+            .load(Ordering::Acquire)
     }
     unsafe extern "C" fn destroy(p: *mut c_void) {
         let p = unsafe { Box::from_raw(p.cast::<TestPlatform>()) };
@@ -1705,7 +1746,10 @@ pub(crate) mod tests {
     }
 
     unsafe extern "C" fn fatal(_: *mut c_void, status: Status) -> ! {
-        std::eprintln!("native ACPI pre-delete quiescence fatal: {status:#x}");
+        std::eprintln!("native ACPI callback completion fatal: {status:#x}");
+        // SAFETY: this fatal callback is entered by the same live singleton's C
+        // bridge after it poisons namespace access, before any provider teardown.
+        assert_eq!(unsafe { stela_acpi_namespace_valid() }, 0);
         std::process::exit(86)
     }
     fn checksum(bytes: &mut [u8], offset: usize) {
@@ -1762,6 +1806,8 @@ pub(crate) mod tests {
         .cast();
         (
             Services {
+                abi_version: SERVICES_ABI_VERSION,
+                abi_bytes: SERVICES_ABI_BYTES,
                 context,
                 root: 0x1000,
                 capabilities: 0,
@@ -1797,6 +1843,7 @@ pub(crate) mod tests {
                 quiesce,
                 destroy,
                 fatal,
+                preflight_wait_events,
             },
             counts,
         )
@@ -1949,6 +1996,156 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn service_abi_rejects_wrong_version_or_extent_before_provider_publication() {
+        let _serial = TEST_SERIAL.lock().unwrap();
+        for (version, bytes) in [
+            (SERVICES_ABI_VERSION - 1, SERVICES_ABI_BYTES),
+            (SERVICES_ABI_VERSION, SERVICES_ABI_BYTES - 8),
+        ] {
+            let (mut provider, counts) = fixture();
+            provider.abi_version = version;
+            provider.abi_bytes = bytes;
+            // SAFETY: complete fixture allocation is valid even with deliberately
+            // mismatched format metadata; Rust must retire it without entering C.
+            assert!(matches!(
+                unsafe { Session::start(provider, Mode::InterpreterOnly) },
+                Err(BAD_PARAMETER)
+            ));
+            assert!(counts.destroyed.load(Ordering::Acquire));
+            assert_eq!(counts.allocations.load(Ordering::Acquire), 0);
+            assert_eq!(counts.mappings.load(Ordering::Acquire), 0);
+            let (mut provider, counts) = fixture();
+            provider.abi_version = version;
+            provider.abi_bytes = bytes;
+            // SAFETY: complete current-sized table checks the C format boundary
+            // directly; rejection must leave ownership with this fixture caller.
+            assert_eq!(unsafe { stela_acpi_start(&provider, 0) }, BAD_PARAMETER.0);
+            assert!(!counts.destroyed.load(Ordering::Acquire));
+            // SAFETY: rejected C start did not take this provider allocation.
+            unsafe { (provider.destroy)(provider.context) };
+        }
+    }
+
+    #[test]
+    fn removal_preflight_retains_real_region_and_notification_on_refusal() {
+        let _serial = TEST_SERIAL.lock().unwrap();
+        let (provider, counts) = fixture();
+        // SAFETY: serialized fixture retains firmware and real ACPICA services.
+        let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+        let handle = session.handle("\\_SB.UCSI").unwrap();
+        unsafe extern "C" fn setup(
+            _: *mut c_void,
+            action: u32,
+            context: *mut c_void,
+            output: *mut *mut c_void,
+        ) -> Status {
+            // SAFETY: ACPICA passes a writable context slot; this test keeps its
+            // exact u8 allocation live until actual handler removal succeeds.
+            unsafe {
+                output.write(if action == 0 {
+                    context
+                } else {
+                    ptr::null_mut()
+                })
+            };
+            0
+        }
+        unsafe extern "C" fn read(
+            function: u32,
+            address: u64,
+            width: u32,
+            value: *mut u64,
+            _: *mut c_void,
+            context: *mut c_void,
+        ) -> Status {
+            if function != 0 || address != 0 || width != 8 || context.is_null() {
+                return SUPPORT.0;
+            }
+            // SAFETY: setup published the retained exact u8 allocation and C
+            // provides the output slot for this screened 8-bit read.
+            unsafe { value.write(u64::from(*context.cast::<u8>())) };
+            0
+        }
+        let context = Box::into_raw(Box::new(0xabu8));
+        // SAFETY: callbacks are static and this owned context survives refusal.
+        unsafe {
+            session
+                .root()
+                .install_region(3, read, setup, context.cast())
+        }
+        .unwrap();
+        let observed = Arc::new(AtomicU32::new(0));
+        let retained = observed.clone();
+        let notification = handle
+            .notify(move |value| {
+                retained.store(value, Ordering::Release);
+            })
+            .unwrap();
+        let flushes = counts.flush_calls.load(Ordering::Acquire);
+        counts.preflight_status.store(SUPPORT.0, Ordering::Release);
+        // SAFETY: exact retained registration; failed preflight must not remove it.
+        assert_eq!(
+            unsafe { session.root().remove_region(3, read) },
+            Err(SUPPORT)
+        );
+        assert_eq!(
+            handle.evaluate(Some("ECRD"), &[]),
+            Ok(Some(Value::Integer(0xab)))
+        );
+        assert_eq!(notification.remove(), Err(SUPPORT));
+        assert_eq!(handle.notify(|_| {}).err(), Some(ALREADY_EXISTS));
+        assert_eq!(Arc::strong_count(&observed), 2);
+        assert_eq!(counts.flush_calls.load(Ordering::Acquire), flushes);
+        assert!(session.namespace_available());
+        counts.preflight_status.store(0, Ordering::Release);
+        // SAFETY: same still-registered handler/context, now eligible for removal.
+        unsafe { session.root().remove_region(3, read) }.unwrap();
+        // SAFETY: successful actual removal and completion exclude all borrowers.
+        unsafe { drop(Box::from_raw(context)) };
+        session.shutdown().unwrap();
+        assert_eq!(Arc::strong_count(&observed), 1);
+        assert!(counts.destroyed.load(Ordering::Acquire));
+        assert_eq!(counts.allocations.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn failed_void_event_completion_stops_before_c_returns() {
+        if std::env::var_os("STELA_ACPI_VOID_FLUSH_CHILD").is_some() {
+            let _serial = TEST_SERIAL.lock().unwrap();
+            let (provider, counts) = fixture();
+            // SAFETY: isolated child owns the singleton and valid fixture table.
+            let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+            let notification = session
+                .handle("\\_SB.UCSI")
+                .unwrap()
+                .notify(|_| {})
+                .unwrap();
+            counts.flush_status.store(SUPPORT.0, Ordering::Release);
+            // Real ACPICA Notify removal enters its internal void OSL completion
+            // call. The bridge must stop there, before returning to this Rust frame.
+            let _unexpected = notification.remove();
+            std::eprintln!("FAILED VOID COMPLETION RETURNED");
+            std::process::exit(87);
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "platform::acpi::tests::failed_void_event_completion_stops_before_c_returns",
+                "--nocapture",
+            ])
+            .env("STELA_ACPI_VOID_FLUSH_CHILD", "1")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(86));
+        let stderr = std::string::String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("native ACPI callback completion fatal: 0xf"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("FAILED VOID COMPLETION RETURNED"));
+    }
+
+    #[test]
     fn wake_gpe_checks_interpreted_sleep_packages() {
         let _serial = TEST_SERIAL.lock().unwrap();
         for (count, elements, accepted) in [
@@ -2088,7 +2285,7 @@ pub(crate) mod tests {
                 .unwrap();
             core::mem::forget(notification); // retained callback tests quarantine, not normal removal
             assert_eq!(session.shutdown(), Err(SUPPORT));
-            unsafe { (provider.drain_work)(provider.context) };
+            assert_eq!(unsafe { (provider.drain_work)(provider.context) }, 0);
             assert_eq!(
                 observed.load(Ordering::SeqCst),
                 0x80,
@@ -2133,6 +2330,9 @@ pub(crate) mod tests {
             core::mem::offset_of!(RawObject, length),
             core::mem::offset_of!(RawObject, payload),
             size_of::<ObjectType>(),
+            core::mem::offset_of!(Services, preflight_wait_events),
+            core::mem::offset_of!(Services, context),
+            size_of::<u32>(),
         ];
         for (field, expected) in expected.into_iter().enumerate() {
             assert_eq!(

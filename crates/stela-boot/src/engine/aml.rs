@@ -36,7 +36,10 @@ use core::{
 };
 use stela_drivers::{
     bus::pci::EcamWindow,
-    platform::acpi::{Interrupt, Mode, PciId, Services, Session, Status, Value, Work},
+    platform::acpi::{
+        Interrupt, Mode, PciId, SERVICES_ABI_BYTES, SERVICES_ABI_VERSION, Services, Session,
+        Status, Value, Work,
+    },
 };
 use stela_engine::machine::mmu::placement::Placement;
 
@@ -192,7 +195,9 @@ impl Provider {
         if work {
             // SAFETY: process queue owned by this provider, with no route or
             // queue borrow held across a worker's OSL semaphore waits.
-            unsafe { drain_work(core::ptr::from_ref(self).cast_mut().cast()) };
+            if unsafe { drain_work(core::ptr::from_ref(self).cast_mut().cast()) } != AE_OK {
+                output::fatal("ACPI deferred work completion failed");
+            }
         }
         handled
     }
@@ -470,14 +475,14 @@ unsafe extern "C" fn execute(
     AE_OK
 }
 
-unsafe extern "C" fn drain_work(context: *mut c_void) {
+unsafe extern "C" fn drain_work(context: *mut c_void) -> Status {
     // SAFETY: ACPICA passes the session's provider.
     let provider = unsafe { provider(context) };
     loop {
         let next = provider.work.borrow_mut().pop_front();
         let Some((work, argument)) = next else {
             provider.queued.store(false, Ordering::Release);
-            return;
+            return AE_OK;
         };
         // SAFETY: ACPICA queued this work with its argument.
         unsafe { work(argument as *mut c_void) };
@@ -742,8 +747,18 @@ unsafe extern "C" fn quiesce(context: *mut c_void) -> Status {
         return AE_ERROR;
     }
     // SAFETY: as above.
-    unsafe { drain_work(context) };
-    AE_OK
+    unsafe { drain_work(context) }
+}
+
+/// Immediate eligibility only: this checks the real current continuation and
+/// reserved firmware-role contract before C removes any callback. The current
+/// legacy constructor refuses; it does not acquire permission from an empty FIFO.
+unsafe extern "C" fn preflight_wait_events(context: *mut c_void) -> Status {
+    // SAFETY: Session retains this provider and its actual affine executor.
+    match unsafe { provider(context) }.executor.check_firmware_wait() {
+        Ok(()) => AE_OK,
+        Err(_) => AE_SUPPORT,
+    }
 }
 
 unsafe extern "C" fn destroy(context: *mut c_void) {
@@ -753,7 +768,7 @@ unsafe extern "C" fn destroy(context: *mut c_void) {
 
 unsafe extern "C" fn fatal(_: *mut c_void, status: Status) -> ! {
     output::fatal(&alloc::format!(
-        "ACPI quiescence before a table unload failed: ACPICA status {status:#x}"
+        "ACPI callback completion failed: ACPICA status {status:#x}"
     ))
 }
 
@@ -841,6 +856,8 @@ impl HostAcpi {
         });
         let provider = Box::into_raw(provider);
         let services = Services {
+            abi_version: SERVICES_ABI_VERSION,
+            abi_bytes: SERVICES_ABI_BYTES,
             context: provider.cast(),
             root: rsdp,
             capabilities,
@@ -876,6 +893,7 @@ impl HostAcpi {
             quiesce,
             destroy,
             fatal,
+            preflight_wait_events,
         };
         // SAFETY: every callback keeps the OSL contract above, the provider
         // is the session's, and only this processor runs ACPICA.
@@ -1112,7 +1130,9 @@ impl HostAcpi {
         // SAFETY: run Notify/_Q work queued by device methods on the BSP.
         // A budgeted EC continuation owns only its disabled GPE, allowing
         // unrelated fixed events and GPEs to keep making SCI progress.
-        unsafe { drain_work(self.provider.cast_mut().cast()) };
+        if unsafe { drain_work(self.provider.cast_mut().cast()) } != AE_OK {
+            output::fatal("ACPI deferred work completion failed");
+        }
     }
 
     /// The loaded namespace. Its calls run in the loader root

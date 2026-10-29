@@ -153,16 +153,22 @@ acpi_status stela_acpi_bind_node(acpi_handle candidate, u64 epoch) {
     return status;
 }
 _Static_assert(sizeof(struct allocation) == 32, "allocator alignment");
-_Static_assert(sizeof(struct stela_acpi_services) == 280, "OSL vtable ABI");
-_Static_assert(ACPI_OFFSET(struct stela_acpi_services, destroy) == 264, "OSL callback ABI");
+_Static_assert(sizeof(struct stela_acpi_services) == 296, "OSL vtable ABI");
+_Static_assert(ACPI_OFFSET(struct stela_acpi_services, destroy) == 272, "OSL callback ABI");
 _Static_assert(sizeof(union acpi_object) == 24, "ACPICA object ABI");
 _Static_assert(sizeof(struct acpi_buffer) == 16, "ACPICA buffer ABI");
 _Static_assert(sizeof(struct acpi_pci_id) == 8, "ACPICA PCI ABI");
 _Static_assert(sizeof(acpi_cpu_flags) == 8, "ACPICA IRQ flags ABI");
 #define CTX services.context
+acpi_status stela_acpi_preflight_wait_events(void) {
+    if (!active) return AE_NOT_EXIST;
+    return services.preflight_wait_events(CTX);
+}
 acpi_status stela_acpi_start(const struct stela_acpi_services *input, u8 hardware) {
     if (active) return AE_ALREADY_EXISTS;
-    if (!input || !input->root) return AE_BAD_PARAMETER;
+    if (!input || input->abi_version != STELA_ACPI_SERVICES_ABI_VERSION ||
+        input->abi_bytes != sizeof(*input) || !input->root ||
+        !input->preflight_wait_events) return AE_BAD_PARAMETER;
     if (hardware && (input->capabilities & STELA_ACPI_FULL_CAPABILITIES) != STELA_ACPI_FULL_CAPABILITIES) return AE_SUPPORT;
     memcpy(&services, input, sizeof(services));
     active = 1;
@@ -275,6 +281,9 @@ u64 stela_acpi_layout(u32 field) {
     case 10: return ACPI_OFFSET(union acpi_object, reference.actual_type);
     case 11: return ACPI_OFFSET(union acpi_object, reference.handle);
     case 12: return sizeof(((union acpi_object *)0)->reference.actual_type);
+    case 13: return ACPI_OFFSET(struct stela_acpi_services, preflight_wait_events);
+    case 14: return ACPI_OFFSET(struct stela_acpi_services, context);
+    case 15: return sizeof(((struct stela_acpi_services *)0)->abi_bytes);
     default: return ~0ull;
     }
 }
@@ -326,7 +335,18 @@ acpi_status acpi_os_install_interrupt_handler(u32 irq, acpi_osd_handler handler,
 acpi_status acpi_os_remove_interrupt_handler(u32 irq, acpi_osd_handler handler) { return services.remove_interrupt(CTX, irq, handler); }
 acpi_thread_id acpi_os_get_thread_id(void) { return services.thread_id(CTX); }
 acpi_status acpi_os_execute(acpi_execute_type type, acpi_osd_exec_callback callback, void *context) { return services.execute(CTX, type, callback, context); }
-void acpi_os_wait_events_complete(void) { services.drain_work(CTX); }
+void acpi_os_wait_events_complete(void) {
+    acpi_status status = services.drain_work(CTX);
+    if (ACPI_FAILURE(status)) {
+        /* This void boundary cannot acknowledge failed completion: the core
+         * may free handlers immediately after it returns. Poison all facade
+         * access and stop before any dependent C reclamation can continue. */
+        __atomic_store_n(&namespace_invalid, 1, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&namespace_epoch, 1, __ATOMIC_ACQ_REL);
+        services.fatal(CTX, status);
+        __builtin_trap(); /* Also stop an invalid returning native provider. */
+    }
+}
 void acpi_os_sleep(u64 ms) { services.sleep(CTX, ms); }
 void acpi_os_stall(u32 us) { services.stall(CTX, us); }
 acpi_status acpi_os_read_port(acpi_io_address port, u32 *value, u32 width) { return services.read_port(CTX, port, value, width); }

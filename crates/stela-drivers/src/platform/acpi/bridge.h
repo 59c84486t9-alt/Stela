@@ -4,7 +4,10 @@
 #include "acpi/acpi.h"
 /* Every callback is mandatory, even in interpreter mode. Missing operations must
  * return their real ACPICA error; void callbacks must fulfil their contract. */
+#define STELA_ACPI_SERVICES_ABI_VERSION 2u
 struct stela_acpi_services {
+    u32 abi_version;
+    u32 abi_bytes;
     void *context;
     acpi_physical_address root;
     u64 capabilities;
@@ -24,7 +27,7 @@ struct stela_acpi_services {
     acpi_status (*remove_interrupt)(void *, u32, acpi_osd_handler);
     u64 (*thread_id)(void *);
     acpi_status (*execute)(void *, u32, acpi_osd_exec_callback, void *);
-    void (*drain_work)(void *);
+    acpi_status (*drain_work)(void *);
     void (*sleep)(void *, u64);
     void (*stall)(void *, u32);
     acpi_status (*read_port)(void *, u64, u32 *, u32);
@@ -42,10 +45,13 @@ struct stela_acpi_services {
     acpi_status (*quiesce)(void *);
     void (*destroy)(void *);
     void (*fatal)(void *, acpi_status); /* must not return */
+    /* Immediate actual-role check, before any C handler removal mutation. */
+    acpi_status (*preflight_wait_events)(void *);
 };
 #define STELA_ACPI_FULL_CAPABILITIES 15ull /* SCI, deferred work, regions, IRQ-safe allocation */
 acpi_status stela_acpi_start(const struct stela_acpi_services *, u8);
 acpi_status stela_acpi_stop(void);
+acpi_status stela_acpi_preflight_wait_events(void);
 acpi_status stela_acpi_evaluate(acpi_handle, const char *, union acpi_object *, u32, struct acpi_buffer *);
 acpi_status stela_acpi_walk(const char *, acpi_walk_callback, void *);
 u64 stela_acpi_layout(u32);

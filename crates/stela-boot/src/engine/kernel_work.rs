@@ -356,6 +356,18 @@ impl KernelWork {
             .map(|id| id.get())
             .map_err(Error::Work)
     }
+    /// Check the actual continuation and both OSL flush roles immediately before
+    /// C removal. This neither captures queue boundaries nor synchronizes SCI.
+    pub(super) fn check_firmware_wait(&self) -> Result<(), Error> {
+        let runtime = self.executor.runtime();
+        runtime.current_id().map_err(Error::Work)?;
+        runtime
+            .check_firmware_join(work::FirmwareQueue::Gpe)
+            .map_err(Error::Work)?;
+        runtime
+            .check_firmware_join(work::FirmwareQueue::Notify)
+            .map_err(Error::Work)
+    }
     fn qualify_foreground(&self) -> Result<(), Error> {
         let pointer = self.executor.runtime().get_ref() as *const _ as usize;
         let bounds = self.foreground.clone();
