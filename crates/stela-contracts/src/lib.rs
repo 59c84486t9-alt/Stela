@@ -12,6 +12,7 @@ pub mod dma;
 pub mod identity;
 pub mod interrupt;
 pub mod pauth;
+pub mod processor;
 pub mod tag_storage;
 
 pub use chip::Chip;

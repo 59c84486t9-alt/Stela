@@ -11,7 +11,7 @@ use alloc::{collections::BTreeSet, vec::Vec};
 use stela_contracts::Chip;
 use stela_contracts::adt::Node;
 use stela_contracts::identity::Identity;
-use stela_engine::machine::engine::ProcessorTarget;
+use stela_contracts::processor::ProcessorTarget;
 use stela_soc_data::pmgr::coverage::DomainId;
 
 /// The existing board reader supplies these normalized views in original

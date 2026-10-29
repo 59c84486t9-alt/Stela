@@ -968,8 +968,8 @@ mod tests {
         crate::machine::engine::NativeCode, crate::machine::engine::NativeExit,
         crate::machine::engine::NativeFault, crate::machine::engine::NoDevices,
         crate::machine::engine::ProcessorBinding, crate::machine::engine::ProcessorChange,
-        crate::machine::engine::ProcessorTarget, crate::machine::engine::Regime,
-        crate::machine::engine::tests::board, stela_contracts::identity::Identity,
+        crate::machine::engine::Regime, crate::machine::engine::tests::board,
+        stela_contracts::identity::Identity, stela_contracts::processor::ProcessorTarget,
     };
 
     #[derive(Default)]

@@ -4,8 +4,8 @@ use crate::machine::soc::ProcessorAssociation;
 use crate::machine::soc::assigned::PlanIdentity;
 use crate::machine::soc::assigned::PlannedPe;
 use stela_contracts::identity::Identity;
+use stela_contracts::processor::ProcessorTarget;
 use stela_engine::machine::engine::ProcessorChange;
-use stela_engine::machine::engine::ProcessorTarget;
 use stela_engine::machine::engine::Processors;
 use {crate::platform::apple::pmgr::DomainTransition, stela_soc_data::pmgr::coverage::DomainId};
 

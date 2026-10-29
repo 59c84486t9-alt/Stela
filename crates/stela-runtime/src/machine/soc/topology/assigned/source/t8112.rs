@@ -4,7 +4,7 @@
 //! writers2b75078/2b74b40, MPIDR consumer2b81fb4, vtable13500c0/13500c8).
 //! This view supplies neither initial PS state nor a lifecycle/executor owner.
 use super::*;
-use stela_engine::machine::engine::ProcessorTarget;
+use stela_contracts::processor::ProcessorTarget;
 
 impl<'a> BspSource<'a> {
     /// Retains the full original graph but exposes only the selected source PE

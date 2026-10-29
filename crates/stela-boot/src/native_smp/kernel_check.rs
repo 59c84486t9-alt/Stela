@@ -318,7 +318,7 @@ pub(crate) unsafe fn check(
             processor_power: &(0..cores)
                 .map(|pe| engine::ProcessorBinding {
                     domain: 1 + pe as u64,
-                    target: engine::ProcessorTarget::Core { pe },
+                    target: stela_contracts::processor::ProcessorTarget::Core { pe },
                     initial: machine::apple::memory_resources::LifecycleState {
                         powered: true,
                         clocked: true,

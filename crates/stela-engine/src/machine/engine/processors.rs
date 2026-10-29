@@ -48,9 +48,10 @@ use crate::machine::{
 };
 use alloc::{boxed::Box, vec::Vec};
 pub use retained::{
-    PreparedProcessorPower, ProcessorBinding, ProcessorChange, ProcessorPowerError,
-    ProcessorTarget, Processors,
+    PreparedProcessorPower, ProcessorBinding, ProcessorChange, ProcessorPowerError, Processors,
 };
+#[cfg(test)]
+use stela_contracts::processor::ProcessorTarget;
 use transaction::NativeProcessorState;
 pub use transaction::{ProcessorWrite, SettledProcessorWrite};
 

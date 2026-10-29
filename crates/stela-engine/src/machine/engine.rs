@@ -69,7 +69,7 @@ pub use prepare::{Description, Preparation, Prepared, Refused, window};
 pub use processors::publication;
 pub use processors::{
     PeerState, PreparedProcessorPower, ProcessorBinding, ProcessorChange, ProcessorPowerError,
-    ProcessorTarget, ProcessorWrite, Processors, SettledProcessorWrite,
+    ProcessorWrite, Processors, SettledProcessorWrite,
 };
 pub use recovery::{NativeFailure, NativeFailureReason, SourceRecord, UnsettledChain};
 pub use shared_memory::{

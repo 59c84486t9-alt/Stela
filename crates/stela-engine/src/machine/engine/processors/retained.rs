@@ -2,23 +2,7 @@
 //! A caller must supply the positively qualified physical domain and exact PE
 //! membership. Neither record names, byte 2 nor MPIDR core-type bits select it.
 use alloc::{collections::BTreeMap, vec, vec::Vec};
-use stela_contracts::bus::LifecycleState;
-
-/// An explicitly qualified CPU owner. A physical cluster can mix core types.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProcessorTarget {
-    Core { pe: usize },
-    Cluster { members: Vec<usize> },
-}
-
-impl ProcessorTarget {
-    fn members(&self) -> &[usize] {
-        match self {
-            Self::Core { pe } => core::slice::from_ref(pe),
-            Self::Cluster { members } => members,
-        }
-    }
-}
+use stela_contracts::{bus::LifecycleState, processor::ProcessorTarget};
 
 /// Original domain identity and initial state supplied by the board. This API
 /// establishes neither the firmware handoff image nor its hardware mapping.

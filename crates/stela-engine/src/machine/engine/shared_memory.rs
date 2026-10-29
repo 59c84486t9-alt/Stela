@@ -639,7 +639,8 @@ mod tests {
     fn clock_domain(
         machine: &mut Machine<FakeHost, NoDevices>,
     ) -> stela_contracts::bus::LifecycleState {
-        use super::super::{ProcessorBinding, ProcessorTarget};
+        use super::super::ProcessorBinding;
+        use stela_contracts::processor::ProcessorTarget;
         let active = stela_contracts::bus::LifecycleState {
             powered: true,
             clocked: true,

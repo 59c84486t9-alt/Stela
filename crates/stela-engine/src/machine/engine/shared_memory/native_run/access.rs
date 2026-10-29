@@ -422,7 +422,7 @@ mod tests {
             machine
                 .bind_processor_power(&[engine::ProcessorBinding {
                     domain: 1,
-                    target: engine::ProcessorTarget::Core { pe: 0 },
+                    target: stela_contracts::processor::ProcessorTarget::Core { pe: 0 },
                     initial: stela_contracts::bus::LifecycleState {
                         powered: true,
                         clocked: true,
