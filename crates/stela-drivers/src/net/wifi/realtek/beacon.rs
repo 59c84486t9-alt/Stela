@@ -9,7 +9,7 @@ use super::{
 };
 use crate::bus::dma::{
     mapping::{Direction, DmaDomain, DmaError, DmaMapping},
-    memory::{CacheAttribute, CpuMapping, MemoryError, PageSource},
+    memory::{CpuMapping, MemoryError, PageSource},
 };
 use alloc::sync::Arc;
 use core::sync::atomic::{Ordering, fence};
@@ -94,9 +94,9 @@ impl Allocation {
         bytes: usize,
         direction: Direction,
     ) -> Result<Self, Error> {
-        let pages = source.allocate(bytes, 4096, CacheAttribute::WriteBack)?;
-        let cpu = pages.cpu_mapping(CacheAttribute::WriteBack)?;
-        let dma = DmaMapping::map(domain, pages, direction, u32::MAX.into())?;
+        let (cpu, dma) = crate::net::wifi::allocation::allocate_32bit::<Error>(
+            source, domain, bytes, direction,
+        )?;
         Ok(Self {
             cpu,
             dma,
@@ -370,7 +370,7 @@ pub(super) mod tests {
     use super::*;
     use crate::bus::dma::{
         mapping::DomainMapping,
-        memory::{PageBacking, PinnedPages},
+        memory::{CacheAttribute, PageBacking, PinnedPages},
     };
     use alloc::{
         alloc::{alloc_zeroed, dealloc},

@@ -8,7 +8,7 @@
 use crate::bus::{
     dma::{
         mapping::{Direction, DmaDomain, DmaError, DmaMapping},
-        memory::{CacheAttribute, CpuMapping, MemoryError, PageSource},
+        memory::{CpuMapping, MemoryError, PageSource},
     },
     mmio::Mmio,
 };
@@ -137,9 +137,9 @@ impl Allocation {
     ) -> Result<Self, Error> {
         // The unsafe installer requires actual hardware-coherent WB DMA for
         // this requester, with NoSnoop/ATS disabled. WB alone proves nothing.
-        let pages = source.allocate(bytes, 4096, CacheAttribute::WriteBack)?;
-        let cpu = pages.cpu_mapping(CacheAttribute::WriteBack)?;
-        let dma = DmaMapping::map(domain, pages, direction, u32::MAX.into())?;
+        let (cpu, dma) = crate::net::wifi::allocation::allocate_32bit::<Error>(
+            source, domain, bytes, direction,
+        )?;
         Ok(Self {
             cpu,
             dma,
@@ -409,7 +409,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::bus::dma::{
         mapping::DomainMapping,
-        memory::{PageBacking, PinnedPages},
+        memory::{CacheAttribute, PageBacking, PinnedPages},
     };
     use alloc::{
         alloc::{alloc_zeroed, dealloc},

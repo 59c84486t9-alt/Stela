@@ -6,6 +6,7 @@
 //! carrier. Station management and scanning require actual vendor commands
 //! and completion/retirement. The OS owns credentials and WPA authentication.
 
+mod allocation;
 pub mod frame;
 pub mod intel;
 pub mod mediatek;
