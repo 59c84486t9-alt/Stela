@@ -5,6 +5,9 @@
 //! of the connection, and a range's by Content-Length alone. Interim 1xx
 //! responses are skipped; any other non-2xx status is an error. Redirects
 //! and other transfer codings are refused.
+mod url;
+pub use url::{Scheme, Url, UrlError};
+
 use super::NetError;
 use alloc::{format, string::String, vec::Vec};
 
