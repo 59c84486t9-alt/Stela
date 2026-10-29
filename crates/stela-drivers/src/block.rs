@@ -662,6 +662,9 @@ pub struct Submission {
     failed: Option<BlockError>,
 }
 
+/// New commands admitted by one polling call, including synchronous execution.
+const POLL_ADMISSIONS: usize = 64;
+
 impl Submission {
     pub fn new(request: Request, identity: &Identity) -> Result<Self, BlockError> {
         let plan = Plan::new(request, identity)?;
@@ -702,6 +705,10 @@ impl Submission {
     /// start those that may run; the request's result once every command
     /// has completed. A failure starts no more commands and ends the
     /// request once the running ones have completed.
+    ///
+    /// Admit at most 64 new commands per call, respecting a queued device's
+    /// depth and retaining at most 64 tags. Completion collection and an
+    /// entered synchronous execution may take longer than the caller's slice.
     pub fn poll(&mut self, device: &mut (impl BlockDevice + ?Sized)) -> Option<Finished> {
         let mut index = 0;
         while index < self.running.len() {
@@ -713,7 +720,10 @@ impl Submission {
             self.running.swap_remove(index);
             self.completed(offset, result);
         }
-        while self.failed.is_none() {
+        let depth = device.depth();
+        let capacity = depth.min(POLL_ADMISSIONS);
+        let mut admitted = 0;
+        while self.failed.is_none() && admitted < POLL_ADMISSIONS {
             let Some((_, command)) = self.commands.peek() else {
                 break;
             };
@@ -721,16 +731,21 @@ impl Submission {
             if (flush && !self.running.is_empty()) || self.running.iter().any(|run| run.2) {
                 break;
             }
-            if device.depth() == 0 {
+            if depth == 0 {
+                if !self.running.is_empty() {
+                    break;
+                }
                 let (offset, command) = self.commands.next().unwrap();
+                admitted += 1;
                 let result = device.execute(command);
                 self.completed(offset, result);
                 continue;
             }
-            if !device.room() {
+            if self.running.len() >= capacity || !device.room() {
                 break;
             }
             let (offset, command) = self.commands.next().unwrap();
+            admitted += 1;
             match device.start(command) {
                 Ok(tag) => self.running.push((tag, offset, flush)),
                 Err(error) => self.failed = Some(error),
@@ -1965,6 +1980,7 @@ impl BlockDevice for RamDisk {
 #[cfg(test)]
 mod tests {
     extern crate std;
+    mod polling;
     use super::*;
     use alloc::rc::Rc;
     use core::cell::Cell;
