@@ -8,7 +8,7 @@
 //! AX88772 original/A/B vendor protocol with acknowledged MII ownership.
 //! Only identified embedded ASIX PHYs are initialized. External PHY boards
 //! require their own vendor driver; USB identities alone never establish one.
-use super::{Control, request};
+use super::{Control, RegisterData, RegisterRequest, request};
 use crate::{block::BlockError, net::Mac};
 use alloc::vec::Vec;
 pub(super) mod framing;
@@ -40,12 +40,12 @@ impl<C: Control> Chip<C> {
         request(
             &mut self.io,
             &mut self.accessible,
-            command,
-            value,
-            index,
-            &[],
-            n,
-            true,
+            RegisterRequest {
+                command,
+                value,
+                index,
+                data: RegisterData::Read(n),
+            },
         )
     }
     fn write(
@@ -58,12 +58,12 @@ impl<C: Control> Chip<C> {
         request(
             &mut self.io,
             &mut self.accessible,
-            command,
-            value,
-            index,
-            data,
-            data.len(),
-            false,
+            RegisterRequest {
+                command,
+                value,
+                index,
+                data: RegisterData::Write(data),
+            },
         )
         .map(|_| ())
     }

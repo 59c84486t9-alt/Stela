@@ -19,21 +19,35 @@ mod registers;
 pub(super) use identity::{Identity, identify};
 use registers::*;
 
-/// Exact endpoint-zero transfers shared by both ASIX register protocols.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "These are the USB control setup fields and bounded data length/direction plus the current device-access guard"
-)]
-fn request<C: Control>(
-    io: &mut C,
-    accessible: &mut bool,
+/// One register operation's setup fields and its endpoint-zero data stage.
+struct RegisterRequest<'a> {
     command: u8,
     value: u16,
     index: u16,
-    data: &[u8],
-    length: usize,
-    read: bool,
+    data: RegisterData<'a>,
+}
+
+enum RegisterData<'a> {
+    Read(usize),
+    Write(&'a [u8]),
+}
+
+/// Exact endpoint-zero transfers shared by both ASIX register protocols.
+fn request<C: Control>(
+    io: &mut C,
+    accessible: &mut bool,
+    operation: RegisterRequest<'_>,
 ) -> Result<Vec<u8>, BlockError> {
+    let RegisterRequest {
+        command,
+        value,
+        index,
+        data,
+    } = operation;
+    let (data, length, read) = match data {
+        RegisterData::Read(length) => (&[][..], length, true),
+        RegisterData::Write(data) => (data, data.len(), false),
+    };
     if !*accessible {
         return Err(BlockError::Unsupported("ASIX register access poisoned"));
     }
@@ -67,25 +81,8 @@ pub(super) struct Chip<C> {
 }
 
 impl<C: Control> Chip<C> {
-    fn request(
-        &mut self,
-        command: u8,
-        value: u16,
-        index: u16,
-        data: &[u8],
-        length: usize,
-        read: bool,
-    ) -> Result<Vec<u8>, BlockError> {
-        request(
-            &mut self.io,
-            &mut self.accessible,
-            command,
-            value,
-            index,
-            data,
-            length,
-            read,
-        )
+    fn request(&mut self, operation: RegisterRequest<'_>) -> Result<Vec<u8>, BlockError> {
+        request(&mut self.io, &mut self.accessible, operation)
     }
 
     fn read(
@@ -95,7 +92,12 @@ impl<C: Control> Chip<C> {
         index: u16,
         length: usize,
     ) -> Result<Vec<u8>, BlockError> {
-        self.request(command, value, index, &[], length, true)
+        self.request(RegisterRequest {
+            command,
+            value,
+            index,
+            data: RegisterData::Read(length),
+        })
     }
     fn write(
         &mut self,
@@ -104,8 +106,13 @@ impl<C: Control> Chip<C> {
         index: u16,
         data: &[u8],
     ) -> Result<(), BlockError> {
-        self.request(command, value, index, data, data.len(), false)
-            .map(|_| ())
+        self.request(RegisterRequest {
+            command,
+            value,
+            index,
+            data: RegisterData::Write(data),
+        })
+        .map(|_| ())
     }
     fn mac_read(&mut self, address: u16, width: usize) -> Result<u16, BlockError> {
         let bytes = self.read(AX_ACCESS_MAC, address, width as u16, width)?;
