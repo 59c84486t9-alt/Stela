@@ -4,7 +4,10 @@ use crate::cpu::msr;
 use alloc::vec::Vec;
 mod active;
 pub(crate) use active::{ActivatedTables, RootError};
-use core::arch::{asm, naked_asm};
+use core::{
+    arch::{asm, naked_asm},
+    marker::PhantomData,
+};
 
 use stela_boot_core::paging_controls as controls;
 
@@ -39,12 +42,20 @@ type Table = [u64; ENTRIES];
 /// Four-level identity tables under construction. Every nonleaf entry is
 /// supervisor RW, as the runtime's frame arenas require of their path.
 pub struct Tables {
-    root: *mut Table,
+    root: u64,
     /// Exact allocations of this builder, not reconstructed pointer metadata.
-    pages: Vec<*mut Table>,
+    pages: Vec<AllocatedTablePage>,
+    _local: PhantomData<*mut ()>,
 }
 
-fn new_table() -> Result<*mut Table, &'static str> {
+/// One successful UEFI allocation retained as LOADER_DATA for this boot.
+/// This non-Clone private owner is minted only by new_table's real allocation;
+/// its internal physical identifier is not itself a construction capability.
+struct AllocatedTablePage {
+    physical: u64,
+}
+
+fn new_table() -> Result<AllocatedTablePage, &'static str> {
     let page = uefi::boot::allocate_pages(
         uefi::boot::AllocateType::AnyPages,
         uefi::boot::MemoryType::LOADER_DATA,
@@ -54,7 +65,9 @@ fn new_table() -> Result<*mut Table, &'static str> {
     let table = page.as_ptr().cast::<Table>();
     // SAFETY: a fresh page owned by Stela for the rest of the boot.
     unsafe { table.write_bytes(0, 1) };
-    Ok(table)
+    Ok(AllocatedTablePage {
+        physical: table as u64,
+    })
 }
 
 impl Tables {
@@ -63,22 +76,27 @@ impl Tables {
         pages
             .try_reserve_exact(1)
             .map_err(|_| "page-table catalog allocation failed")?;
-        let root = new_table()?;
-        pages.push(root);
-        Ok(Self { root, pages })
+        let allocation = new_table()?;
+        let root = allocation.physical;
+        pages.push(allocation);
+        Ok(Self {
+            root,
+            pages,
+            _local: PhantomData,
+        })
     }
 
     pub fn root(&self) -> u64 {
-        self.root as u64
+        self.root
     }
 
     /// The child table under `table[index]`, created when absent.
-    fn child(&mut self, table: *mut Table, index: usize) -> Result<*mut Table, &'static str> {
-        if index >= ENTRIES || !self.pages.contains(&table) {
+    fn child(&mut self, table: u64, index: usize) -> Result<u64, &'static str> {
+        if index >= ENTRIES || !self.pages.iter().any(|page| page.physical == table) {
             return Err("foreign page-table frame");
         }
         // SAFETY: `table` is one of this builder's live pages.
-        let entry = unsafe { &mut (*table)[index] };
+        let entry = unsafe { &mut (*(table as *mut Table))[index] };
         if *entry & LARGE != 0 {
             return Err("2 MiB chunk mapped twice");
         }
@@ -86,12 +104,13 @@ impl Tables {
             self.pages
                 .try_reserve(1)
                 .map_err(|_| "page-table catalog allocation failed")?;
-            let child = new_table()?;
-            self.pages.push(child);
-            *entry = child as u64 | PRESENT | WRITABLE;
+            let allocation = new_table()?;
+            let physical = allocation.physical;
+            self.pages.push(allocation);
+            *entry = physical | PRESENT | WRITABLE;
         }
-        let child = (*entry & ADDRESS) as *mut Table;
-        if !self.pages.contains(&child) {
+        let child = *entry & ADDRESS;
+        if !self.pages.iter().any(|page| page.physical == child) {
             return Err("page-table child is not owned by this builder");
         }
         Ok(child)
@@ -102,7 +121,7 @@ impl Tables {
         let pointers = self.child(self.root, (address >> 39) & (ENTRIES - 1))?;
         let directory = self.child(pointers, (address >> 30) & (ENTRIES - 1))?;
         // SAFETY: the directory is one of this builder's live pages.
-        Ok(unsafe { &raw mut (*directory)[(address >> 21) & (ENTRIES - 1)] })
+        Ok(unsafe { &raw mut (*(directory as *mut Table))[(address >> 21) & (ENTRIES - 1)] })
     }
 
     /// Map the 2 MiB chunk at `address` as one RW+NX page.
@@ -129,9 +148,10 @@ impl Tables {
             self.pages
                 .try_reserve(1)
                 .map_err(|_| "page-table catalog allocation failed")?;
-            let child = new_table()?;
-            self.pages.push(child);
-            *entry = child as u64 | PRESENT | WRITABLE;
+            let allocation = new_table()?;
+            let physical = allocation.physical;
+            self.pages.push(allocation);
+            *entry = physical | PRESENT | WRITABLE;
         }
         Ok(())
     }
@@ -159,13 +179,14 @@ impl Tables {
                     self.small(chunk)?;
                 }
                 // SAFETY: the entry now names one of this builder's tables.
-                let table = unsafe { (*entry & ADDRESS) as *mut Table };
-                if !self.pages.contains(&table) {
+                let table = unsafe { *entry & ADDRESS };
+                if !self.pages.iter().any(|page| page.physical == table) {
                     return Err("device table is not owned");
                 }
                 for page in (chunk.max(start)..(chunk + LARGE_PAGE).min(end)).step_by(PAGE) {
                     // SAFETY: as above.
-                    let slot = unsafe { &mut (*table)[(page >> 12) & (ENTRIES - 1)] };
+                    let slot =
+                        unsafe { &mut (*(table as *mut Table))[(page >> 12) & (ENTRIES - 1)] };
                     if *slot != 0 && *slot & !ADDRESS != DEVICE {
                         return Err("device registers overlap mapped RAM");
                     }
@@ -185,16 +206,16 @@ impl Tables {
             if *entry & LARGE != 0 || *entry == 0 {
                 return Err("page outside a 4 KiB chunk");
             }
-            let table = (*entry & ADDRESS) as *mut Table;
-            if !self.pages.contains(&table) {
+            let table = *entry & ADDRESS;
+            if !self.pages.iter().any(|page| page.physical == table) {
                 return Err("leaf table is not owned");
             }
-            (*table)[(address >> 12) & (ENTRIES - 1)] = address as u64 | rights;
+            (*(table as *mut Table))[(address >> 12) & (ENTRIES - 1)] = address as u64 | rights;
         }
         Ok(())
     }
     fn read_owned(&self, table: u64, index: usize) -> Option<u64> {
-        if index >= ENTRIES || !self.pages.iter().any(|page| *page as u64 == table) {
+        if index >= ENTRIES || !self.pages.iter().any(|page| page.physical == table) {
             return None;
         }
         // SAFETY: exact original allocation of this retained builder; caller
@@ -217,7 +238,54 @@ impl Tables {
     }
     fn validate_table_aliases(&self) -> Result<(), RootError> {
         for page in &self.pages {
-            let physical = *page as u64;
+            let physical = page.physical;
+            let leaf = self
+                .observe(physical)
+                .map_err(RootError::Traversal)?
+                .ok_or(RootError::AliasMissing { physical })?;
+            if leaf.physical != physical || !leaf.writable || leaf.user {
+                return Err(RootError::AliasMismatch { physical });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Retained actual allocations, moved out of the consumed builder. Numeric
+/// table roots supplied by a caller cannot construct this private owner.
+struct FrameCatalog {
+    root: u64,
+    pages: Vec<AllocatedTablePage>,
+}
+impl FrameCatalog {
+    fn from_builder(tables: Tables) -> Self {
+        Self {
+            root: tables.root,
+            pages: tables.pages,
+        }
+    }
+    fn read_owned(&self, table: u64, index: usize) -> Option<u64> {
+        if index >= ENTRIES || !self.pages.iter().any(|page| page.physical == table) {
+            return None;
+        }
+        // SAFETY: this catalog retains the exact original allocated frame;
+        // callers establish actual CPU/current-root lifetime before access.
+        Some(unsafe { (table as *const u64).add(index).read_volatile() })
+    }
+    fn observe(
+        &self,
+        address: u64,
+    ) -> Result<
+        Option<stela_boot_core::guarded_stacks::mappings::Observation>,
+        stela_boot_core::guarded_stacks::mappings::Error,
+    > {
+        stela_boot_core::guarded_stacks::mappings::observe(address, self.root, 4, |table, index| {
+            self.read_owned(table, index)
+        })
+    }
+    fn validate_table_aliases(&self) -> Result<(), RootError> {
+        for page in &self.pages {
+            let physical = page.physical;
             let leaf = self
                 .observe(physical)
                 .map_err(RootError::Traversal)?

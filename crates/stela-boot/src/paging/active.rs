@@ -2,12 +2,12 @@
 //! pages and CPU/root/control observations. It supplies no controller, ECAM,
 //! reset, cache-policy or hardware-service grant by itself.
 use super::*;
-use alloc::rc::Rc;
+use alloc::sync::Arc;
 use core::{
     arch::x86_64::{__cpuid, __cpuid_count},
-    cell::Cell,
     fmt,
     marker::PhantomData,
+    sync::atomic::{AtomicBool, Ordering},
 };
 use stela_boot_core::guarded_stacks::mappings;
 
@@ -152,20 +152,20 @@ impl Context {
 /// One real builder after successful native activation. Its fields/constructor
 /// are private; root numbers or Handoff records cannot instantiate this owner.
 pub(crate) struct RetainedRoot {
-    tables: Tables,
+    tables: FrameCatalog,
     context: Context,
-    closed: Cell<bool>,
+    closed: AtomicBool,
 }
 impl RetainedRoot {
     pub(crate) fn check_current(&self) -> Result<(), RootError> {
-        if self.closed.get() {
+        if self.closed.load(Ordering::Acquire) {
             return Err(RootError::Closed);
         }
         match self.context.check() {
             Err(error @ (RootError::RootChanged | RootError::ControlsChanged)) => {
                 // Returning to an old CR3/control tuple cannot revive an owner
                 // whose uninterrupted context lifetime has already ended.
-                self.closed.set(true);
+                self.closed.store(true, Ordering::Release);
                 Err(error)
             }
             Ok(()) => self.tables.validate_table_aliases(),
@@ -178,7 +178,7 @@ impl RetainedRoot {
 /// pins; carrying this value does not authorize arbitrary MMIO or configuration.
 #[must_use = "retain the actual activated table owner through every native consumer"]
 pub(crate) struct ActivatedTables {
-    root: Rc<RetainedRoot>,
+    root: Arc<RetainedRoot>,
     _local: PhantomData<*mut ()>,
 }
 impl ActivatedTables {
@@ -189,10 +189,10 @@ impl ActivatedTables {
             return Err(RootError::NotActivated);
         }
         tables.validate_table_aliases()?;
-        let root = Rc::new(RetainedRoot {
-            tables,
+        let root = Arc::new(RetainedRoot {
+            tables: FrameCatalog::from_builder(tables),
             context,
-            closed: Cell::new(false),
+            closed: AtomicBool::new(false),
         });
         root.check_current()?;
         // Actual CR3 still reaches these pages after the lexical primary owner
