@@ -114,8 +114,11 @@ pub struct SamplerInfo {
     pub reduction_mode: SamplerReductionMode,
 }
 
-/// NIR the compiler registered with the backend, which hands it to the
-/// driver's shader compiler in place of SPIR-V.
+/// NIR the compiler built: the address of a `nir_shader` whose entry point is
+/// `main`. The backend hands it to the driver's shader compiler in place of
+/// SPIR-V; the compiler owns it until [`Compiler::release`].
+///
+/// [`Compiler::release`]: crate::gpu::metal::shader::Compiler::release
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ShaderCode(pub u64);
 

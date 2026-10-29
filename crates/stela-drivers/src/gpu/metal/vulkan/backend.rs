@@ -4,10 +4,10 @@
 //! driver (NVK for NVIDIA): one `VkDevice` with the extensions and features
 //! [`requirements`] lists, one universal queue, the bindless descriptor set
 //! of [`binding`](crate::gpu::metal::binding) and the single pipeline layout
-//! every pipeline uses. Shader code arrives as NIR handles the compiler
-//! registered, which the backend hands to the driver's internal NIR entry
-//! instead of SPIR-V. Each method is one Vulkan call or a fixed sequence of
-//! them; failures map to [`Error::OutOfMemory`] or [`Error::DeviceLost`].
+//! every pipeline uses. Shader code arrives as NIR the compiler built, which
+//! the backend hands to the driver's internal NIR entry instead of SPIR-V.
+//! Each method is one Vulkan call or a fixed sequence of them; failures map
+//! to [`Error::OutOfMemory`] or [`Error::DeviceLost`].
 //!
 //! [`Error::OutOfMemory`]: crate::gpu::metal::error::Error::OutOfMemory
 //! [`Error::DeviceLost`]: crate::gpu::metal::error::Error::DeviceLost

@@ -18,12 +18,42 @@ use crate::gpu::metal::{
 };
 use alloc::vec::Vec;
 use ash::vk;
+use core::ffi::c_void;
 
 /// `DRM_FORMAT_MOD_LINEAR`.
 const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 
 /// The entry point every compiled stage exports.
 pub(super) const ENTRY_POINT: &core::ffi::CStr = c"main";
+
+/// Mesa's `VkPipelineShaderStageNirCreateInfoMESA`
+/// (`src/vulkan/util/vk_internal_exts.h`). A stage without a module takes
+/// its NIR from this structure in place of SPIR-V; Mesa's runtime clones
+/// the NIR, so the compiler keeps ownership.
+#[repr(C)]
+pub(super) struct NirStage {
+    s_type: vk::StructureType,
+    p_next: *const c_void,
+    nir: *const c_void,
+}
+
+impl NirStage {
+    /// `VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_NIR_CREATE_INFO_MESA`.
+    pub(super) const STRUCTURE_TYPE: vk::StructureType = vk::StructureType::from_raw(1_000_290_001);
+
+    pub(super) fn new(code: ShaderCode) -> Self {
+        Self {
+            s_type: Self::STRUCTURE_TYPE,
+            p_next: core::ptr::null(),
+            nir: code.0 as usize as *const c_void,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn nir(&self) -> u64 {
+        self.nir as usize as u64
+    }
+}
 
 pub(super) fn format(format: Format) -> vk::Format {
     vk::Format::from_raw(format.raw() as i32)
@@ -257,11 +287,12 @@ pub(super) fn sampler<T>(
     build(&create)
 }
 
-fn stage(stage: ShaderStages, code: ShaderCode) -> vk::PipelineShaderStageCreateInfo<'static> {
-    vk::PipelineShaderStageCreateInfo::default()
+fn stage(stage: ShaderStages, nir: &NirStage) -> vk::PipelineShaderStageCreateInfo<'_> {
+    let mut info = vk::PipelineShaderStageCreateInfo::default()
         .stage(vk::ShaderStageFlags::from_raw(stage.bits()))
-        .module(handle(code.0))
-        .name(ENTRY_POINT)
+        .name(ENTRY_POINT);
+    info.p_next = (nir as *const NirStage).cast();
+    info
 }
 
 pub(super) fn compute_pipeline<T>(
@@ -271,7 +302,8 @@ pub(super) fn compute_pipeline<T>(
 ) -> Result<T> {
     let mut subgroup = vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo::default()
         .required_subgroup_size(info.required_subgroup_size);
-    let mut stage = stage(ShaderStages::COMPUTE, info.code);
+    let nir = NirStage::new(info.code);
+    let mut stage = stage(ShaderStages::COMPUTE, &nir);
     if info.full_subgroups {
         stage = stage.flags(vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS);
     }
@@ -309,10 +341,16 @@ pub(super) fn graphics_pipeline<T>(
     layout: vk::PipelineLayout,
     build: impl FnOnce(&vk::GraphicsPipelineCreateInfo<'_>) -> Result<T>,
 ) -> Result<T> {
+    let nirs: Vec<_> = info
+        .stages
+        .iter()
+        .map(|&(_, code)| NirStage::new(code))
+        .collect();
     let stages: Vec<_> = info
         .stages
         .iter()
-        .map(|&(shader, code)| stage(shader, code))
+        .zip(&nirs)
+        .map(|(&(shader, _), nir)| stage(shader, nir))
         .collect();
     let mesh = info
         .stages

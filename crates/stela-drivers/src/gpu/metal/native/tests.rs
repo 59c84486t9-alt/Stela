@@ -234,7 +234,13 @@ fn mesh_pipelines_have_no_vertex_input() {
         // SAFETY: the stage array has two entries.
         let stage = unsafe { &*create.p_stages };
         assert_eq!(stage.p_name, objects::ENTRY_POINT.as_ptr());
-        assert_eq!(stage.module, vk::Handle::from_raw(1));
+        assert!(stage.module == vk::ShaderModule::null());
+        // SAFETY: the builder chained the stage's NIR.
+        let nir = unsafe { &*stage.p_next.cast::<objects::NirStage>() };
+        // SAFETY: every chained structure starts with its type.
+        let s_type = unsafe { *stage.p_next.cast::<vk::StructureType>() };
+        assert!(s_type == objects::NirStage::STRUCTURE_TYPE);
+        assert_eq!(nir.nir(), 1);
         Ok(())
     })
     .unwrap();

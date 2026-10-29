@@ -7,10 +7,9 @@
 //! robust access), takes one universal queue, and builds the bindless heap
 //! and the single pipeline layout of the [binding ABI](super::binding).
 //!
-//! Handles cross the boundary as their raw Vulkan values. Shader code is a
-//! `VkShaderModule` handle the compiler made with Mesa's
-//! `vk_shader_module_handle_from_nir`, so pipelines take NIR without
-//! SPIR-V. Images are moved to `VK_IMAGE_LAYOUT_GENERAL` once, on the host
+//! Handles cross the boundary as their raw Vulkan values. Shader code is
+//! NIR, which pipelines pass in Mesa's `VkPipelineShaderStageNirCreateInfoMESA`
+//! (as Mesa's own meta shaders do) without a module or SPIR-V. Images are moved to `VK_IMAGE_LAYOUT_GENERAL` once, on the host
 //! when they allow host transfers and otherwise at the start of the next
 //! submission, and stay there.
 mod objects;
@@ -480,8 +479,8 @@ impl NativeBackend {
 
     fn create_compute(&mut self, info: &ComputePipelineInfo) -> Result<vk::Pipeline> {
         objects::compute_pipeline(info, self.layout, |create| {
-            // SAFETY: the create info, its stage and the NIR module outlive
-            // the call.
+            // SAFETY: the create info, its stage and the NIR outlive the
+            // call.
             unsafe {
                 self.device
                     .create_compute_pipelines(vk::PipelineCache::null(), &[*create], None)
@@ -789,7 +788,7 @@ impl Backend for NativeBackend {
     fn create_graphics_pipeline(&mut self, info: &GraphicsPipelineInfo) -> Result<Pipeline> {
         objects::graphics_pipeline(info, self.layout, |create| {
             // SAFETY: the create info, every structure it points to and the
-            // NIR modules outlive the call.
+            // NIR outlive the call.
             unsafe {
                 self.device
                     .create_graphics_pipelines(vk::PipelineCache::null(), &[*create], None)
