@@ -217,6 +217,43 @@ impl TessellationArguments {
     }
 }
 
+/// What the backend's internal accumulate kernel reads at the push
+/// constants' `arguments`: runs of 64-bit query results, each summed into
+/// its own destination. Thread `n` sums run `n`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AccumulateArguments {
+    /// Address of the first result.
+    pub results: u64,
+    /// (first result, result count, destination address).
+    pub runs: Vec<(u32, u32, u64)>,
+}
+
+impl AccumulateArguments {
+    pub const RUNS_OFFSET: u32 = 16;
+    pub const RUN_BYTES: u32 = 16;
+    pub const ALIGNMENT: u64 = 16;
+    /// Threads per workgroup of the kernel.
+    pub const WORKGROUP_SIZE: u32 = 64;
+
+    pub fn encode(&self) -> Vec<u8> {
+        let length = Self::RUNS_OFFSET + Self::RUN_BYTES * self.runs.len() as u32;
+        let mut bytes = alloc::vec![0; length as usize];
+        let mut writer = Writer {
+            bytes: &mut bytes,
+            offset: 0,
+        };
+        writer.u64(self.results);
+        writer.u32(self.runs.len() as u32);
+        writer.u32(0);
+        for &(first, count, destination) in &self.runs {
+            writer.u32(first);
+            writer.u32(count);
+            writer.u64(destination);
+        }
+        bytes
+    }
+}
+
 struct Writer<'a> {
     bytes: &'a mut [u8],
     offset: usize,

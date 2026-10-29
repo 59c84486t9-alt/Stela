@@ -22,7 +22,7 @@ use crate::gpu::metal::{
         PrimitiveTopologyClass, PrimitiveType, RenderStages, StoreAction,
         TessellationControlPointIndexType, TriangleFillMode, VisibilityResultMode, Winding,
     },
-    binding::{BufferBinding, ResourceId, TessellationArguments},
+    binding::{AccumulateArguments, BufferBinding, ResourceId, TessellationArguments},
     error::{Error, Result, ensure},
     hazard::{RENDER_PASS, Use},
     pass::{AttachmentSlot, RenderPassPlan, RenderingAttachment},
@@ -312,7 +312,7 @@ impl CommandBuffer {
         let scratch =
             self.recorder
                 .upload(resolver, &alloc::vec![0; visibility.queries.len() * 8], 8)?;
-        let mut sums = Vec::with_capacity(offsets.len());
+        let mut runs = Vec::with_capacity(offsets.len());
         let mut next = 0u32;
         for &offset in &offsets {
             let first = next;
@@ -329,18 +329,28 @@ impl CommandBuffer {
                 });
                 next += 1;
             }
-            sums.push((first, next - first, buffer.at(offset, 8)?));
+            runs.push((first, next - first, buffer.address + offset));
         }
+        let count = runs.len() as u32;
+        let arguments = AccumulateArguments {
+            results: scratch.address,
+            runs,
+        };
+        let arguments = self.recorder.upload(
+            resolver,
+            &arguments.encode(),
+            AccumulateArguments::ALIGNMENT,
+        )?;
         self.recorder.access(Use::new(
             PipelineStages::COMPUTE_SHADER,
             Access::SHADER_READ | Access::SHADER_WRITE,
         ));
         self.recorder.push(Command::AccumulateResults {
-            results: scratch.buffer,
-            results_offset: scratch.offset,
-            sums,
-            dst: buffer.buffer,
+            arguments: arguments.address,
+            runs: count,
         });
+        // The kernel replaced the pipeline and push constants.
+        self.bindings.reset();
         Ok(())
     }
 }

@@ -270,14 +270,14 @@ pub enum Command {
         offset: u64,
         stride: u64,
     },
-    /// Writes the sum of each run of 64-bit results to its destination:
-    /// the backend's internal compute kernel for queries Metal accumulates
-    /// into one visibility result. `sums` holds (first result, result count,
-    /// destination offset); results start at `results_offset`.
+    /// Sums runs of 64-bit query results into their visibility results:
+    /// the backend binds its internal accumulate kernel and dispatches one
+    /// thread per run, with `arguments` (an
+    /// [`AccumulateArguments`](crate::gpu::metal::binding::AccumulateArguments)
+    /// upload) in the push constants. The next draw or dispatch rebinds its
+    /// own pipeline and push constants.
     AccumulateResults {
-        results: Buffer,
-        results_offset: u64,
-        sums: Vec<(u32, u32, u64)>,
-        dst: Buffer,
+        arguments: u64,
+        runs: u32,
     },
 }

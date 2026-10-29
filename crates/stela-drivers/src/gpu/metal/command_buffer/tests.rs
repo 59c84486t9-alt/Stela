@@ -10,7 +10,9 @@ use crate::gpu::metal::{
         StorageMode, StoreAction, StoreActionOptions, SwizzleChannels,
         TessellationControlPointIndexType, TextureType, TextureUsage, VisibilityResultMode,
     },
-    binding::{ArgumentTable, BufferBinding, PushConstants, TessellationArguments},
+    binding::{
+        AccumulateArguments, ArgumentTable, BufferBinding, PushConstants, TessellationArguments,
+    },
     capabilities::Size,
     error::Error,
     hazard::FULL,
@@ -583,11 +585,25 @@ fn visibility_results_copy_or_sum_their_queries() {
         [QueryPool(1), QueryPool(2)],
         "a second pool once the first is full"
     );
-    let Some(Command::AccumulateResults { sums, dst, .. }) = commands.last() else {
+    let Some(&Command::AccumulateResults { arguments, runs }) = commands.last() else {
         panic!("{:?}", commands.last())
     };
-    assert_eq!(*dst, Buffer(8));
-    assert_eq!(sums, &[(0, 2, 0), (2, 1, 8)]);
+    assert_eq!(runs, 2);
+    let (chunk, bytes) = recording
+        .uploads
+        .iter()
+        .find(|(chunk, _)| (chunk.address..chunk.address + chunk.size).contains(&arguments))
+        .unwrap();
+    let encoded = &bytes[(arguments - chunk.address) as usize..];
+    let run = |index: usize| {
+        let at = AccumulateArguments::RUNS_OFFSET as usize + 16 * index;
+        let word =
+            |offset: usize| u32::from_le_bytes(encoded[at + offset..][..4].try_into().unwrap());
+        let destination = u64::from_le_bytes(encoded[at + 8..][..8].try_into().unwrap());
+        (word(0), word(4), destination)
+    };
+    assert_eq!(run(0), (0, 2, 8 << 32));
+    assert_eq!(run(1), (2, 1, (8 << 32) + 8));
     let end = commands
         .iter()
         .position(|command| *command == Command::EndRendering)
