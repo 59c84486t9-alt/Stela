@@ -4801,5 +4801,25 @@
       "STELA_TEST_LLD"
     ],
     "reason": "Independent stock AArch64 Linux-user QEMU semantics against actual x86 baseline and Arm lane model; LLVM assembler and linker generate bounded no-libc input ELF. No host-SM3 timing claim."
+  },
+  {
+    "package": "stela-compiler",
+    "test": "baseline_and_gfni_sm4_match_stock_aarch64_qemu",
+    "source": "crates/stela-compiler/src/x86_64/simd/sm4/tests/oracle.rs",
+    "kind": "oracle",
+    "inputs": [
+      "STELA_TEST_SM4_QEMU",
+      "STELA_TEST_LLVM_MC",
+      "STELA_TEST_LLD"
+    ],
+    "reason": "Stock AArch64 Linux-user execution compared with constant-work SSE2 and actual supported GFNI SM4 recipes; LLVM tools assemble/link bounded no-libc oracle ELF."
+  },
+  {
+    "package": "stela-compiler",
+    "test": "sm4_costs",
+    "source": "crates/stela-compiler/src/x86_64/simd/sm4/tests/costs.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "Actual supported GFNI hardware timing of complete compiled SM4 leaves versus constant-work SSE2 baseline; isolated pinned execution on request."
   }
 ]

@@ -512,6 +512,19 @@ impl<'a> Asm<'a> {
         self.code.push(constant);
     }
 
+    /// GFNI inverse in the AES field followed by the supplied affine matrix.
+    pub(crate) fn gf2p8affineinvqb(&mut self, xmm: u8, matrix: Rm, constant: u8) {
+        self.legacy(
+            Size::Dword,
+            Some(0x66),
+            &[0x0f, 0x3a, 0xcf],
+            xmm,
+            false,
+            matrix,
+        );
+        self.code.push(constant);
+    }
+
     // BMI2 (VEX-encoded general-purpose forms).
 
     /// `shlx`, `shrx` or `sarx dst, rm, count`: a shift by the count register
