@@ -536,6 +536,19 @@ impl Heartbeat {
             // the interval, its waits, and the blocks it compiled and
             // installed from another PE.
             let mut shares = String::from("PES TIME idle%/spin%/sync%/waits/compiled/shared");
+            // Per PE with `--profile`: the interval's share in each engine
+            // phase, in step timing's order.
+            let mut phases = String::from("PES PHASES");
+            for phase in step_timing::Phase::ALL {
+                phases.push_str(if phase == step_timing::Phase::Schedule {
+                    " "
+                } else {
+                    "/"
+                });
+                phases.push_str(phase.name());
+                phases.push('%');
+            }
+            let tsc_percent = |ticks: u64| u128::from(ticks) * 100 / u128::from(elapsed.max(1));
             let mut totals = parallel::Counts::default();
             for (pe, (now, before)) in per_pe.iter().zip(&mut self.pe_counts).enumerate() {
                 let rate = u128::from(now.retired.saturating_sub(before.retired))
@@ -552,6 +565,13 @@ impl Heartbeat {
                     now.compiled.saturating_sub(before.compiled),
                     now.shared.saturating_sub(before.shared),
                 ));
+                phases.push_str(&format!(" {pe}:"));
+                for (slot, (now, before)) in now.phases.iter().zip(before.phases).enumerate() {
+                    if slot > 0 {
+                        phases.push('/');
+                    }
+                    phases.push_str(&format!("{}", tsc_percent(now.saturating_sub(before))));
+                }
                 totals.broadcasts += now.broadcasts.saturating_sub(before.broadcasts);
                 totals.forwards += now.forwards.saturating_sub(before.forwards);
                 *before = *now;
@@ -573,6 +593,9 @@ impl Heartbeat {
             ));
             self.lock_waits = waits;
             output::arguments(format_args!("{shares}\n"));
+            if machine.step_timing().is_some() {
+                output::arguments(format_args!("{phases}\n"));
+            }
         }
         output::arguments(format_args!(
             "GUEST PERFORMANCE retired={retired} interval_retired={instructions} instructions_per_second={} instructions_per_block_milli={}\n",

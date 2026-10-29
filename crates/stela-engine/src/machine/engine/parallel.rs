@@ -31,6 +31,7 @@ use super::{
     DeviceError, DeviceReadShape, Devices, Host, Machine, RequirementKind, Reset, Start, Step,
     clock::{ClockStatus, Pace, SharedClock},
     processors::Peer,
+    step_timing,
 };
 use crate::machine::{
     ctrr,
@@ -137,6 +138,9 @@ pub struct Counts {
     pub forwards: u64,
     pub exceptions: u64,
     pub device_accesses: u64,
+    /// TSC ticks in each engine phase ([`step_timing::Phase`]), while
+    /// step timing is enabled.
+    pub phases: [u64; step_timing::Phase::COUNT],
 }
 
 /// The cluster state its powered PEs share.
@@ -977,6 +981,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             forwards: statistics.forwards,
             exceptions: statistics.exceptions,
             device_accesses: statistics.device_accesses,
+            phases: self
+                .step_timing
+                .as_ref()
+                .map_or([0; step_timing::Phase::COUNT], |timing| timing.phases),
         }
     }
 
