@@ -14,7 +14,17 @@ pub(super) fn bind(
     source: &[crate::aarch64::Instruction],
     rows: Vec<FaultRecovery>,
 ) -> Vec<FaultRecovery> {
-    let mut output = Vec::new();
+    let capacity = code
+        .sites()
+        .iter()
+        .map(|marker| {
+            rows.iter()
+                .filter(|row| row.start < marker.end && marker.start < row.end)
+                .count()
+                .max(1)
+        })
+        .sum();
+    let mut output = Vec::with_capacity(capacity);
     // Old broad rows prove register locations across the operand/check only.
     // Their frame commits do not prove a complete Before state. Missing
     // internal intervals terminate as host faults without architectural writes.
@@ -104,6 +114,7 @@ mod tests {
             site: RecoverySite::native_internal(),
         };
         let rows = bind(&code, &[(pc, 0)], &source, alloc::vec![row]);
+        assert_eq!(rows.capacity(), rows.len());
         assert_eq!(
             rows.iter()
                 .map(|row| (row.start, row.end, row.site.kind()))
@@ -142,6 +153,7 @@ mod tests {
         // Baseline code has an authoritative frame and needs no dirty bindings,
         // but its exact guest operations still require qualified semantics.
         let baseline = bind(&code, &[(pc, 0)], &source, Vec::new());
+        assert_eq!(baseline.capacity(), baseline.len());
         assert_eq!(
             baseline
                 .iter()
@@ -156,6 +168,50 @@ mod tests {
         assert_eq!(
             FaultRecovery::site_at(&baseline, 12).unwrap().kind(),
             RecoverySiteKind::NativeInternal
+        );
+    }
+    #[test]
+    fn exact_capacity_includes_overlapping_plans_and_frame_fallbacks() {
+        let mut code = Code::new();
+        for _ in 0..3 {
+            code.asm().guest_check();
+        }
+        let pc = GuestAddress(0x1000);
+        let source = [Instruction {
+            pc,
+            operation: Operation::Nop,
+        }];
+        let rows = [RecoveryBinding::gpr(0, 8), RecoveryBinding::gpr(1, 9)]
+            .into_iter()
+            .map(|binding| FaultRecovery {
+                start: 0,
+                end: 2,
+                bindings: alloc::vec![binding],
+                retirement: RetirementPoint::before(pc, 0).unwrap(),
+                site: RecoverySite::native_internal(),
+            })
+            .collect();
+        let result = bind(&code, &[(pc, 0)], &source, rows);
+        assert_eq!(result.capacity(), 4);
+        assert_eq!(
+            result
+                .iter()
+                .map(|row| (row.start, row.end))
+                .collect::<Vec<_>>(),
+            alloc::vec![(0, 2), (0, 2), (2, 4), (4, 6)]
+        );
+        assert_eq!(result[0].bindings, [RecoveryBinding::gpr(0, 8)]);
+        assert_eq!(result[1].bindings, [RecoveryBinding::gpr(1, 9)]);
+        assert!(result[2..].iter().all(|row| row.bindings.is_empty()));
+        assert!(
+            result
+                .iter()
+                .all(|row| row.site.kind() == RecoverySiteKind::GuestCheck)
+        );
+        assert!(
+            result
+                .iter()
+                .all(|row| row.retirement == RetirementPoint::before(pc, 0).unwrap())
         );
     }
 }
