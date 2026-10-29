@@ -5,6 +5,7 @@
 //! form the selected interpretation. Later branches are validated, never merged.
 //! HID 1.11 6.2.2.8 makes alternate exposure optional and prohibits delimiters
 //! on Application Collections and Array items. Raw bytes remain with UsbInput.
+use super::error::UsageError;
 use alloc::vec::Vec;
 
 const LIMIT: usize = 12_288;
@@ -26,16 +27,20 @@ impl Local {
         )
     }
 
-    fn reserve(&mut self, count: usize) -> Result<(), &'static str> {
+    fn reserve(&mut self, count: usize) -> Result<(), UsageError> {
         self.usage_count = self
             .usage_count
             .checked_add(count)
             .filter(|n| *n <= LIMIT)
-            .ok_or("too many HID usages")?;
+            .ok_or(UsageError::Limit {
+                existing: self.usage_count,
+                added: count,
+                limit: LIMIT,
+            })?;
         Ok(())
     }
 
-    pub(super) fn usage(&mut self, value: u32, size: usize, page: u32) -> Result<(), &'static str> {
+    pub(super) fn usage(&mut self, value: u32, size: usize, page: u32) -> Result<(), UsageError> {
         self.reserve(1)?;
         if self.branch <= 1 {
             self.selected.push(Self::qualified(value, size, page));
@@ -43,35 +48,30 @@ impl Local {
         Ok(())
     }
 
-    pub(super) fn minimum(
-        &mut self,
-        value: u32,
-        size: usize,
-        page: u32,
-    ) -> Result<(), &'static str> {
+    pub(super) fn minimum(&mut self, value: u32, size: usize, page: u32) -> Result<(), UsageError> {
         if self
             .minimum
             .replace(Self::qualified(value, size, page))
             .is_some()
         {
-            return Err("HID nested usage minimum");
+            return Err(UsageError::NestedMinimum { value, size, page });
         }
         Ok(())
     }
 
-    pub(super) fn maximum(
-        &mut self,
-        value: u32,
-        size: usize,
-        page: u32,
-    ) -> Result<(), &'static str> {
+    pub(super) fn maximum(&mut self, value: u32, size: usize, page: u32) -> Result<(), UsageError> {
         let (first, extended) = self
             .minimum
             .take()
-            .ok_or("HID usage maximum without minimum")?;
+            .ok_or(UsageError::MaximumWithoutMinimum { value, size, page })?;
         let (last, last_extended) = Self::qualified(value, size, page);
         if extended != last_extended || first >> 16 != last >> 16 || first > last {
-            return Err("invalid HID usage range");
+            return Err(UsageError::Range {
+                first,
+                last,
+                first_extended: extended,
+                last_extended,
+            });
         }
         self.reserve((last - first) as usize + 1)?;
         if self.branch <= 1 {
@@ -80,50 +80,46 @@ impl Local {
         Ok(())
     }
 
-    pub(super) fn delimiter(&mut self, value: u32, size: usize) -> Result<(), &'static str> {
-        if self.minimum.is_some() {
-            return Err("unfinished HID usage range");
+    pub(super) fn delimiter(&mut self, value: u32, size: usize) -> Result<(), UsageError> {
+        if let Some((minimum, _)) = self.minimum {
+            return Err(UsageError::UnfinishedRange { minimum });
         }
         match (value, size != 0, self.open) {
             (1, true, false) => {
-                self.branch = self
-                    .branch
-                    .checked_add(1)
-                    .filter(|n| *n <= LIMIT)
-                    .ok_or("too many HID delimiter sets")?;
+                self.branch = self.branch.checked_add(1).filter(|n| *n <= LIMIT).ok_or(
+                    UsageError::DelimiterLimit {
+                        existing: self.branch,
+                        limit: LIMIT,
+                    },
+                )?;
                 self.open = true;
             }
             (0, true, true) => self.open = false,
-            (1, true, true) => return Err("nested HID delimiter"),
-            (0, true, false) => return Err("HID delimiter close without open"),
-            _ => return Err("invalid HID delimiter value"),
+            (1, true, true) => return Err(UsageError::NestedDelimiter),
+            (0, true, false) => return Err(UsageError::CloseWithoutOpen),
+            _ => return Err(UsageError::DelimiterValue { value, size }),
         }
         Ok(())
     }
 
-    pub(super) fn complete(&self) -> Result<(), &'static str> {
+    pub(super) fn complete(&self) -> Result<(), UsageError> {
         if self.open {
-            return Err("unclosed HID delimiter");
+            return Err(UsageError::UnclosedDelimiter);
         }
-        if self.minimum.is_some() {
-            return Err("unfinished HID usage range");
+        if let Some((minimum, _)) = self.minimum {
+            return Err(UsageError::UnfinishedRange { minimum });
         }
         Ok(())
     }
 
     /// Only Main items reset local state; global Push/Pop never touches it.
-    pub(super) fn main(
-        &mut self,
-        tag: u8,
-        value: u32,
-        page: u32,
-    ) -> Result<Vec<u32>, &'static str> {
+    pub(super) fn main(&mut self, tag: u8, value: u32, page: u32) -> Result<Vec<u32>, UsageError> {
         self.complete()?;
         if self.branch != 0
             && ((tag == 0xa0 && value == 1)
                 || (matches!(tag, 0x80 | 0x90 | 0xb0) && value & 2 == 0))
         {
-            return Err("HID delimiter on Application Collection or Array");
+            return Err(UsageError::ForbiddenDelimiter { tag, value });
         }
         // Linux hid_concatenate_last_usage_page: complete trailing short
         // usages using the final page, stopping at an already completed page.

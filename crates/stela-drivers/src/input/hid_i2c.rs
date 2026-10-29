@@ -14,7 +14,7 @@
 //! no keyboard, touchpad or touchscreen descriptor is substituted here.
 use super::Input;
 use crate::bus::i2c::{self, Address, Bus, Operation, Timer};
-use crate::usb::hid::Translator;
+use crate::usb::hid::{ParseError, Translator};
 use alloc::{string::String, vec::Vec};
 
 mod descriptor;
@@ -705,7 +705,7 @@ impl<B: Bus, I: Interrupt, T: Timer> HidInput<B, I, T> {
     pub fn new(
         device: Device<B, I, T>,
         name: String,
-    ) -> Result<Self, (Device<B, I, T>, &'static str)> {
+    ) -> Result<Self, (Device<B, I, T>, ParseError)> {
         match Translator::describe(device.report_descriptor()) {
             Ok(translator) => Ok(Self {
                 device,

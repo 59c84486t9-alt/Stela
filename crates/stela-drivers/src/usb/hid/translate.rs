@@ -9,6 +9,7 @@
 use super::{
     KEY_USAGES, LED_PAGE, LED_USAGES, MODIFIER_USAGES, VARIABLE,
     descriptor::{DecodeError, Descriptor, Frame, ReportType},
+    error::ParseError,
     events,
     report::{self, Field, Pointer, Reports},
 };
@@ -60,13 +61,16 @@ impl Translator {
 
     /// A translator for a report-protocol device whose report descriptor is
     /// `bytes`.
-    pub fn describe(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn describe(bytes: &[u8]) -> Result<Self, ParseError> {
         let descriptor = Descriptor::parse(bytes)?;
         let reports = report::parse(bytes)?;
         if let Some(pointer) = &reports.pointer
             && pointer.x.map(|f| f.relative) != pointer.y.map(|f| f.relative)
         {
-            return Err("HID pointer with one absolute and one relative axis");
+            return Err(ParseError::pointer(
+                pointer.x.map(|field| field.relative),
+                pointer.y.map(|field| field.relative),
+            ));
         }
         Ok(Self::new(Some(descriptor), reports))
     }

@@ -526,7 +526,7 @@ mod attach {
                 .map_err(PlatformError::HidI2c)?;
                 device.initialize().map_err(PlatformError::HidI2c)?;
                 let input = hid_i2c::HidInput::new(device, format!("I2C-HID {location}"))
-                    .map_err(|(_, error)| PlatformError::Refused(error))?;
+                    .map_err(|(_, error)| PlatformError::HidDescriptor(error))?;
                 Ok(Some(InputDevice::I2cHid(Box::new(input))))
             }
             Kind::Elan => {

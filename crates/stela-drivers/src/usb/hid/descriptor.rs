@@ -6,7 +6,10 @@
 //! Descriptor-qualified HID reports, including consumer, gamepad and digitizer
 //! collections. Values retain their wire field and collection identity: contact
 //! IDs, tip/in-range/confidence, scan time and contact count are never guessed.
-use super::usages::Local;
+use super::{
+    error::{ParseError, ParseErrorKind, Reader},
+    usages::Local,
+};
 use alloc::vec::Vec;
 
 const MAX_BITS: usize = (16_384 - 1) * 8;
@@ -125,7 +128,7 @@ struct Global {
 }
 
 impl Descriptor {
-    pub fn parse(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
         let mut descriptor = Self {
             collections: Vec::new(),
             reports: Vec::new(),
@@ -138,17 +141,27 @@ impl Descriptor {
         let mut fields = 0usize;
         let mut at = 0;
         while at < bytes.len() {
+            let item_offset = at;
             let prefix = bytes[at];
             if prefix == 0xfe {
-                return Err("HID long items are unsupported");
+                return Err(ParseError::at(
+                    Reader::Descriptor,
+                    item_offset,
+                    ParseErrorKind::LongItem,
+                ));
             }
             let size = match prefix & 3 {
                 3 => 4,
                 size => usize::from(size),
             };
-            let data = bytes
-                .get(at + 1..at + 1 + size)
-                .ok_or("truncated HID item")?;
+            let data = bytes.get(at + 1..at + 1 + size).ok_or(ParseError::at(
+                Reader::Descriptor,
+                item_offset,
+                ParseErrorKind::TruncatedItem {
+                    needed: size,
+                    available: bytes.len() - at - 1,
+                },
+            ))?;
             at += 1 + size;
             let unsigned = data
                 .iter()
@@ -162,14 +175,24 @@ impl Descriptor {
             };
             let tag = prefix & 0xfc;
             let usages = if matches!(tag, 0x80 | 0x90 | 0xa0 | 0xb0 | 0xc0) {
-                local.main(tag, unsigned, global.page)?
+                local.main(tag, unsigned, global.page).map_err(|error| {
+                    ParseError::at(
+                        Reader::Descriptor,
+                        item_offset,
+                        ParseErrorKind::Usage(error),
+                    )
+                })?
             } else {
                 Vec::new()
             };
             match prefix & 0xfc {
                 0x04 => {
                     if unsigned > 0xffff {
-                        return Err("HID usage page exceeds 16 bits");
+                        return Err(ParseError::at(
+                            Reader::Descriptor,
+                            item_offset,
+                            ParseErrorKind::UsagePage { value: unsigned },
+                        ));
                     }
                     global.page = unsigned;
                 }
@@ -197,56 +220,128 @@ impl Descriptor {
                 0x64 => global.unit = unsigned,
                 0x74 => {
                     if unsigned > 256 {
-                        return Err("HID Report Size exceeds 256 bits");
+                        return Err(ParseError::at(
+                            Reader::Descriptor,
+                            item_offset,
+                            ParseErrorKind::ReportSize { bits: unsigned },
+                        ));
                     }
                     global.size = unsigned as usize;
                 }
                 0x84 => {
-                    global.id = u8::try_from(unsigned)
-                        .ok()
-                        .filter(|id| *id != 0)
-                        .ok_or("invalid HID report ID")?;
+                    global.id =
+                        u8::try_from(unsigned)
+                            .ok()
+                            .filter(|id| *id != 0)
+                            .ok_or(ParseError::at(
+                                Reader::Descriptor,
+                                item_offset,
+                                ParseErrorKind::ReportId { value: unsigned },
+                            ))?;
                     descriptor.numbered = true;
                 }
                 0x94 => {
                     if unsigned as usize > MAX_USAGES {
-                        return Err("HID Report Count exceeds 12288");
+                        return Err(ParseError::at(
+                            Reader::Descriptor,
+                            item_offset,
+                            ParseErrorKind::ReportCount { count: unsigned },
+                        ));
                     }
                     global.count = unsigned as usize;
                 }
                 0xa4 => {
                     if globals.len() == 4 {
-                        return Err("HID global stack overflow");
+                        return Err(ParseError::at(
+                            Reader::Descriptor,
+                            item_offset,
+                            ParseErrorKind::GlobalStackOverflow { limit: 4 },
+                        ));
                     }
                     globals.push(global.clone());
                 }
-                0xb4 => global = globals.pop().ok_or("HID Pop without Push")?,
-                0x08 => local.usage(unsigned, size, global.page)?,
-                0x18 => local.minimum(unsigned, size, global.page)?,
-                0x28 => local.maximum(unsigned, size, global.page)?,
+                0xb4 => {
+                    global = globals.pop().ok_or(ParseError::at(
+                        Reader::Descriptor,
+                        item_offset,
+                        ParseErrorKind::GlobalStackUnderflow,
+                    ))?
+                }
+                0x08 => local.usage(unsigned, size, global.page).map_err(|error| {
+                    ParseError::at(
+                        Reader::Descriptor,
+                        item_offset,
+                        ParseErrorKind::Usage(error),
+                    )
+                })?,
+                0x18 => local
+                    .minimum(unsigned, size, global.page)
+                    .map_err(|error| {
+                        ParseError::at(
+                            Reader::Descriptor,
+                            item_offset,
+                            ParseErrorKind::Usage(error),
+                        )
+                    })?,
+                0x28 => local
+                    .maximum(unsigned, size, global.page)
+                    .map_err(|error| {
+                        ParseError::at(
+                            Reader::Descriptor,
+                            item_offset,
+                            ParseErrorKind::Usage(error),
+                        )
+                    })?,
                 0xa0 => {
                     if descriptor.collections.len() == MAX_COLLECTIONS {
-                        return Err("too many HID collections");
+                        return Err(ParseError::at(
+                            Reader::Descriptor,
+                            item_offset,
+                            ParseErrorKind::CollectionLimit {
+                                limit: MAX_COLLECTIONS,
+                            },
+                        ));
                     }
                     let index = descriptor.collections.len();
                     descriptor.collections.push(Collection {
                         parent: collections.last().copied(),
                         usage: usages.first().copied().unwrap_or(0),
-                        kind: u8::try_from(unsigned).map_err(|_| "invalid HID collection type")?,
+                        kind: u8::try_from(unsigned).map_err(|_| {
+                            ParseError::at(
+                                Reader::Descriptor,
+                                item_offset,
+                                ParseErrorKind::CollectionType { value: unsigned },
+                            )
+                        })?,
                     });
                     collections.push(index);
                 }
                 0xc0 => {
-                    collections
-                        .pop()
-                        .ok_or("HID End Collection without Collection")?;
+                    collections.pop().ok_or(ParseError::at(
+                        Reader::Descriptor,
+                        item_offset,
+                        ParseErrorKind::CollectionUnderflow,
+                    ))?;
                 }
                 tag @ (0x80 | 0x90 | 0xb0) => {
                     if global.count != 0 && global.size == 0 {
-                        return Err("zero-size HID field");
+                        return Err(ParseError::at(
+                            Reader::Descriptor,
+                            item_offset,
+                            ParseErrorKind::ZeroSizeField {
+                                count: global.count,
+                            },
+                        ));
                     }
                     if global.minimum > global.maximum {
-                        return Err("invalid HID logical range");
+                        return Err(ParseError::at(
+                            Reader::Descriptor,
+                            item_offset,
+                            ParseErrorKind::LogicalRange {
+                                minimum: global.minimum,
+                                maximum: global.maximum,
+                            },
+                        ));
                     }
                     let kind = match tag {
                         0x80 => ReportType::Input,
@@ -272,12 +367,29 @@ impl Descriptor {
                         .bits
                         .checked_add(global.size * global.count)
                         .filter(|b| *b <= MAX_BITS)
-                        .ok_or("HID report exceeds 16384 bytes")?;
+                        .ok_or(ParseError::at(
+                            Reader::Descriptor,
+                            item_offset,
+                            ParseErrorKind::ReportBits {
+                                existing: offset,
+                                size: global.size,
+                                count: global.count,
+                                limit: MAX_BITS,
+                            },
+                        ))?;
                     if unsigned & CONSTANT == 0 && global.count != 0 {
                         fields = fields
                             .checked_add(global.count)
                             .filter(|n| *n <= MAX_FIELDS)
-                            .ok_or("too many HID fields")?;
+                            .ok_or(ParseError::at(
+                                Reader::Descriptor,
+                                item_offset,
+                                ParseErrorKind::FieldCount {
+                                    existing: fields,
+                                    added: global.count,
+                                    limit: MAX_FIELDS,
+                                },
+                            ))?;
                         layout.fields.push(ReportField {
                             offset,
                             size: global.size,
@@ -294,18 +406,46 @@ impl Descriptor {
                         });
                     }
                 }
-                0xa8 => local.delimiter(unsigned, size)?,
+                0xa8 => local.delimiter(unsigned, size).map_err(|error| {
+                    ParseError::at(
+                        Reader::Descriptor,
+                        item_offset,
+                        ParseErrorKind::Usage(error),
+                    )
+                })?,
                 // Designators and string indices carry no field semantics.
                 0x38 | 0x48 | 0x58 | 0x78 | 0x88 | 0x98 => {}
-                _ => return Err("unknown or reserved HID item"),
+                _ => {
+                    return Err(ParseError::at(
+                        Reader::Descriptor,
+                        item_offset,
+                        ParseErrorKind::ReservedItem { prefix },
+                    ));
+                }
             }
         }
-        local.complete()?;
+        local.complete().map_err(|error| {
+            ParseError::at(
+                Reader::Descriptor,
+                bytes.len(),
+                ParseErrorKind::Usage(error),
+            )
+        })?;
         if !collections.is_empty() {
-            return Err("unfinished HID descriptor");
+            return Err(ParseError::at(
+                Reader::Descriptor,
+                bytes.len(),
+                ParseErrorKind::UnfinishedCollections {
+                    depth: collections.len(),
+                },
+            ));
         }
         if descriptor.numbered && descriptor.reports.iter().any(|r| r.id == 0 && r.bits != 0) {
-            return Err("HID descriptor mixes numbered and unnumbered reports");
+            return Err(ParseError::at(
+                Reader::Descriptor,
+                bytes.len(),
+                ParseErrorKind::MixedReportIds,
+            ));
         }
         Ok(descriptor)
     }

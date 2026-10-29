@@ -23,7 +23,10 @@
 //! holding ErrorRollOver (usage 01h) is ignored and keeps its previous keys
 //! while the report's bitmaps still apply; POSTFail and ErrorUndefined
 //! (02h-03h, HID Usage Tables 10) are not keys.
-use super::usages::Local;
+use super::{
+    error::{ParseError, ParseErrorKind, Reader},
+    usages::Local,
+};
 use alloc::{sync::Arc, vec::Vec};
 
 #[cfg(test)]
@@ -315,9 +318,8 @@ impl Reports {
     }
 }
 
-/// The input fields of a report descriptor.
 /// The input fields of a report descriptor, and its longest input report.
-fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
+fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), ParseError> {
     #[derive(Clone, Copy, Default)]
     struct Global {
         page: u32,
@@ -335,16 +337,28 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
     let mut collections: Vec<(u32, bool)> = Vec::new();
     let mut at = 0;
     while at < descriptor.len() {
+        let item_offset = at;
         let prefix = descriptor[at];
         if prefix == LONG_ITEM {
-            return Err("long items in a report descriptor");
+            return Err(ParseError::at(
+                Reader::InputReports,
+                item_offset,
+                ParseErrorKind::LongItem,
+            ));
         }
         let size = match prefix & SIZE_MASK {
             SIZE_FOUR => 4,
             n => usize::from(n),
         };
         let Some(data) = descriptor.get(at + 1..at + 1 + size) else {
-            return Err("truncated report descriptor");
+            return Err(ParseError::at(
+                Reader::InputReports,
+                item_offset,
+                ParseErrorKind::TruncatedItem {
+                    needed: size,
+                    available: descriptor.len() - at - 1,
+                },
+            ));
         };
         at += 1 + size;
         let unsigned = data
@@ -359,7 +373,13 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
         };
         let tag = prefix & TAG_MASK;
         let mut usages = if matches!(tag, INPUT | OUTPUT | COLLECTION | FEATURE | END_COLLECTION) {
-            local.main(tag, unsigned, global.page)?
+            local.main(tag, unsigned, global.page).map_err(|error| {
+                ParseError::at(
+                    Reader::InputReports,
+                    item_offset,
+                    ParseErrorKind::Usage(error),
+                )
+            })?
         } else {
             Vec::new()
         };
@@ -376,13 +396,29 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
                 let start = *offset;
                 *offset += global.size * global.count;
                 if *offset > MAX_REPORT_BITS {
-                    return Err("input report longer than 16384 bytes");
+                    return Err(ParseError::at(
+                        Reader::InputReports,
+                        item_offset,
+                        ParseErrorKind::ReportBits {
+                            existing: start,
+                            size: global.size,
+                            count: global.count,
+                            limit: MAX_REPORT_BITS,
+                        },
+                    ));
                 }
                 let constant = flags & CONSTANT != 0;
                 let variable = flags & VARIABLE != 0;
                 let array = if !constant && !variable && global.count != 0 && !usages.is_empty() {
                     if i64::from(global.minimum) > global.maximum {
-                        return Err("HID array logical minimum exceeds maximum");
+                        return Err(ParseError::at(
+                            Reader::InputReports,
+                            item_offset,
+                            ParseErrorKind::LogicalRange {
+                                minimum: i64::from(global.minimum),
+                                maximum: global.maximum,
+                            },
+                        ));
                     }
                     let has_keyboard = usages.iter().any(|usage| usage >> 16 == KEYBOARD_PAGE);
                     Some(Array {
@@ -431,14 +467,20 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
                 collections.push((usages.first().copied().unwrap_or(0), unsigned == 1));
             }
             END_COLLECTION => {
-                collections
-                    .pop()
-                    .ok_or("HID End Collection without Collection")?;
+                collections.pop().ok_or(ParseError::at(
+                    Reader::InputReports,
+                    item_offset,
+                    ParseErrorKind::CollectionUnderflow,
+                ))?;
             }
             OUTPUT | FEATURE => {}
             USAGE_PAGE => {
                 if unsigned > 0xffff {
-                    return Err("HID usage page exceeds 16 bits");
+                    return Err(ParseError::at(
+                        Reader::InputReports,
+                        item_offset,
+                        ParseErrorKind::UsagePage { value: unsigned },
+                    ));
                 }
                 global.page = unsigned;
             }
@@ -452,34 +494,108 @@ fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
                 };
             }
             REPORT_SIZE if unsigned > MAX_REPORT_SIZE => {
-                return Err("Report Size over 256 bits");
+                return Err(ParseError::at(
+                    Reader::InputReports,
+                    item_offset,
+                    ParseErrorKind::ReportSize { bits: unsigned },
+                ));
             }
             REPORT_SIZE => global.size = unsigned as usize,
             REPORT_ID => match u8::try_from(unsigned) {
                 Ok(id) if id != 0 => global.report = Some(id),
-                _ => return Err("Report ID outside 1-255"),
+                _ => {
+                    return Err(ParseError::at(
+                        Reader::InputReports,
+                        item_offset,
+                        ParseErrorKind::ReportId { value: unsigned },
+                    ));
+                }
             },
             REPORT_COUNT if unsigned > MAX_REPORT_COUNT => {
-                return Err("Report Count over 12288");
+                return Err(ParseError::at(
+                    Reader::InputReports,
+                    item_offset,
+                    ParseErrorKind::ReportCount { count: unsigned },
+                ));
             }
             REPORT_COUNT => global.count = unsigned as usize,
-            PUSH if stack.len() == GLOBAL_STACK => return Err("global item stack overflow"),
+            PUSH if stack.len() == GLOBAL_STACK => {
+                return Err(ParseError::at(
+                    Reader::InputReports,
+                    item_offset,
+                    ParseErrorKind::GlobalStackOverflow {
+                        limit: GLOBAL_STACK,
+                    },
+                ));
+            }
             PUSH => stack.push(global),
-            POP => global = stack.pop().ok_or("Pop without Push")?,
+            POP => {
+                global = stack.pop().ok_or(ParseError::at(
+                    Reader::InputReports,
+                    item_offset,
+                    ParseErrorKind::GlobalStackUnderflow,
+                ))?
+            }
             // Physical extents and units do not change a field's value.
             PHYSICAL_MINIMUM | PHYSICAL_MAXIMUM | UNIT_EXPONENT | UNIT => {}
-            USAGE => local.usage(unsigned, size, global.page)?,
-            USAGE_MINIMUM => local.minimum(unsigned, size, global.page)?,
-            USAGE_MAXIMUM => local.maximum(unsigned, size, global.page)?,
-            0xa8 => local.delimiter(unsigned, size)?,
+            USAGE => local.usage(unsigned, size, global.page).map_err(|error| {
+                ParseError::at(
+                    Reader::InputReports,
+                    item_offset,
+                    ParseErrorKind::Usage(error),
+                )
+            })?,
+            USAGE_MINIMUM => local
+                .minimum(unsigned, size, global.page)
+                .map_err(|error| {
+                    ParseError::at(
+                        Reader::InputReports,
+                        item_offset,
+                        ParseErrorKind::Usage(error),
+                    )
+                })?,
+            USAGE_MAXIMUM => local
+                .maximum(unsigned, size, global.page)
+                .map_err(|error| {
+                    ParseError::at(
+                        Reader::InputReports,
+                        item_offset,
+                        ParseErrorKind::Usage(error),
+                    )
+                })?,
+            0xa8 => local.delimiter(unsigned, size).map_err(|error| {
+                ParseError::at(
+                    Reader::InputReports,
+                    item_offset,
+                    ParseErrorKind::Usage(error),
+                )
+            })?,
             // Designators and strings do not change this reader's fields.
-            _ if prefix & 0x0c == 0 => return Err("unknown or reserved HID Main item"),
+            _ if prefix & 0x0c == 0 => {
+                return Err(ParseError::at(
+                    Reader::InputReports,
+                    item_offset,
+                    ParseErrorKind::ReservedItem { prefix },
+                ));
+            }
             _ => {}
         }
     }
-    local.complete()?;
+    local.complete().map_err(|error| {
+        ParseError::at(
+            Reader::InputReports,
+            descriptor.len(),
+            ParseErrorKind::Usage(error),
+        )
+    })?;
     if !collections.is_empty() {
-        return Err("unfinished HID descriptor");
+        return Err(ParseError::at(
+            Reader::InputReports,
+            descriptor.len(),
+            ParseErrorKind::UnfinishedCollections {
+                depth: collections.len(),
+            },
+        ));
     }
     let numbered = offsets.iter().any(|(id, _)| id.is_some());
     let longest = offsets.iter().map(|(_, bits)| bits.div_ceil(8)).max();
@@ -555,7 +671,7 @@ fn keys(items: &[Item]) -> Option<Keys> {
 }
 
 /// The pointer and keyboard reports of `descriptor`.
-pub fn parse(descriptor: &[u8]) -> Result<Reports, &'static str> {
+pub fn parse(descriptor: &[u8]) -> Result<Reports, ParseError> {
     let (items, input_bytes) = items(descriptor)?;
     Ok(Reports {
         pointer: pointer(&items),
@@ -604,15 +720,30 @@ mod tests {
         ];
         let pointer = parse(&pushed).unwrap().pointer.unwrap();
         assert_eq!(pointer.x.unwrap().offset, 0);
-        assert_eq!(parse(&[0xa4; 5]), Err("global item stack overflow"));
-        assert_eq!(parse(&[0xb4]), Err("Pop without Push"));
+        assert_eq!(
+            parse(&[0xa4; 5]).map_err(ParseError::message),
+            Err("global item stack overflow")
+        );
+        assert_eq!(
+            parse(&[0xb4]).map_err(ParseError::message),
+            Err("Pop without Push")
+        );
         // Report Size 257, Report Count 12289 and Report ID 0 are refused.
-        assert_eq!(parse(&[0x76, 0x01, 0x01]), Err("Report Size over 256 bits"));
-        assert_eq!(parse(&[0x96, 0x01, 0x30]), Err("Report Count over 12288"));
-        assert_eq!(parse(&[0x85, 0x00]), Err("Report ID outside 1-255"));
+        assert_eq!(
+            parse(&[0x76, 0x01, 0x01]).map_err(ParseError::message),
+            Err("Report Size over 256 bits")
+        );
+        assert_eq!(
+            parse(&[0x96, 0x01, 0x30]).map_err(ParseError::message),
+            Err("Report Count over 12288")
+        );
+        assert_eq!(
+            parse(&[0x85, 0x00]).map_err(ParseError::message),
+            Err("Report ID outside 1-255")
+        );
         // 256 bits times 12288 fields cannot fit 16 KiB.
         assert_eq!(
-            parse(&[0x76, 0x00, 0x01, 0x96, 0x00, 0x30, 0x81, 0x01]),
+            parse(&[0x76, 0x00, 0x01, 0x96, 0x00, 0x30, 0x81, 0x01]).map_err(ParseError::message),
             Err("input report longer than 16384 bytes")
         );
     }

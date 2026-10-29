@@ -34,7 +34,8 @@ fn a_boot_keyboard_with_report_ids_is_read_through_its_descriptor() {
         input_bytes: BOOT_REPORT_BYTES,
     };
     let usable = |reports: &Reports| reports.keys.is_some();
-    let described = report::parse(&NUMBERED_KEYBOARD).map_err(BlockError::Unsupported);
+    let described =
+        report::parse(&NUMBERED_KEYBOARD).map_err(|error| BlockError::Unsupported(error.message()));
     let (protocol, reports) = boot_interface(described, boot(), usable);
     assert_eq!(protocol, REPORT_PROTOCOL);
     assert!(reports.numbered());
@@ -58,7 +59,7 @@ fn a_boot_keyboard_with_report_ids_is_read_through_its_descriptor() {
         0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x02, 0x81,
         0x06,
     ])
-    .map_err(BlockError::Unsupported);
+    .map_err(|error| BlockError::Unsupported(error.message()));
     assert_eq!(
         boot_interface(pointer_only, boot(), usable).0,
         BOOT_PROTOCOL

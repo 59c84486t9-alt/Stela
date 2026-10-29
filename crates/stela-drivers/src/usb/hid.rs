@@ -18,6 +18,7 @@ mod control;
 #[cfg(test)]
 mod delimiter_tests;
 pub mod descriptor;
+mod error;
 pub mod events;
 mod lifecycle;
 pub mod receiver;
@@ -31,6 +32,7 @@ pub mod translate;
 mod usages;
 
 pub use descriptor::{DecodeError, Descriptor, Frame, ReportType};
+pub use error::{ParseError, ParseErrorKind, Reader, UsageError};
 pub use touch::{TouchDiscard, TouchFrame, TouchPoll};
 pub use translate::{Translated, Translator};
 
@@ -306,8 +308,10 @@ impl UsbInput {
             // fallback is allowed only for an actual boot subclass interface.
             let raw = read_descriptor(&mut c, device, interface);
             let described = raw.as_ref().map_err(Clone::clone).and_then(|bytes| {
-                let descriptor = Descriptor::parse(bytes).map_err(BlockError::Unsupported)?;
-                let reports = report::parse(bytes).map_err(BlockError::Unsupported)?;
+                let descriptor = Descriptor::parse(bytes)
+                    .map_err(|error| BlockError::Unsupported(error.message()))?;
+                let reports = report::parse(bytes)
+                    .map_err(|error| BlockError::Unsupported(error.message()))?;
                 Ok((descriptor, reports))
             });
             let legacy = described

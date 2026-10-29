@@ -100,6 +100,8 @@ pub enum PlatformError {
     Lpss(crate::bus::lpss::Error),
     LpssAttach(crate::bus::lpss::AttachError),
     HidI2c(input::hid_i2c::Error),
+    /// The HID report descriptor could not be interpreted as input.
+    HidDescriptor(usb::hid::ParseError),
     Touchpad(input::touchpad::Error),
     #[cfg(feature = "native-acpi")]
     Gpio(crate::bus::gpio::native::Error),
@@ -129,6 +131,7 @@ impl fmt::Display for PlatformError {
             Self::Lpss(error) => write!(f, "LPSS: {error:?}"),
             Self::LpssAttach(error) => write!(f, "LPSS I2C attach: {error:?}"),
             Self::HidI2c(error) => error.fmt(f),
+            Self::HidDescriptor(error) => error.fmt(f),
             Self::Touchpad(error) => error.fmt(f),
             #[cfg(feature = "native-acpi")]
             Self::Gpio(error) => write!(f, "GPIO controller: {error:?}"),
