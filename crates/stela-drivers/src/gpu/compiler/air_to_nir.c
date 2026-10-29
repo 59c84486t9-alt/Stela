@@ -76,6 +76,8 @@ struct translator {
    const struct stela_air_stage_options *stage_options;
    struct stela_air_render render;
    nir_variable *outputs[AIR_MAX_ARGUMENTS];
+   /* An amplified vertex function's layer and viewport outputs. */
+   nir_variable *layer, *viewport;
    struct stela_air_error *error;
    unsigned air_minor;
    unsigned language_major, language_minor;
@@ -168,6 +170,21 @@ static bool
 value_shape(LLVMTypeRef type, unsigned *components, unsigned *bits)
 {
    return shape(type, components, bits) || float_shape(type, components, bits);
+}
+
+/* A render aggregate leaf: an integer, float or half scalar or vector. */
+static bool
+leaf_shape(LLVMTypeRef type)
+{
+   unsigned components, bits;
+   if (value_shape(type, &components, &bits))
+      return true;
+   if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
+      if (LLVMGetVectorSize(type) < 2 || LLVMGetVectorSize(type) > 4)
+         return false;
+      type = LLVMGetElementType(type);
+   }
+   return LLVMGetTypeKind(type) == LLVMHalfTypeKind;
 }
 
 static bool
@@ -966,9 +983,8 @@ aggregate_value(struct translator *t, LLVMValueRef llvm)
    }
    unsigned count = LLVMCountStructElementTypes(type);
    for (unsigned i = 0; i < count; i++) {
-      unsigned n, bits;
-      if (!float_shape(LLVMStructGetTypeAtIndex(type, i), &n, &bits)) {
-         fail(t, STELA_AIR_TYPE, "aggregate requires flat FP32 scalar/vector leaves"); return NULL;
+      if (!leaf_shape(LLVMStructGetTypeAtIndex(type, i))) {
+         fail(t, STELA_AIR_TYPE, "aggregate requires flat scalar/vector leaves"); return NULL;
       }
    }
    v = rzalloc(t->values, struct value);
@@ -1044,14 +1060,60 @@ stage_value_instruction(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
 static unsigned
 stage_location(struct translator *t, const struct stela_air_stage_io *io)
 {
-   if (io->semantic == STELA_AIR_POSITION) return VARYING_SLOT_POS;
-   if (io->semantic == STELA_AIR_RENDER_TARGET) return FRAG_RESULT_DATA0;
+   switch (io->semantic) {
+   case STELA_AIR_POSITION: return VARYING_SLOT_POS;
+   case STELA_AIR_RENDER_TARGET: return FRAG_RESULT_DATA0 + io->location;
+   case STELA_AIR_VERTEX_INPUT: return VERT_ATTRIB_GENERIC0 + io->location;
+   case STELA_AIR_POINT_SIZE: return VARYING_SLOT_PSIZ;
+   case STELA_AIR_LAYER: return VARYING_SLOT_LAYER;
+   case STELA_AIR_VIEWPORT: return VARYING_SLOT_VIEWPORT;
+   case STELA_AIR_DEPTH: return FRAG_RESULT_DEPTH;
+   case STELA_AIR_SAMPLE_MASK: return FRAG_RESULT_SAMPLE_MASK;
+   case STELA_AIR_STENCIL: return FRAG_RESULT_STENCIL;
+   default: break;
+   }
    for (unsigned i = 0; i < t->stage_options->varying_count; i++) {
       const struct stela_air_varying_slot *v = &t->stage_options->varyings[i];
       if (v->identifier_bytes == io->identifier_bytes && !memcmp(v->identifier, io->identifier, io->identifier_bytes))
          return VARYING_SLOT_VAR0 + v->location;
    }
    UNREACHABLE("stage map validated before emission");
+}
+
+/* Stage IO crosses the stage boundary in 32-bit lanes: floats for float and
+ * half, signed or unsigned integers for the integer types. */
+static bool
+stage_signed(enum stela_air_primitive p)
+{
+   return p == STELA_AIR_CHAR || p == STELA_AIR_SHORT || p == STELA_AIR_INT;
+}
+
+static unsigned
+stage_bits(enum stela_air_primitive p)
+{
+   return p == STELA_AIR_CHAR || p == STELA_AIR_UCHAR ? 8 :
+          p == STELA_AIR_SHORT || p == STELA_AIR_USHORT || p == STELA_AIR_HALF ? 16 : 32;
+}
+
+static nir_def *
+stage_narrow(nir_builder *b, nir_def *def, enum stela_air_primitive p)
+{
+   unsigned bits = stage_bits(p);
+   if (bits == 32)
+      return def;
+   if (p == STELA_AIR_HALF)
+      return nir_f2f16(b, def);
+   return stage_signed(p) ? nir_i2iN(b, def, bits) : nir_u2uN(b, def, bits);
+}
+
+static nir_def *
+stage_widen(nir_builder *b, nir_def *def, enum stela_air_primitive p)
+{
+   if (def->bit_size == 32)
+      return def;
+   if (p == STELA_AIR_HALF)
+      return nir_f2f32(b, def);
+   return stage_signed(p) ? nir_i2i32(b, def) : nir_u2u32(b, def);
 }
 
 static nir_variable *
@@ -1061,12 +1123,45 @@ stage_variable(struct translator *t, const struct stela_air_stage_io *io, bool o
    const char *source = io->name ? io->name : "air.output";
    size_t n = io->name ? io->name_bytes : strlen(source);
    memcpy(name, source, n); name[n] = 0;
+   enum glsl_base_type base = io->primitive == STELA_AIR_FLOAT || io->primitive == STELA_AIR_HALF ?
+      GLSL_TYPE_FLOAT : stage_signed(io->primitive) ? GLSL_TYPE_INT : GLSL_TYPE_UINT;
+   /* The indices and masks are ints, as SPIR-V's builtins are. */
+   if (io->semantic == STELA_AIR_LAYER || io->semantic == STELA_AIR_VIEWPORT ||
+       io->semantic == STELA_AIR_SAMPLE_MASK || io->semantic == STELA_AIR_STENCIL)
+      base = GLSL_TYPE_INT;
    nir_variable *var = nir_variable_create(t->b.shader, output ? nir_var_shader_out : nir_var_shader_in,
-      glsl_vector_type(GLSL_TYPE_FLOAT, io->components), name);
+      glsl_vector_type(base, io->components), name);
    if (!var) { fail(t, STELA_AIR_ALLOCATION, "render IO variable allocation failed"); return NULL; }
    var->data.location = stage_location(t, io);
-   if (!output) var->data.interpolation = io->interpolation == STELA_AIR_PERSPECTIVE ?
-      INTERP_MODE_SMOOTH : INTERP_MODE_NOPERSPECTIVE;
+   var->data.index = io->semantic == STELA_AIR_RENDER_TARGET ? io->index : 0;
+   var->data.invariant = io->invariant;
+   if (io->semantic == STELA_AIR_DEPTH) {
+      static const enum gl_frag_depth_layout layouts[] = {
+         [STELA_AIR_DEPTH_ANY] = FRAG_DEPTH_LAYOUT_ANY,
+         [STELA_AIR_DEPTH_GREATER] = FRAG_DEPTH_LAYOUT_GREATER,
+         [STELA_AIR_DEPTH_LESS] = FRAG_DEPTH_LAYOUT_LESS,
+      };
+      t->b.shader->info.fs.depth_layout = layouts[io->depth];
+   }
+   if (!output && io->semantic != STELA_AIR_VERTEX_INPUT) {
+      var->data.interpolation = io->interpolation == STELA_AIR_PERSPECTIVE ? INTERP_MODE_SMOOTH :
+                                io->interpolation == STELA_AIR_FLAT ? INTERP_MODE_FLAT :
+                                INTERP_MODE_NOPERSPECTIVE;
+      var->data.centroid = io->sampling == STELA_AIR_CENTROID;
+      var->data.sample = io->sampling == STELA_AIR_SAMPLE;
+   }
+   return var;
+}
+
+/* A flat int output an amplified vertex function writes for its view. */
+static nir_variable *
+view_output(struct translator *t, gl_varying_slot slot, const char *name)
+{
+   nir_variable *var = nir_variable_create(t->b.shader, nir_var_shader_out, glsl_int_type(), name);
+   if (!var)
+      fail(t, STELA_AIR_ALLOCATION, "render IO variable allocation failed");
+   else
+      var->data.location = slot;
    return var;
 }
 
@@ -1116,7 +1211,7 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
       } else {
          nir_variable *var = stage_variable(t, io, false);
          if (!var) return false;
-         def = nir_load_var(&t->b, var);
+         def = stage_narrow(&t->b, nir_load_var(&t->b, var), io->primitive);
       }
       if (!put_value(t, param, def, io->buffer.access)) return false;
       if (io->semantic == STELA_AIR_STAGE_BUFFER) {
@@ -1126,7 +1221,16 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
       }
    }
    for (unsigned i = 0; i < t->render.entry.output_count; i++) {
-      if (!(t->outputs[i] = stage_variable(t, &t->render.outputs[i], true))) return false;
+      const struct stela_air_stage_io *io = &t->render.outputs[i];
+      if (!(t->outputs[i] = stage_variable(t, io, true))) return false;
+      if (io->semantic == STELA_AIR_LAYER) t->layer = t->outputs[i];
+      if (io->semantic == STELA_AIR_VIEWPORT) t->viewport = t->outputs[i];
+   }
+   if (t->stage_options->amplified) {
+      if (!t->layer && !(t->layer = view_output(t, VARYING_SLOT_LAYER, "air.view_layer")))
+         return false;
+      if (!t->viewport && !(t->viewport = view_output(t, VARYING_SLOT_VIEWPORT, "air.view_viewport")))
+         return false;
    }
    return true;
 }
@@ -1148,8 +1252,26 @@ stage_return(struct translator *t, LLVMValueRef inst)
       if (!values[i]) return fail(t, STELA_AIR_INSTRUCTION, "undefined/poison render output leaf/lane");
    }
    /* Validate ALL leaves before emitting any output effect. */
-   for (unsigned i = 0; i < t->render.entry.output_count; i++)
-      nir_store_var(&t->b, t->outputs[i], values[i], BITFIELD_MASK(values[i]->num_components));
+   nir_def *layer = NULL, *viewport = NULL;
+   for (unsigned i = 0; i < t->render.entry.output_count; i++) {
+      const struct stela_air_stage_io *io = &t->render.outputs[i];
+      nir_def *value = stage_widen(&t->b, values[i], io->primitive);
+      if (t->stage_options->amplified && t->outputs[i] == t->layer)
+         layer = value;
+      else if (t->stage_options->amplified && t->outputs[i] == t->viewport)
+         viewport = value;
+      else
+         nir_store_var(&t->b, t->outputs[i], value, BITFIELD_MASK(value->num_components));
+   }
+   if (t->stage_options->amplified) {
+      nir_def *mapping = device_value(t, STELA_AIR_VIEW_MAPPING);
+      if (!mapping)
+         return false;
+      nir_def *zero = nir_imm_int(&t->b, 0);
+      nir_store_var(&t->b, t->layer, nir_iadd(&t->b, layer ? layer : zero, nir_ushr_imm(&t->b, mapping, 16)), 1);
+      nir_store_var(&t->b, t->viewport,
+                    nir_iadd(&t->b, viewport ? viewport : zero, nir_iand_imm(&t->b, mapping, 0xffff)), 1);
+   }
    return true;
 }
 
@@ -2265,8 +2387,8 @@ cfg_phi_shape(struct translator *t, LLVMTypeRef type, unsigned *leaves)
       return fail(t, STELA_AIR_TYPE, "PHI requires numeric/proven pointer value or packed flat FP32 render aggregate");
    *leaves = LLVMCountStructElementTypes(type);
    for (unsigned i = 0; i < *leaves; i++) {
-      if (!float_shape(LLVMStructGetTypeAtIndex(type, i), &components, &bits))
-         return fail(t, STELA_AIR_TYPE, "aggregate PHI requires flat FP32 scalar/vector leaves");
+      if (!leaf_shape(LLVMStructGetTypeAtIndex(type, i)))
+         return fail(t, STELA_AIR_TYPE, "aggregate PHI requires flat scalar/vector leaves");
    }
    return true;
 }

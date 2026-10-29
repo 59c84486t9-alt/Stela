@@ -609,6 +609,30 @@ fn color_targets() -> RenderTargets {
 }
 
 #[test]
+fn amplified_pipelines_compile_amplified_vertex_functions() {
+    let mut device = device();
+    let vertex = device.new_function(1, "vertex", Vec::new()).unwrap();
+    let fragment = device.new_function(1, "fragment", Vec::new()).unwrap();
+    let request = RenderPipelineRequest {
+        vertex_function: vertex,
+        fragment_function: Some(fragment),
+        vertex_descriptor: None,
+        targets: color_targets(),
+        input_primitive_topology: PrimitiveTopologyClass::Triangle,
+        max_vertex_amplification_count: 2,
+        tessellation: Default::default(),
+    };
+    device.new_render_pipeline(&request).unwrap();
+    let amplified: Vec<bool> = device
+        .compiler
+        .compiled
+        .iter()
+        .map(|specialization| specialization.amplified)
+        .collect();
+    assert_eq!(amplified, [true, false]);
+}
+
+#[test]
 fn render_pipelines_compile_their_functions_once() {
     let mut device = device();
     let vertex = device

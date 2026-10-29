@@ -302,6 +302,10 @@ pub struct Specialization {
     /// A kernel's stage-in layout. The region it is fetched over is the
     /// push constants' `arguments`.
     pub stage_in: Option<StageInputDescriptor>,
+    /// A vertex function of a pipeline that amplifies vertices: it adds the
+    /// push constants' `view_mapping` offsets to the render target array and
+    /// viewport indices it writes.
+    pub amplified: bool,
 }
 
 /// What a post-tessellation vertex function compiles against: its

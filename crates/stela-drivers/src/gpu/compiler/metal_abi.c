@@ -32,6 +32,8 @@ nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_val
                                     .range = 12, .align_mul = 4);
    case STELA_AIR_AMPLIFICATION:
       return load_push(b, 32, STELA_METAL_PUSH_AMPLIFICATION);
+   case STELA_AIR_VIEW_MAPPING:
+      return load_push(b, 32, STELA_METAL_PUSH_VIEW_MAPPING);
    }
    return NULL;
 }

@@ -98,6 +98,9 @@ enum stela_air_device_value {
    STELA_AIR_DISPATCH_GRID,
    /* The amplification ID of an amplified draw, as a uint. */
    STELA_AIR_AMPLIFICATION,
+   /* That view's mapping as a uint: the viewport offset in the low half, the
+    * render target array index offset in the high half. */
+   STELA_AIR_VIEW_MAPPING,
 };
 typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_device_value,
                                                 void *binding_data);
@@ -149,6 +152,10 @@ struct stela_air_stage_options {
    struct stela_air_options resources;
    const struct stela_air_varying_slot *varyings;
    unsigned varying_count, max_varying_slots;
+   /* A vertex function of a pipeline that amplifies vertices: it adds its
+    * view's mapping to the render target array and viewport indices it
+    * writes, or writes the offsets alone. */
+   bool amplified;
 };
 nir_shader *stela_air_stage_to_nir(const void *, size_t, const char *entry,
                                   const nir_shader_compiler_options *,

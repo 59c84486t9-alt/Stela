@@ -9,6 +9,8 @@ extern "C" {
 #endif
 
 #define AIR_MAX_ARGUMENTS 128
+#define AIR_MAX_VERTEX_ATTRIBUTES 31u
+#define AIR_MAX_RENDER_TARGETS 8u
 #define AIR_MAX_METADATA_OPERANDS 256
 #define AIR_MAX_BITCODE_BYTES (64u * 1024u * 1024u)
 
@@ -65,7 +67,7 @@ enum stela_air_primitive {
    STELA_AIR_PRIMITIVE_UNKNOWN,
    STELA_AIR_CHAR, STELA_AIR_UCHAR, STELA_AIR_SHORT, STELA_AIR_USHORT,
    STELA_AIR_INT, STELA_AIR_UINT, STELA_AIR_LONG, STELA_AIR_ULONG, STELA_AIR_FLOAT,
-   STELA_AIR_HALF, /* Texture components only. */
+   STELA_AIR_HALF,
 };
 
 /* MTLTextureType, as the texture's reflected type name spells it. */
@@ -175,10 +177,23 @@ enum stela_air_stage_semantic {
    STELA_AIR_STAGE_BUFFER = 1, STELA_AIR_STAGE_BUILTIN, STELA_AIR_POSITION,
    STELA_AIR_VARYING, STELA_AIR_RENDER_TARGET, STELA_AIR_STAGE_TEXTURE,
    STELA_AIR_STAGE_SAMPLER,
+   STELA_AIR_VERTEX_INPUT, /* A stage-in attribute at location. */
+   /* Vertex outputs. */
+   STELA_AIR_POINT_SIZE, STELA_AIR_LAYER, STELA_AIR_VIEWPORT,
+   /* Fragment outputs. */
+   STELA_AIR_DEPTH, STELA_AIR_SAMPLE_MASK, STELA_AIR_STENCIL,
 };
 enum stela_air_interpolation {
    STELA_AIR_INTERPOLATION_NONE, STELA_AIR_PERSPECTIVE,
-   STELA_AIR_NO_PERSPECTIVE,
+   STELA_AIR_NO_PERSPECTIVE, STELA_AIR_FLAT,
+};
+/* Where an interpolated fragment input is sampled. */
+enum stela_air_sampling {
+   STELA_AIR_SAMPLING_NONE, STELA_AIR_CENTER, STELA_AIR_CENTROID, STELA_AIR_SAMPLE,
+};
+/* A depth output's air.depth_qualifier. */
+enum stela_air_depth_qualifier {
+   STELA_AIR_DEPTH_ANY, STELA_AIR_DEPTH_GREATER, STELA_AIR_DEPTH_LESS,
 };
 struct stela_air_struct_member {
    unsigned offset, size;
@@ -197,8 +212,11 @@ struct stela_air_stage_io {
    enum stela_air_primitive primitive;
    unsigned components;
    enum stela_air_interpolation interpolation;
-   bool center, used;
-   unsigned location, index; /* RENDER_TARGET attachment / dual-source index. */
+   enum stela_air_sampling sampling;
+   enum stela_air_depth_qualifier depth; /* Only DEPTH. */
+   bool used, invariant;
+   /* RENDER_TARGET attachment and dual-source index; VERTEX_INPUT attribute. */
+   unsigned location, index;
    const char *name, *type_name, *identifier;
    size_t name_bytes, type_name_bytes, identifier_bytes;
    unsigned member_count;

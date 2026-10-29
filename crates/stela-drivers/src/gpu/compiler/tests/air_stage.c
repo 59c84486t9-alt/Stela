@@ -635,7 +635,7 @@ aggregate_phi_semantics(void)
       "float -0.0,float poison,float 0.0,float 4.0");
    refusal(bad, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_INSTRUCTION);
    free(bad); free(text);
-   const char *unsupported[] = {"{<4 x float>,<4 x float>}", "<{i32,<4 x float>}>", "<{<{float}>,<4 x float>}>"};
+   const char *unsupported[] = {"{<4 x float>,<4 x float>}", "<{double,<4 x float>}>", "<{<{float}>,<4 x float>}>"};
    for (unsigned i = 0; i < ARRAY_SIZE(unsupported); i++) {
       char body[1024];
       snprintf(body, sizeof(body), "{\nentry:\n %%take = icmp eq i32 %%id, 0\n br i1 %%take, label %%a, label %%b\n"

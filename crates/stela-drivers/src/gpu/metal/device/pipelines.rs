@@ -154,13 +154,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     fn compile_tessellation(
         &mut self,
         id: FunctionId,
+        specialization: Specialization,
         tessellation: &Tessellation,
     ) -> Result<TessellationStages> {
         let function = self.pipelines.functions.get(id.0)?;
+        let specialization = Specialization {
+            amplified: specialization.amplified,
+            ..function.specialization()
+        };
         let stages = self.compiler.compile_tessellation(
             function.library,
             &function.entry,
-            &function.specialization(),
+            &specialization,
             tessellation,
         )?;
         let interface = &stages.evaluation.interface;
@@ -192,15 +197,20 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             &request.tessellation,
             request.vertex_descriptor.as_ref(),
         )?;
+        let specialization = Specialization {
+            amplified: request.max_vertex_amplification_count > 1,
+            ..Specialization::default()
+        };
         let (vertex, feeding) = match &tessellation {
             Some(tessellation) => {
-                let stages = self.compile_tessellation(request.vertex_function, tessellation)?;
+                let stages = self.compile_tessellation(
+                    request.vertex_function,
+                    specialization,
+                    tessellation,
+                )?;
                 (stages.evaluation, Some([stages.vertex, stages.control]))
             }
-            None => (
-                self.compile(request.vertex_function, Specialization::default())?,
-                None,
-            ),
+            None => (self.compile(request.vertex_function, specialization)?, None),
         };
         let mut codes: Vec<ShaderCode> = feeding.into_iter().flatten().collect();
         codes.push(vertex.code);

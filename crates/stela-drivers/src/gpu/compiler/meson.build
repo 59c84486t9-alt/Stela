@@ -276,6 +276,15 @@ if stela_air_llvm != ''
     build_rpath : fs.parent(stela_air_llvm),
   )
   test('stela_air_builtins', stela_air_builtins_test, suite : 'stela')
+  stela_air_render_io_test = executable(
+    'stela_air_render_io_test',
+    'tests/air_render_io.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : [idep_stela_air],
+    link_with : stela_metal_abi,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_render_io', stela_air_render_io_test, suite : 'stela')
   if with_nvidia
     stela_nvidia_air_render_test = executable(
       'stela_nvidia_air_render_test',
