@@ -6,6 +6,7 @@ use super::{Community, Error, Group, Profile, RegisterIo};
 use alloc::vec::Vec;
 use core::mem::ManuallyDrop;
 
+#[cfg(any(test, feature = "native-acpi"))]
 const MAX_PADS: usize = 512;
 const RX: u32 = 1 << 1;
 const TX: u32 = 1;
@@ -105,7 +106,7 @@ pub struct Controller<R: RegisterIo> {
     retired: bool,
 }
 impl<R: RegisterIo> Controller<R> {
-    #[allow(dead_code)] // Private protocol admission, never a native pad grant.
+    #[cfg(any(test, feature = "native-acpi"))] // Private protocol admission, never a native pad grant.
     pub(in crate::bus::gpio) fn new(
         registers: R,
         profile: &'static Profile,
@@ -308,6 +309,7 @@ impl<R: RegisterIo> Controller<R> {
     }
 }
 impl<R: RegisterIo> Controller<R> {
+    #[cfg(any(test, feature = "native-acpi"))]
     fn snapshot(&mut self, pin: u16) -> Result<Saved, Error> {
         let (community, group) = self.locate(pin)?;
         self.host_owner(community, group, pin)?;

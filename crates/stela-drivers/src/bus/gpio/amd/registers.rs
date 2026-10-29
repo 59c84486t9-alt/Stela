@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Actual bounded, volatile access through retained native UC mappings.
 use super::Error;
-use crate::bus::mmio::owned::{CacheAttribute, Mapping, Protection};
+use crate::bus::mmio::owned::Mapping;
+#[cfg(feature = "native-acpi")]
+use crate::bus::mmio::owned::{CacheAttribute, Protection};
 
 pub(super) mod sealed {
     pub trait Sealed {}
@@ -30,7 +32,7 @@ pub struct NativeRegisters {
 }
 impl sealed::Sealed for NativeRegisters {}
 impl NativeRegisters {
-    #[allow(dead_code)] // Raw construction stays internal to native admission.
+    #[cfg(feature = "native-acpi")] // Raw construction stays internal to native admission.
     pub(in crate::bus::gpio) fn from_owned_mappings(
         gpio: Mapping,
         mux: Option<Mapping>,

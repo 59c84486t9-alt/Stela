@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 //! Actual retained UC mappings. MMIO alone never authorizes native pad access.
 use super::Error;
-use crate::bus::mmio::owned::{CacheAttribute, Mapping, Protection};
+use crate::bus::mmio::owned::Mapping;
+#[cfg(feature = "native-acpi")]
+use crate::bus::mmio::owned::{CacheAttribute, Protection};
 use alloc::vec::Vec;
 
 pub(super) mod sealed {
@@ -19,7 +21,7 @@ pub struct NativeRegisters {
 }
 impl sealed::Sealed for NativeRegisters {}
 impl NativeRegisters {
-    #[allow(dead_code)] // Raw construction stays internal to native admission.
+    #[cfg(feature = "native-acpi")] // Raw construction stays internal to native admission.
     pub(in crate::bus::gpio) fn from_owned_mappings(
         windows: Vec<(u8, Mapping)>,
     ) -> Result<Self, Error> {

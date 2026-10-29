@@ -53,6 +53,13 @@ pub(super) struct Group {
 pub(super) struct Community {
     bar: u8,
     first: u16,
+    #[cfg_attr(
+        not(any(test, feature = "native-acpi")),
+        expect(
+            dead_code,
+            reason = "Profiles retain complete community geometry; count is validated when the native or model constructor is enabled"
+        )
+    )]
     count: u16,
     pad_own: usize,
     lock: usize,

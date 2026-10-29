@@ -88,7 +88,7 @@ pub struct Controller<R: RegisterIo> {
 impl<R: RegisterIo> Controller<R> {
     // The bitmap is internal protocol inventory, never a native grant. The real
     // resource adapter starts empty and captures each actually claimed line.
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "native-acpi"))]
     pub(in crate::bus::gpio) fn new(
         registers: R,
         profile: Profile,
