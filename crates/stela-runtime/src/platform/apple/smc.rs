@@ -24,7 +24,11 @@
 //! documents for the same protocol: WRITE 0x11 takes its value from the
 //! shared page, GET_KEY_BY_INDEX 0x12 answers the key at an index of the
 //! lexicographically sorted table, GET_KEY_INFO 0x13 writes six bytes to the
-//! shared page, RW 0x20 writes then reads.
+//! shared page, RW 0x20 writes then reads. Returned key names and the SRAM
+//! type field carry the FourCC's ASCII bytes in order: consumers decode a
+//! big-endian word (_getKeyFromIndexGated 0xfffffe0009da7d28 and
+//! _getKeyInfoGated 0xfffffe0009da82dc; Linux macsmc's swab32/BE32). This
+//! field order is independent of each key value's own encoding.
 //!
 //! Notifications. A message of type 0x18 from the SMC carries an event in
 //! bytes 4..7: its class in byte 7, a subclass in byte 6 and two data
@@ -717,14 +721,14 @@ impl Endpoint for Smc {
                 }
                 READ | WRITE | READ_WRITE => Self::reply(payload, BAD_ARGUMENT, 0, 0),
                 KEY_BY_INDEX => match self.key_by_index(name as usize) {
-                    Some(key) => Self::reply(payload, SUCCESS, 4, key),
+                    Some(key) => Self::reply(payload, SUCCESS, 4, key.swap_bytes()),
                     None => Self::reply(payload, INDEX_RANGE, 0, 0),
                 },
                 KEY_INFO => match self.key_info(name) {
                     Some((bytes, kind, flags)) => {
                         let mut info = [0u8; 6];
                         info[0] = bytes as u8;
-                        info[1..5].copy_from_slice(&kind.to_le_bytes());
+                        info[1..5].copy_from_slice(&kind.to_be_bytes());
                         info[5] = flags;
                         self.sram.put(&info);
                         Self::reply(payload, SUCCESS, info.len(), 0)
@@ -932,7 +936,7 @@ mod tests {
         assert_eq!(names.iter().filter(|&&name| name == key).count(), 1);
         assert_eq!(smc.key_by_index(names.len()), None);
         assert_eq!(send(&mut smc, request(KEY_INFO, 2, 0, 0, key)) & 0xff, 0);
-        assert_eq!(sram.get(6), [6, b'_', b'x', b'e', b'h', 0x94]);
+        assert_eq!(sram.get(6), [6, b'h', b'e', b'x', b'_', 0x94]);
         sram.put(&[0xa5; 16]);
         let mut output = Vec::new();
         assert!(
@@ -1132,25 +1136,54 @@ mod tests {
     }
 
     #[test]
+    fn fourcc_key_indices_decode_at_the_consumer_boundary() {
+        let (mut smc, _) = smc();
+        let expected: Vec<u32> = smc.keys.keys().copied().collect();
+        for (index, key) in expected.into_iter().enumerate() {
+            let reply = send(&mut smc, request(KEY_BY_INDEX, 3, 0, 0, index as u32));
+            assert_eq!(reply as u8, SUCCESS);
+            // Linux swab32 and Apple's LDR/REV interpret the four raw
+            // response bytes as a most-significant-byte-first FourCC.
+            let wire = ((reply >> 32) as u32).to_le_bytes();
+            assert_eq!(u32::from_be_bytes(wire), key);
+        }
+    }
+
+    #[test]
+    fn fourcc_key_information_decodes_at_the_consumer_boundary() {
+        let (mut smc, sram) = smc();
+        let reply = send(&mut smc, request(KEY_INFO, 4, 0, 0, code(b"gP16")));
+        assert_eq!(reply as u8, SUCCESS);
+        let info = sram.get(6);
+        // Linux get_unaligned_be32 and Apple's LDUR/REV decode this field.
+        assert_eq!(
+            u32::from_be_bytes(info[1..5].try_into().unwrap()),
+            code(b"ui32")
+        );
+        assert_eq!(info[0], 4);
+        assert_eq!(info[5], READABLE | WRITABLE | FUNCTION);
+    }
+
+    #[test]
     fn keys_enumerate_sorted_with_their_information() {
         let (mut smc, sram) = smc();
         let first = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 0));
-        assert_eq!((first >> 32) as u32, code(b"#KEY"));
+        assert_eq!(((first >> 32) as u32).to_le_bytes(), *b"#KEY");
         // Byte order: `D1Vn` before `MBSE`, `aDC#` before `bHLD` and `gP09`.
         let second = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 1));
-        assert_eq!((second >> 32) as u32, code(b"D1Vn"));
+        assert_eq!(((second >> 32) as u32).to_le_bytes(), *b"D1Vn");
         let third = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 2));
-        assert_eq!((third >> 32) as u32, code(b"MBSE"));
+        assert_eq!(((third >> 32) as u32).to_le_bytes(), *b"MBSE");
         let eighth = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 7));
-        assert_eq!((eighth >> 32) as u32, code(b"aDC#"));
+        assert_eq!(((eighth >> 32) as u32).to_le_bytes(), *b"aDC#");
         let tenth = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 9));
-        assert_eq!((tenth >> 32) as u32, code(b"gP09"));
+        assert_eq!(((tenth >> 32) as u32).to_le_bytes(), *b"gP09");
         assert_eq!(
             send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 17)) & 0xff,
             u64::from(INDEX_RANGE)
         );
         send(&mut smc, request(KEY_INFO, 0, 0, 0, code(b"gP16")));
-        assert_eq!(sram.get(6), [4, b'2', b'3', b'i', b'u', 0xd0]);
+        assert_eq!(sram.get(6), [4, b'u', b'i', b'3', b'2', 0xd0]);
     }
 
     #[test]
@@ -1368,7 +1401,7 @@ mod tests {
         send(&mut smc, request(KEY_INFO, 0, 0, 0, lock));
         assert_eq!(
             sram.get(6),
-            [1, b'g', b'a', b'l', b'f', READABLE | WRITABLE]
+            [1, b'f', b'l', b'a', b'g', READABLE | WRITABLE]
         );
     }
 
