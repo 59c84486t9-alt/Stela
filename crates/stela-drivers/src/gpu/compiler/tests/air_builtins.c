@@ -306,6 +306,43 @@ refuses_misplaced_and_malformed_builtins(void)
    assert(error.kind == STELA_AIR_METADATA);
 }
 
+static bool
+reflect_max_threads(const struct stela_air_inspection *info, const struct stela_air_entry *entry,
+                    void *data)
+{
+   (void)info;
+   *(unsigned *)data = entry->max_threads;
+   return true;
+}
+
+/* air.max_work_group_size bounds the workgroup a kernel compiles for, and
+ * inspection reflects it. */
+static void
+kernels_bound_their_workgroups(void)
+{
+   const char *body = "define void @kernel(i32 %i) {\nret void\n}\n";
+   for (unsigned limit = 32; limit <= 64; limit += 32) {
+      char md[512];
+      snprintf(md, sizeof(md), "!air.kernel = !{!2}\n!2 = !{ptr @kernel, !3, !4, !5}\n!3 = !{}\n"
+               "!4 = !{!40}\n!5 = !{!\"air.max_work_group_size\", i32 %u}\n%s", limit,
+               BUILTIN(40, 0, "thread_index_in_threadgroup", "uint"));
+      struct stela_air_error error = {0};
+      /* The workgroup is 64 threads. */
+      nir_shader *shader = translate(body, md, "kernel", 0, true, &error);
+      assert(limit < 64 ? !shader && error.kind == STELA_AIR_LIMIT : shader != NULL);
+      ralloc_free(shader);
+
+      char *text = metadata(md);
+      LLVMMemoryBufferRef input = stela_air_test_custom_bitcode(module, body, text, "");
+      free(text);
+      unsigned reflected = 0;
+      assert(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 1,
+                               reflect_max_threads, &reflected, &error));
+      assert(reflected == limit);
+      LLVMDisposeMemoryBuffer(input);
+   }
+}
+
 int
 main(void)
 {
@@ -315,6 +352,7 @@ main(void)
    vertex_builtins_include_the_bases();
    fragment_builtins_read_the_rasterizer();
    refuses_misplaced_and_malformed_builtins();
+   kernels_bound_their_workgroups();
    glsl_type_singleton_decref();
    puts("air builtins: ok");
    return 0;

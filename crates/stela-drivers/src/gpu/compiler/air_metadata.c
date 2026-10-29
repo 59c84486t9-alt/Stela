@@ -1401,6 +1401,39 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
    return true;
 }
 
+/* An entry descriptor's fields past its outputs and inputs: a kernel's,
+ * object or mesh function's air.max_work_group_size, which *max_threads
+ * receives, and an object function's air.max_mesh_work_groups. Stage zero
+ * is a kernel. */
+static bool
+entry_limits(struct stela_air_metadata *m, LLVMValueRef node, enum stela_air_stage stage,
+             unsigned *max_threads, unsigned *max_mesh_threadgroups)
+{
+   LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+   unsigned n;
+   if (!stela_air_md_node(m, node, fields, &n))
+      return false;
+   *max_threads = 0;
+   if (max_mesh_threadgroups)
+      *max_mesh_threadgroups = 0;
+   for (unsigned i = 3; i < n; i++) {
+      LLVMValueRef pair[AIR_MAX_METADATA_OPERANDS];
+      unsigned count, value;
+      if (stage == STELA_AIR_VERTEX || stage == STELA_AIR_FRAGMENT ||
+          !stela_air_md_node(m, fields[i], pair, &count) || count != 2 ||
+          !stela_air_md_uint(pair[1], &value) || !value)
+         return fail(m, STELA_AIR_METADATA, "unsupported entry descriptor field");
+      unsigned *limit = stela_air_md_string(pair[0], "air.max_work_group_size") ? max_threads :
+                        stage == STELA_AIR_OBJECT &&
+                        stela_air_md_string(pair[0], "air.max_mesh_work_groups") ?
+                           max_mesh_threadgroups : NULL;
+      if (!limit || *limit)
+         return fail(m, STELA_AIR_METADATA, "unsupported/duplicate entry descriptor field");
+      *limit = value;
+   }
+   return true;
+}
+
 bool
 stela_air_metadata_kernel(struct stela_air_metadata *t, LLVMValueRef fn,
                            struct stela_air_kernel *kernel)
@@ -1409,14 +1442,14 @@ stela_air_metadata_kernel(struct stela_air_metadata *t, LLVMValueRef fn,
        LLVMGetTypeKind(LLVMGetReturnType(LLVMGlobalGetValueType(fn))) != LLVMVoidTypeKind ||
        LLVMIsFunctionVarArg(LLVMGlobalGetValueType(fn)))
       return fail(t, STELA_AIR_ARGUMENT, "entry must be a defined nonvariadic void C-convention kernel");
-   LLVMValueRef kernels[AIR_MAX_METADATA_OPERANDS], args_node = NULL;
+   LLVMValueRef kernels[AIR_MAX_METADATA_OPERANDS], args_node = NULL, selected = NULL;
    unsigned kernel_count;
    if (!stela_air_named_md(t, "air.kernel", kernels, &kernel_count))
       return false;
    for (unsigned i = 0; i < kernel_count; i++) {
       LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
       unsigned count;
-      if (!stela_air_md_node(t, kernels[i], fields, &count) || count != 3)
+      if (!stela_air_md_node(t, kernels[i], fields, &count) || count < 3)
          return fail(t, STELA_AIR_METADATA, "invalid air.kernel descriptor");
       if (fields[0] == fn) {
          LLVMValueRef outputs[AIR_MAX_METADATA_OPERANDS];
@@ -1424,41 +1457,13 @@ stela_air_metadata_kernel(struct stela_air_metadata *t, LLVMValueRef fn,
          if (args_node || !stela_air_md_node(t, fields[1], outputs, &output_count) || output_count)
             return fail(t, STELA_AIR_METADATA, "duplicate kernel or nonempty compute outputs");
          args_node = fields[2];
+         selected = kernels[i];
       }
    }
    if (!args_node)
       return fail(t, STELA_AIR_METADATA, "entry is not an AIR compute kernel");
-   return metadata_arguments(t, fn, args_node, kernel, NULL);
-}
-
-/* The selected entry descriptor's fields past its outputs and inputs: an
- * object or mesh function's air.max_work_group_size and an object
- * function's air.max_mesh_work_groups. */
-static bool
-entry_limits(struct stela_air_metadata *m, struct stela_air_render *r, LLVMValueRef node)
-{
-   LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
-   unsigned n;
-   if (!stela_air_md_node(m, node, fields, &n))
-      return false;
-   enum stela_air_stage stage = r->entry.stage;
-   for (unsigned i = 3; i < n; i++) {
-      LLVMValueRef pair[AIR_MAX_METADATA_OPERANDS];
-      unsigned count, value;
-      if ((stage != STELA_AIR_OBJECT && stage != STELA_AIR_MESH) ||
-          !stela_air_md_node(m, fields[i], pair, &count) || count != 2 ||
-          !stela_air_md_uint(pair[1], &value) || !value)
-         return fail(m, STELA_AIR_METADATA, "unsupported entry descriptor field");
-      unsigned *limit = stela_air_md_string(pair[0], "air.max_work_group_size") ?
-                           &r->entry.max_threads :
-                        stage == STELA_AIR_OBJECT &&
-                        stela_air_md_string(pair[0], "air.max_mesh_work_groups") ?
-                           &r->entry.max_mesh_threadgroups : NULL;
-      if (!limit || *limit)
-         return fail(m, STELA_AIR_METADATA, "unsupported/duplicate entry descriptor field");
-      *limit = value;
-   }
-   return true;
+   return metadata_arguments(t, fn, args_node, kernel, NULL) &&
+          entry_limits(t, selected, 0, &kernel->max_threads, NULL);
 }
 
 bool
@@ -1504,7 +1509,8 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
          outputs = fields[1]; args = fields[2]; selected = nodes[i];
       }
    }
-   if (!args || !entry_limits(m, r, selected) || !metadata_arguments(m, fn, args, &r->arguments, r))
+   if (!args || !entry_limits(m, selected, stage, &r->entry.max_threads, &r->entry.max_mesh_threadgroups) ||
+       !metadata_arguments(m, fn, args, &r->arguments, r))
       return fail(m, STELA_AIR_METADATA, "selected entry is not a supported render stage");
    r->entry.input_count = r->arguments.count;
    r->entry.inputs = r->inputs; r->entry.outputs = r->outputs;
@@ -1800,7 +1806,7 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
    for (unsigned i = 0; i < count; i++) {
       LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
       unsigned fields_count;
-      if (!stela_air_md_node(&m, kernels[i], fields, &fields_count) || fields_count != 3 ||
+      if (!stela_air_md_node(&m, kernels[i], fields, &fields_count) || fields_count < 3 ||
           !fields[0] || !LLVMIsAFunction(fields[0])) {
          fail(&m, STELA_AIR_METADATA, "invalid AIR kernel manifest entry");
          goto done;
@@ -1844,6 +1850,7 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
          .name = entries[i].name, .name_bytes = entries[i].name_bytes,
          .argument_count = entries[i].kernel.count, .arguments = args,
          .reflection_complete = complete_reflection(&m, entries[i].fn, &entries[i].kernel),
+         .max_threads = entries[i].kernel.max_threads,
       };
       if (!visit(&info, &entry, data)) {
          fail(&m, STELA_AIR_LIMIT, "AIR manifest receiver refused entry");

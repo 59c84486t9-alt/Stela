@@ -163,6 +163,7 @@ struct stela_air_entry {
    unsigned argument_count;
    const struct stela_air_argument_info *arguments;
    bool reflection_complete; /* Bounded plain-resource reflection; see README. */
+   unsigned max_threads; /* air.max_work_group_size, or zero when undeclared. */
 };
 typedef bool (*stela_air_visit_entry)(const struct stela_air_inspection *,
                                      const struct stela_air_entry *, void *);
@@ -247,7 +248,8 @@ struct stela_air_stage_entry {
    unsigned input_count, output_count;
    const struct stela_air_stage_io *inputs, *outputs;
    /* An object or mesh function's air.max_work_group_size, an object
-    * function's air.max_mesh_work_groups; zero when undeclared. */
+    * function's air.max_mesh_work_groups; zero when undeclared. Kernels
+    * reflect theirs as stela_air_entry's. */
    unsigned max_threads, max_mesh_threadgroups;
    /* A mesh function's vertex and primitive capacities and topology. Its
     * outputs are its mesh's vertex and primitive data. */
@@ -374,6 +376,7 @@ struct stela_air_argument {
 };
 struct stela_air_kernel {
    unsigned count, field_count;
+   unsigned max_threads; /* A kernel's air.max_work_group_size, or zero. */
    struct stela_air_argument arguments[AIR_MAX_ARGUMENTS];
    struct stela_air_field fields[AIR_MAX_FIELDS];
 };

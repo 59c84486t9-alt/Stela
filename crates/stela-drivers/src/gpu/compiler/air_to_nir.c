@@ -758,6 +758,15 @@ compute_arguments(struct translator *t, const struct stela_air_kernel *kernel)
    return true;
 }
 
+/* Whether the workgroup is within a function's air.max_work_group_size. */
+static bool
+workgroup_within(struct translator *t, unsigned max_threads)
+{
+   const unsigned *size = t->options->workgroup_size;
+   return !max_threads || (uint64_t)size[0] * size[1] * size[2] <= max_threads ||
+      fail(t, STELA_AIR_LIMIT, "workgroup exceeds the function's maximum threads");
+}
+
 static bool
 kernel_arguments(struct translator *t, LLVMValueRef fn)
 {
@@ -765,7 +774,8 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
    struct stela_air_kernel *kernel = ralloc(t->values, struct stela_air_kernel);
    if (!kernel)
       return fail(t, STELA_AIR_ALLOCATION, "AIR kernel reflection allocation failed");
-   return stela_air_metadata_kernel(&t->metadata, fn, kernel) && compute_arguments(t, kernel);
+   return stela_air_metadata_kernel(&t->metadata, fn, kernel) &&
+          workgroup_within(t, kernel->max_threads) && compute_arguments(t, kernel);
 }
 
 static bool
@@ -3835,12 +3845,8 @@ translate(const void *bitcode, size_t size, const char *entry,
    if (!cfg_prepare(&t, fn))
       goto done;
    t.entry = fn;
-   const struct stela_air_stage_entry *stage_entry = &t.render.entry;
-   if (stage_entry->max_threads && (uint64_t)options->workgroup_size[0] * options->workgroup_size[1] *
-                                   options->workgroup_size[2] > stage_entry->max_threads) {
-      fail(&t, STELA_AIR_LIMIT, "workgroup exceeds the function's maximum threads");
+   if (!workgroup_within(&t, t.render.entry.max_threads))
       goto done;
-   }
    static const mesa_shader_stage stages[] = {
       [STELA_AIR_VERTEX] = MESA_SHADER_VERTEX, [STELA_AIR_FRAGMENT] = MESA_SHADER_FRAGMENT,
       [STELA_AIR_OBJECT] = MESA_SHADER_TASK, [STELA_AIR_MESH] = MESA_SHADER_MESH,
