@@ -42,6 +42,45 @@ fn native_clock_requires_unique_progress_and_quiet_retirement_proof() {
 }
 
 #[test]
+fn native_clock_accepts_exactly_one_complete_hpet_source() {
+    let full = "CHECK native-clock PASS busy_jiffies=8 idle_waits=1 guest_mux=elapsed detach=quiet source=Observation { hpet_sha256: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], hpet_base: 4096, hpet_block_id: 0, hpet_number: 0, hpet_period_fs: 10000000, apic_hz: 0, cpu: 0, root: 0, idt: 0, gs: 0, max_cpuid: 0, thermal_eax: 0 }; authored UP fixture, original Linux and hardware unqualified";
+    assert_eq!(native_clock_proof(full), Some(full));
+    for (field, replacement) in [
+        ("hpet_sha256:", "fadt_sha256:"),
+        ("hpet_sha256:", "source_sha256:"),
+        ("hpet_base: 4096, ", ""),
+        ("hpet_block_id: 0, ", ""),
+        ("hpet_number: 0, ", ""),
+        ("hpet_period_fs: 10000000, ", ""),
+        ("hpet_base: 4096", "hpet_base: 18446744073709551616"),
+        ("hpet_block_id: 0", "hpet_block_id: 4294967296"),
+        ("hpet_number: 0", "hpet_number: 256"),
+        ("hpet_period_fs: 10000000", "hpet_period_fs: 4294967296"),
+        ("hpet_number: 0", "pm_port: 0"),
+        ("hpet_number: 0", "hpet_number: 0, hpet_number: 0"),
+        ("hpet_number: 0", "hpet_number: 0, pm_port: 0"),
+        ("apic_hz: 0", "apic_hz: 0, apic_hz: 0"),
+        ("guest_mux=elapsed", "guest_mux=pending"),
+        ("detach=quiet", "detach=active"),
+        ("idle_waits=1", "idle_waits=0"),
+        ("busy_jiffies=8", "busy_jiffies=7"),
+    ] {
+        assert!(
+            native_clock_proof(&full.replace(field, replacement)).is_none(),
+            "{field}"
+        );
+    }
+    assert!(native_clock_proof(&format!("{full}\n{full}")).is_none());
+    let pm = full.replace("hpet_sha256:", "fadt_sha256:").replace(
+        "hpet_base: 4096, hpet_block_id: 0, hpet_number: 0, hpet_period_fs: 10000000",
+        "pm_port: 0, pm_mask: 0, pm_hz: 0",
+    );
+    assert_eq!(native_clock_proof(&pm), Some(pm.as_str()));
+    assert!(native_clock_proof(&format!("{pm}\n{full}")).is_none());
+    assert!(native_clock_proof(&pm.replace("pm_hz: 0", "pm_hz: 0, hpet_number: 0")).is_none());
+}
+
+#[test]
 fn native_clock_requires_exclusive_topology() {
     use clap::Parser;
     let prefix = ["xtask", "boot", "run", "--output", "/tmp/native-clock"];
@@ -189,7 +228,7 @@ fn native_mmio_requires_complete_actual_mapping_and_refusal_proof() {
 }
 
 #[test]
-fn native_mmio_hpet_is_explicit_and_restricted_before_work() {
+fn hpet_is_explicit_and_restricted_to_owned_clock_modes_before_work() {
     use clap::Parser;
     let prefix = ["xtask", "boot", "run", "--output", "/tmp/native-mmio-hpet"];
     let parse = |options: Vec<&str>| {
@@ -201,18 +240,24 @@ fn native_mmio_hpet_is_explicit_and_restricted_before_work() {
     };
     let default = parse(vec!["--native-mmio-check"]).unwrap();
     assert!(!default.hpet);
-    let enabled = parse(vec!["--native-mmio-check", "--hpet"]).unwrap();
-    assert!(enabled.hpet);
-    assert!(native_root_preflight(&enabled).is_ok());
+    for mode in ["--native-mmio-check", "--native-clock-check"] {
+        let enabled = parse(vec![mode, "--hpet"]).unwrap();
+        assert!(enabled.hpet);
+        assert!(native_root_preflight(&enabled).is_ok());
+        assert!(
+            native_root_preflight(&parse(vec![mode, "--hpet", "--host-cores", "2"]).unwrap())
+                .is_err()
+        );
+    }
     assert!(parse(vec!["--hpet"]).is_err());
     for options in [
-        vec!["--native-clock-check", "--hpet"],
         vec!["--network", "--hpet"],
         vec!["--module", "not-opened-by-preflight", "--hpet"],
     ] {
-        let invalid = parse(options).unwrap();
-        assert!(invalid.hpet && !invalid.native_mmio_check);
-        assert!(native_root_preflight(&invalid).is_err());
+        if let Ok(invalid) = parse(options) {
+            assert!(invalid.hpet && !invalid.native_mmio_check && !invalid.native_clock_check);
+            assert!(native_root_preflight(&invalid).is_err());
+        }
     }
     assert!(
         native_root_preflight(

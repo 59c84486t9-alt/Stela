@@ -271,7 +271,7 @@ pub struct Run {
     /// Check single-BSP MMIO mapping, context refusal, retirement and reuse.
     /// The root's wall time is an owned HPET, so it passes only with `--hpet`;
     /// without one the mount refuses at `stage=hpet-wholeblock`.
-    #[arg(long, conflicts_with_all = [
+    #[arg(long, group = "owned_clock_check", conflicts_with_all = [
         "native_dma_check", "native_dma_isolation_check", "native_work_check", "native_irq_work_check",
         "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
         "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input",
@@ -285,11 +285,11 @@ pub struct Run {
         "native_dma_check", "native_dma_isolation_check", "native_irq_work_check"
     ])]
     iommu: Option<Iommu>,
-    /// Expose QEMU's real HPET to the owned Root/MMIO diagnostic.
-    #[arg(long, requires = "native_mmio_check")]
+    /// Expose QEMU's HPET to the owned MMIO or native-clock check.
+    #[arg(long, requires = "owned_clock_check")]
     hpet: bool,
-    /// Check bounded PM/LAPIC clock, IRQ progress, idle waits and retirement.
-    #[arg(long, conflicts_with_all = [
+    /// Check bounded PM or owned HPET/LAPIC clock, IRQ progress and retirement.
+    #[arg(long, group = "owned_clock_check", conflicts_with_all = [
         "native_dma_check", "native_dma_isolation_check", "native_work_check", "native_irq_work_check", "native_mmio_check",
         "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
         "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input",
@@ -632,8 +632,8 @@ fn qemu_machine(keyboard: &str, hpet: bool) -> String {
 fn native_root_preflight(arguments: &Run) -> Result<()> {
     // Clap conflicts can supersede `requires`; enforce the HPET mode before work.
     ensure!(
-        !arguments.hpet || arguments.native_mmio_check,
-        "--hpet requires the owned --native-mmio-check diagnostic"
+        !arguments.hpet || arguments.native_mmio_check || arguments.native_clock_check,
+        "--hpet requires --native-mmio-check or --native-clock-check"
     );
     if arguments.native_mmio_check || arguments.native_clock_check {
         ensure!(
@@ -1156,18 +1156,35 @@ fn native_clock_proof(serial: &str) -> Option<&str> {
         .split_once(" source=Observation { ")?
         .1
         .strip_suffix(" }; authored UP fixture, original Linux and hardware unqualified")?;
-    let (digest, rest) = observation
-        .strip_prefix("fadt_sha256: [")?
-        .split_once("], ")?;
+    let (digest_key, source_fields): (&str, &[(&str, u64)]) =
+        if observation.starts_with("fadt_sha256: [") {
+            (
+                "fadt_sha256: [",
+                &[
+                    ("pm_port: ", u64::from(u16::MAX)),
+                    ("pm_mask: ", u64::from(u32::MAX)),
+                    ("pm_hz: ", u64::MAX),
+                ],
+            )
+        } else if observation.starts_with("hpet_sha256: [") {
+            (
+                "hpet_sha256: [",
+                &[
+                    ("hpet_base: ", u64::MAX),
+                    ("hpet_block_id: ", u64::from(u32::MAX)),
+                    ("hpet_number: ", u64::from(u8::MAX)),
+                    ("hpet_period_fs: ", u64::from(u32::MAX)),
+                ],
+            )
+        } else {
+            return None;
+        };
+    let (digest, rest) = observation.strip_prefix(digest_key)?.split_once("], ")?;
     let digest = digest.split(", ").collect::<Vec<_>>();
     if digest.len() != 32 || digest.iter().any(|byte| byte.parse::<u8>().is_err()) {
         return None;
     }
-    // Validate the emitted Debug record's framing and field types.
-    let observation_fields = [
-        ("pm_port: ", u64::from(u16::MAX)),
-        ("pm_mask: ", u64::from(u32::MAX)),
-        ("pm_hz: ", u64::MAX),
+    let common_fields = [
         ("apic_hz: ", u64::MAX),
         ("cpu: ", u64::from(u32::MAX)),
         ("root: ", u64::MAX),
@@ -1177,11 +1194,11 @@ fn native_clock_proof(serial: &str) -> Option<&str> {
         ("thermal_eax: ", u64::from(u32::MAX)),
     ];
     let observed = rest.split(", ").collect::<Vec<_>>();
-    if observed.len() != observation_fields.len()
+    if observed.len() != source_fields.len() + common_fields.len()
         || !observed
             .iter()
-            .zip(observation_fields)
-            .all(|(field, (key, max))| {
+            .zip(source_fields.iter().chain(&common_fields))
+            .all(|(field, &(key, max))| {
                 field
                     .strip_prefix(key)
                     .and_then(|v| v.parse::<u64>().ok())
