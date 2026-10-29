@@ -66,6 +66,8 @@ unsafe extern "C" {
 struct Mapping {
     base: usize,
     bytes: usize,
+    usable: Range<usize>,
+    guard: Range<usize>,
     dropped: Arc<AtomicUsize>,
 }
 // SAFETY: each owner exclusively retains its complete successful private mmap;
@@ -73,10 +75,10 @@ struct Mapping {
 // munmap; uncertain executor drop quarantines the mapping and actual owner.
 unsafe impl StackBacking for Mapping {
     fn bounds(&self) -> Range<usize> {
-        self.base + 4096..self.base + self.bytes - 4096
+        self.usable.clone()
     }
     fn guard(&self) -> Range<usize> {
-        self.base..self.base + 4096
+        self.guard.clone()
     }
 }
 impl Drop for Mapping {
@@ -118,12 +120,53 @@ pub(crate) fn stacks_count(dropped: &Arc<AtomicUsize>, count: usize) -> Vec<Stac
             Stack::new(Box::new(Mapping {
                 base: base as usize,
                 bytes,
+                usable: base as usize + 4096..base as usize + bytes - 4096,
+                guard: base as usize..base as usize + 4096,
                 dropped: dropped.clone(),
             }))
             .unwrap()
         })
         .collect()
 }
+/// Allocate usable/guard/alignment geometry. The offset supplies checked
+/// alignment-refusal cases; both guards and padding remain PROT_NONE.
+pub(crate) fn backing(
+    requirement: StackRequirement,
+    offset: usize,
+    dropped: &Arc<AtomicUsize>,
+) -> Box<dyn StackBacking> {
+    #[cfg(target_os = "macos")]
+    let anonymous = 0x1000;
+    #[cfg(not(target_os = "macos"))]
+    let anonymous = 0x20;
+    let bytes = requirement.usable_bytes()
+        + 2 * requirement.minimum_guard_bytes()
+        + requirement.alignment()
+        + offset;
+    // SAFETY: new anonymous private PROT_NONE extent, without a supplied
+    // address or file. Success is checked before any permission change.
+    let base = unsafe { mmap(core::ptr::null_mut(), bytes, 0, 2 | anonymous, -1, 0) };
+    assert_ne!(base as usize, usize::MAX);
+    let start = ((base as usize + requirement.minimum_guard_bytes() + requirement.alignment() - 1)
+        & !(requirement.alignment() - 1))
+        + offset;
+    let end = start + requirement.usable_bytes();
+    assert!(end + requirement.minimum_guard_bytes() <= base as usize + bytes);
+    assert_eq!(
+        // SAFETY: this complete page-aligned usable range is inside the fresh
+        // mapping. Both guards and all alignment padding remain PROT_NONE.
+        unsafe { mprotect(start as *mut c_void, requirement.usable_bytes(), 3) },
+        0
+    );
+    Box::new(Mapping {
+        base: base as usize,
+        bytes,
+        usable: start..end,
+        guard: start - requirement.minimum_guard_bytes()..start,
+        dropped: dropped.clone(),
+    })
+}
+
 pub(crate) fn executor<const N: usize>(
     owner: RetainedOwner,
 ) -> (Executor<N>, Arc<CpuModel>, Arc<AtomicUsize>) {

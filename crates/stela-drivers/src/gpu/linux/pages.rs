@@ -12,6 +12,11 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[cfg(target_arch = "x86_64")]
+mod stack;
+#[cfg(target_arch = "x86_64")]
+pub use stack::{AdmissionError, StackAdmission};
+
 const PAGE_SHIFT: u32 = 12;
 const PAGE_BYTES: usize = 1 << PAGE_SHIFT;
 // Linux's asm-generic errno ABI, independent of the hosted C library's errno.
@@ -76,6 +81,35 @@ impl Reservation {
             cpu_base,
             page_count,
         })
+    }
+}
+
+/// Immutable allocation policy for a retained physical/CPU extent.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtentKind {
+    Ordinary = 0,
+    RuntimeStack = 1,
+}
+/// Classified coverage retained by the catalog's provider. Stack payload
+/// admission separately consumes a pinned cold worker.
+#[derive(Clone, Copy)]
+pub struct Extent {
+    reservation: Reservation,
+    kind: ExtentKind,
+}
+impl Extent {
+    pub fn ordinary(reservation: Reservation) -> Self {
+        Self {
+            reservation,
+            kind: ExtentKind::Ordinary,
+        }
+    }
+    pub fn runtime_stack(reservation: Reservation) -> Self {
+        Self {
+            reservation,
+            kind: ExtentKind::RuntimeStack,
+        }
     }
 }
 
@@ -162,11 +196,26 @@ pub unsafe trait Provider: Send + Sync + 'static {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct NativeReservation {
     generation: u64,
     physical_base: u64,
     cpu_base: *mut c_void,
     page_count: usize,
+}
+
+#[repr(C)]
+struct NativeExtentV3 {
+    reservation: NativeReservation,
+    kind: u32,
+    reserved: u32,
+}
+#[repr(C)]
+struct NativeInventoryV3 {
+    version: u32,
+    bytes: u32,
+    extents: *const NativeExtentV3,
+    count: usize,
 }
 
 #[repr(C)]
@@ -202,6 +251,11 @@ unsafe extern "C" {
         operations: *const OperationsV2,
         context: *mut c_void,
     ) -> c_int;
+    fn stela_linux_page_catalog_register_annotated(
+        inventory: *const NativeInventoryV3,
+        operations: *const OperationsV2,
+        context: *mut c_void,
+    ) -> c_int;
     fn stela_linux_page_catalog_unregister(generation: u64) -> c_int;
     fn stela_linux_page_catalog_verify(generation: u64) -> c_int;
     fn stela_linux_page_request_basic(gfp: u32) -> bool;
@@ -231,7 +285,7 @@ impl Drop for Entered {
 
 struct Context<P> {
     provider: P,
-    reservations: Vec<Reservation>,
+    reservations: Vec<Extent>,
 }
 
 struct Pin {
@@ -312,11 +366,13 @@ unsafe extern "C" fn allocate<P: Provider>(
         let Some(address) = (cpu.as_ptr() as usize).checked_add(index * PAGE_BYTES) else {
             return -EINVAL;
         };
-        if !context.reservations.iter().any(|reservation| {
-            address
-                .checked_sub(reservation.cpu_base.as_ptr() as usize)
-                .filter(|offset| *offset < reservation.page_count * PAGE_BYTES)
-                .is_some_and(|offset| *physical == reservation.physical_base + offset as u64)
+        if !context.reservations.iter().any(|extent| {
+            let reservation = &extent.reservation;
+            extent.kind == ExtentKind::Ordinary
+                && address
+                    .checked_sub(reservation.cpu_base.as_ptr() as usize)
+                    .filter(|offset| *offset < reservation.page_count * PAGE_BYTES)
+                    .is_some_and(|offset| *physical == reservation.physical_base + offset as u64)
         }) {
             return -EINVAL;
         }
@@ -402,12 +458,46 @@ impl<P: Provider> Catalog<P> {
     /// The process/IRQ/root/retirement requirements of `register` also apply.
     pub unsafe fn register_extents(
         provider: P,
-        mut reservations: Vec<Reservation>,
+        reservations: Vec<Reservation>,
+    ) -> Result<Self, Error> {
+        let mut extents = Vec::new();
+        extents
+            .try_reserve_exact(reservations.len())
+            .map_err(|_| Error::OutOfMemory)?;
+        for reservation in reservations {
+            extents.push(Extent::ordinary(reservation));
+        }
+        // SAFETY: original provider, coverage and serialized context contract;
+        // every original entry keeps its ordinary allocation policy.
+        unsafe { Self::register_inventory(provider, extents, false) }
+    }
+
+    /// Register the complete classified inventory in the same descriptor owner.
+    /// RuntimeStack extents remain reserved after unpublished markers end.
+    ///
+    /// # Safety
+    /// The provider retains every actual allocation/mapping owner through
+    /// retirement or quarantine. RuntimeStack entries describe Linux-compatible
+    /// worker slots excluded from ordinary heap allocation. All register_extents
+    /// process/root/IRQ/ownership requirements also apply.
+    pub unsafe fn register_annotated(
+        provider: P,
+        reservations: Vec<Extent>,
+    ) -> Result<Self, Error> {
+        // SAFETY: this forwards exactly the caller's retained classified owner
+        // inventory; C validates geometry/classes before publishing descriptors.
+        unsafe { Self::register_inventory(provider, reservations, true) }
+    }
+
+    unsafe fn register_inventory(
+        provider: P,
+        mut reservations: Vec<Extent>,
+        annotated: bool,
     ) -> Result<Self, Error> {
         if reservations.is_empty() {
             return Err(Error::InvalidReservation);
         }
-        reservations.sort_unstable_by_key(|reservation| reservation.physical_base);
+        reservations.sort_unstable_by_key(|extent| extent.reservation.physical_base);
         let generation = NEXT_GENERATION
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(1)
@@ -417,13 +507,27 @@ impl<P: Provider> Catalog<P> {
         native
             .try_reserve_exact(reservations.len())
             .map_err(|_| Error::OutOfMemory)?;
-        for reservation in &reservations {
+        for extent in &reservations {
+            let reservation = &extent.reservation;
             native.push(NativeReservation {
                 generation,
                 physical_base: reservation.physical_base,
                 cpu_base: reservation.cpu_base.as_ptr().cast(),
                 page_count: reservation.page_count,
             });
+        }
+        let mut annotations = Vec::new();
+        if annotated {
+            annotations
+                .try_reserve_exact(reservations.len())
+                .map_err(|_| Error::OutOfMemory)?;
+            for (native, extent) in native.iter().zip(&reservations) {
+                annotations.push(NativeExtentV3 {
+                    reservation: *native,
+                    kind: extent.kind as u32,
+                    reserved: 0,
+                });
+            }
         }
         let mut context = try_box(Context {
             provider,
@@ -442,16 +546,31 @@ impl<P: Provider> Catalog<P> {
         };
         let result = {
             let _entered = Entered::try_new()?;
-            // SAFETY: native contains exactly its declared number of original
-            // ABI records, each derived from a retained actual reservation.
-            // C copies them before return and borrows only stable Context.
+            // SAFETY: arrays contain their declared number of initialized
+            // repr(C) records. Provider-owned reservations and Context remain
+            // retained while C validates and copies the selected inventory.
             unsafe {
-                stela_linux_page_catalog_register_extents_v2(
-                    native.as_ptr(),
-                    native.len(),
-                    &operations,
-                    (&mut *context as *mut Context<P>).cast(),
-                )
+                if annotated {
+                    let inventory = NativeInventoryV3 {
+                        version: 3,
+                        bytes: u32::try_from(size_of::<NativeInventoryV3>())
+                            .map_err(|_| Error::InvalidReservation)?,
+                        extents: annotations.as_ptr(),
+                        count: annotations.len(),
+                    };
+                    stela_linux_page_catalog_register_annotated(
+                        &inventory,
+                        &operations,
+                        (&mut *context as *mut Context<P>).cast(),
+                    )
+                } else {
+                    stela_linux_page_catalog_register_extents_v2(
+                        native.as_ptr(),
+                        native.len(),
+                        &operations,
+                        (&mut *context as *mut Context<P>).cast(),
+                    )
+                }
             }
         };
         if result != 0 {

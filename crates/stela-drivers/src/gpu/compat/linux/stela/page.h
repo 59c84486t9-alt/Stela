@@ -81,6 +81,53 @@ int stela_linux_page_catalog_register_extents(
 int stela_linux_page_catalog_register_extents_v2(
     const struct stela_linux_page_reservation *extents, size_t extent_count,
     const struct stela_linux_page_ops_v2 *ops, void *context);
+/* Annotated immutable inventory, versioned separately from earlier records.
+ * RuntimeStack coverage stays reserved after every unpublished admission is
+ * cancelled; ordinary GFP allocation cannot consume it. Payload ownership
+ * remains in the caller's actual cold pin. No C stack is lent by these APIs. */
+#define STELA_LINUX_PAGE_INVENTORY_V3 3U
+#define STELA_LINUX_PAGE_ORDINARY 0U
+#define STELA_LINUX_PAGE_RUNTIME_STACK 1U
+struct stela_linux_page_extent_v3 {
+    struct stela_linux_page_reservation reservation;
+    u32 kind;
+    u32 reserved;
+};
+struct stela_linux_page_inventory_v3 {
+    u32 version;
+    u32 bytes;
+    const struct stela_linux_page_extent_v3 *extents;
+    size_t count;
+};
+int stela_linux_page_catalog_register_annotated(
+    const struct stela_linux_page_inventory_v3 *inventory,
+    const struct stela_linux_page_ops_v2 *ops, void *context);
+
+/* Private descriptor reservation only: no payload pin/refcount transfer and
+ * no page/address return. The caller retains actual allocation/mapping/cold
+ * ownership through cancellation or permanent quarantine. All calls require
+ * the serialized quiescent entered owner. Headers admit tails before use. */
+#define STELA_LINUX_STACK_ADMISSION_V1 1U
+struct stela_linux_stack_admission_v1 {
+    u32 version;
+    u32 bytes;
+    u64 generation;
+    void *cpu_base;
+    const u64 *physical_pages;
+    size_t page_count;
+};
+struct stela_linux_stack_ticket_v1 {
+    u32 version;
+    u32 bytes;
+    u64 generation;
+    size_t record;
+    u64 nonce;
+};
+int stela_linux_page_stack_admit(
+    const struct stela_linux_stack_admission_v1 *request,
+    struct stela_linux_stack_ticket_v1 *ticket);
+int stela_linux_page_stack_cancel(const struct stela_linux_stack_ticket_v1 *ticket);
+
 void stela_linux_pages_finish(void);
 /* Explicit bounded service diagnostic, not GPU or native-IRQ qualification.
  * Requires quiescent entry; owns and retires only its temporary allocations. */

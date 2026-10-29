@@ -335,7 +335,7 @@ fn callback_transfers_only_valid_pins_and_refuses_before_provider_allocation() {
         }
         let mut context = Context {
             provider,
-            reservations: alloc::vec![reservation],
+            reservations: alloc::vec![Extent::ordinary(reservation)],
         };
         let mut output = NativeAllocation {
             pin: ptr::null_mut(),

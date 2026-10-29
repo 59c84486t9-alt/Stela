@@ -2,82 +2,12 @@
 use super::*;
 use alloc::vec;
 use core::sync::atomic::AtomicUsize;
-unsafe extern "C" {
-    fn mmap(
-        address: *mut c_void,
-        bytes: usize,
-        protection: i32,
-        flags: i32,
-        fd: i32,
-        offset: i64,
-    ) -> *mut c_void;
-    fn mprotect(address: *mut c_void, bytes: usize, protection: i32) -> i32;
-    fn munmap(address: *mut c_void, bytes: usize) -> i32;
-}
-struct Mapped {
-    allocation: usize,
-    bytes: usize,
-    usable: core::ops::Range<usize>,
-    guard: core::ops::Range<usize>,
-    dropped: Arc<AtomicUsize>,
-}
-// SAFETY: each owner retains its exact private mmap. The whole allocation starts
-// PROT_NONE; only the real usable extent becomes RW. Both guards/padding remain
-// absent. Runtime retirement precedes munmap; uncertain executors quarantine it.
-unsafe impl StackBacking for Mapped {
-    fn bounds(&self) -> core::ops::Range<usize> {
-        self.usable.clone()
-    }
-    fn guard(&self) -> core::ops::Range<usize> {
-        self.guard.clone()
-    }
-}
-impl Drop for Mapped {
-    fn drop(&mut self) {
-        assert_eq!(
-            // SAFETY: exact successful mapping, unpublished or genuinely retired;
-            // no continuation/source can still reach it. Failed retirement retains us.
-            unsafe { munmap(self.allocation as *mut c_void, self.bytes) },
-            0
-        );
-        self.dropped.fetch_add(1, Ordering::Relaxed);
-    }
-}
 pub(super) fn mapped(
     requirement: StackRequirement,
     offset: usize,
     dropped: &Arc<AtomicUsize>,
 ) -> Stack {
-    #[cfg(target_os = "macos")]
-    let anonymous = 0x1000;
-    #[cfg(not(target_os = "macos"))]
-    let anonymous = 0x20;
-    let bytes = requirement.usable_bytes()
-        + 2 * requirement.minimum_guard_bytes()
-        + requirement.alignment()
-        + offset;
-    // SAFETY: new anonymous private PROT_NONE extent; no supplied address/file or overlap.
-    let base = unsafe { mmap(core::ptr::null_mut(), bytes, 0, 2 | anonymous, -1, 0) };
-    assert_ne!(base as usize, usize::MAX);
-    let start = ((base as usize + requirement.minimum_guard_bytes() + requirement.alignment() - 1)
-        & !(requirement.alignment() - 1))
-        + offset;
-    let end = start + requirement.usable_bytes();
-    assert!(end + requirement.minimum_guard_bytes() <= base as usize + bytes);
-    assert_eq!(
-        // SAFETY: complete page-aligned usable range lies inside this exact mapping;
-        // all preceding/following guard and alignment padding remain PROT_NONE.
-        unsafe { mprotect(start as *mut c_void, requirement.usable_bytes(), 3) },
-        0
-    );
-    Stack::new(Box::new(Mapped {
-        allocation: base as usize,
-        bytes,
-        usable: start..end,
-        guard: start - requirement.minimum_guard_bytes()..start,
-        dropped: dropped.clone(),
-    }))
-    .unwrap()
+    Stack::new(test_support::backing(requirement, offset, dropped)).unwrap()
 }
 pub(super) fn requirements(kernel_count: usize) -> Vec<StackRequirement> {
     let mut result = vec![ordinary(); 8];
