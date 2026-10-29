@@ -22,7 +22,8 @@
  *   calculate_*_lod   texture, sampler, coord, i32 access
  *   fence             texture
  *
- * Sample, read and gather return {texel, i8 residency}. */
+ * Sample, read and gather return {texel, i8 residency}. Atomics are described
+ * where they are lowered. */
 #include "air_texture.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -654,6 +655,111 @@ write_texel(struct call *call)
    return true;
 }
 
+/* Texture atomics, as DXMT records them:
+ *
+ *   air.atomic_fetch_<op>_explicit_<type>.<s|u>.v4i32, and atomic_exchange_:
+ *     texture, position, [array], <4 x i32> operand, i32 order, i32 access
+ *     -> <4 x i32> old texel
+ *   air.atomic_compare_exchange_weak_explicit_<type>.<s|u>.v4i32: texture,
+ *     position, [array], ptr expected, <4 x i32> desired, i32 success order,
+ *     i32 failure order, i32 access -> i1 exchanged
+ *
+ * The sign selects min and max's comparison and does not change the other
+ * operations. Operands use their x component, and an old texel reads as an
+ * R32 texel does, (x, 0, 0, 1). Orders are relaxed. */
+static const struct {
+   const char *stem;
+   nir_atomic_op op, signed_op;
+   bool negate;
+} atomics[] = {
+   {"fetch_add", nir_atomic_op_iadd, nir_atomic_op_iadd},
+   {"fetch_sub", nir_atomic_op_iadd, nir_atomic_op_iadd, true},
+   {"fetch_and", nir_atomic_op_iand, nir_atomic_op_iand},
+   {"fetch_or", nir_atomic_op_ior, nir_atomic_op_ior},
+   {"fetch_xor", nir_atomic_op_ixor, nir_atomic_op_ixor},
+   {"fetch_min", nir_atomic_op_umin, nir_atomic_op_imin},
+   {"fetch_max", nir_atomic_op_umax, nir_atomic_op_imax},
+   {"exchange", nir_atomic_op_xchg, nir_atomic_op_xchg},
+   {"compare_exchange_weak", nir_atomic_op_cmpxchg, nir_atomic_op_cmpxchg},
+};
+
+/* The index in atomics of a texture atomic's name, and its sign; or -1. */
+static int
+atomic_named(const struct call *call, const char *name, size_t bytes, bool *is_signed)
+{
+   const char *type = call->texture->depth ? call->shape->depth : call->shape->name;
+   for (unsigned i = 0; i < ARRAY_SIZE(atomics); i++) {
+      for (unsigned sign = 0; sign < 2; sign++) {
+         char expected[96];
+         int length = snprintf(expected, sizeof(expected), "air.atomic_%s_explicit_%s.%c.v4i32",
+                               atomics[i].stem, type, sign ? 's' : 'u');
+         if (length > 0 && (size_t)length == bytes && !memcmp(expected, name, bytes)) {
+            *is_signed = sign;
+            return (int)i;
+         }
+      }
+   }
+   return -1;
+}
+
+static bool
+atomic(struct call *call, unsigned index, bool is_signed, nir_def **result)
+{
+   const struct shape *shape = call->shape;
+   const struct stela_air_texture *texture = call->texture;
+   bool exchange = atomics[index].op == nir_atomic_op_cmpxchg;
+   if (texture->access != STELA_AIR_TEXTURE_READ_WRITE || texture->depth ||
+       (texture->primitive != STELA_AIR_INT && texture->primitive != STELA_AIR_UINT) ||
+       shape->dim == GLSL_SAMPLER_DIM_CUBE || shape->dim == GLSL_SAMPLER_DIM_MS)
+      return fail(call, "texture atomics act on read-write 32-bit integer textures, not cube or multisample");
+   if (!type_is(LLVMTypeOf(call->inst), exchange ? 1 : 4, LLVMIntegerTypeKind, exchange ? 1 : 32))
+      return fail(call, "texture atomic has an unexpected result type");
+   nir_deref_instr *deref = texture_deref(call);
+   if (!deref)
+      return false;
+   nir_def *position = operand(call, shape->positions, LLVMIntegerTypeKind, 32);
+   nir_def *layer = position && shape->array ? uint_operand(call) : NULL;
+   if (!position || (shape->array && !layer))
+      return false;
+   LLVMValueRef expected = exchange ? take(call) : NULL;
+   if (exchange && (!expected || LLVMGetTypeKind(LLVMTypeOf(expected)) != LLVMPointerTypeKind))
+      return fail(call, "texture compare-exchange takes its expected texel through a pointer");
+   nir_def *data = operand(call, 4, LLVMIntegerTypeKind, 32);
+   if (!data || !expect(call, 32, 0, "atomic order") ||
+       (exchange && !expect(call, 32, 0, "atomic order")) ||
+       !expect(call, 32, texture->access, "access operand") || !finished(call))
+      return false;
+   nir_builder *b = call->b;
+   nir_def *coord = image_coord(call, position, NULL, layer);
+   enum pipe_format format = texture->primitive == STELA_AIR_INT ? PIPE_FORMAT_R32_SINT :
+                                                                   PIPE_FORMAT_R32_UINT;
+   data = nir_channel(b, data, 0);
+   if (exchange) {
+      nir_def *compare = call->c->load_word(call->c->translator, expected);
+      if (!compare)
+         return false;
+      nir_def *old = nir_image_deref_atomic_swap(b, 32, &deref->def, coord, nir_undef(b, 1, 32),
+                                                 compare, data, .image_dim = shape->dim,
+                                                 .image_array = shape->array, .format = format,
+                                                 .atomic_op = nir_atomic_op_cmpxchg);
+      /* expected receives the texel seen, which success leaves unchanged. */
+      if (!call->c->store_word(call->c->translator, expected, old))
+         return false;
+      *result = nir_ieq(b, old, compare);
+      return true;
+   }
+   if (atomics[index].negate)
+      data = nir_ineg(b, data);
+   nir_def *old = nir_image_deref_atomic(b, 32, &deref->def, coord, nir_undef(b, 1, 32), data,
+                                         .image_dim = shape->dim, .image_array = shape->array,
+                                         .format = format,
+                                         .atomic_op = is_signed ? atomics[index].signed_op :
+                                                                  atomics[index].op);
+   nir_def *zero = nir_imm_int(b, 0);
+   *result = nir_vec4(b, old, zero, zero, nir_imm_int(b, 1));
+   return true;
+}
+
 static bool
 query(struct call *call, enum operation op, nir_def **result)
 {
@@ -767,6 +873,11 @@ stela_air_texture_call(const struct stela_air_texture_context *context, LLVMValu
       fail(&call, "texture call is not a direct call of an AIR declaration");
       return STELA_AIR_TEXTURE_FAILED;
    }
+   bool is_signed;
+   int atomic_index = atomic_named(&call, name, name_bytes, &is_signed);
+   if (atomic_index >= 0)
+      return atomic(&call, (unsigned)atomic_index, is_signed, result) ? STELA_AIR_TEXTURE_LOWERED :
+                                                                       STELA_AIR_TEXTURE_FAILED;
    int op = -1;
    for (unsigned o = 0; o < ARRAY_SIZE(operations) && op < 0; o++) {
       bool coherent_forms = o == READ || o == WRITE;

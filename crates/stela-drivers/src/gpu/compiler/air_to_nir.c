@@ -1935,6 +1935,36 @@ sampler_argument(void *translator, LLVMValueRef value)
 
 /* A call of one of AIR's texture functions; false with no error when the
  * call is something else. */
+/* The read-write word at a texture call's pointer operand. */
+static const struct value *
+texture_word(struct translator *t, LLVMValueRef pointer)
+{
+   const struct value *address = pointer_value(t, pointer);
+   if (!address || (address->access & STELA_AIR_READ_WRITE) != STELA_AIR_READ_WRITE) {
+      fail(t, STELA_AIR_MEMORY, "texture call lacks a bound read-write pointer");
+      return NULL;
+   }
+   return address;
+}
+
+static nir_def *
+texture_load_word(void *translator, LLVMValueRef pointer)
+{
+   struct translator *t = translator;
+   const struct value *address = texture_word(t, pointer);
+   return address ? memory_access(t, address, NULL, NULL, 0, 1, 32, 4) : NULL;
+}
+
+static bool
+texture_store_word(void *translator, LLVMValueRef pointer, nir_def *value)
+{
+   struct translator *t = translator;
+   const struct value *address = texture_word(t, pointer);
+   if (address)
+      memory_access(t, address, value, NULL, 0, 1, 32, 4);
+   return t->error->kind == STELA_AIR_OK;
+}
+
 static bool
 texture_call(struct translator *t, LLVMValueRef inst, const char *name, size_t name_length,
              bool *lowered)
@@ -1942,6 +1972,7 @@ texture_call(struct translator *t, LLVMValueRef inst, const char *name, size_t n
    const struct stela_air_texture_context context = {
       .b = &t->b, .options = t->options, .error = t->error, .translator = t,
       .operand = texture_operand, .texture = texture_argument, .sampler = sampler_argument,
+      .load_word = texture_load_word, .store_word = texture_store_word,
    };
    nir_def *result;
    bool pair;

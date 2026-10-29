@@ -123,6 +123,7 @@ options(struct stela_metal_stage *stage, bool compute)
       .workgroup_size = {compute ? 64u : 0u, compute ? 1u : 0u, compute ? 1u : 0u},
       .max_instructions = 10000, .bind_buffer = stela_metal_bind_buffer, .binding_data = stage,
       .bind_texture = stela_metal_bind_texture, .bind_sampler = stela_metal_bind_sampler,
+      .max_private_bytes = 64,
    };
 }
 
@@ -305,6 +306,105 @@ unsupported_texture_uses_are_refused(void)
           STELA_AIR_ARGUMENT, "texture type");
 }
 
+/* Fetch operations on a uint 2D and an int 2D array texture, and a
+ * compare-exchange through thread memory. */
+static const char *atomic_body =
+   "declare <4 x i32> @air.atomic_fetch_add_explicit_texture_2d.u.v4i32(ptr addrspace(1), <2 x i32>,"
+   " <4 x i32>, i32, i32)\n"
+   "declare <4 x i32> @air.atomic_fetch_sub_explicit_texture_2d.u.v4i32(ptr addrspace(1), <2 x i32>,"
+   " <4 x i32>, i32, i32)\n"
+   "declare <4 x i32> @air.atomic_fetch_min_explicit_texture_2d_array.s.v4i32(ptr addrspace(1),"
+   " <2 x i32>, i32, <4 x i32>, i32, i32)\n"
+   "declare i1 @air.atomic_compare_exchange_weak_explicit_texture_2d.u.v4i32(ptr addrspace(1),"
+   " <2 x i32>, ptr, <4 x i32>, i32, i32, i32)\n"
+   "define void @kernel(ptr addrspace(1) %t, ptr addrspace(1) %a, ptr addrspace(1) %out) {\n"
+   "%e = alloca <4 x i32>, align 16\n"
+   "%add = call <4 x i32> @air.atomic_fetch_add_explicit_texture_2d.u.v4i32(ptr addrspace(1) %t,"
+   " <2 x i32> <i32 1, i32 2>, <4 x i32> <i32 5, i32 0, i32 0, i32 0>, i32 0, i32 3)\n"
+   "%sub = call <4 x i32> @air.atomic_fetch_sub_explicit_texture_2d.u.v4i32(ptr addrspace(1) %t,"
+   " <2 x i32> <i32 1, i32 2>, <4 x i32> <i32 2, i32 0, i32 0, i32 0>, i32 0, i32 3)\n"
+   "%min = call <4 x i32> @air.atomic_fetch_min_explicit_texture_2d_array.s.v4i32(ptr addrspace(1) %a,"
+   " <2 x i32> <i32 3, i32 4>, i32 1, <4 x i32> <i32 -7, i32 0, i32 0, i32 0>, i32 0, i32 3)\n"
+   "store <4 x i32> <i32 7, i32 0, i32 0, i32 0>, ptr %e, align 16\n"
+   "%ok = call i1 @air.atomic_compare_exchange_weak_explicit_texture_2d.u.v4i32(ptr addrspace(1) %t,"
+   " <2 x i32> <i32 1, i32 2>, ptr %e, <4 x i32> <i32 9, i32 0, i32 0, i32 0>, i32 0, i32 0, i32 3)\n"
+   "%x = extractelement <4 x i32> %add, i32 0\n"
+   "%y = extractelement <4 x i32> %min, i32 0\n"
+   "%s = add i32 %x, %y\n"
+   "%w = zext i1 %ok to i32\n"
+   "%r = add i32 %s, %w\n"
+   "store i32 %r, ptr addrspace(1) %out, align 4\n"
+   "ret void\n}\n";
+
+static const char *atomic_metadata =
+   "!air.kernel = !{!2}\n"
+   "!air.version = !{!20}\n!air.language_version = !{!21}\n"
+   "!2 = !{ptr @kernel, !3, !4}\n!3 = !{}\n!4 = !{!5, !6, !7}\n"
+   "!5 = !{i32 0, !\"air.texture\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.arg_type_name\", !\"texture2d<uint, read_write>\", !\"air.arg_name\", !\"t\"}\n"
+   "!6 = !{i32 1, !\"air.texture\", !\"air.location_index\", i32 1, i32 1, !\"air.read_write\","
+   " !\"air.arg_type_name\", !\"texture2d_array<int, read_write>\", !\"air.arg_name\", !\"a\"}\n"
+   "!7 = !{i32 2, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
+   " !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"out\"}\n"
+   "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n";
+
+/* The image atomics of a shader, in order. */
+static unsigned
+image_atomics(nir_shader *shader, nir_intrinsic_instr **found, unsigned capacity)
+{
+   unsigned n = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+            if (intrinsic->intrinsic == nir_intrinsic_image_deref_atomic ||
+                intrinsic->intrinsic == nir_intrinsic_image_deref_atomic_swap) {
+               assert(n < capacity);
+               found[n++] = intrinsic;
+            }
+         }
+      }
+   }
+   return n;
+}
+
+static void
+kernels_take_texture_atomics(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = kernel(atomic_body, atomic_metadata, &error);
+   if (!shader)
+      fprintf(stderr, "texture atomics: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_intrinsic_instr *atomics[4];
+   assert(image_atomics(shader, atomics, ARRAY_SIZE(atomics)) == 4);
+   const nir_atomic_op ops[] = {nir_atomic_op_iadd, nir_atomic_op_iadd, nir_atomic_op_imin,
+                                nir_atomic_op_cmpxchg};
+   const enum pipe_format formats[] = {PIPE_FORMAT_R32_UINT, PIPE_FORMAT_R32_UINT,
+                                       PIPE_FORMAT_R32_SINT, PIPE_FORMAT_R32_UINT};
+   for (unsigned i = 0; i < ARRAY_SIZE(atomics); i++) {
+      assert(nir_intrinsic_atomic_op(atomics[i]) == ops[i]);
+      assert(nir_intrinsic_format(atomics[i]) == formats[i]);
+   }
+   /* Subtraction adds the negated operand. */
+   assert(nir_def_as_alu(atomics[1]->src[3].ssa)->op == nir_op_ineg);
+   assert(nir_intrinsic_image_dim(atomics[2]) == GLSL_SAMPLER_DIM_2D && nir_intrinsic_image_array(atomics[2]));
+   assert(atomics[3]->intrinsic == nir_intrinsic_image_deref_atomic_swap);
+   ralloc_free(shader);
+
+   /* Only read-write 32-bit integer textures take atomics, with relaxed order. */
+   refuse(atomic_body, replace(atomic_metadata, "i32 0, i32 1, !\"air.read_write\"",
+                               "i32 0, i32 1, !\"air.read\""), STELA_AIR_INSTRUCTION, "texture atomics");
+   refuse(atomic_body, replace(atomic_metadata, "texture2d<uint, read_write>", "texture2d<float, read_write>"),
+          STELA_AIR_INSTRUCTION, "texture atomics");
+   refuse(replace(atomic_body, "<4 x i32> <i32 5, i32 0, i32 0, i32 0>, i32 0, i32 3",
+                  "<4 x i32> <i32 5, i32 0, i32 0, i32 0>, i32 5, i32 3"),
+          atomic_metadata, STELA_AIR_INSTRUCTION, "atomic order");
+}
+
 int
 main(void)
 {
@@ -313,8 +413,9 @@ main(void)
    kernels_sample_write_read_and_query();
    fragments_sample_with_derivatives_compare_and_gather();
    unsupported_texture_uses_are_refused();
+   kernels_take_texture_atomics();
    glsl_type_singleton_decref();
    puts("AIR textures: sample/level/offset, write, read_write array read, size queries, "
-        "implicit-derivative fragment sampling, depth compare, gather and refusals passed");
+        "implicit-derivative fragment sampling, depth compare, gather, atomics and refusals passed");
    return 0;
 }

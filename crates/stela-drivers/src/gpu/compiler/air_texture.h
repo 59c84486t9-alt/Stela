@@ -16,6 +16,10 @@ struct stela_air_texture_context {
    /* The texture or sampler argument an operand names, or NULL. */
    const struct stela_air_texture *(*texture)(void *translator, LLVMValueRef value);
    const struct stela_air_sampler *(*sampler)(void *translator, LLVMValueRef value);
+   /* Loads or stores the 32-bit word a read-write pointer operand addresses;
+    * NULL or false after reporting why. */
+   nir_def *(*load_word)(void *translator, LLVMValueRef pointer);
+   bool (*store_word)(void *translator, LLVMValueRef pointer, nir_def *value);
 };
 
 enum stela_air_texture_status {
