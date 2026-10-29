@@ -12,7 +12,7 @@ use core::ops::Range;
 use sha2::{Digest, Sha256};
 mod clock;
 mod integrity;
-pub use clock::PmicEpoch;
+use stela_soc_data::pmu::PmicEpoch;
 
 const HEADER: usize = 0xc0;
 const HEADER_BYTES: usize = 0x34;
@@ -326,9 +326,10 @@ impl Loader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{
-        pmu::{Configuration, FirmwareSram, Pmu, tests::maverick},
-        spmi::{SlaveError, SpmiSlave},
+    use {
+        crate::platform::apple::pmu::Pmu, crate::platform::apple::pmu::tests::maverick,
+        crate::platform::apple::spmi::SlaveError, crate::platform::apple::spmi::SpmiSlave,
+        stela_soc_data::pmu::Configuration, stela_soc_data::pmu::FirmwareSram,
     };
 
     fn ports(profile: FirmwareStartup) -> FirmwareSram {

@@ -626,8 +626,8 @@ mod tests {
         let sram = bus.add(Box::new(owner.native_sram().unwrap()));
         bus.map(
             sram,
-            t6000::SRAM_BASE,
-            t6000::SRAM_LIMIT - t6000::SRAM_BASE,
+            stela_soc_data::pmgr::t6000::SRAM_BASE,
+            stela_soc_data::pmgr::t6000::SRAM_LIMIT - stela_soc_data::pmgr::t6000::SRAM_BASE,
             0,
         )
         .unwrap();
@@ -818,7 +818,7 @@ mod tests {
 
     #[test]
     fn actual_canonical_source_copy_retains_bytes_across_pause_and_destination_refusal() {
-        const SOURCE: u64 = t6000::SRAM_BASE + 0x60000;
+        const SOURCE: u64 = stela_soc_data::pmgr::t6000::SRAM_BASE + 0x60000;
         const DESTINATION: u64 = 0x1301000000;
         let bytes: Vec<u8> = (0..128).map(|n| (n ^ 0x59) as u8).collect();
         let words = vec![

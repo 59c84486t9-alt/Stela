@@ -54,7 +54,7 @@
 //! Woodcote) is a second such owner: `_readOff2WakeSource` (mac15s 26A434 VA
 //! 0xfffffe0009d57ea0) reads its byte-counted extent and, when asked to
 //! clear, writes the same bytes back (`..d57f30..d57f68`), the fault log's
-//! snapshot acknowledgement ([`Retained`], `with_wake_source_history`).
+//! snapshot acknowledgement ([`stela_soc_data::pmu::Retained`], `with_wake_source_history`).
 //! The legacy scratchpad is 0x100 bytes, the boot keys'
 //! extent rounded to the 256-byte page at whose end the RTC block begins
 //! (inferred). The upcount follows the system counter and refuses writes;
@@ -111,20 +111,17 @@ use stela_soc_data::pmu::LEGACY_SCRATCH_BYTES;
 use stela_soc_data::pmu::OFFSET_BYTES;
 use stela_soc_data::pmu::UPCOUNT_BYTES;
 mod clock;
-mod config;
 mod fault;
 mod firmware;
 mod startup;
 pub use clock::{RtcClock, RtcEpoch};
-pub use config::Configuration;
-pub use firmware::{FirmwareSram, FirmwareStartup};
-pub use startup::PmicEpoch;
 
 use super::spmi::{SlaveError, SpmiSlave};
 #[cfg(test)]
 use crate::platform::apple::counter::FREQUENCY_HZ;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
+use stela_soc_data::pmu::{Configuration, FirmwareStartup, Resources};
 
 /// The RTC's tick rate.
 pub const RTC_HZ: u64 = 32_768;
@@ -132,8 +129,7 @@ pub const RTC_HZ: u64 = 32_768;
 const SECOND_SHIFT: u32 = 15;
 /// The firmware mailbox's message, doorbell, response and status bytes
 /// (see the module comment).
-const MAILBOX_BYTES: u16 = 0xb;
-use stela_soc_data::pmu::{ClockOffset, Retained, Rtc, WallClock, Window};
+use stela_soc_data::pmu::{ClockOffset, Rtc, WallClock, Window};
 
 /// The PMU's interrupt output, shared with whatever the board connects it
 /// to: asserted while an alarm event is latched and unmasked.
@@ -215,7 +211,7 @@ impl Pmu {
         clock: RtcClock,
         wall: Option<WallClock>,
     ) -> Result<Self, &'static str> {
-        let Configuration {
+        let Resources {
             mut windows,
             rtc,
             monitor,
@@ -227,7 +223,7 @@ impl Pmu {
             startup,
             native_loader,
             execution_epoch,
-        } = config;
+        } = config.into_resources();
         let loader = if native_loader {
             Some(startup::Loader::new(
                 startup.expect("validated native loader profile"),
@@ -838,7 +834,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            config.windows,
+            config.storage_windows(),
             alloc::vec![Window {
                 base: 0x8000,
                 bytes: 0x1000

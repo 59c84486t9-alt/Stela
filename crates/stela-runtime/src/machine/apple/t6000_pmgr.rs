@@ -5,14 +5,12 @@ use {
     crate::machine::soc::t6000_pmgr::Descriptor, crate::platform::apple::bridge::Bridge,
     crate::platform::apple::cluster::t6000::Complex,
     crate::platform::apple::cluster::t6000::Snapshot,
-    crate::platform::apple::cluster::t6000::T6000, crate::platform::apple::pmgr::t6000::SRAM_BASE,
-    crate::platform::apple::pmgr::t6000::SRAM_LIMIT,
-    crate::platform::apple::pmgr::t6000::reconfiguration,
-    crate::platform::apple::power::t6000 as power,
+    crate::platform::apple::cluster::t6000::T6000, crate::platform::apple::power::t6000 as power,
     crate::platform::apple::power::t6000::Controller,
     crate::platform::apple::power::t6000::identity, crate::platform::apple::power::t6000::native,
     stela_contracts::bus::DeviceId, stela_contracts::bus::LifecycleState,
-    stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioDevice, stela_soc_data::pmgr::t6000::SRAM_BASE,
+    stela_soc_data::pmgr::t6000::SRAM_LIMIT, stela_soc_data::pmgr::t6000::reconfiguration,
 };
 
 /// Supplied provenance is not authenticated by naming it. No variant supplies

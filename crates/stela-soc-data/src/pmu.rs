@@ -143,3 +143,13 @@ pub struct WallClock {
     pub unix_seconds: u64,
     pub counter: u64,
 }
+
+pub mod configuration;
+pub mod firmware;
+pub mod history;
+mod pmic_epoch;
+pub use configuration::{Configuration, Resources};
+pub use firmware::{FirmwareSram, FirmwareStartup};
+pub use pmic_epoch::PmicEpoch;
+/// AP mailbox register extent, independent of firmware execution.
+pub const MAILBOX_BYTES: u16 = 0xb;

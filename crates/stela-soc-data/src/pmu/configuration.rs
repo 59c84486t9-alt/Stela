@@ -1,9 +1,7 @@
-//! Validated byte-resource ownership for the source-qualified RTC interface.
-use super::fault::FaultHistory;
-use super::firmware::FirmwareHistory;
-use super::{
-    ClockOffset, FirmwareSram, FirmwareStartup, MAILBOX_BYTES, PmicEpoch, Retained, Rtc, Window,
-};
+//! Validated PMU resource layout and supplied initial data for native construction.
+use super::firmware::{FirmwareHistory, FirmwareSram, FirmwareStartup};
+use super::history::FaultHistory;
+use super::{ClockOffset, MAILBOX_BYTES, PmicEpoch, Retained, Rtc, Window};
 use alloc::vec::Vec;
 
 /// An explicit PMU register resource configuration, independent of its SID or SKU.
@@ -23,6 +21,11 @@ pub struct Configuration {
 }
 
 impl Configuration {
+    /// Normalized ordinary storage windows, before a device adds its RTC ports.
+    pub fn storage_windows(&self) -> &[Window] {
+        &self.windows
+    }
+
     /// Storage aliases are normalized to one byte owner; RTC masks describe the
     /// recovered monitor/enable, event-W1C and interrupt-mask fields only.
     pub fn new(windows: Vec<Window>, rtc: Option<Rtc>, monitor: u8) -> Result<Self, &'static str> {
@@ -194,8 +197,9 @@ impl Configuration {
         Ok(self)
     }
 
-    /// Explicitly create a stopped native Stela protected-loader owner over
-    /// this configuration's actual SRAM and known startup routes. This is not
+    /// Request construction of a stopped native Stela protected-loader owner over
+    /// this configuration's supplied SRAM and known startup routes. The actual
+    /// device owner must instantiate that state. This is not
     /// an Apple reset/handoff observation or firmware execution admission.
     /// Authentication, service initialization and starting remain explicit
     /// requirements; the loader cannot manufacture a Ready value.
@@ -288,4 +292,41 @@ impl Configuration {
 pub(super) fn overlaps(a: Window, b: Window) -> bool {
     u32::from(a.base) < u32::from(b.base) + u32::from(b.bytes)
         && u32::from(b.base) < u32::from(a.base) + u32::from(a.bytes)
+}
+
+/// Consumed initial resources for one validated configuration. These plain
+/// values carry no running PMIC, oscillator, stream or completion authority;
+/// device constructors accept `Configuration`, never a mutable `Resources`.
+#[derive(Debug)]
+pub struct Resources {
+    pub windows: Vec<Window>,
+    pub rtc: Option<Rtc>,
+    pub monitor: u8,
+    pub identity: Option<Window>,
+    pub mailbox: Option<[Window; 2]>,
+    pub fault_history: Option<FaultHistory>,
+    pub wake_source: Option<FaultHistory>,
+    pub firmware: Option<FirmwareHistory>,
+    pub startup: Option<FirmwareStartup>,
+    pub native_loader: bool,
+    pub execution_epoch: Option<PmicEpoch>,
+}
+
+impl Configuration {
+    /// Consume validated planning data without cloning initial byte buffers.
+    pub fn into_resources(self) -> Resources {
+        Resources {
+            windows: self.windows,
+            rtc: self.rtc,
+            monitor: self.monitor,
+            identity: self.identity,
+            mailbox: self.mailbox,
+            fault_history: self.fault_history,
+            wake_source: self.wake_source,
+            firmware: self.firmware,
+            startup: self.startup,
+            native_loader: self.native_loader,
+            execution_epoch: self.execution_epoch,
+        }
+    }
 }

@@ -3992,9 +3992,9 @@
     "reason": "requires original J314s LLB and iBootData"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_all_revision_routes_and_isp_guard_preserve_native_execution_obligation",
-    "source": "crates/stela-runtime/src/platform/apple/pmgr/t6000/reconfiguration.rs",
+    "source": "crates/stela-soc-data/src/pmgr/t6000/reconfiguration.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_IBOOTDATA",
@@ -4005,7 +4005,7 @@
   {
     "package": "stela-runtime",
     "test": "original_all_193_bridge_programs_keep_masks_order_and_actual_dt_bounds",
-    "source": "crates/stela-runtime/src/platform/apple/pmgr/t6000/tunables.rs",
+    "source": "crates/stela-runtime/src/platform/apple/pmgr/t6000_tuning_source_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_ADT",
@@ -4014,9 +4014,9 @@
     "reason": "requires original J314s ADT/kernelcache; all guarded native bridge fields"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_t6000_layout_routes_all_bindings_three_complexes_and_193_bridges",
-    "source": "crates/stela-runtime/src/platform/apple/pmgr/t6000.rs",
+    "source": "crates/stela-soc-data/src/pmgr/t6000.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_ADT",

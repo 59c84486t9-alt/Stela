@@ -9,7 +9,7 @@ use super::super::{Error, History, Installation, Step, write};
 use alloc::{rc::Rc, vec::Vec};
 use stela_contracts::bus::Width;
 
-pub use super::super::super::t6000::PRE_ACTIVATION_BASE;
+use stela_soc_data::pmgr::t6000::PRE_ACTIVATION_BASE;
 
 /// T6000 first-die effects only. The caller supplies actual stage/kind inputs
 /// and exclusively owns the controller across this retained transaction.

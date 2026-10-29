@@ -8,7 +8,6 @@ use super::String;
 use super::Vec;
 use super::WakeLayout;
 use super::apertures;
-use super::bridge;
 use super::cluster;
 use super::energy;
 use super::format;
@@ -449,8 +448,13 @@ fn place_bridges(
             .flatten()
             .ok_or("bridge names an unmapped DT reg window")?;
         let record = records.record(id).expect("validated bridge ordinal");
-        let model = bridge::Bridge::new(tunables, record.header, &record.configs, record.axi)
-            .map_err(String::from)?;
+        let model = stela_soc_data::bridge::Layout::new(
+            tunables,
+            record.header,
+            &record.configs,
+            record.axi,
+        )
+        .map_err(String::from)?;
         for (o, n) in model.spans() {
             if o.checked_add(n).is_none_or(|end| end > bytes)
                 || physical.checked_add(o + n).is_none()

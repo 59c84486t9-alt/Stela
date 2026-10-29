@@ -22,3 +22,5 @@ pub mod pmu;
 pub mod power;
 pub mod ptd;
 pub mod spmi;
+
+pub mod bridge;

@@ -10,14 +10,12 @@
 use super::{Controller, RequestKind};
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use {
-    crate::platform::apple::pmgr::t6000::CODE_BASE,
-    crate::platform::apple::pmgr::t6000::PRE_ACTIVATION_BASE,
-    crate::platform::apple::pmgr::t6000::SRAM_BASE,
-    crate::platform::apple::pmgr::t6000::SRAM_LIMIT,
-    crate::platform::apple::pmgr::t6000::TABLE_BASE, stela_contracts::bus::Access,
-    stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
     stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+    stela_soc_data::pmgr::t6000::CODE_BASE, stela_soc_data::pmgr::t6000::PRE_ACTIVATION_BASE,
+    stela_soc_data::pmgr::t6000::SRAM_BASE, stela_soc_data::pmgr::t6000::SRAM_LIMIT,
+    stela_soc_data::pmgr::t6000::TABLE_BASE,
 };
 
 pub mod effects;

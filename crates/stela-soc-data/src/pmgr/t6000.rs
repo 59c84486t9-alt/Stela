@@ -11,7 +11,7 @@
 pub mod reconfiguration;
 pub mod tunables;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub const COMPLEXES: usize = 3;
 /// The PMGR native SRAM window, the native-program table and code in it,
 /// and the pre-activation words.

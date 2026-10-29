@@ -7,7 +7,6 @@ use super::String;
 use super::Vec;
 use super::apertures;
 use super::format;
-use super::pmu;
 use super::rtbuddy_nub;
 use super::smc;
 
@@ -35,7 +34,7 @@ pub struct SpmiPmu {
 /// A PMIC firmware mailbox (`fw-mcom-address`, `fw-host-irq-address` and, on
 /// M4 and later, `fw-mcom-int-index`), served by PMIC firmware that does not
 /// execute: its registers are unqualified and its vector is never driven,
-/// so it stays unrouted (`pmu::Configuration::with_unqualified_firmware_mailbox`).
+/// so it stays unrouted (`stela_soc_data::pmu::Configuration::with_unqualified_firmware_mailbox`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FirmwareMailbox {
     pub registers: u16,
@@ -52,9 +51,12 @@ impl SpmiPmu {
             stela_soc_data::pmu::Retained,
             stela_soc_data::pmu::Window,
         ) -> Result<Vec<u8>, String>,
-    ) -> Result<pmu::Configuration, String> {
-        let mut configuration =
-            pmu::Configuration::new(self.windows.clone(), self.rtc, self.alarm_monitor)?;
+    ) -> Result<stela_soc_data::pmu::Configuration, String> {
+        let mut configuration = stela_soc_data::pmu::Configuration::new(
+            self.windows.clone(),
+            self.rtc,
+            self.alarm_monitor,
+        )?;
         for (kind, window) in self.retained() {
             configuration = configuration.with_retained(kind, window, history(kind, window)?)?;
         }
@@ -756,7 +758,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let epoch = pmu::RtcEpoch {
+        let epoch = crate::platform::apple::pmu::RtcEpoch {
             counter: 0,
             ticks: 0,
         };

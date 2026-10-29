@@ -1,7 +1,7 @@
 //! Original T6000 ACC/CPM register ownership, independent of T8112 layout.
 //!
 //! Offsets are the driver's logical ACC coordinates, routed by
-//! `pmgr::t6000::Layout` through the actual E/P0/P1 DT views. Every readable
+//! `stela_soc_data::pmgr::t6000::Layout` through the actual E/P0/P1 DT views. Every readable
 //! value is an actual supplied image word or a committed software write.
 //! Native performance/APSC, DVMR, throttling and autonomous counter execution
 //! require their actual controller owner; neither zero nor a cleared BUSY is
@@ -434,8 +434,8 @@ mod original {
     use alloc::boxed::Box;
     use sha2::{Digest, Sha256};
     use {
-        crate::platform::apple::pmgr::t6000::Layout, stela_contracts::adt::Node,
-        stela_contracts::bus::Bus, stela_contracts::interrupt::InterruptLatch,
+        stela_contracts::adt::Node, stela_contracts::bus::Bus,
+        stela_contracts::interrupt::InterruptLatch, stela_soc_data::pmgr::t6000::Layout,
     };
     fn original(variable: &str, digest: &str) -> Vec<u8> {
         let bytes = std::fs::read(std::env::var(variable).expect("pinned J314s original")).unwrap();

@@ -34,50 +34,19 @@
 //! Stela's existing T8112 model hands off zero idle/disabled configuration, without conditional iBoot
 //! tuning. Header flag variants, other layouts and unknown registers refuse.
 use super::regfile::Held;
-use alloc::{
-    collections::{BTreeMap, BTreeSet},
-    vec::Vec,
-};
+use alloc::{collections::BTreeSet, vec::Vec};
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
     stela_contracts::bus::refuse,
 };
-pub mod tunables;
 const NAME: &str = "fabric-bridge";
-const CONFIG_BYTES: usize = 36;
-const SELECTOR_BASE: u64 = 8;
-const EVENT_SELECTOR: u64 = 0x208;
-const HISTOGRAM_MASK: u64 = 0x280;
-const BOUNDARY_BASE: u64 = 0x288;
-const BOUNDARY_STRIDE: u64 = 0x18;
-const HISTOGRAM_ENABLE: u64 = 0x2b8;
-const EVENT_INIT: u64 = 0x2bc;
-const EVENT_ENABLE: u64 = 0x2c0;
-const SIMPLE_INIT: u64 = 0x14;
-const SIMPLE_ENABLE: u64 = 0x18;
-const SIMPLE_COUNT: u64 = 0x4000;
-const LATENCY_MAX: u64 = 0x4200;
-const LATENCY_MIN: u64 = 0x4230;
-const EVENT_SUM: u64 = 0x4260;
-const HISTOGRAM_BINS: u64 = 0x4290;
-const HISTOGRAM_BINS_STRIDE: u64 = 0x30;
-const EMPTY: u64 = 0;
-const EMPTY_MINIMUM: u64 = u64::MAX;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
-    Configuration,
-    Initialize(u32),
-    /// A read-only 64-bit accumulator, holding its empty value.
-    Sample(u64),
-}
+use stela_soc_data::bridge::{CONFIG_BYTES, Layout, Role};
 #[derive(Debug, Clone)]
 pub struct Bridge {
-    words: BTreeMap<u64, Role>,
+    layout: Layout,
     values: Held,
     known: Option<BTreeSet<u64>>,
-    counter_enables: BTreeSet<u64>,
-    tuning_masks: BTreeMap<u64, u32>,
 }
 impl Bridge {
     pub fn new(
@@ -86,123 +55,17 @@ impl Bridge {
         configs: &[[u8; CONFIG_BYTES]],
         axi: Option<[u8; 4]>,
     ) -> Result<Self, &'static str> {
-        Self::configuration(fields, header, configs, axi, 1)
-    }
-    fn configuration(
-        fields: &[(u64, u32)],
-        header: [u8; 4],
-        configs: &[[u8; CONFIG_BYTES]],
-        axi: Option<[u8; 4]>,
-        max_side: u8,
-    ) -> Result<Self, &'static str> {
-        let mut words = BTreeMap::new();
-        let mut counter_enables = BTreeSet::new();
-        for &(offset, _) in fields {
-            if !offset.is_multiple_of(4) {
-                return Err("unaligned bridge tuning field");
-            }
-            words.insert(offset, Role::Configuration);
-        }
-        let bank = u64::from(u16::from_le_bytes([header[0], header[1]]));
-        if header[3] != 0 {
-            if bank & 3 != 0 || configs.len() != usize::from(header[3]) {
-                return Err("unsupported bridge counter flags or partial config selection");
-            }
-            for o in [0x410, 0x420, 0x430, bank] {
-                words.insert(o, Role::Configuration);
-            }
-            let mut simple = 0;
-            let mut event = 0;
-            for config in configs {
-                let slot = config[2];
-                if slot >= 32 || config[0] > max_side || config[10] > 6 || config[3] > 1 {
-                    return Err("unsupported bridge counter selector, side or histogram layout");
-                }
-                let at = |base: u64| bank + base + 8 * u64::from(slot);
-                if config[3] == 0 {
-                    words.insert(at(SIMPLE_COUNT), Role::Sample(EMPTY));
-                    let select = axi.map_or(0x834, |a| u64::from(a[1]) | u64::from(a[3]) << 8);
-                    words.insert(select, Role::Configuration);
-                    words.insert(
-                        bank + SELECTOR_BASE + 4 * u64::from(slot),
-                        Role::Configuration,
-                    );
-                    simple |= 1 << slot;
-                } else {
-                    // Version3 event 2/3 also programs an upstream selector.
-                    if matches!(config[1], 2 | 3) {
-                        let base = u16::from_le_bytes([config[8], config[9]]);
-                        let base = if base == 0 { 0x748 } else { u64::from(base) };
-                        words.insert(base + 0x60 * u64::from(config[0]), Role::Configuration);
-                        words.insert(at(LATENCY_MAX), Role::Sample(EMPTY));
-                        words.insert(at(LATENCY_MIN), Role::Sample(EMPTY_MINIMUM));
-                        words.insert(at(EVENT_SUM), Role::Sample(EMPTY));
-                        for i in 0..config[10] {
-                            words.insert(
-                                bank + HISTOGRAM_BINS
-                                    + HISTOGRAM_BINS_STRIDE * u64::from(slot)
-                                    + 8 * u64::from(i),
-                                Role::Sample(EMPTY),
-                            );
-                        }
-                    }
-                    words.insert(
-                        bank + EVENT_SELECTOR + 4 * u64::from(slot),
-                        Role::Configuration,
-                    );
-                    if config[1] == 0 {
-                        for o in [0x408, 0x418, 0x41c, 0x420, 0x424, 0x428] {
-                            words.insert(bank + o, Role::Configuration);
-                        }
-                        words.insert(at(EVENT_SUM), Role::Sample(EMPTY));
-                    }
-                    if config[10] != 0 {
-                        words.insert(
-                            bank + HISTOGRAM_MASK + 4 * u64::from(slot),
-                            Role::Configuration,
-                        );
-                        for k in 0..config[10] {
-                            words.insert(
-                                bank + BOUNDARY_BASE
-                                    + BOUNDARY_STRIDE * u64::from(slot)
-                                    + 4 * u64::from(k),
-                                Role::Configuration,
-                            );
-                        }
-                    }
-                    if config[1] == 0 || config[11] != 0 {
-                        words.insert(bank + HISTOGRAM_ENABLE, Role::Configuration);
-                        counter_enables.insert(bank + HISTOGRAM_ENABLE);
-                    }
-                    event |= 1 << slot;
-                }
-            }
-            if simple != 0 {
-                words.insert(bank + SIMPLE_INIT, Role::Initialize(simple));
-                words.insert(bank + SIMPLE_ENABLE, Role::Configuration);
-                counter_enables.insert(bank + SIMPLE_ENABLE);
-            }
-            if event != 0 {
-                words.insert(bank + EVENT_INIT, Role::Initialize(event));
-                words.insert(bank + EVENT_ENABLE, Role::Configuration);
-                counter_enables.insert(bank + EVENT_ENABLE);
-            }
-        } else if !configs.is_empty() {
-            return Err("bridge without counters has selected counter configurations");
-        }
         Ok(Self {
-            words,
+            layout: Layout::new(fields, header, configs, axi)?,
             values: Held::default(),
             known: None,
-            counter_enables,
-            tuning_masks: fields.iter().copied().collect(),
         })
     }
     /// Actual T6000 source-selected fields and supplied handoff words. Missing
     /// values stay unknown. Captured disabled samples may be read, but this
     /// model cannot enable a native fabric event source or retire its reset.
     pub fn t6000(
-        profile: super::pmgr::t6000::tunables::Profile,
+        profile: stela_soc_data::pmgr::t6000::tunables::Profile,
         id: usize,
         header: [u8; 4],
         configs: &[[u8; CONFIG_BYTES]],
@@ -213,7 +76,11 @@ impl Bridge {
         // Native M1 version3 programming zero-extends the whole side byte at
         // kernel 0x2b3a674, then computes base + 0x60*side. J314s actually
         // supplies side3. Final spans must still fit each actual DT view.
-        let mut model = Self::configuration(&fields, header, configs, axi, u8::MAX)?;
+        let mut model = Self {
+            layout: Layout::t6000(&fields, header, configs, axi)?,
+            values: Held::default(),
+            known: None,
+        };
         let mut known = BTreeSet::new();
         for &(offset, width, value) in image {
             let role = model.role(offset, width)?;
@@ -223,7 +90,7 @@ impl Bridge {
             if value & !width.mask() != 0 || !known.insert(offset) {
                 return Err("T6000 bridge image has an oversized or duplicate word");
             }
-            if model.counter_enables.contains(&offset) && value != 0 {
+            if model.layout.is_counter_enable(offset) && value != 0 {
                 return Err("T6000 bridge handoff has enabled unowned counter effects");
             }
             model.values.set(offset, value);
@@ -234,31 +101,13 @@ impl Bridge {
 
     /// Each described register as (offset, bytes).
     pub fn spans(&self) -> Vec<(u64, u64)> {
-        self.words
-            .iter()
-            .map(|(&o, role)| (o, role.width().bytes()))
-            .collect()
+        self.layout.spans()
     }
-    fn role(&self, o: u64, w: Width) -> Result<Role, &'static str> {
-        let role = self
-            .words
-            .get(&o)
-            .copied()
-            .ok_or("fabric bridge word has no described configuration or sample contract")?;
-        if w != role.width() {
-            return Err("fabric bridge configuration is full32 and samples are full64");
-        }
-        Ok(role)
+    fn role(&self, offset: u64, width: Width) -> Result<Role, &'static str> {
+        self.layout.role(offset, width)
     }
 }
-impl Role {
-    fn width(self) -> Width {
-        match self {
-            Role::Sample(_) => Width::Double,
-            _ => Width::Word,
-        }
-    }
-}
+
 impl MmioDevice for Bridge {
     fn advance_policy(&self) -> super::bus::AdvancePolicy {
         super::bus::AdvancePolicy::Passive
@@ -284,9 +133,9 @@ impl MmioDevice for Bridge {
                         return Err(fail("T6000 bridge sample handoff word is unknown"));
                     }
                     if self
-                        .counter_enables
-                        .iter()
-                        .any(|enable| !known.contains(enable) || self.values.get(*enable) != 0)
+                        .layout
+                        .counter_enables()
+                        .any(|enable| !known.contains(&enable) || self.values.get(enable) != 0)
                     {
                         return Err(fail(
                             "T6000 bridge sample has no qualified disabled counter state",
@@ -302,13 +151,13 @@ impl MmioDevice for Bridge {
         let fail = |r| refuse(NAME, o, w, Direction::Write, r);
         match self.role(o, w).map_err(fail)? {
             Role::Configuration => {
-                if self.known.is_some() && self.counter_enables.contains(&o) && v != 0 {
+                if self.known.is_some() && self.layout.is_counter_enable(o) && v != 0 {
                     return Err(fail(
                         "T6000 bridge native counter event effects are not connected",
                     ));
                 }
                 if let Some(known) = &self.known
-                    && let Some(&mask) = self.tuning_masks.get(&o)
+                    && let Some(mask) = self.layout.tuning_mask(o)
                 {
                     if !known.contains(&o) && mask != u32::MAX {
                         return Err(fail(
@@ -398,7 +247,7 @@ mod tests {
     }
     #[test]
     fn t6000_actual_configuration_retains_only_known_words_and_never_invents_counter_effects() {
-        use super::super::pmgr::t6000::tunables::Profile;
+        use stela_soc_data::pmgr::t6000::tunables::Profile;
         let profile = Profile::new(0x6000, 8, 0).unwrap();
         let mut irq = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut irq);

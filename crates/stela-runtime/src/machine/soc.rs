@@ -19,14 +19,12 @@ use crate::platform::apple::agx;
 use crate::platform::apple::ans;
 use crate::platform::apple::asc;
 use crate::platform::apple::atc_phy;
-use crate::platform::apple::bridge;
 use crate::platform::apple::cluster;
 use crate::platform::apple::coresight;
 use crate::platform::apple::dcp;
 use crate::platform::apple::energy;
 use crate::platform::apple::fuse;
 use crate::platform::apple::i2c;
-use crate::platform::apple::pmu;
 use crate::platform::apple::sart;
 use crate::platform::apple::smc;
 use crate::platform::apple::spi;
@@ -688,7 +686,7 @@ const SOCS: [Soc; 22] = [
             (35, stela_soc_data::power::Kind::Tvm),
         ],
         dpe_reg: Some(29),
-        bridge_fields: Some(&bridge::tunables::T8112),
+        bridge_fields: Some(&stela_soc_data::bridge::tunables::T8112),
     },
     Soc {
         chip_id: 0x6020,
@@ -2648,7 +2646,7 @@ mod tests {
         devices
             .add_smc(&smc, stela_formats::builds::DEFAULT)
             .unwrap();
-        let epoch = pmu::RtcEpoch {
+        let epoch = crate::platform::apple::pmu::RtcEpoch {
             counter: 100,
             ticks: 0,
         };

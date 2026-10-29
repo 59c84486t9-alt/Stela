@@ -995,12 +995,11 @@ mod tests {
     #[test]
     fn smc_and_spmi_sample_one_epoch_while_calendar_offset_has_one_pmu_owner() {
         use {
-            crate::platform::apple::counter::FREQUENCY_HZ,
-            crate::platform::apple::pmu::Configuration, crate::platform::apple::pmu::Pmu,
+            crate::platform::apple::counter::FREQUENCY_HZ, crate::platform::apple::pmu::Pmu,
             crate::platform::apple::pmu::RTC_HZ, crate::platform::apple::pmu::RtcClock,
             crate::platform::apple::pmu::RtcEpoch, crate::platform::apple::spmi::SpmiSlave,
-            stela_soc_data::pmu::ClockOffset, stela_soc_data::pmu::Rtc,
-            stela_soc_data::pmu::WallClock,
+            stela_soc_data::pmu::ClockOffset, stela_soc_data::pmu::Configuration,
+            stela_soc_data::pmu::Rtc, stela_soc_data::pmu::WallClock,
         };
         let rtc = Rtc {
             upcount: 0x1406,

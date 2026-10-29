@@ -11,27 +11,7 @@ use alloc::vec::Vec;
 /// The extended-long opcode carries a three-bit length-minus-one.
 const CHUNK_BYTES: usize = 8;
 
-#[derive(Debug, Clone)]
-pub(super) struct FaultHistory {
-    pub window: Window,
-    initial: Vec<u8>,
-}
-
-impl FaultHistory {
-    pub fn new(window: Window, initial: Vec<u8>) -> Result<Self, &'static str> {
-        if window.bytes == 0
-            // The original driver's declared fault-log count is one byte.
-            || window.bytes > u16::from(u8::MAX)
-            || u32::from(window.base) + u32::from(window.bytes) > 0x10000
-            || initial.len() != usize::from(window.bytes)
-        {
-            return Err(
-                "PMU fault history requires a byte-sized count, valid extent and all initial bytes",
-            );
-        }
-        Ok(Self { window, initial })
-    }
-}
+use stela_soc_data::pmu::history::FaultHistory;
 
 struct Snapshot {
     bytes: Vec<u8>,
@@ -50,9 +30,10 @@ pub(super) struct FaultLog {
 
 impl From<FaultHistory> for FaultLog {
     fn from(history: FaultHistory) -> Self {
+        let (window, initial) = history.into_parts();
         Self {
-            window: history.window,
-            pending: history.initial,
+            window,
+            pending: initial,
             reading: Vec::new(),
             captured: None,
         }

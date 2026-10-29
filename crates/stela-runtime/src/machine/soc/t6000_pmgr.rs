@@ -1,10 +1,7 @@
 //! Explicit T6000 source descriptors, independent of public PMGR admission.
 use super::{Node, PowerStates, power_resources};
-use crate::platform::apple::{
-    bridge::Bridge,
-    pmgr::t6000::{self, tunables},
-};
 use alloc::{format, string::String, vec::Vec};
+use {stela_soc_data::pmgr::t6000, stela_soc_data::pmgr::t6000::tunables};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeDescriptor {
@@ -101,8 +98,13 @@ impl Descriptor {
         for id in 0..t6000::BRIDGE_COUNT {
             let view = layout.bridge(id).map_err(String::from)?;
             let record = records.record(id).expect("validated T6000 bridge ordinal");
-            let model = Bridge::t6000(tuning, id, record.header, &record.configs, record.axi, &[])
-                .map_err(String::from)?;
+            let model = stela_soc_data::bridge::Layout::t6000(
+                &tuning.fields(id).map_err(String::from)?,
+                record.header,
+                &record.configs,
+                record.axi,
+            )
+            .map_err(String::from)?;
             for (offset, bytes) in model.spans() {
                 if offset.checked_add(bytes).is_none_or(|end| end > view.bytes)
                     || view.physical.checked_add(offset + bytes).is_none()
@@ -179,8 +181,13 @@ mod original {
             }
         }
         for bank in &d.bridges {
-            let model = Bridge::t6000(d.tuning, bank.id, bank.header, &bank.configs, bank.axi, &[])
-                .unwrap();
+            let model = stela_soc_data::bridge::Layout::t6000(
+                &d.tuning.fields(bank.id).unwrap(),
+                bank.header,
+                &bank.configs,
+                bank.axi,
+            )
+            .unwrap();
             for (offset, bytes) in model.spans() {
                 spans.push((
                     bank.view.physical + offset,

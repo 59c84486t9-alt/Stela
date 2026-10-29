@@ -24,7 +24,8 @@ pub mod dvfs;
 #[cfg(test)]
 pub mod install;
 pub mod sequencer;
-pub mod t6000;
+#[cfg(all(test, feature = "std"))]
+mod t6000_tuning_source_tests;
 
 use alloc::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "std"))]

@@ -11,7 +11,7 @@ use stela_contracts::bus::Width;
 
 pub mod activation;
 
-pub use super::super::t6000::{CODE_BASE, SRAM_BASE, SRAM_LIMIT, TABLE_BASE};
+use stela_soc_data::pmgr::t6000::{CODE_BASE, SRAM_BASE, SRAM_LIMIT, TABLE_BASE};
 const GPCE_BINDINGS: u64 = 0x28e099040;
 const GROUPS: u8 = 10;
 
