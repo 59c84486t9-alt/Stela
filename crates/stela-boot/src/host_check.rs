@@ -164,6 +164,8 @@ impl Timing {
 
 /// What the check takes from the firmware, handed to [`run`].
 struct Machine {
+    /// Actual activated table/catalog owner; no hardware grant from metadata.
+    active_tables: Option<paging::ActivatedTables>,
     native_dma: Option<crate::native_dma::diagnostic::Prepared>,
     native_work: Option<crate::native_work_check::Prepared>,
     options: HostCheck,
@@ -198,9 +200,10 @@ pub fn boot(options: Vec<u8>) -> ! {
     // the drivers and the APIC use.
     unsafe {
         asm!("cli", options(nomem, nostack));
-        if let Err(error) = paging::activate(tables) {
-            output::fatal(error);
-        }
+        machine.active_tables = Some(paging::activate(tables).unwrap_or_else(|error| {
+            output::arguments(format_args!("native table activation refused: {error}"));
+            output::fatal("native table activation failed");
+        }));
         asm!(
             "mov rsp, {top}",
             "call {run}",
@@ -225,6 +228,7 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
     }
     let tsc_hz = crate::firmware::tsc_hz();
     let mut machine = Machine {
+        active_tables: None,
         native_dma: None,
         native_work: None,
         timing: Timing {
@@ -329,6 +333,13 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
 
 /// The checks after ExitBootServices, on Stela's own stack and tables.
 extern "sysv64" fn run(machine: &mut Machine) -> ! {
+    match machine.active_tables.as_ref() {
+        Some(tables) => tables.check_current().unwrap_or_else(|error| {
+            output::arguments(format_args!("activated native root refused: {error}\n"));
+            output::fatal("activated native root is unavailable");
+        }),
+        None => output::fatal("actual activated native table owner is missing"),
+    }
     let band = machine.screen.map(|screen| {
         let height = screen.resolution().1;
         let top = height - height / BAND_FRACTION;

@@ -36,6 +36,9 @@ use stela_boot_core::pe;
 /// What the host storage check runs with after boot services end.
 pub struct Handoff {
     pub stack_top: usize,
+    /// The genuine builder after activation; configuration factories must
+    /// additionally qualify resources/current context before hardware access.
+    pub(crate) active_tables: Option<crate::paging::ActivatedTables>,
     /// The firmware's framebuffer, mapped RW+NX, when it has a usable one.
     pub screen: Option<Framebuffer>,
     /// The disks `stela.cfg` names, until the check takes them.
@@ -299,6 +302,7 @@ pub fn take_over(
     core::mem::forget(map);
     Ok((
         Handoff {
+            active_tables: None,
             stack_top: guard + (STACK_PAGES + 1) * PAGE,
             screen,
             storage: Some(storage),

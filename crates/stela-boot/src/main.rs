@@ -156,9 +156,10 @@ fn main() -> Status {
     // the stack and every RAM byte in use.
     unsafe {
         asm!("cli", options(nomem, nostack));
-        if let Err(error) = paging::activate(tables) {
-            output::fatal(error);
-        }
+        handoff.active_tables = Some(paging::activate(tables).unwrap_or_else(|error| {
+            output::arguments(format_args!("native table activation refused: {error}"));
+            output::fatal("native table activation failed");
+        }));
         asm!(
             "mov rsp, {top}",
             "call {run}",
@@ -173,6 +174,13 @@ fn main() -> Status {
 
 /// Run the host storage check on Stela's own stack.
 extern "sysv64" fn run(handoff: &mut firmware::Handoff) -> ! {
+    match handoff.active_tables.as_ref() {
+        Some(tables) => tables.check_current().unwrap_or_else(|error| {
+            output::arguments(format_args!("activated native root refused: {error}\n"));
+            output::fatal("activated native root is unavailable");
+        }),
+        None => output::fatal("actual activated native table owner is missing"),
+    }
     if let Some(storage) = handoff.storage.take() {
         storage.run();
     }

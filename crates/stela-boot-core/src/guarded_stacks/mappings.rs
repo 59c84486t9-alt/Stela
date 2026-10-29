@@ -67,6 +67,37 @@ fn leaf(
     }
     Err(Error::Geometry)
 }
+/// Observed leaf data only. It grants no mapping, table-frame, CPU or memory
+/// authority; native users separately retain the actual root/table owners.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Observation {
+    pub physical: u64,
+    pub writable: bool,
+    pub user: bool,
+    pub nx: bool,
+    pub pat_index: usize,
+}
+/// Decode one actual or modeled root using the caller's bounded table reader.
+/// Missing/foreign table storage is an error, not an absent device mapping.
+pub fn observe(
+    address: u64,
+    root: u64,
+    levels: u32,
+    mut read: impl FnMut(u64, usize) -> Option<u64>,
+) -> Result<Option<Observation>, Error> {
+    if !matches!(levels, 4 | 5) || root == 0 || root & !ADDRESS != 0 {
+        return Err(Error::Geometry);
+    }
+    leaf(address, root, levels, &mut read).map(|entry| {
+        entry.map(|entry| Observation {
+            physical: entry.physical,
+            writable: entry.writable,
+            user: entry.user,
+            nx: entry.nx,
+            pat_index: entry.pat,
+        })
+    })
+}
 /// Verify an entire page-aligned alignment/guard hole is absent in every
 /// retained root. The supplied reader and numeric roots remain data only;
 /// native callers separately retain every actual table/root/control owner.
@@ -247,6 +278,35 @@ mod tests {
                 .map(|t| t[index])),
             Ok(())
         );
+    }
+    #[test]
+    fn observation_preserves_actual_leaf_fields_and_rejects_unknown_table_storage() {
+        let t = tables();
+        let read = |table: u64, index: usize| {
+            table
+                .checked_div(PAGE)
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|n| t.get(n as usize))
+                .map(|page| page[index])
+        };
+        assert_eq!(
+            observe(PAGE + 17, PAGE, 4, read),
+            Ok(Some(Observation {
+                physical: 0x10_0000 + 17,
+                writable: true,
+                user: false,
+                nx: true,
+                pat_index: 0
+            }))
+        );
+        assert_eq!(observe(0, PAGE, 4, read), Ok(None));
+        assert_eq!(
+            observe(0, PAGE, 4, |_, _| None),
+            Err(Error::TableUnavailable)
+        );
+        assert_eq!(observe(0, PAGE, 0, read), Err(Error::Geometry));
+        assert_eq!(observe(0, 0, 4, read), Err(Error::Geometry));
+        assert_eq!(observe(0, PAGE + 1, 4, read), Err(Error::Geometry));
     }
     #[test]
     fn alignment_holes_require_every_page_absent_in_every_root() {

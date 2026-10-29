@@ -1,6 +1,9 @@
 //! Stela's own identity page tables and fatal exception handlers, which
 //! replace the firmware's once boot services end.
 use crate::cpu::msr;
+use alloc::vec::Vec;
+mod active;
+pub(crate) use active::{ActivatedTables, RootError};
 use core::arch::{asm, naked_asm};
 
 use stela_boot_core::paging_controls as controls;
@@ -37,6 +40,8 @@ type Table = [u64; ENTRIES];
 /// supervisor RW, as the runtime's frame arenas require of their path.
 pub struct Tables {
     root: *mut Table,
+    /// Exact allocations of this builder, not reconstructed pointer metadata.
+    pages: Vec<*mut Table>,
 }
 
 fn new_table() -> Result<*mut Table, &'static str> {
@@ -54,7 +59,13 @@ fn new_table() -> Result<*mut Table, &'static str> {
 
 impl Tables {
     pub fn new() -> Result<Self, &'static str> {
-        Ok(Self { root: new_table()? })
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(1)
+            .map_err(|_| "page-table catalog allocation failed")?;
+        let root = new_table()?;
+        pages.push(root);
+        Ok(Self { root, pages })
     }
 
     pub fn root(&self) -> u64 {
@@ -62,22 +73,34 @@ impl Tables {
     }
 
     /// The child table under `table[index]`, created when absent.
-    fn child(table: *mut Table, index: usize) -> Result<*mut Table, &'static str> {
+    fn child(&mut self, table: *mut Table, index: usize) -> Result<*mut Table, &'static str> {
+        if index >= ENTRIES || !self.pages.contains(&table) {
+            return Err("foreign page-table frame");
+        }
         // SAFETY: `table` is one of this builder's live pages.
         let entry = unsafe { &mut (*table)[index] };
         if *entry & LARGE != 0 {
             return Err("2 MiB chunk mapped twice");
         }
         if *entry == 0 {
-            *entry = new_table()? as u64 | PRESENT | WRITABLE;
+            self.pages
+                .try_reserve(1)
+                .map_err(|_| "page-table catalog allocation failed")?;
+            let child = new_table()?;
+            self.pages.push(child);
+            *entry = child as u64 | PRESENT | WRITABLE;
         }
-        Ok((*entry & ADDRESS) as *mut Table)
+        let child = (*entry & ADDRESS) as *mut Table;
+        if !self.pages.contains(&child) {
+            return Err("page-table child is not owned by this builder");
+        }
+        Ok(child)
     }
 
     /// The page-directory entry of the 2 MiB chunk at `address`.
     fn directory_entry(&mut self, address: usize) -> Result<*mut u64, &'static str> {
-        let pointers = Self::child(self.root, (address >> 39) & (ENTRIES - 1))?;
-        let directory = Self::child(pointers, (address >> 30) & (ENTRIES - 1))?;
+        let pointers = self.child(self.root, (address >> 39) & (ENTRIES - 1))?;
+        let directory = self.child(pointers, (address >> 30) & (ENTRIES - 1))?;
         // SAFETY: the directory is one of this builder's live pages.
         Ok(unsafe { &raw mut (*directory)[(address >> 21) & (ENTRIES - 1)] })
     }
@@ -103,7 +126,12 @@ impl Tables {
             if *entry != 0 {
                 return Err("2 MiB chunk mapped twice");
             }
-            *entry = new_table()? as u64 | PRESENT | WRITABLE;
+            self.pages
+                .try_reserve(1)
+                .map_err(|_| "page-table catalog allocation failed")?;
+            let child = new_table()?;
+            self.pages.push(child);
+            *entry = child as u64 | PRESENT | WRITABLE;
         }
         Ok(())
     }
@@ -132,6 +160,9 @@ impl Tables {
                 }
                 // SAFETY: the entry now names one of this builder's tables.
                 let table = unsafe { (*entry & ADDRESS) as *mut Table };
+                if !self.pages.contains(&table) {
+                    return Err("device table is not owned");
+                }
                 for page in (chunk.max(start)..(chunk + LARGE_PAGE).min(end)).step_by(PAGE) {
                     // SAFETY: as above.
                     let slot = unsafe { &mut (*table)[(page >> 12) & (ENTRIES - 1)] };
@@ -155,7 +186,45 @@ impl Tables {
                 return Err("page outside a 4 KiB chunk");
             }
             let table = (*entry & ADDRESS) as *mut Table;
+            if !self.pages.contains(&table) {
+                return Err("leaf table is not owned");
+            }
             (*table)[(address >> 12) & (ENTRIES - 1)] = address as u64 | rights;
+        }
+        Ok(())
+    }
+    fn read_owned(&self, table: u64, index: usize) -> Option<u64> {
+        if index >= ENTRIES || !self.pages.iter().any(|page| *page as u64 == table) {
+            return None;
+        }
+        // SAFETY: exact original allocation of this retained builder; caller
+        // keeps its actual current identity mapping across the root transition.
+        Some(unsafe { (table as *const u64).add(index).read_volatile() })
+    }
+    fn observe(
+        &self,
+        address: u64,
+    ) -> Result<
+        Option<stela_boot_core::guarded_stacks::mappings::Observation>,
+        stela_boot_core::guarded_stacks::mappings::Error,
+    > {
+        stela_boot_core::guarded_stacks::mappings::observe(
+            address,
+            self.root(),
+            4,
+            |table, index| self.read_owned(table, index),
+        )
+    }
+    fn validate_table_aliases(&self) -> Result<(), RootError> {
+        for page in &self.pages {
+            let physical = *page as u64;
+            let leaf = self
+                .observe(physical)
+                .map_err(RootError::Traversal)?
+                .ok_or(RootError::AliasMissing { physical })?;
+            if leaf.physical != physical || !leaf.writable || leaf.user {
+                return Err(RootError::AliasMismatch { physical });
+            }
         }
         Ok(())
     }
@@ -226,14 +295,20 @@ fatal_handler!(fatal_page_fault, "'P'");
 ///
 /// # Safety
 /// Boot services have ended and interrupts are disabled. `tables` maps every
-/// byte the code, stack and data in use touch. Nothing else runs.
-pub unsafe fn activate(tables: Tables) -> Result<(), &'static str> {
+/// byte the code, stack and data in use touch. The current firmware mappings
+/// still reach every actual table allocation until CR3 changes. Nothing else
+/// runs or mutates those allocations during this transition.
+pub unsafe fn activate(tables: Tables) -> Result<ActivatedTables, RootError> {
+    // Original firmware identity mappings still reach the genuine fresh
+    // LoaderData allocations until this controlled transition completes.
+    active::validate_cpu()?;
+    tables.validate_table_aliases()?;
     // SAFETY: the caller's contract.
     unsafe {
-        take_over()?;
+        take_over().map_err(RootError::Transition)?;
         asm!("mov cr3, {}", in(reg) tables.root(), options(nostack, preserves_flags));
     }
-    Ok(())
+    ActivatedTables::retain(tables)
 }
 
 /// Install the fatal handlers and the controls the runtime requires, still
