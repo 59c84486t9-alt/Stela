@@ -7,7 +7,7 @@
 //! compiler and this implementation together ([`capabilities`]).
 //!
 //! [`library`] parses Metal libraries and exposes their original AIR and
-//! metadata. AGX machine code archives are a different input and are not
+//! metadata, which [`compiler`] lowers through the AIR compiler service. AGX machine code archives are a different input and are not
 //! accepted as AIR libraries.
 #[macro_use]
 mod macros;
@@ -16,6 +16,7 @@ pub mod abi;
 pub mod binding;
 pub mod capabilities;
 pub mod command_buffer;
+pub mod compiler;
 pub mod device;
 pub mod error;
 pub mod hazard;

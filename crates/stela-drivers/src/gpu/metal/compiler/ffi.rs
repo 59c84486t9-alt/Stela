@@ -1,0 +1,231 @@
+//! The layouts of `compiler/metal_compiler.h`, which the service fills and
+//! reads. Its `STELA_METAL_*_BYTES` sizes are checked against these.
+use super::super::capabilities::{MAX_BUFFER_BINDINGS, MAX_SAMPLER_BINDINGS, MAX_TEXTURE_BINDINGS};
+use alloc::string::String;
+use core::ffi::{c_char, c_void};
+
+pub(super) const ATTRIBUTES: usize = 31;
+pub(super) const VARYINGS: usize = 32;
+pub(super) const COLOR_OUTPUTS: usize = 9;
+pub(super) const NAME_BYTES: usize = 4096;
+
+/// `enum stela_air_error_kind`.
+pub(super) mod kind {
+    pub const OK: u32 = 0;
+    pub const INPUT: u32 = 1;
+    pub const LLVM_VERSION: u32 = 2;
+    pub const BITCODE: u32 = 3;
+    pub const VERIFY: u32 = 4;
+    pub const TARGET: u32 = 5;
+    pub const METADATA: u32 = 6;
+    pub const ARGUMENT: u32 = 7;
+    pub const CONTROL_FLOW: u32 = 8;
+    pub const INSTRUCTION: u32 = 9;
+    pub const TYPE: u32 = 10;
+    pub const MEMORY: u32 = 11;
+    pub const LIMIT: u32 = 12;
+    pub const ALLOCATION: u32 = 13;
+}
+
+/// `enum stela_air_primitive`.
+pub(super) mod primitive {
+    pub const CHAR: u32 = 1;
+    pub const UCHAR: u32 = 2;
+    pub const SHORT: u32 = 3;
+    pub const USHORT: u32 = 4;
+    pub const INT: u32 = 5;
+    pub const UINT: u32 = 6;
+    pub const FLOAT: u32 = 9;
+    pub const HALF: u32 = 10;
+}
+
+/// `struct stela_air_error`.
+#[repr(C)]
+pub struct AirError {
+    pub(super) kind: u32,
+    pub(super) instruction: u32,
+    pub(super) detail: [u8; 256],
+}
+
+impl AirError {
+    pub(super) const NONE: Self = Self {
+        kind: kind::OK,
+        instruction: 0,
+        detail: [0; 256],
+    };
+
+    /// The detail up to its terminator.
+    pub(super) fn detail(&self) -> String {
+        let end = self.detail.iter().position(|byte| *byte == 0);
+        String::from_utf8_lossy(&self.detail[..end.unwrap_or(self.detail.len())]).into_owned()
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct BufferUse {
+    pub index: u32,
+    pub access: u32,
+    pub argument_buffer: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct TextureUse {
+    pub index: u32,
+    pub access: u32,
+    pub texture_type: u32,
+    pub primitive: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ThreadgroupUse {
+    pub index: u32,
+    pub bytes: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct AttributeUse {
+    pub index: u32,
+    pub primitive: u32,
+    pub components: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Varying {
+    pub identifier: u32,
+    pub identifier_bytes: u32,
+    pub primitive: u32,
+    pub components: u32,
+    pub per_primitive: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ColorOutput {
+    pub index: u32,
+    pub primitive: u32,
+    pub dual_source: u32,
+}
+
+/// `struct stela_metal_reflection`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Reflection {
+    pub(super) stage: u32,
+    pub(super) max_total_threads: u32,
+    pub(super) threadgroup_bytes: u64,
+    pub(super) buffer_count: u32,
+    pub(super) texture_count: u32,
+    pub(super) sampler_count: u32,
+    pub(super) threadgroup_count: u32,
+    pub(super) attribute_count: u32,
+    pub(super) varying_count: u32,
+    pub(super) color_output_count: u32,
+    pub(super) writes_depth: u32,
+    pub(super) writes_stencil: u32,
+    pub(super) writes_sample_mask: u32,
+    pub(super) discards: u32,
+    pub(super) amplification: u32,
+    pub(super) ident: u32,
+    pub(super) ident_bytes: u32,
+    pub(super) names_bytes: u32,
+    pub(super) buffers: [BufferUse; MAX_BUFFER_BINDINGS as usize],
+    pub(super) textures: [TextureUse; MAX_TEXTURE_BINDINGS as usize],
+    pub(super) samplers: [u32; MAX_SAMPLER_BINDINGS as usize],
+    pub(super) threadgroup: [ThreadgroupUse; MAX_BUFFER_BINDINGS as usize],
+    pub(super) attributes: [AttributeUse; ATTRIBUTES],
+    pub(super) varyings: [Varying; VARYINGS],
+    pub(super) color_outputs: [ColorOutput; COLOR_OUTPUTS],
+    pub(super) names: [u8; NAME_BYTES],
+}
+
+impl Reflection {
+    // SAFETY: every member is an integer or an array of integers.
+    pub(super) const ZERO: Self = unsafe { core::mem::zeroed() };
+}
+
+/// `struct stela_metal_target`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Target {
+    pub(super) nir: *const c_void,
+    pub(super) max_instructions: u32,
+    pub(super) max_threadgroup_bytes: u32,
+    pub(super) max_private_bytes: u32,
+    pub(super) max_constant_bytes: u32,
+    pub(super) max_varying_slots: u32,
+    pub(super) max_payload_bytes: u32,
+    pub(super) max_mesh_vertices: u32,
+    pub(super) max_mesh_primitives: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ThreadgroupLength {
+    pub index: u32,
+    pub bytes: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(super) struct LinkedVarying {
+    pub identifier: *const c_char,
+    pub identifier_bytes: usize,
+    pub per_primitive: u32,
+}
+
+/// `struct stela_metal_specialization`.
+#[repr(C)]
+#[derive(Debug)]
+pub struct Specialization {
+    pub(super) workgroup_size: [u32; 3],
+    pub(super) threadgroup_length_count: u32,
+    pub(super) threadgroup_lengths: *const ThreadgroupLength,
+    pub(super) varyings: *const LinkedVarying,
+    pub(super) varying_count: u32,
+    pub(super) amplified: u32,
+    pub(super) launched_by_grid: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::mem::size_of;
+
+    #[test]
+    fn layouts_match_the_service_header() {
+        let header = include_str!("../../compiler/metal_compiler.h");
+        let define = |name: &str| -> usize {
+            header
+                .lines()
+                .find_map(|line| {
+                    let value = line.strip_prefix("#define ")?.strip_prefix(name)?;
+                    value.strip_prefix(' ')?.strip_suffix('u')?.parse().ok()
+                })
+                .unwrap_or_else(|| panic!("metal_compiler.h does not define {name}"))
+        };
+        let expected = [
+            ("STELA_METAL_ATTRIBUTES", ATTRIBUTES),
+            ("STELA_METAL_VARYINGS", VARYINGS),
+            ("STELA_METAL_COLOR_OUTPUTS", COLOR_OUTPUTS),
+            ("STELA_METAL_NAME_BYTES", NAME_BYTES),
+            ("STELA_METAL_REFLECTION_BYTES", size_of::<Reflection>()),
+            ("STELA_METAL_TARGET_BYTES", size_of::<Target>()),
+            (
+                "STELA_METAL_LINKED_VARYING_BYTES",
+                size_of::<LinkedVarying>(),
+            ),
+            (
+                "STELA_METAL_SPECIALIZATION_BYTES",
+                size_of::<Specialization>(),
+            ),
+        ];
+        for (name, value) in expected {
+            assert_eq!(define(name), value, "{name}");
+        }
+    }
+}

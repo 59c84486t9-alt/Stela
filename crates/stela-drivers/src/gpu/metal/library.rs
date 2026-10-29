@@ -471,7 +471,7 @@ impl<'a> Air<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use alloc::{vec, vec::Vec};
 
@@ -487,7 +487,7 @@ mod tests {
 
     /// An original synthetic container. Its payload is only LLVM framing, not a
     /// valid shader; AIR semantics are the LLVM reader/compiler's responsibility.
-    fn fixture(duplicate: bool) -> Vec<u8> {
+    pub(crate) fn fixture(duplicate: bool) -> Vec<u8> {
         let mut module = vec![];
         for word in [LLVM_WRAPPER_MAGIC, 0, 20, 8, u32::MAX] {
             module.extend_from_slice(&word.to_le_bytes());
