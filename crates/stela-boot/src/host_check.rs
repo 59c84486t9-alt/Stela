@@ -714,7 +714,7 @@ fn enabled(ticks: u64, mut done: impl FnMut() -> bool) -> u64 {
     rdtsc() - start
 }
 
-extern "sysv64" fn interrupt(frame: &mut Frame) {
+extern "sysv64" fn interrupt(frame: &mut Frame, _saved: &interrupts::SavedState<'_>) {
     let _configuration_interrupt = paging::config::Interrupt::enter();
     // SAFETY: unchanged IDT/IST entry supplies this actual hardware frame.
     if unsafe { crate::native_irq::dispatch_frame(frame.vector as u8, frame.rsp as usize) } {

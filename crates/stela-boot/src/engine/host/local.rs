@@ -15,7 +15,8 @@ pub(crate) struct Local {
     this: *mut Local,
     /// Native assembly and the local recovery path share this one slot.
     recovery_rsp: UnsafeCell<u64>,
-    handler: extern "sysv64" fn(&mut super::super::interrupts::Frame),
+    handler: super::super::interrupts::Handler,
+    entry_tables: *const super::super::interrupts::Tables,
     state: UnsafeCell<Option<State>>,
     interrupted: AtomicBool,
     xstate: super::super::xstate::EntryAbi,
@@ -36,6 +37,7 @@ impl Local {
             this: core::ptr::null_mut(),
             recovery_rsp: UnsafeCell::new(0),
             handler: super::super::interrupts::interrupt,
+            entry_tables: core::ptr::null(),
             state: UnsafeCell::new(None),
             interrupted: AtomicBool::new(false),
             xstate: super::super::xstate::EntryAbi::EMPTY,
@@ -220,7 +222,6 @@ impl Owner {
 
 const _: () = assert!(core::mem::offset_of!(Local, this) == 0);
 pub(super) const RECOVERY_RSP_OFFSET: usize = core::mem::offset_of!(Local, recovery_rsp);
-pub(crate) const HANDLER_OFFSET: usize = core::mem::offset_of!(Local, handler);
 pub(crate) const XSTATE_IMAGE_BYTES_OFFSET: usize = core::mem::offset_of!(Local, xstate)
     + core::mem::offset_of!(super::super::xstate::EntryAbi, image_bytes);
 pub(crate) const XSTATE_SUPPORTED_MASK_OFFSET: usize = core::mem::offset_of!(Local, xstate)
@@ -265,7 +266,8 @@ unsafe fn set_base(base: u64) {
 /// stopped; its descriptor owner retains it after this call.
 pub(crate) unsafe fn activate(
     local: &mut Local,
-    handler: extern "sysv64" fn(&mut super::super::interrupts::Frame),
+    handler: super::super::interrupts::Handler,
+    tables: *const super::super::interrupts::Tables,
 ) {
     assert!(
         local.this.is_null(),
@@ -276,6 +278,7 @@ pub(crate) unsafe fn activate(
         "processor xstate descriptor owner absent"
     );
     local.handler = handler;
+    local.entry_tables = tables;
     local.this = local;
     // SAFETY: the descriptor owner pins this private record for the CPU lifetime.
     unsafe { set_base(local as *mut Local as u64) };
@@ -444,4 +447,31 @@ pub(super) fn native_cpu_lease() -> Option<stela_engine::NativeCpuLease> {
             .as_ref()
             .map(|owner| owner.lease())
     }
+}
+
+/// The original permanently pinned descriptor/IST owner of this actual GS.
+/// This never resolves an arbitrary address supplied by a caller.
+pub(crate) fn interrupt_owner() -> (
+    &'static super::super::interrupts::Tables,
+    super::super::interrupts::Handler,
+    [u64; 2],
+) {
+    let pointer = current();
+    assert!(!pointer.is_null(), "interrupt local owner absent");
+    // SAFETY: only the installed assembly interrupt dispatch calls this while
+    // its active IST slot is retained. activate records the original Tables
+    // allocation, which install_on pins/maps for the entire CPU lifetime.
+    let local = unsafe { &*pointer };
+    assert!(
+        !local.entry_tables.is_null(),
+        "interrupt descriptor owner absent"
+    );
+    // SAFETY: same original permanently pinned allocation, never user memory.
+    let tables = unsafe { &*local.entry_tables };
+    assert!(
+        tables.owns_local(pointer),
+        "interrupt GS differs from its original descriptor owner"
+    );
+    // SAFETY: local CPU's assembly owns these slots; dispatch has IF clear.
+    (tables, local.handler, unsafe { *local.xstate_active.get() })
 }

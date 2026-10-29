@@ -64,6 +64,15 @@ impl XstateOwner {
         Err(LayoutError::UnsupportedHost)
     }
 
+    pub(crate) fn extended_gprs(
+        &self,
+        image: &[u8],
+        mask: u64,
+    ) -> Result<Option<[u64; 16]>, ImageError> {
+        self.layout
+            .extended_gprs(image, mask, ImageFormat::Standard)
+    }
+
     pub(crate) fn abi(&self) -> &EntryAbi {
         &self.layout.abi
     }

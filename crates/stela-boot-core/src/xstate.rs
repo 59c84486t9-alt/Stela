@@ -17,6 +17,22 @@ pub struct EntryMetadata {
     format: u64,
     mask: u64,
 }
+impl EntryMetadata {
+    /// Decode only the tags emitted by the actual standard-save entry. This
+    /// pure operation grants no CPU, stack or image ownership.
+    pub fn save_format(&self) -> Option<SaveFormat> {
+        match (self.format, self.mask) {
+            (FORMAT_FXSAVE, 0) => Some(SaveFormat::Fxsave),
+            (FORMAT_XSAVE, mask) if mask & (X87 | SSE) == X87 | SSE => {
+                Some(SaveFormat::Xsave { mask })
+            }
+            (FORMAT_XSAVE_LEGACY_SSE, mask) if mask & X87 != 0 && mask & SSE == 0 => {
+                Some(SaveFormat::XsaveLegacySse { mask })
+            }
+            _ => None,
+        }
+    }
+}
 pub const ENTRY_METADATA_BYTES: usize = core::mem::size_of::<EntryMetadata>();
 pub const ENTRY_FORMAT_OFFSET: usize = core::mem::offset_of!(EntryMetadata, format);
 pub const ENTRY_MASK_OFFSET: usize = core::mem::offset_of!(EntryMetadata, mask);
@@ -519,5 +535,48 @@ mod tests {
             .unwrap_err(),
             LayoutError::ResourceLimit
         );
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    #[test]
+    fn saved_metadata_tags_keep_legacy_and_extended_images_distinct() {
+        assert_eq!(
+            EntryMetadata {
+                format: FORMAT_FXSAVE,
+                mask: 0
+            }
+            .save_format(),
+            Some(SaveFormat::Fxsave)
+        );
+        assert_eq!(
+            EntryMetadata {
+                format: FORMAT_XSAVE,
+                mask: X87 | SSE | AVX
+            }
+            .save_format(),
+            Some(SaveFormat::Xsave {
+                mask: X87 | SSE | AVX
+            })
+        );
+        assert_eq!(
+            EntryMetadata {
+                format: FORMAT_XSAVE_LEGACY_SSE,
+                mask: X87
+            }
+            .save_format(),
+            Some(SaveFormat::XsaveLegacySse { mask: X87 })
+        );
+        for (format, mask) in [
+            (FORMAT_FXSAVE, X87),
+            (FORMAT_XSAVE, X87),
+            (FORMAT_XSAVE_LEGACY_SSE, X87 | SSE),
+            (FORMAT_XSAVE, 0),
+            (3, X87 | SSE),
+        ] {
+            assert_eq!(EntryMetadata { format, mask }.save_format(), None);
+        }
     }
 }

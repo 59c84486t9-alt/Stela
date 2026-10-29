@@ -8,6 +8,9 @@
 use super::host;
 use crate::output;
 use core::arch::{asm, global_asm};
+mod saved_state;
+pub(crate) use saved_state::SavedState;
+pub(crate) type Handler = for<'image> extern "sysv64" fn(&mut Frame, &SavedState<'image>);
 
 pub const TIMER_VECTOR: u8 = 0x40;
 /// Native worker doorbell; host-device IRQs own 0x50..=0x5f.
@@ -100,6 +103,10 @@ impl Tables {
 }
 
 impl Tables {
+    pub(crate) fn owns_local(&self, local: *const host::local::Local) -> bool {
+        core::ptr::eq(&self.local, local)
+    }
+
     pub(crate) fn matches(&self, observed: Observation) -> bool {
         observed.gdt == &raw const self.gdt as u64
             && observed.idt == &raw const self.idt as u64
@@ -216,6 +223,7 @@ stela_xstate_saved:
     fninit
     ldmxcsr [rip + stela_interrupt_mxcsr]
     mov rdi, rbx
+    mov rsi, rsp
     mov rax, [rbx + {vector}]
     cmp rax, 2
     je stela_xstate_terminal
@@ -223,7 +231,7 @@ stela_xstate_saved:
     je stela_xstate_terminal
     cmp rax, 18
     je stela_xstate_terminal
-    call qword ptr gs:[{handler}]
+    call {dispatch_handler}
 
     // The handler may not change the state contract underneath an
     // outstanding image. Refuse before partial restoration if XCR0 changed.
@@ -312,7 +320,7 @@ stela_interrupt_mxcsr:
     available = const host::local::XSTATE_AVAILABLE_OFFSET,
     extended = const host::local::XSTATE_EXTENDED_OFFSET,
     active = const host::local::XSTATE_ACTIVE_OFFSET,
-    handler = const host::local::HANDLER_OFFSET,
+    dispatch_handler = sym saved_state::dispatch,
     terminal_handler = sym terminal_interrupt,
 );
 
@@ -381,7 +389,7 @@ fn gate(handler: usize, ist: u8) -> [u64; 2] {
 ///
 /// # Safety
 /// Interrupts are disabled and nothing else uses the descriptor tables.
-pub unsafe fn install(handler: extern "sysv64" fn(&mut Frame)) {
+pub(crate) unsafe fn install(handler: Handler) {
     let tables = &raw mut BSP_TABLES;
     // SAFETY: only the BSP installs its permanent static tables, once.
     unsafe { install_on(&mut *tables, handler) };
@@ -393,10 +401,7 @@ pub unsafe fn install(handler: extern "sysv64" fn(&mut Frame)) {
 /// `tables` belongs exclusively to this processor and stays pinned and mapped
 /// for its whole lifetime, including its parked state. Interrupts are disabled;
 /// no native execution/handler can still refer to preceding tables or GS state.
-pub(crate) unsafe fn install_on(
-    tables: &'static mut Tables,
-    handler: extern "sysv64" fn(&mut Frame),
-) {
+pub(crate) unsafe fn install_on(tables: &'static mut Tables, handler: Handler) {
     if tables.xstate.is_some() {
         output::fatal("native xstate descriptor owner cannot be reinstalled");
     }
@@ -460,7 +465,8 @@ pub(crate) unsafe fn install_on(
         );
         // Loading a GS selector above resets its base; establish the private
         // CPL0 record after GDT/segment setup, before making our IDT active.
-        host::local::activate(&mut tables.local, handler);
+        let retained_tables = tables as *const Tables;
+        host::local::activate(&mut tables.local, handler, retained_tables);
         let idt = &raw mut tables.idt;
         let table = &stela_vector_table;
         for (&vector, &handler) in VECTOR_NUMBERS.iter().zip(table) {
@@ -483,13 +489,13 @@ fn cr2() -> u64 {
     value
 }
 
-pub extern "sysv64" fn interrupt(frame: &mut Frame) {
+pub(crate) extern "sysv64" fn interrupt(frame: &mut Frame, saved: &SavedState<'_>) {
     if crate::native_irq::dispatch(frame.vector as u8) {
         return;
     }
     match frame.vector as u8 {
-        14 => host::page_fault(frame, cr2()),
-        13 | 6 => host::native_exception(frame),
+        14 => host::page_fault(frame, cr2(), saved),
+        13 | 6 => host::native_exception(frame, saved),
         TIMER_VECTOR => host::timer_interrupt(),
         NATIVE_WAKE_VECTOR => host::wake_interrupt(),
         SHOOTDOWN_VECTOR => host::shootdown_interrupt(),

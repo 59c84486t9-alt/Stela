@@ -251,7 +251,7 @@ struct Recorded {
     write: bool,
     cause: FaultCause,
     /// RAX through R15 at the faulting instruction, by x86 register number.
-    registers: [u64; 16],
+    registers: stela_compiler::block::HostGprSnapshot,
 }
 
 pub struct State {
@@ -1079,7 +1079,14 @@ fn in_code(state: &State, rip: u64) -> bool {
 }
 
 /// End the native block at `frame` and report `cause` to the engine.
-fn abandon(state: &mut State, frame: &mut Frame, address: u64, write: bool, cause: FaultCause) {
+fn abandon(
+    state: &mut State,
+    frame: &mut Frame,
+    address: u64,
+    write: bool,
+    cause: FaultCause,
+    saved: &super::interrupts::SavedState<'_>,
+) {
     state.recorded = Some(Recorded {
         rip: frame.rip,
         origin: stela_engine::machine::NativeFaultOrigin::Exception,
@@ -1088,10 +1095,9 @@ fn abandon(state: &mut State, frame: &mut Frame, address: u64, write: bool, caus
         address,
         write,
         cause,
-        registers: [
-            frame.rax, frame.rcx, frame.rdx, frame.rbx, frame.rsp, frame.rbp, frame.rsi, frame.rdi,
-            frame.r8, frame.r9, frame.r10, frame.r11, frame.r12, frame.r13, frame.r14, frame.r15,
-        ],
+        registers: saved.registers().unwrap_or_else(|_| {
+            crate::output::fatal("native fault has no valid owned interrupt register image")
+        }),
     });
     frame.rip = stela_native_recover as *const () as u64;
 }
@@ -1138,7 +1144,11 @@ fn resolve(
 }
 
 /// #PF: fill the shadow from the guest's tables or end the block precisely.
-pub fn page_fault(frame: &mut Frame, address: u64) {
+pub(crate) fn page_fault(
+    frame: &mut Frame,
+    address: u64,
+    saved: &super::interrupts::SavedState<'_>,
+) {
     let state = state();
     if !in_code(state, frame.rip) {
         super::interrupts::fatal(frame);
@@ -1152,11 +1162,18 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
     // (`mmu::placement`): its own check finds where it goes.
     if !state.placement.native(address) {
         state.guard_faults += u64::from(state.placement.in_guard(address));
-        return abandon(state, frame, address, write, FaultCause::NonCanonical);
+        return abandon(
+            state,
+            frame,
+            address,
+            write,
+            FaultCause::NonCanonical,
+            saved,
+        );
     }
     let (translation, host) = match resolve(state, address, write, false) {
         Ok(resolved) => resolved,
-        Err(cause) => return abandon(state, frame, address, write, cause),
+        Err(cause) => return abandon(state, frame, address, write, cause, saved),
     };
     let rights = PRESENT | NX | if translation.writable { WRITABLE } else { 0 };
     let root = state.roots[state.current];
@@ -1220,7 +1237,7 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
 }
 
 /// #GP or #UD inside native code ends the block; elsewhere it is fatal.
-pub fn native_exception(frame: &mut Frame) {
+pub(crate) fn native_exception(frame: &mut Frame, saved: &super::interrupts::SavedState<'_>) {
     let state = state();
     if !in_code(state, frame.rip) {
         super::interrupts::fatal(frame);
@@ -1230,7 +1247,7 @@ pub fn native_exception(frame: &mut Frame) {
     } else {
         FaultCause::InvalidOpcode
     };
-    abandon(state, frame, 0, false, cause);
+    abandon(state, frame, 0, false, cause, saved);
 }
 
 pub fn timer_interrupt() {
@@ -1390,7 +1407,7 @@ fn native_return(code: NativeCode, exit: BlockExit, entered: u64) -> NativeExit 
             trap: recorded.trap,
             error_code: recorded.error_code,
             spills: stela_compiler::block::HostSpillSnapshot::new(),
-            registers: stela_compiler::block::HostGprSnapshot::legacy(recorded.registers),
+            registers: recorded.registers,
         });
     }
     NativeExit::Exit {
