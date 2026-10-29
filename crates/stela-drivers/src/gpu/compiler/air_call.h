@@ -17,6 +17,9 @@ struct stela_air_call_context {
    /* Admits the function's floating-point environment before an FP result;
     * false after reporting why. */
    bool (*fp_environment)(void *translator);
+   /* Stores a function's second result through its pointer operand; false
+    * after reporting why. */
+   bool (*store)(void *translator, LLVMValueRef pointer, nir_def *value);
 };
 
 enum stela_air_call_status {

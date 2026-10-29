@@ -1,17 +1,21 @@
 /* SPDX-License-Identifier: MIT */
-/* AIR's math, integer, conversion, derivative and discard functions, and
- * LLVM's math intrinsics. AIR names a function after its MSL builtin and its
- * overload, as DXMT's AIR builder (src/airconv/nt/air_builder.cpp) records:
+/* AIR's math, integer, relational, conversion, packing, derivative and
+ * discard functions, and LLVM's math intrinsics. AIR names a function after
+ * its MSL builtin and its overload, as Apple's compiler emits them:
  *
  *   air.[fast_]<function>.<type>   floating-point functions
  *   air.<function>.<s|u>.<type>    signed or unsigned integer functions
- *   air.<function>.<type>          sign-agnostic integer functions
+ *   air.<function>.<type>          sign-agnostic integer and bool functions
  *   air.convert.<to>.<from>        conversions; each type is prefixed "f.",
  *                                  "s." or "u."
+ *   air.[un]pack.<format>.<type>   packing, <type> naming the float vector
  *
- * A type is "f32", "f16" or "iN", prefixed "vN" for vectors. This file
- * rebuilds each name, LLVM's intrinsics' included, from the call's own types,
- * so a call whose name and types disagree is refused rather than guessed.
+ * A type is "f32", "f16" or "iN", prefixed "vN" for vectors. Apple's compiler
+ * leaves frexp and ilogb to its function library, named in that library's
+ * spelling: ___metal_frexp_v2half_pthreadv2int32, ___metal_ilogb_float. This
+ * file rebuilds each name, LLVM's intrinsics' included, from the call's own
+ * types, so a call whose name and types disagree is refused rather than
+ * guessed.
  *
  * NIR computes approximate functions at the accuracy Vulkan requires, which
  * matches Metal's fast variants, not its precise ones. Single-precision
@@ -20,6 +24,8 @@
  * Half-precision approximate functions evaluate in single precision. */
 #include "air_math.h"
 #include "compiler/nir/nir_builtin_builder.h"
+#include "compiler/nir/nir_format_convert.h"
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -29,12 +35,19 @@ enum operation {
    SATURATE, LOG2, EXP2, SQRT, RSQRT, FRACT, RINT, FLOOR, CEIL, TRUNC, ROUND, COS, SIN, TAN,
    FABS, ACOS, ASIN, ATAN, COSH, SINH, TANH, ACOSH, ASINH, ATANH, EXP, EXP10, LOG, LOG10,
    COSPI, SINPI, TANPI, FMAX, FMIN, POW, POWR, ATAN2, FMOD, COPYSIGN, FDIM, FMA, FCLAMP, MIX,
-   FMAX3, FMIN3, FMEDIAN3, NORMALIZE, CROSS, DFDX, DFDY, FWIDTH,
+   FMAX3, FMIN3, FMEDIAN3, NORMALIZE, CROSS, DFDX, DFDY, FWIDTH, SIGN, NEXTAFTER,
+   /* ldexp takes an i32 exponent per lane; ilogb returns one. */
+   LDEXP, ILOGB,
+   /* Functions storing a second result through a thread pointer: sincos its
+    * cosine, frexp its i32 exponents. */
+   SINCOS, FREXP,
    /* Floating-point reductions to the element type. */
    DOT, LENGTH, DISTANCE,
    /* Integer functions. */
    POPCOUNT, REVERSE_BITS, CLZ, CTZ, IABS, IMAX, IMIN, MUL_HI, ADD_SAT, SUB_SAT, ICLAMP,
-   CONVERT, DISCARD,
+   ABS_DIFF, HADD, RHADD, MAD_HI, MAD_SAT, IMAX3, IMIN3, IMEDIAN3, MUL24, MAD24, ROTATE,
+   /* Bit fields at i32 offsets and widths. */
+   EXTRACT_BITS, INSERT_BITS,
 };
 
 enum signature {
@@ -63,7 +76,8 @@ static const struct function floating[] = {
    {"copysign", COPYSIGN, 2}, {"fdim", FDIM, 2}, {"fma", FMA, 3}, {"clamp", FCLAMP, 3},
    {"mix", MIX, 3}, {"fmax3", FMAX3, 3}, {"fmin3", FMIN3, 3}, {"fmedian3", FMEDIAN3, 3},
    {"normalize", NORMALIZE, 1}, {"cross", CROSS, 2}, {"dot", DOT, 2}, {"length", LENGTH, 1},
-   {"distance", DISTANCE, 2},
+   {"distance", DISTANCE, 2}, {"sign", SIGN, 1}, {"nextafter", NEXTAFTER, 2},
+   {"ldexp", LDEXP, 2}, {"sincos", SINCOS, 2},
 };
 
 /* Derivatives, which have no fast variant. */
@@ -75,12 +89,29 @@ static const struct function derivatives[] = {
 static const struct function signed_integer[] = {
    {"abs", IABS, 1}, {"max", IMAX, 2}, {"min", IMIN, 2}, {"mul_hi", MUL_HI, 2},
    {"add_sat", ADD_SAT, 2}, {"sub_sat", SUB_SAT, 2}, {"clamp", ICLAMP, 3},
+   {"abs_diff", ABS_DIFF, 2}, {"hadd", HADD, 2}, {"rhadd", RHADD, 2}, {"mad_hi", MAD_HI, 3},
+   {"mad_sat", MAD_SAT, 3}, {"max3", IMAX3, 3}, {"min3", IMIN3, 3}, {"median3", IMEDIAN3, 3},
+   {"mul24", MUL24, 2}, {"mad24", MAD24, 3}, {"extract_bits", EXTRACT_BITS, 3},
+   {"insert_bits", INSERT_BITS, 4},
 };
 
 /* Integer functions named without a sign. clz and ctz also take an i1. */
 static const struct function unsigned_integer[] = {
    {"popcount", POPCOUNT, 1}, {"reverse_bits", REVERSE_BITS, 1}, {"clz", CLZ, 2},
-   {"ctz", CTZ, 2},
+   {"ctz", CTZ, 2}, {"rotate", ROTATE, 2},
+};
+
+/* The formats air.pack and air.unpack convert, named as Metal names pixel
+ * formats: the first component in the least significant bits. */
+static const struct format {
+   const char *name;
+   unsigned components, bits[4];
+   bool snorm, srgb;
+} formats[] = {
+   {"unorm4x8", 4, {8, 8, 8, 8}}, {"snorm4x8", 4, {8, 8, 8, 8}, .snorm = true},
+   {"unorm2x16", 2, {16, 16}}, {"snorm2x16", 2, {16, 16}, .snorm = true},
+   {"unorm4x8.srgb", 4, {8, 8, 8, 8}, .srgb = true}, {"unorm.rgb10a2", 4, {10, 10, 10, 2}},
+   {"unorm.rgb565", 3, {5, 6, 5}},
 };
 
 /* LLVM's intrinsics with these semantics. */
@@ -122,7 +153,7 @@ approximate(enum operation operation)
    case LOG2: case EXP2: case SQRT: case RSQRT: case COS: case SIN: case TAN: case ACOS:
    case ASIN: case ATAN: case COSH: case SINH: case TANH: case ACOSH: case ASINH: case ATANH:
    case EXP: case EXP10: case LOG: case LOG10: case COSPI: case SINPI: case TANPI: case POW:
-   case POWR: case ATAN2: case FMOD: case NORMALIZE: case LENGTH: case DISTANCE:
+   case POWR: case ATAN2: case FMOD: case NORMALIZE: case LENGTH: case DISTANCE: case SINCOS:
       return true;
    default:
       return false;
@@ -135,8 +166,41 @@ length(nir_builder *b, nir_def *x)
    return nir_fsqrt(b, nir_fdot(b, x, x));
 }
 
+/* x's i32 binary exponents as frexp gives them, with its significands in
+ * [0.5, 1) in `significand`. Zero, infinities and NaN keep their value with
+ * exponent 0, as C's libraries give them. */
 static nir_def *
-floating_value(nir_builder *b, enum operation operation, nir_def **s)
+exponent(nir_builder *b, nir_def *x, nir_def **significand)
+{
+   unsigned bits = x->bit_size, mantissa = bits == 16 ? 10 : 23;
+   /* NIR's frexp reads the exponent field, so subnormals first scale exactly
+    * into the normal range. */
+   nir_def *subnormal = nir_iand(b, nir_fneu_imm(b, x, 0.0),
+                                 nir_flt_imm(b, nir_fabs(b, x), bits == 16 ? 0x1p-14 : 0x1p-126));
+   nir_def *scaled = nir_bcsel(b, subnormal, nir_fmul_imm(b, x, ldexp(1.0, (int)mantissa)), x);
+   *significand = nir_frexp_sig(b, scaled);
+   nir_def *e = nir_isub(b, nir_frexp_exp(b, scaled),
+                         nir_bcsel(b, subnormal, nir_imm_int(b, (int)mantissa), nir_imm_int(b, 0)));
+   return nir_bcsel(b, nir_fisfinite(b, x), e, nir_imm_int(b, 0));
+}
+
+/* The value after x toward y, stepping x's bits; zero steps to the least
+ * subnormal of y's sign. */
+static nir_def *
+next_after(nir_builder *b, nir_def *x, nir_def *y)
+{
+   unsigned bits = x->bit_size;
+   nir_def *toward_zero = nir_ieq(b, nir_flt(b, x, y), nir_flt_imm(b, x, 0.0));
+   nir_def *stepped = nir_bcsel(b, toward_zero, nir_iadd_imm(b, x, -1), nir_iadd_imm(b, x, 1));
+   nir_def *least = nir_ior_imm(b, nir_iand_imm(b, y, 1ull << (bits - 1)), 1);
+   nir_def *next = nir_bcsel(b, nir_feq(b, x, y), y,
+                             nir_bcsel(b, nir_feq_imm(b, x, 0.0), least, stepped));
+   return nir_bcsel(b, nir_ior(b, nir_fisnan(b, x), nir_fisnan(b, y)), nir_fadd(b, x, y), next);
+}
+
+/* `operation`'s value; `second` receives a second result's. */
+static nir_def *
+floating_value(nir_builder *b, enum operation operation, nir_def **s, nir_def **second)
 {
    nir_def *x = s[0];
    unsigned bits = x->bit_size;
@@ -216,6 +280,28 @@ floating_value(nir_builder *b, enum operation operation, nir_def **s)
    case DFDX: return nir_ddx(b, x);
    case DFDY: return nir_ddy(b, x);
    case FWIDTH: return nir_fadd(b, nir_fabs(b, nir_ddx(b, x)), nir_fabs(b, nir_ddy(b, x)));
+   /* Zeros keep their sign; NaN is 0. */
+   case SIGN:
+      return nir_bcsel(b, nir_fgt_imm(b, x, 0.0), imm(b, 1.0, bits),
+                       nir_bcsel(b, nir_flt_imm(b, x, 0.0), imm(b, -1.0, bits),
+                                 nir_bcsel(b, nir_fisnan(b, x), imm(b, 0.0, bits), x)));
+   case NEXTAFTER: return next_after(b, x, s[1]);
+   case LDEXP: return nir_ldexp(b, x, s[1]);
+   /* Darwin's FP_ILOGB0 and FP_ILOGBNAN are INT_MIN. */
+   case ILOGB: {
+      nir_def *significand, *e = exponent(b, x, &significand);
+      return nir_bcsel(b, nir_fisfinite(b, x),
+                       nir_bcsel(b, nir_feq_imm(b, x, 0.0), nir_imm_int(b, INT_MIN), nir_iadd_imm(b, e, -1)),
+                       nir_bcsel(b, nir_fisnan(b, x), nir_imm_int(b, INT_MIN), nir_imm_int(b, INT_MAX)));
+   }
+   case SINCOS:
+      *second = nir_fcos(b, x);
+      return nir_fsin(b, x);
+   case FREXP: {
+      nir_def *significand;
+      *second = exponent(b, x, &significand);
+      return significand;
+   }
    case DOT: return nir_fdot(b, x, s[1]);
    case LENGTH: return length(b, x);
    case DISTANCE: return length(b, nir_fsub(b, x, s[1]));
@@ -270,6 +356,67 @@ trailing_zeros(nir_builder *b, nir_def *x)
 }
 
 static nir_def *
+maximum(nir_builder *b, bool sign, nir_def *x, nir_def *y)
+{
+   return sign ? nir_imax(b, x, y) : nir_umax(b, x, y);
+}
+
+static nir_def *
+minimum(nir_builder *b, bool sign, nir_def *x, nir_def *y)
+{
+   return sign ? nir_imin(b, x, y) : nir_umin(b, x, y);
+}
+
+static nir_def *
+halve(nir_builder *b, bool sign, nir_def *x)
+{
+   return sign ? nir_ishr_imm(b, x, 1) : nir_ushr_imm(b, x, 1);
+}
+
+/* x * y + z, saturated to x's type. The product's high and low halves take
+ * z with its carry and, when signed, its sign extension; the sum fits when
+ * the high half only extends the low one. */
+static nir_def *
+mad_saturated(nir_builder *b, bool sign, nir_def *x, nir_def *y, nir_def *z)
+{
+   unsigned bits = x->bit_size;
+   nir_def *low = nir_imul(b, x, y);
+   nir_def *high = sign ? nir_imul_high(b, x, y) : nir_umul_high(b, x, y);
+   nir_def *sum = nir_iadd(b, low, z);
+   high = nir_iadd(b, high, nir_b2iN(b, nir_ult(b, sum, low), bits));
+   if (sign)
+      high = nir_iadd(b, high, nir_ishr_imm(b, z, bits - 1));
+   nir_def *fits = sign ? nir_ieq(b, high, nir_ishr_imm(b, sum, bits - 1)) : nir_ieq_imm(b, high, 0);
+   nir_def *limit = sign ? nir_bcsel(b, nir_ilt_imm(b, high, 0), nir_imm_intN_t(b, u_intN_min(bits), bits),
+                                     nir_imm_intN_t(b, u_intN_max(bits), bits)) :
+                           nir_imm_intN_t(b, -1, bits);
+   return nir_bcsel(b, fits, sum, limit);
+}
+
+/* x's `count` bits from `offset`, sign-extended when signed; none when
+ * count is 0. */
+static nir_def *
+extract_bits(nir_builder *b, bool sign, nir_def *x, nir_def *offset, nir_def *count)
+{
+   unsigned bits = x->bit_size;
+   nir_def *top = nir_ishl(b, x, nir_isub(b, nir_isub_imm(b, bits, offset), count));
+   nir_def *field = sign ? nir_ishr(b, top, nir_isub_imm(b, bits, count)) :
+                           nir_ushr(b, top, nir_isub_imm(b, bits, count));
+   return nir_bcsel(b, nir_ieq_imm(b, count, 0), nir_imm_intN_t(b, 0, bits), field);
+}
+
+/* base with its `count` bits from `offset` replaced by insert's lowest. */
+static nir_def *
+insert_bits(nir_builder *b, nir_def *base, nir_def *insert, nir_def *offset, nir_def *count)
+{
+   unsigned bits = base->bit_size;
+   nir_def *ones = nir_ushr(b, nir_imm_intN_t(b, -1, bits), nir_isub_imm(b, bits, count));
+   nir_def *mask = nir_bcsel(b, nir_ieq_imm(b, count, 0), nir_imm_intN_t(b, 0, bits),
+                             nir_ishl(b, ones, offset));
+   return nir_ior(b, nir_iand(b, base, nir_inot(b, mask)), nir_iand(b, nir_ishl(b, insert, offset), mask));
+}
+
+static nir_def *
 integer_value(nir_builder *b, enum operation operation, bool sign, nir_def **s)
 {
    nir_def *x = s[0];
@@ -282,28 +429,102 @@ integer_value(nir_builder *b, enum operation operation, bool sign, nir_def **s)
    case CLZ: return leading_zeros(b, x);
    case CTZ: return trailing_zeros(b, x);
    case IABS: return sign ? nir_iabs(b, x) : x;
-   case IMAX: return sign ? nir_imax(b, x, s[1]) : nir_umax(b, x, s[1]);
-   case IMIN: return sign ? nir_imin(b, x, s[1]) : nir_umin(b, x, s[1]);
+   case IMAX: return maximum(b, sign, x, s[1]);
+   case IMIN: return minimum(b, sign, x, s[1]);
    case MUL_HI: return sign ? nir_imul_high(b, x, s[1]) : nir_umul_high(b, x, s[1]);
    case ADD_SAT: return sign ? nir_iadd_sat(b, x, s[1]) : nir_uadd_sat(b, x, s[1]);
    case SUB_SAT: return sign ? nir_isub_sat(b, x, s[1]) : nir_usub_sat(b, x, s[1]);
-   case ICLAMP:
-      return sign ? nir_imin(b, nir_imax(b, x, s[1]), s[2]) : nir_umin(b, nir_umax(b, x, s[1]), s[2]);
+   case ICLAMP: return minimum(b, sign, maximum(b, sign, x, s[1]), s[2]);
+   /* The difference wraps into the unsigned result. */
+   case ABS_DIFF: {
+      nir_def *less = sign ? nir_ilt(b, x, s[1]) : nir_ult(b, x, s[1]);
+      return nir_bcsel(b, less, nir_isub(b, s[1], x), nir_isub(b, x, s[1]));
+   }
+   /* Halved sums without the overflowing sum: (x + y) >> 1 and
+    * (x + y + 1) >> 1. */
+   case HADD: return nir_iadd(b, nir_iand(b, x, s[1]), halve(b, sign, nir_ixor(b, x, s[1])));
+   case RHADD: return nir_isub(b, nir_ior(b, x, s[1]), halve(b, sign, nir_ixor(b, x, s[1])));
+   case MAD_HI:
+      return nir_iadd(b, sign ? nir_imul_high(b, x, s[1]) : nir_umul_high(b, x, s[1]), s[2]);
+   case MAD_SAT: return mad_saturated(b, sign, x, s[1], s[2]);
+   case IMAX3: return maximum(b, sign, maximum(b, sign, x, s[1]), s[2]);
+   case IMIN3: return minimum(b, sign, minimum(b, sign, x, s[1]), s[2]);
+   case IMEDIAN3:
+      return maximum(b, sign, minimum(b, sign, x, s[1]),
+                     minimum(b, sign, maximum(b, sign, x, s[1]), s[2]));
+   /* Metal defines mul24 and mad24 only for 24-bit operands, which a full
+    * multiply computes exactly. */
+   case MUL24: return nir_imul(b, x, s[1]);
+   case MAD24: return nir_iadd(b, nir_imul(b, x, s[1]), s[2]);
+   /* NIR masks shift counts to the lane width, so a rotation by a multiple
+    * of it shifts by zero both ways. */
+   case ROTATE: {
+      nir_def *count = nir_u2u32(b, s[1]);
+      return nir_ior(b, nir_ishl(b, x, count), nir_ushr(b, x, nir_ineg(b, count)));
+   }
+   case EXTRACT_BITS: return extract_bits(b, sign, x, s[1], s[2]);
+   case INSERT_BITS: return insert_bits(b, x, s[1], s[2], s[3]);
    default: UNREACHABLE("integer operation");
    }
 }
 
-/* The call's operands, each of the result's type unless `mixed`. */
+/* `element` with `lanes` lanes. */
+static LLVMTypeRef
+lanes_of(LLVMTypeRef element, unsigned lanes)
+{
+   return lanes > 1 ? LLVMVectorType(element, lanes) : element;
+}
+
+/* The type of `operation`'s operand `i`, given its first operand's type:
+ * that type, or an i32 scalar or per-lane, an i1 or a thread pointer. */
+static LLVMTypeRef
+operand_type(LLVMTypeRef type, enum operation operation, unsigned i)
+{
+   LLVMContextRef context = LLVMGetTypeContext(type);
+   LLVMTypeRef i32 = LLVMInt32TypeInContext(context);
+   unsigned lanes;
+   stela_air_call_element(type, &lanes);
+   switch (operation) {
+   /* clz's, ctz's and llvm.abs's i1 say whether zero or INT_MIN is poison. */
+   case CLZ: case CTZ: case IABS: return i ? LLVMInt1TypeInContext(context) : type;
+   case LDEXP: return i ? lanes_of(i32, lanes) : type;
+   case ILOGB: return i ? i32 : type;
+   case SINCOS: case FREXP: return i ? LLVMPointerTypeInContext(context, 0) : type;
+   case EXTRACT_BITS: return i >= 1 ? i32 : type;
+   case INSERT_BITS: return i >= 2 ? i32 : type;
+   default: return type;
+   }
+}
+
+/* `operation`'s result type, given its first operand's type. */
+static LLVMTypeRef
+result_type(LLVMTypeRef type, enum operation operation)
+{
+   unsigned lanes;
+   LLVMTypeRef element = stela_air_call_element(type, &lanes);
+   switch (operation) {
+   case DOT: case LENGTH: case DISTANCE: return lanes > 1 ? element : NULL;
+   case ILOGB: return lanes_of(LLVMInt32TypeInContext(LLVMGetTypeContext(type)), lanes);
+   case CROSS: return lanes == 3 ? type : NULL;
+   case NORMALIZE: return lanes > 1 ? type : NULL;
+   default: return type;
+   }
+}
+
+/* The call's `count` operands' values, NULL for pointers, after checking
+ * each is of the type `operation` gives it. */
 static bool
-operands(const struct stela_air_call_context *c, LLVMValueRef call, unsigned count, bool mixed,
-         nir_def **values)
+operands(const struct stela_air_call_context *c, LLVMValueRef call, enum operation operation,
+         unsigned count, nir_def **values)
 {
    LLVMTypeRef type = LLVMTypeOf(LLVMGetOperand(call, 0));
    for (unsigned i = 0; i < count; i++) {
       LLVMValueRef operand = LLVMGetOperand(call, i);
-      if (!mixed && LLVMTypeOf(operand) != type)
+      if (LLVMTypeOf(operand) != operand_type(type, operation, i))
          return stela_air_call_fail(c, STELA_AIR_TYPE, "math function operand types differ");
-      if (!(values[i] = c->operand(c->translator, operand)))
+      values[i] = NULL;
+      if (LLVMGetTypeKind(LLVMTypeOf(operand)) != LLVMPointerTypeKind &&
+          !(values[i] = c->operand(c->translator, operand)))
          return false;
    }
    return true;
@@ -318,22 +539,18 @@ lower(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef ca
    nir_builder *b = c->b;
    LLVMTypeRef type = LLVMTypeOf(call);
    LLVMTypeRef operand = LLVMTypeOf(LLVMGetOperand(call, 0));
-   nir_def *s[3];
+   nir_def *s[4];
    if (operation >= POPCOUNT) {
-      /* clz, ctz and llvm.abs take a trailing constant i1. */
-      unsigned values = operation == CLZ || operation == CTZ || (operation == IABS && count == 2) ?
-                        1 : count;
-      if (!stela_air_call_integer(type) || operand != type || !operands(c, call, values, false, s))
+      if (!stela_air_call_integer(type) || operand != type)
          return stela_air_call_fail(c, STELA_AIR_TYPE, "unsupported integer function types"), STELA_AIR_CALL_FAILED;
+      if (!operands(c, call, operation, count, s))
+         return STELA_AIR_CALL_FAILED;
       *result = integer_value(b, operation, sign == SIGNED, s);
       return STELA_AIR_CALL_LOWERED;
    }
-   bool reduction = operation == DOT || operation == LENGTH || operation == DISTANCE;
    unsigned lanes;
    LLVMTypeRef scalar = stela_air_call_element(operand, &lanes);
-   if (!stela_air_call_floating(operand) ||
-       (reduction ? lanes < 2 || type != scalar : type != operand) ||
-       (operation == CROSS && lanes != 3) || (operation == NORMALIZE && lanes < 2))
+   if (!stela_air_call_floating(operand) || type != result_type(operand, operation))
       return stela_air_call_fail(c, STELA_AIR_TYPE, "unsupported floating-point function types"), STELA_AIR_CALL_FAILED;
    if ((operation == DFDX || operation == DFDY || operation == FWIDTH) && !c->fragment)
       return stela_air_call_fail(c, STELA_AIR_INSTRUCTION, "derivatives exist only in fragment functions"),
@@ -341,16 +558,19 @@ lower(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef ca
    if (approximate(operation) && !fast && LLVMGetTypeKind(scalar) == LLVMFloatTypeKind)
       return stela_air_call_fail(c, STELA_AIR_INSTRUCTION, "precise single-precision function accuracy is unqualified"),
              STELA_AIR_CALL_FAILED;
-   if (!c->fp_environment(c->translator) || !operands(c, call, count, false, s))
+   if (!c->fp_environment(c->translator) || !operands(c, call, operation, count, s))
       return STELA_AIR_CALL_FAILED;
-   unsigned bits = s[0]->bit_size;
-   if (bits == 16 && approximate(operation)) {
+   nir_def *second = NULL;
+   if (s[0]->bit_size == 16 && approximate(operation)) {
       for (unsigned i = 0; i < count; i++)
-         s[i] = nir_f2f32(b, s[i]);
-      *result = nir_f2f16(b, floating_value(b, operation, s));
+         s[i] = s[i] ? nir_f2f32(b, s[i]) : NULL;
+      *result = nir_f2f16(b, floating_value(b, operation, s, &second));
+      second = second ? nir_f2f16(b, second) : NULL;
    } else {
-      *result = floating_value(b, operation, s);
+      *result = floating_value(b, operation, s, &second);
    }
+   if (second && !c->store(c->translator, LLVMGetOperand(call, count - 1), second))
+      return STELA_AIR_CALL_FAILED;
    return STELA_AIR_CALL_LOWERED;
 }
 
@@ -438,6 +658,146 @@ air_function(const struct function *table, size_t size, const char *name, size_t
    return NULL;
 }
 
+/* c with its color channels converted by `convert` and its alpha kept. */
+static nir_def *
+color(nir_builder *b, nir_def *c, nir_def *(*convert)(nir_builder *, nir_def *))
+{
+   nir_def *rgb = convert(b, nir_trim_vector(b, c, 3));
+   return nir_vec4(b, nir_channel(b, rgb, 0), nir_channel(b, rgb, 1), nir_channel(b, rgb, 2),
+                   nir_channel(b, c, 3));
+}
+
+/* "air.pack.<format>.<type>" and "air.unpack.<format>.<type>": a format's
+ * normalized components to and from an integer of their bits, <type> naming
+ * the float vector. NaN packs as zero. */
+static enum stela_air_call_status
+pack(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef callee,
+     const char *name, size_t bytes, bool unpack, nir_def **result)
+{
+   if (LLVMGetNumArgOperands(call) != 1)
+      return STELA_AIR_CALL_OTHER;
+   LLVMTypeRef operand = LLVMTypeOf(LLVMGetOperand(call, 0));
+   LLVMTypeRef packed = unpack ? operand : LLVMTypeOf(call);
+   LLVMTypeRef vector = unpack ? LLVMTypeOf(call) : operand;
+   if (!stela_air_call_floating(vector))
+      return STELA_AIR_CALL_OTHER;
+   char type[16];
+   stela_air_call_overload(vector, type, sizeof(type));
+   const struct format *format = NULL;
+   for (unsigned i = 0; i < ARRAY_SIZE(formats) && !format; i++) {
+      char expected[64];
+      snprintf(expected, sizeof(expected), "air.%s.%s.%s", unpack ? "unpack" : "pack",
+               formats[i].name, type);
+      if (stela_air_call_named(name, bytes, expected))
+         format = &formats[i];
+   }
+   if (!format)
+      return STELA_AIR_CALL_OTHER;
+   if (!stela_air_call_plain(c, call, callee, 1))
+      return STELA_AIR_CALL_FAILED;
+   unsigned lanes, width = 0;
+   LLVMTypeRef element = stela_air_call_element(vector, &lanes);
+   for (unsigned i = 0; i < format->components; i++)
+      width += format->bits[i];
+   if (lanes != format->components || LLVMGetTypeKind(packed) != LLVMIntegerTypeKind ||
+       LLVMGetIntTypeWidth(packed) != width)
+      return stela_air_call_fail(c, STELA_AIR_TYPE, "packing types disagree with their format"),
+             STELA_AIR_CALL_FAILED;
+   nir_def *x;
+   if (!c->fp_environment(c->translator) || !(x = c->operand(c->translator, LLVMGetOperand(call, 0))))
+      return STELA_AIR_CALL_FAILED;
+   nir_builder *b = c->b;
+   if (unpack) {
+      nir_def *fields = format->snorm ?
+         nir_format_unpack_sint(b, nir_u2u32(b, x), format->bits, format->components) :
+         nir_format_unpack_uint(b, nir_u2u32(b, x), format->bits, format->components);
+      nir_def *f = format->snorm ? nir_format_snorm_to_float(b, fields, format->bits) :
+                                   nir_format_unorm_to_float(b, fields, format->bits);
+      if (format->srgb)
+         f = color(b, f, nir_format_srgb_to_linear);
+      *result = nir_f2fN(b, f, LLVMGetTypeKind(element) == LLVMHalfTypeKind ? 16 : 32);
+      return STELA_AIR_CALL_LOWERED;
+   }
+   x = nir_f2f32(b, x);
+   x = nir_bcsel(b, nir_fisnan(b, x), nir_imm_float(b, 0.0f), x);
+   if (format->srgb)
+      x = color(b, x, nir_format_linear_to_srgb);
+   nir_def *fields = format->snorm ? nir_format_float_to_snorm(b, x, format->bits) :
+                                     nir_format_float_to_unorm(b, x, format->bits);
+   *result = nir_u2uN(b, nir_format_pack_uint(b, fields, format->bits, format->components), width);
+   return STELA_AIR_CALL_LOWERED;
+}
+
+/* "air.all.<type>" and "air.any.<type>": whether all or any lanes of a bool
+ * vector are true. */
+static enum stela_air_call_status
+reduce_bools(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef callee,
+             const char *name, size_t bytes, nir_def **result)
+{
+   LLVMTypeRef operand = LLVMTypeOf(LLVMGetOperand(call, 0));
+   char type[16], all[32], any[32];
+   stela_air_call_overload(operand, type, sizeof(type));
+   snprintf(all, sizeof(all), "air.all.%s", type);
+   snprintf(any, sizeof(any), "air.any.%s", type);
+   bool every = stela_air_call_named(name, bytes, all);
+   if (!every && !stela_air_call_named(name, bytes, any))
+      return STELA_AIR_CALL_OTHER;
+   if (!stela_air_call_plain(c, call, callee, 1))
+      return STELA_AIR_CALL_FAILED;
+   if (LLVMTypeOf(call) != LLVMInt1TypeInContext(LLVMGetTypeContext(operand)))
+      return stela_air_call_fail(c, STELA_AIR_TYPE, "bool reductions return a bool"), STELA_AIR_CALL_FAILED;
+   nir_def *x = c->operand(c->translator, LLVMGetOperand(call, 0));
+   if (!x)
+      return STELA_AIR_CALL_FAILED;
+   *result = x->num_components == 1 ? x : every ? nir_ball(c->b, x) : nir_bany(c->b, x);
+   return STELA_AIR_CALL_LOWERED;
+}
+
+/* A type as Apple's function library spells it: "float", "v2half",
+ * "v3int32". */
+static void
+library_type(LLVMTypeRef type, char *name, size_t size)
+{
+   unsigned lanes;
+   LLVMTypeRef element = stela_air_call_element(type, &lanes);
+   char base[16];
+   if (LLVMGetTypeKind(element) == LLVMIntegerTypeKind)
+      snprintf(base, sizeof(base), "int%u", LLVMGetIntTypeWidth(element));
+   else
+      snprintf(base, sizeof(base), LLVMGetTypeKind(element) == LLVMHalfTypeKind ? "half" : "float");
+   if (lanes > 1)
+      snprintf(name, size, "v%u%s", lanes, base);
+   else
+      snprintf(name, size, "%s", base);
+}
+
+/* Apple's library functions: "___metal_frexp_<type>_pthread<exponents>"
+ * and "___metal_ilogb_<type>", whose i32 operand says whether fast math is
+ * on, which its exact result ignores. */
+static enum stela_air_call_status
+library_call(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef callee,
+             const char *name, size_t bytes, nir_def **result)
+{
+   if (LLVMGetNumArgOperands(call) != 2)
+      return STELA_AIR_CALL_OTHER;
+   LLVMTypeRef x = LLVMTypeOf(LLVMGetOperand(call, 0));
+   if (!stela_air_call_floating(x))
+      return STELA_AIR_CALL_OTHER;
+   unsigned lanes;
+   stela_air_call_element(x, &lanes);
+   char value[16], exponents[16], expected[64];
+   library_type(x, value, sizeof(value));
+   library_type(lanes_of(LLVMInt32TypeInContext(LLVMGetTypeContext(x)), lanes), exponents,
+                sizeof(exponents));
+   snprintf(expected, sizeof(expected), "___metal_frexp_%s_pthread%s", value, exponents);
+   if (stela_air_call_named(name, bytes, expected))
+      return lower(c, call, callee, FREXP, SIGN_NONE, 2, false, result);
+   snprintf(expected, sizeof(expected), "___metal_ilogb_%s", value);
+   if (stela_air_call_named(name, bytes, expected))
+      return lower(c, call, callee, ILOGB, SIGN_NONE, 2, false, result);
+   return STELA_AIR_CALL_OTHER;
+}
+
 enum stela_air_call_status
 stela_air_math_call(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef callee,
                     const char *name, size_t bytes, nir_def **result)
@@ -462,6 +822,8 @@ stela_air_math_call(const struct stela_air_call_context *c, LLVMValueRef call, L
       return lower(c, call, callee, intrinsics[i].operation, intrinsics[i].sign,
                    intrinsics[i].operands, fast, result);
    }
+   if (bytes > strlen("___metal_") && !memcmp(name, "___metal_", strlen("___metal_")))
+      return library_call(c, call, callee, name, bytes, result);
    if (bytes < 4 || memcmp(name, "air.", 4))
       return STELA_AIR_CALL_OTHER;
    if (stela_air_call_named(name, bytes, "air.discard_fragment")) {
@@ -476,9 +838,15 @@ stela_air_math_call(const struct stela_air_call_context *c, LLVMValueRef call, L
    }
    if (bytes > strlen("air.convert.") && !memcmp(name, "air.convert.", strlen("air.convert.")))
       return convert(c, call, callee, name, bytes, result);
+   if (bytes > strlen("air.pack.") && !memcmp(name, "air.pack.", strlen("air.pack.")))
+      return pack(c, call, callee, name, bytes, false, result);
+   if (bytes > strlen("air.unpack.") && !memcmp(name, "air.unpack.", strlen("air.unpack.")))
+      return pack(c, call, callee, name, bytes, true, result);
    if (LLVMGetNumArgOperands(call) == 0)
       return STELA_AIR_CALL_OTHER;
-   /* Every function's overload is its first operand's type. */
+   if (boolean(LLVMTypeOf(LLVMGetOperand(call, 0))))
+      return reduce_bools(c, call, callee, name, bytes, result);
+   /* Every other function's overload is its first operand's type. */
    char type[16];
    LLVMTypeRef first = LLVMTypeOf(LLVMGetOperand(call, 0));
    if (!stela_air_call_floating(first) && !stela_air_call_integer(first))

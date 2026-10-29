@@ -2442,6 +2442,18 @@ math_environment(void *translator)
    return fp_environment(translator);
 }
 
+static bool
+math_store(void *translator, LLVMValueRef pointer, nir_def *value)
+{
+   struct translator *t = translator;
+   const struct value *address = pointer_value(t, pointer);
+   if (!address || !(address->access & STELA_AIR_WRITE))
+      return fail(t, STELA_AIR_MEMORY, "math function result pointer is not writable");
+   memory_access(t, address, value, NULL, 0, value->num_components, value->bit_size,
+                 value->bit_size / 8);
+   return t->error->kind == STELA_AIR_OK;
+}
+
 /* LLVM's conversions to, from and between half and float. */
 static bool
 fp_conversion(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
@@ -3442,7 +3454,7 @@ instruction(struct translator *t, LLVMValueRef inst)
       const struct stela_air_call_context math_context = {
          .b = &t->b, .error = t->error, .translator = t,
          .fragment = t->stage_options && t->stage_options->stage == STELA_AIR_FRAGMENT,
-         .operand = texture_operand, .fp_environment = math_environment,
+         .operand = texture_operand, .fp_environment = math_environment, .store = math_store,
       };
       switch (stela_air_simd_call(&math_context, inst, callee, name, name_length, &math)) {
       case STELA_AIR_CALL_OTHER:
