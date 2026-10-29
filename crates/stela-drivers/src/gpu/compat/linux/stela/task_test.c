@@ -42,7 +42,7 @@ static struct rcu_head retirement;
 static struct rcu_head signal_retirement;
 static unsigned int refused_schedule_state;
 static struct rcuwait *published_wait;
-static bool wait_condition, wait_worker_done;
+static bool wait_condition, wait_worker_done, idle_worker_done;
 static unsigned int wait_payload;
 static struct task_struct *reserved_service_task;
 static struct task_struct *scope_end_target;
@@ -180,6 +180,22 @@ static void original_rcuwait(void)
 	printf("Linux rcuwait: original wait/wake/finish, atomic delivery, signals and RCU lifetime passed\n");
 }
 
+static void original_idle_wait(void)
+{
+	/* The peer itself is already parked in exact TASK_IDLE on its actual
+	 * retained Runtime frame. Waking it must not add a load-accounted sleeper. */
+	assert(schedule_worker->__state == TASK_IDLE && schedule_worker->is_blocked);
+	assert(!schedule_worker->sched_contributes_to_load);
+	assert(!stela_linux_task_waiting_io() && !stela_linux_task_waiting_load());
+	assert(wake_up_process(schedule_worker) == 1);
+	set_current_state(TASK_IDLE);
+	schedule();
+	assert(idle_worker_done && current == foreground_task);
+	assert(current->__state == TASK_RUNNING && !current->is_blocked);
+	assert(!stela_linux_task_waiting_io() && !stela_linux_task_waiting_load());
+	assert(stela_linux_quiescent() && !preempt_count() && !irqs_disabled());
+}
+
 void stela_linux_task_test_foreground(void *context)
 {
 	(void)context;
@@ -251,11 +267,14 @@ void stela_linux_task_test_foreground(void *context)
 	/* TASK_RUNNING schedule is an actual cooperative yield, not a skip. */
 	schedule();
 	original_rcuwait();
+	original_idle_wait();
 	refused_schedule_state = TASK_WAKEKILL;
 	assert(stela_test_traps(unsupported_schedule_state));
 	refused_schedule_state = TASK_NORMAL;
 	assert(stela_test_traps(unsupported_schedule_state));
-	refused_schedule_state = TASK_IDLE;
+	refused_schedule_state = TASK_NOLOAD;
+	assert(stela_test_traps(unsupported_schedule_state));
+	refused_schedule_state = TASK_IDLE | TASK_WAKEKILL;
 	assert(stela_test_traps(unsupported_schedule_state));
 	check_current();
 	assert(stela_linux_quiescent());
@@ -297,6 +316,15 @@ void stela_linux_task_test_schedule_worker(void *context)
 	assert(rcuwait_active(published_wait));
 	stela_linux_atomic_callback_end(&delivery);
 	wait_worker_done = true;
+	set_current_state(TASK_IDLE);
+	schedule();
+	assert(current == schedule_worker && current->__state == TASK_RUNNING);
+	assert(foreground_task->__state == TASK_IDLE && foreground_task->is_blocked);
+	assert(!foreground_task->sched_contributes_to_load);
+	assert(!stela_linux_task_waiting_io() && !stela_linux_task_waiting_load());
+	idle_worker_done = true;
+	assert(wake_up_process(foreground_task) == 1);
+	assert(wake_up_process(foreground_task) == 0);
 	stela_linux_exit();
 }
 

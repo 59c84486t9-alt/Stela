@@ -198,7 +198,9 @@ static void block_account(struct stela_linux_task *task, unsigned int state)
 	if (task->io_blocked || task->load_blocked || task->linux_task.is_blocked)
 		__builtin_trap();
 	bool io = task->linux_task.in_iowait;
-	bool load = !!(state & TASK_UNINTERRUPTIBLE);
+	/* Pinned sched/core.c block_task: idle/frozen sleepers do not add load. */
+	bool load = (state & TASK_UNINTERRUPTIBLE) &&
+		!(state & TASK_NOLOAD) && !(state & TASK_FROZEN);
 	if ((io && waiting_io == UINT_MAX) || (load && waiting_load == UINT_MAX))
 		__builtin_trap();
 	task->io_blocked = io;
@@ -398,13 +400,21 @@ static bool prepared_here(struct stela_linux_task *task)
 	       stela_linux_lease_matches(&task->lease);
 }
 
+static bool supported_block_state(unsigned int state)
+{
+	/* Preserve the existing ordinary wait masks, plus the exact idle state.
+	 * TASK_NOLOAD alone is not an admitted sleeping state. */
+	return state == TASK_IDLE ||
+	       !(state & ~(unsigned int)(TASK_NORMAL | TASK_WAKEKILL));
+}
+
 int stela_linux_task_still_blocked(struct stela_linux_task *task,
 	const struct stela_linux_task_context *view)
 {
 	if (!live_here(task, view) || !prepared_here(task))
 		return -EBUSY;
 	unsigned int state = READ_ONCE(task->linux_task.__state);
-	if (state & ~(unsigned int)(TASK_NORMAL | TASK_WAKEKILL))
+	if (!supported_block_state(state))
 		return -EOPNOTSUPP;
 	return state != TASK_RUNNING;
 }
@@ -423,7 +433,7 @@ int stela_linux_task_leave(struct stela_linux_task *task,
 	if (lease.owner) {
 		if (!prepared_here(task) ||
 		    (reason != 1 && (task->prepared_count || READ_ONCE(task->linux_task.__state))) ||
-		    (reason == 1 && (READ_ONCE(task->linux_task.__state) & ~(unsigned int)(TASK_NORMAL | TASK_WAKEKILL))))
+		    (reason == 1 && !supported_block_state(READ_ONCE(task->linux_task.__state))))
 			return -EBUSY;
 	} else if (task->scope_boundary) {
 		if (reason != 2 || !task->scope || task->prepared || task->suspended ||
@@ -640,7 +650,7 @@ void schedule(void)
 	struct task_struct *task = stela_linux_current();
 	unsigned int state = READ_ONCE(task->__state);
 	bool admitted_state = state == TASK_RUNNING || state == TASK_INTERRUPTIBLE ||
-		state == TASK_UNINTERRUPTIBLE || state == TASK_KILLABLE;
+		state == TASK_UNINTERRUPTIBLE || state == TASK_KILLABLE || state == TASK_IDLE;
 	if (stela_linux_atomic_callback_active() || preempt_count() || irqs_disabled() ||
 	    !admitted_state ||
 	    (task->flags & (PF_KTHREAD | PF_WQ_WORKER | PF_IO_WORKER)) != PF_KTHREAD || task->plug)
