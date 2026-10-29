@@ -9,7 +9,13 @@
 //! this module never fabricates those grants from an ID or pin configuration.
 //! This controller candidate does not establish an attached codec/frontend.
 pub use super::acp_pdm::{Error, Identity, Phase, Registers, State};
-use super::{Direction, acp_pdm::check_dma_range};
+use super::{
+    Direction,
+    acp_pdm::{
+        access::{self, Deadline},
+        check_dma_range,
+    },
+};
 use crate::bus::{
     dma::{
         mapping::{Direction as DmaDirection, DmaDomain, DmaMapping},
@@ -199,12 +205,6 @@ impl Drop for Stream {
         // Published mappings remain quarantined by the canonical DMA owner.
     }
 }
-#[derive(Clone, Copy)]
-struct Deadline {
-    phase: Phase,
-    start: u64,
-    budget: u64,
-}
 pub struct Controller<R, T> {
     registers: R,
     timer: T,
@@ -280,21 +280,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         result
     }
     fn usable(&self) -> Result<(), Error> {
-        match self.state {
-            State::Claimed => Err(Error::NotInitialized),
-            State::Faulted => Err(Error::NeedsReset),
-            State::Shutdown => Err(Error::Shutdown),
-            State::Suspended => Err(Error::Suspended),
-            _ => Ok(()),
-        }
+        access::usable(self.state)
     }
     fn read(&mut self, offset: usize) -> Result<u32, Error> {
-        let value = self.registers.read32(offset);
-        if value == u32::MAX {
-            Err(Error::RegisterUnavailable(offset))
-        } else {
-            Ok(value)
-        }
+        access::read(&mut self.registers, offset)
     }
     fn expect(&mut self, offset: usize, value: u32) -> Result<(), Error> {
         if self.read(offset)? == value {
@@ -308,24 +297,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.expect(offset, value)
     }
     fn deadline(&self, phase: Phase, budget: u64) -> Deadline {
-        Deadline {
-            phase,
-            budget,
-            start: self.timer.now_us(),
-        }
+        Deadline::new(phase, self.timer.now_us(), budget)
     }
     fn timely(&self, deadline: Deadline) -> Result<(), Error> {
-        if self.timer.now_us().wrapping_sub(deadline.start) >= deadline.budget {
-            Err(Error::Timeout(deadline.phase))
-        } else {
-            Ok(())
-        }
+        deadline.check(&self.timer)
     }
     fn phase_read(&mut self, offset: usize, deadline: Deadline) -> Result<u32, Error> {
-        self.timely(deadline)?;
-        let value = self.read(offset)?;
-        self.timely(deadline)?;
-        Ok(value)
+        access::phase_read(&mut self.registers, &self.timer, offset, deadline)
     }
     fn phase_write(&mut self, offset: usize, value: u32, deadline: Deadline) -> Result<(), Error> {
         self.timely(deadline)?;
@@ -338,12 +316,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         deadline: Deadline,
         ready: impl Fn(u32) -> bool,
     ) -> Result<(), Error> {
-        loop {
-            if ready(self.phase_read(offset, deadline)?) {
-                return Ok(());
-            }
-            self.timer.relax();
-        }
+        access::wait(&mut self.registers, &self.timer, offset, deadline, ready)
     }
     fn associated(&mut self) -> Result<(), Error> {
         if self.registers.identity()? == self.identity {

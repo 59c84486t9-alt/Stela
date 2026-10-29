@@ -15,6 +15,8 @@ use crate::bus::{
     },
     i2c::Timer,
 };
+pub(super) mod access;
+use access::Deadline;
 pub(super) mod pci;
 pub(super) mod registers;
 pub use registers::Registers;
@@ -89,12 +91,6 @@ pub enum Phase {
     ResetClear,
     DmaStart,
     DmaStop,
-}
-#[derive(Clone, Copy)]
-struct Deadline {
-    phase: Phase,
-    start: u64,
-    timeout: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,12 +227,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
     }
 
     fn read(&mut self, offset: usize) -> Result<u32, Error> {
-        let value = self.registers.read32(offset);
-        if value == u32::MAX {
-            Err(Error::RegisterUnavailable(offset))
-        } else {
-            Ok(value)
-        }
+        access::read(&mut self.registers, offset)
     }
     fn write_checked(&mut self, offset: usize, value: u32) -> Result<(), Error> {
         self.registers.write32(offset, value);
@@ -251,25 +242,13 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         Ok(())
     }
     fn deadline(&self, phase: Phase, timeout: u64) -> Deadline {
-        Deadline {
-            phase,
-            start: self.timer.now_us(),
-            timeout,
-        }
+        Deadline::new(phase, self.timer.now_us(), timeout)
     }
     fn check_deadline(&self, deadline: Deadline) -> Result<(), Error> {
-        if self.timer.now_us().wrapping_sub(deadline.start) >= deadline.timeout {
-            return Err(Error::Timeout(deadline.phase));
-        }
-        Ok(())
+        deadline.check(&self.timer)
     }
     fn phase_read(&mut self, offset: usize, deadline: Deadline) -> Result<u32, Error> {
-        self.check_deadline(deadline)?;
-        // A failed actual access takes priority over the clock observed after
-        // that access; a successful late ready value never grants completion.
-        let value = self.read(offset)?;
-        self.check_deadline(deadline)?;
-        Ok(value)
+        access::phase_read(&mut self.registers, &self.timer, offset, deadline)
     }
     fn phase_write(&mut self, offset: usize, value: u32, deadline: Deadline) -> Result<(), Error> {
         self.check_deadline(deadline)?;
@@ -299,12 +278,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         deadline: Deadline,
         ready: impl Fn(u32) -> bool,
     ) -> Result<(), Error> {
-        loop {
-            if ready(self.phase_read(offset, deadline)?) {
-                return Ok(());
-            }
-            self.timer.relax();
-        }
+        access::wait(&mut self.registers, &self.timer, offset, deadline, ready)
     }
     fn pci_authority(&mut self) -> Result<(), Error> {
         if self.registers.identity()? != self.identity {
@@ -352,13 +326,7 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
         Ok(())
     }
     fn usable(&self) -> Result<(), Error> {
-        match self.state {
-            State::Claimed => Err(Error::NotInitialized),
-            State::Faulted => Err(Error::NeedsReset),
-            State::Shutdown => Err(Error::Shutdown),
-            State::Suspended => Err(Error::Suspended),
-            _ => Ok(()),
-        }
+        access::usable(self.state)
     }
     fn finish<U>(&mut self, result: Result<U, Error>) -> Result<U, Error> {
         if let Err(error) = result.as_ref() {
