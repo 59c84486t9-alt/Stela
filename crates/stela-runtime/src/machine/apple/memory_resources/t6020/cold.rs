@@ -9,21 +9,14 @@ use super::Configuration;
 use super::MemoryController;
 use super::Prepared;
 use super::T6020Memory;
-use super::validate_ram;
 use crate::Result;
 use crate::machine::apple::AppleDevices;
-use crate::platform::apple::pmgr;
-use crate::platform::apple::pmgr::Pmgr;
-use alloc::{sync::Arc, vec, vec::Vec};
-use stela_contracts::bus::LifecycleState;
-use stela_contracts::bus::Width;
+use crate::machine::apple::memory_resources::cold;
+use alloc::sync::Arc;
+use stela_contracts::refusal::Within;
 use stela_contracts::refuse;
 use stela_engine::memory::RegisteredSystemRam;
-use stela_soc_data::board::PowerOwner;
 use stela_soc_data::board::PowerStates;
-use stela_soc_data::pmgr::coverage;
-use stela_soc_data::pmgr::coverage::Consumer;
-use stela_soc_data::pmgr::coverage::LifecycleSinks;
 
 /// Private inputs keep source identities. Construction supplies no
 /// lifecycle status, native topology, firmware PTD service or cache grant.
@@ -31,10 +24,8 @@ pub struct Plan {
     controller: MemoryController,
     descriptor: T6020Memory,
     power: PowerStates,
-    resources: Vec<usize>,
-    domains: Vec<u64>,
-    ram: Arc<RegisteredSystemRam>,
-    generation: u64,
+    inputs: cold::Inputs,
+    ram: cold::PinnedRam,
     programmed: stela_soc_data::amcc::Programmed,
     configuration: Configuration,
 }
@@ -52,7 +43,8 @@ impl Plan {
         configuration: &Configuration,
     ) -> Result<Self> {
         descriptor.validate(controller)?;
-        validate_ram(descriptor, controller, programmed, ram)?;
+        let pinned = super::placed_ram(descriptor, controller, programmed, ram)
+            .within(|| refuse!("cold T602x memory placement"))?;
         let layout = descriptor.layout()?;
         if configuration.channels.len() != layout.channels()
             || configuration.mcc_gating.len() != layout.apertures()
@@ -61,18 +53,17 @@ impl Plan {
                 "cold T602x configuration omits actual controller channels"
             ));
         }
-        let (resources, domains) = source_inputs(power, descriptor)?;
-        let generation = ram
-            .generation()
-            .map_err(|_| refuse!("cold T602x canonical RAM is not live"))?;
+        // Lifecycle identity follows the original node's first reg, the PTD
+        // bank, not its first direct controller and not the separate PMP ASC.
+        let inputs =
+            cold::Inputs::resolve(power, descriptor.ptd.physical, &super::extents(descriptor))
+                .within(|| refuse!("cold T602x lifecycle inputs"))?;
         Ok(Self {
             controller: controller.clone(),
             descriptor: descriptor.clone(),
             power: power.clone(),
-            resources,
-            domains,
-            ram: Arc::clone(ram),
-            generation,
+            inputs,
+            ram: pinned,
             programmed,
             configuration: configuration.clone(),
         })
@@ -94,97 +85,30 @@ impl Plan {
                 "cold T602x differs from its complete retained source resources"
             ));
         }
-        self.validate_ram()
+        self.ram.check()
     }
     pub fn registered_ram(&self) -> &Arc<RegisteredSystemRam> {
-        &self.ram
+        self.ram.ram()
     }
     pub fn descriptor(&self) -> &T6020Memory {
         &self.descriptor
     }
-    /// Lifecycle identity follows the original node's first reg, not its
-    /// first direct controller and not the separate PMP ASC.
     pub fn lifecycle_physical(&self) -> u64 {
-        self.descriptor.ptd.physical
+        self.inputs.owner()
     }
     pub fn source_resource_indices(&self) -> &[usize] {
-        &self.resources
+        self.inputs.resources()
     }
     pub fn input_domains(&self) -> &[u64] {
-        &self.domains
-    }
-    fn validate_ram(&self) -> Result<()> {
-        if self
-            .ram
-            .generation()
-            .map_err(|_| refuse!("cold T602x canonical RAM is not live"))?
-            != self.generation
-        {
-            return Err(refuse!("cold T602x canonical RAM generation changed"));
-        }
-        Ok(())
-    }
-
-    fn lifecycle(&self, devices: &AppleDevices) -> Result<LifecycleState> {
-        self.validate_ram()?;
-        let id = devices
-            .pmgr
-            .ok_or(refuse!("cold T602x requires the actual placed PMGR"))?;
-        let pmgr = devices
-            .bus
-            .device::<Pmgr>(id)
-            .ok_or(refuse!("cold T602x has a foreign PMGR owner"))?;
-        // Even an input-free MCC cannot borrow a numerically matching
-        // PMGR state table with absent/foreign physical routes.
-        for &address in &self.power.registers {
-            if devices.bus.route(address, Width::Word).ok() != Some((id, address))
-                || pmgr.domain_state(address).is_none()
-            {
-                return Err(refuse!(
-                    "cold T602x source register {address:#x} has no actual PMGR route/state",
-                    address
-                ));
-            }
-        }
-        if self.domains.is_empty() {
-            // source_inputs proved literal absence of activated/implicit inputs
-            // in every positively owned alias. This is only the initial state
-            // of the NEW synchronous software frontend, not a hardware power,
-            // cache-ready or private PMP acknowledgement. Unrelated PMP gates
-            // keep their state and are never sampled as MCC readiness.
-            return Ok(LifecycleState {
-                powered: true,
-                clocked: true,
-                quiesced: false,
-                reset: false,
-                retention: true,
-            });
-        }
-        let states = self
-            .domains
-            .iter()
-            .map(|&address| {
-                pmgr.domain_state(address).ok_or_else(|| {
-                    refuse!(
-                        "cold T602x input {address:#x} has no actual PMGR state",
-                        address
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(LifecycleState {
-            powered: states.iter().all(|state| state.power != pmgr::POWER_GATED),
-            clocked: states.iter().all(|state| state.power == pmgr::ACTIVE),
-            quiesced: states.iter().any(|state| state.disabled),
-            reset: states.iter().any(|state| state.reset),
-            retention: true,
-        })
+        self.inputs.domains()
     }
 
     /// After PMGR placement and before complete power connection, install
     /// one joint owner and register its source reg0 lifecycle identity. The caller
     /// keeps stopped native/all-writer ownership through this cold placement.
     /// No controller request is retired and no PTD publication service is made.
+    /// Unrelated PMP gates keep their state and are never sampled as MCC
+    /// readiness.
     pub fn install(self, devices: &mut AppleDevices) -> Result<()> {
         if devices.power_configured
             || devices.memory_controller.is_some()
@@ -194,7 +118,11 @@ impl Plan {
                 "cold T602x requires an unoccupied unconnected memory mount"
             ));
         }
-        let lifecycle = self.lifecycle(devices)?;
+        let lifecycle = self
+            .ram
+            .check()
+            .and_then(|()| self.inputs.sample(devices, &self.power))
+            .within(|| refuse!("cold T602x memory lifecycle"))?;
         let physical = self.lifecycle_physical();
         let owner = Prepared::new(
             self.descriptor,
@@ -202,7 +130,7 @@ impl Plan {
             self.programmed,
             self.configuration,
             lifecycle,
-            self.ram,
+            self.ram.into_live()?,
         )?;
         devices.add_t6020_memory_resources(owner)?;
         let id = devices
@@ -214,154 +142,14 @@ impl Plan {
     }
 }
 
-fn source_inputs(power: &PowerStates, descriptor: &T6020Memory) -> Result<(Vec<usize>, Vec<u64>)> {
-    let physical = descriptor.ptd.physical;
-    let resources = power
-        .resources
-        .iter()
-        .enumerate()
-        .filter_map(|(id, resource)| {
-            (resource.owner == Some(PowerOwner::Mmio(physical))).then_some(id)
-        })
-        .collect::<Vec<_>>();
-    if resources.is_empty()
-        || resources
-            .iter()
-            .any(|&id| power.resources[id].admission == coverage::Admission::Unavailable)
-    {
-        return Err(refuse!(
-            "cold T602x source reg0 has no positively owned lifecycle resource"
-        ));
-    }
-    let requirements = power.power_requirements()?;
-    let consumers = power
-        .resources
-        .iter()
-        .enumerate()
-        .map(|(id, resource)| Consumer {
-            id,
-            name: &resource.name,
-            clocks: resource.activated_clocks(),
-            power: &requirements[id],
-            admission: resource.admission,
-            sinks: LifecycleSinks::default(),
-        })
-        .collect::<Vec<_>>();
-    let graph = coverage::analyze(&power.domains, &consumers)
-        .map_err(|error| refuse!("cold T602x complete source power graph: {error}", ?error))?;
-    if graph.len() != power.registers.len()
-        || graph
-            .iter()
-            .any(|domain| !power.registers.contains(&domain.address))
-    {
-        return Err(refuse!(
-            "cold T602x source graph differs from its complete register set"
-        ));
-    }
-    for &id in &resources {
-        for &input in power.resources[id]
-            .activated_clocks()
-            .iter()
-            .chain(&requirements[id])
-        {
-            if !resolved_input(power, input) {
-                return Err(refuse!(
-                    "cold T602x input has an unresolved virtual ancestor"
-                ));
-            }
-        }
-    }
-    for (id, resource) in power.resources.iter().enumerate() {
-        if let Some(PowerOwner::Mmio(address)) = resource.owner
-            && address != physical
-            && contains(descriptor, address)
-            && (!resource.activated_clocks().is_empty() || !requirements[id].is_empty())
-        {
-            return Err(refuse!(
-                "cold T602x independently gated overlapping alias needs its own actual lifecycle join"
-            ));
-        }
-    }
-    let domains = graph
-        .iter()
-        .filter(|domain| {
-            domain
-                .consumers
-                .iter()
-                .any(|consumer| resources.contains(&consumer.id))
-        })
-        .map(|domain| domain.address)
-        .collect::<Vec<_>>();
-    if domains.is_empty()
-        && resources.iter().any(|&id| {
-            !power.resources[id].activated_clocks().is_empty() || !requirements[id].is_empty()
-        })
-    {
-        return Err(refuse!(
-            "cold T602x activated inputs have no physical lifecycle producer"
-        ));
-    }
-    Ok((resources, domains))
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Key {
-    Physical(u64),
-    Virtual(coverage::DomainId),
-}
-fn key(domain: &coverage::Domain) -> Key {
-    domain
-        .address
-        .map_or(Key::Virtual(domain.id), Key::Physical)
-}
-/// Follow coverage's normalized physical aliases and ALL ancestor edges. An
-/// unresolved virtual root on any path cannot be masked by one physical parent.
-fn resolved_input(power: &PowerStates, input: coverage::DomainId) -> bool {
-    let mut pending = vec![input];
-    let mut seen = Vec::new();
-    let mut physical = false;
-    while let Some(id) = pending.pop() {
-        let Some(domain) = power.domains.iter().find(|domain| domain.id == id) else {
-            return false;
-        };
-        let current = key(domain);
-        if seen.contains(&current) {
-            continue;
-        }
-        seen.push(current);
-        let mut parents = Vec::new();
-        for alias in power.domains.iter().filter(|alias| key(alias) == current) {
-            for &id in alias.parents.iter().flatten() {
-                let Some(parent) = power.domains.iter().find(|domain| domain.id == id) else {
-                    return false;
-                };
-                if key(parent) != current {
-                    parents.push(id);
-                }
-            }
-        }
-        match current {
-            Key::Physical(_) => physical = true,
-            Key::Virtual(_) if parents.is_empty() => return false,
-            Key::Virtual(_) => {}
-        }
-        pending.extend(parents);
-    }
-    physical
-}
-fn contains(descriptor: &T6020Memory, address: u64) -> bool {
-    descriptor.apertures.iter().any(|&start| {
-        address >= start && address - start < stela_soc_data::mcc::t6020::APERTURE_BYTES
-    }) || address >= descriptor.ptd.physical
-        && address - descriptor.ptd.physical < stela_soc_data::ptd::PTD_BYTES
-        || address >= descriptor.auxiliary.0
-            && address - descriptor.auxiliary.0 < descriptor.auxiliary.1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::boxed::Box;
+    use crate::platform::apple::pmgr;
+    use crate::platform::apple::pmgr::Pmgr;
+    use alloc::{boxed::Box, vec};
+    use stela_contracts::bus::Width;
+    use stela_soc_data::board::PowerOwner;
     use {
         crate::platform::apple::pmgr::PowerState, stela_contracts::bus::Access,
         stela_contracts::interrupt::InterruptLatch, stela_soc_data::board::ClockRole,
@@ -410,7 +198,7 @@ mod tests {
         (
             fixture.source_locks.clone(),
             descriptor,
-            Arc::clone(&fixture.ram),
+            Arc::clone(fixture.ram.ram()),
             power,
             configuration,
         )
@@ -557,19 +345,6 @@ mod tests {
         assert!(plan.validate(Some(&parts.0), None, None).is_err());
     }
     #[test]
-    fn alias_inputs_and_all_physical_ancestors_are_kept() {
-        let mut parts = components(4);
-        parts.3.registers.push(SUPPLY + 4);
-        parts.3.domains[0].parents[0] = Some(id(2));
-        parts.3.domains.push(domain(2, Some(SUPPLY + 4), [None; 4]));
-        parts.3.resources.push(parts.3.resources[0].clone());
-        parts.3.resources[1].name = "authored-same-owner-alias".into();
-        parts.3.resources[1].power.push(id(1));
-        let plan = plan(&parts).unwrap();
-        assert_eq!(plan.source_resource_indices(), &[0, 1]);
-        assert_eq!(plan.input_domains(), &[SUPPLY, SUPPLY + 4]);
-    }
-    #[test]
     fn independently_gated_owned_aperture_aliases_require_an_separate_join() {
         let mut parts = components(16);
         for address in [parts.1.apertures[8], parts.1.updates.0, parts.1.auxiliary.0] {
@@ -580,19 +355,6 @@ mod tests {
             assert!(plan(&parts).is_err());
             parts.3.resources.pop();
         }
-    }
-    #[test]
-    fn one_physical_parent_does_not_hide_an_unresolved_virtual_ancestor() {
-        let mut parts = components(4);
-        parts.3.domains.push(domain(2, None, [None; 4]));
-        parts
-            .3
-            .domains
-            .push(domain(3, None, [Some(id(1)), Some(id(2)), None, None]));
-        parts.3.resources[0].power.push(id(3));
-        assert!(plan(&parts).is_err());
-        parts.3.domains[1].parents[0] = Some(id(1));
-        assert_eq!(plan(&parts).unwrap().input_domains(), &[SUPPLY]);
     }
     #[test]
     fn incomplete_configuration_and_changed_register_inventory_refuse() {

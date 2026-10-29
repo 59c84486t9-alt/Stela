@@ -1,13 +1,18 @@
 use super::*;
+use crate::platform::apple::pmgr;
+use crate::platform::apple::pmgr::Pmgr;
 use crate::platform::apple::pmgr::PowerState;
 use alloc::{boxed::Box, vec};
 use core::{cell::UnsafeCell, ptr::NonNull};
 use stela_contracts::bus::Access;
+use stela_contracts::bus::LifecycleState;
+use stela_contracts::bus::Width;
 use stela_contracts::interrupt::InterruptLatch;
 use stela_contracts::refuse;
 use stela_engine::memory::ReservedSystemRamRange;
 use stela_engine::memory::system_ram::fixture;
 use stela_soc_data::board::ClockRole;
+use stela_soc_data::board::PowerOwner;
 use stela_soc_data::board::PowerResource;
 use stela_soc_data::pmgr::coverage::Admission;
 use stela_soc_data::pmgr::coverage::Domain;
@@ -242,140 +247,23 @@ fn switched_input_samples_pmgr_and_preserves_clock_gating() {
     );
 }
 #[test]
-fn absent_unavailable_virtual_and_independent_alias_inputs_refuse() {
-    let (controller, direct, ram, power) = components();
-    let prepare = |power: &PowerStates| {
+fn every_direct_aperture_is_owned_against_independent_alias_inputs() {
+    let (controller, direct, ram, mut power) = components();
+    let mut alias = power.resources[0].clone();
+    alias.name = "authored-independent-overlap".into();
+    alias.owner = Some(PowerOwner::Mmio(direct.apertures[1]));
+    alias.clocks.push(id());
+    power.resources.push(alias);
+    assert!(
         Plan::prepare_resources(
-            &controller,
-            &direct,
-            power,
-            &ram,
-            [None; 4],
-            &configuration(),
-        )
-    };
-    let mut absent = power.clone();
-    absent.resources.clear();
-    assert!(prepare(&absent).is_err());
-    let mut unavailable = power.clone();
-    unavailable.resources[0].admission = Admission::Unavailable;
-    assert!(prepare(&unavailable).is_err());
-    let mut virtual_only = power.clone();
-    virtual_only.domains[0].address = None;
-    virtual_only.registers.clear();
-    virtual_only.resources[0].power.push(id());
-    assert!(prepare(&virtual_only).is_err());
-    let mut alias = power.clone();
-    let mut r = alias.resources[0].clone();
-    r.name = "authored-independent-overlap".into();
-    r.owner = Some(PowerOwner::Mmio(direct.apertures[1]));
-    r.clocks.push(id());
-    alias.resources.push(r);
-    assert!(prepare(&alias).is_err());
-    // A real physical sibling does not resolve a separate virtual input.
-    let mut mixed = power.clone();
-    mixed.domains.push(Domain {
-        name: "unbacked virtual".into(),
-        id: DomainId { die: 0, device: 2 },
-        address: None,
-        parents: [None; 4],
-    });
-    mixed.resources[0]
-        .power
-        .extend([id(), DomainId { die: 0, device: 2 }]);
-    assert!(prepare(&mixed).is_err());
-    let mut unknown = power.clone();
-    unknown.resources[0]
-        .power
-        .push(DomainId { die: 0, device: 2 });
-    assert!(prepare(&unknown).is_err());
-}
-#[test]
-fn physical_alias_parents_cannot_hide_unresolved_virtual_root_or_intermediate_inputs() {
-    let (controller, direct, ram, source) = components();
-    let domain = |device: u16, address: Option<u64>, parent: Option<u16>| Domain {
-        name: alloc::format!("authored-alias-{device}"),
-        id: DomainId { die: 0, device },
-        address,
-        parents: [
-            parent.map(|device| DomainId { die: 0, device }),
-            None,
-            None,
-            None,
-        ],
-    };
-    for intermediate in [false, true] {
-        let mut power = source.clone();
-        power.resources[0].clocks.push(id());
-        let virtual_id = if intermediate { 4 } else { 3 };
-        // A(P,no parents), B(P,parent V), V(None,no parents), or
-        // A(P,parent C), C(Q,no parents), D(Q,parent V). Every reached
-        // physical key must expand ALL its aliases, including Q.
-        if intermediate {
-            power.domains[0].parents[0] = Some(DomainId { die: 0, device: 2 });
-            power.domains.push(domain(2, Some(SUPPLY + 8), None));
-            power
-                .domains
-                .push(domain(3, Some(SUPPLY + 8), Some(virtual_id)));
-            power.registers.push(SUPPLY + 8);
-        } else {
-            power
-                .domains
-                .push(domain(2, Some(SUPPLY), Some(virtual_id)));
-        }
-        power.domains.push(domain(virtual_id, None, None));
-        assert!(!resolved_input(&power, id()));
-        assert!(
-            matches!(Plan::prepare_resources(&controller, &direct, &power, &ram,
-                [None; 4], &configuration()),
-                Err(reason) if reason == refuse!("cold T6000 requested input has an unresolved virtual ancestor"))
-        );
-        // The same alias ancestry is supported when V resolves
-        // to a physical ancestor. No arbitrary virtual-input veto.
-        let backed_id = virtual_id + 1;
-        power
-            .domains
-            .iter_mut()
-            .find(|d| d.id.device == virtual_id)
-            .unwrap()
-            .parents[0] = Some(DomainId {
-            die: 0,
-            device: backed_id,
-        });
-        let backed_address = SUPPLY + if intermediate { 16 } else { 8 };
-        power
-            .domains
-            .push(domain(backed_id, Some(backed_address), None));
-        power.registers.push(backed_address);
-        power.blocks[0].1 = if intermediate { 24 } else { 16 };
-        assert!(resolved_input(&power, id()));
-        let plan = Plan::prepare_resources(
             &controller,
             &direct,
             &power,
             &ram,
             [None; 4],
-            &configuration(),
-        )
-        .unwrap();
-        assert_eq!(plan.domains, power.registers);
-    }
-    // An acyclic raw A->B edge within the SAME physical key disappears in
-    // normalized coverage; it is not an unresolved virtual requirement.
-    let mut same_key = source.clone();
-    same_key.resources[0].clocks.push(id());
-    same_key.domains[0].parents[0] = Some(DomainId { die: 0, device: 2 });
-    same_key.domains.push(domain(2, Some(SUPPLY), None));
-    assert!(
-        Plan::prepare_resources(
-            &controller,
-            &direct,
-            &same_key,
-            &ram,
-            [None; 4],
             &configuration()
         )
-        .is_ok()
+        .is_err()
     );
 }
 #[test]

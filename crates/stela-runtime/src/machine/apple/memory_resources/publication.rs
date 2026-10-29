@@ -1,5 +1,7 @@
 //! PTD publication geometry shared by the direct-memory and DCS frontends.
 use crate::Result;
+use crate::platform::apple::ptd::Ptd;
+use stela_contracts::bus::Access;
 use stela_contracts::refuse;
 use {
     crate::platform::apple::ptd::transport::IRQ_STATUS,
@@ -66,5 +68,31 @@ impl Layout {
 
     pub fn supports_pair(&self, offset: u64, bytes: u8) -> bool {
         self.entry(offset, bytes).is_some() || self.status_pair(offset, bytes).is_some()
+    }
+
+    /// Read `ptd`'s whole pair at device `offset`. A pair consumes only at a
+    /// complete publication entry; the interrupt-status words are a
+    /// snapshot. The update alias, scalar halves and unknown tail keep their
+    /// own MMIO semantics.
+    pub fn read_pair(
+        &self,
+        ptd: &Ptd,
+        offset: u64,
+        bytes: u8,
+        access: &mut Access<'_>,
+    ) -> Result<[u64; 2]> {
+        if let Some(entry) = self.entry(offset, bytes) {
+            let entry = ptd.consume_entry(entry, access)?;
+            return Ok([entry.value, entry.metadata]);
+        }
+        let (offset, width) = self
+            .status_pair(offset, bytes)
+            .ok_or(refuse!("unqualified PTD pair read shape {bytes}", bytes))?;
+        let value = ptd.interrupt_snapshot(offset, width)?;
+        Ok(if bytes == 8 {
+            [value.low, value.high]
+        } else {
+            [value.low & u64::from(u32::MAX), value.low >> 32]
+        })
     }
 }

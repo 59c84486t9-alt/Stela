@@ -265,8 +265,11 @@ fn paired_read_consumes_only_the_complete_publication_entry() {
     use stela_engine::machine::Devices;
     let owner = prepared();
     let offset = owner.ptd_offset();
-    assert_eq!(owner.paired_entry(offset, 8), Some(0));
-    assert_eq!(owner.paired_entry(offset + 383 * 16, 8), Some(383));
+    assert_eq!(owner.publication_layout().entry(offset, 8), Some(0));
+    assert_eq!(
+        owner.publication_layout().entry(offset + 383 * 16, 8),
+        Some(383)
+    );
     for (offset, bytes) in [
         (offset, 4),
         (offset + 8, 8),
@@ -274,7 +277,7 @@ fn paired_read_consumes_only_the_complete_publication_entry() {
         (offset + stela_soc_data::ptd::UPDATE_OFFSET, 8),
         (0, 8),
     ] {
-        assert_eq!(owner.paired_entry(offset, bytes), None);
+        assert_eq!(owner.publication_layout().entry(offset, bytes), None);
     }
     let publication = owner.publication_bank().clone();
     let bindings = owner.bindings();
@@ -352,7 +355,14 @@ fn local_constructor_returns_the_same_publication_and_notification_owner() {
         )
         .unwrap();
     assert_eq!(local.asserted(), 1 << 3);
-    assert_eq!(owner.consume_entry(0, &mut access).unwrap()[0], 0x1234);
+    assert_eq!(
+        owner
+            .publication_bank()
+            .consume_entry(0, &mut access)
+            .unwrap()
+            .value,
+        0x1234
+    );
     assert_eq!(local.asserted(), 0);
     assert!(latch.take_aic_inputs().is_empty());
 }

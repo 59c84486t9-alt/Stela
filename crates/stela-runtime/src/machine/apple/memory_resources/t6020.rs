@@ -42,8 +42,7 @@ pub struct Prepared {
     controller: Controller,
     views: Vec<View>,
     registers: Vec<u64>,
-    ram: Arc<RegisteredSystemRam>,
-    generation: u64,
+    ram: super::cold::PinnedRam,
 }
 impl Prepared {
     /// Keeps reservations supplied by the canonical boot owner. The
@@ -60,7 +59,7 @@ impl Prepared {
         ram: Arc<RegisteredSystemRam>,
     ) -> Result<Self> {
         descriptor.validate(&source_locks)?;
-        validate_ram(&descriptor, &source_locks, programmed, &ram)?;
+        let ram = placed_ram(&descriptor, &source_locks, programmed, &ram)?;
         if source_locks.layout.cache_status
             != Some(stela_soc_data::amcc::Register {
                 offset: stela_soc_data::mcc::t6020::CACHE_STATUS,
@@ -105,9 +104,6 @@ impl Prepared {
         let views = (0..descriptor.apertures.len())
             .map(|index| controller.view(index))
             .collect::<Result<Vec<_>, _>>()?;
-        let generation = ram
-            .generation()
-            .map_err(|_| refuse!("T602x canonical RAM generation is not live"))?;
         Ok(Self {
             descriptor,
             source_locks,
@@ -116,14 +112,13 @@ impl Prepared {
             views,
             registers,
             ram,
-            generation,
         })
     }
     pub fn descriptor(&self) -> &T6020Memory {
         &self.descriptor
     }
     pub fn registered_ram(&self) -> &Arc<RegisteredSystemRam> {
-        &self.ram
+        self.ram.ram()
     }
     pub fn locked_regions(&self) -> stela_soc_data::amcc::Locked {
         self.locks.locked_regions()
@@ -164,19 +159,8 @@ impl Prepared {
             PTD_OFFSET,
         )
     }
-    fn live_generation(&self) -> Result<()> {
-        if self
-            .ram
-            .generation()
-            .map_err(|_| refuse!("T602x canonical RAM is not live"))?
-            != self.generation
-        {
-            return Err(refuse!("T602x canonical RAM generation changed"));
-        }
-        Ok(())
-    }
     fn live(&self) -> Result<()> {
-        self.live_generation()?;
+        self.ram.check()?;
         let state = self.controller.lifecycle_state();
         if !state.powered || !state.clocked || state.quiesced || state.reset {
             return Err(refuse!(
@@ -219,7 +203,7 @@ impl Prepared {
                 "T602x canonical read is not a source DCS drain word"
             ));
         }
-        if !memory.belongs_to(&self.ram) {
+        if !memory.belongs_to(self.ram.ram()) {
             return Err(refuse!(
                 "T602x drain borrowed a different actual canonical RAM owner"
             ));
@@ -227,7 +211,7 @@ impl Prepared {
         memory
             .validate_current()
             .map_err(|_| refuse!("T602x drain lost its actual RAM/writer hold"))?;
-        if memory.generation() != self.generation {
+        if memory.generation() != self.ram.generation() {
             return Err(refuse!("T602x drain borrowed a different RAM generation"));
         }
         let (aperture, within) = self.target(offset)?;
@@ -260,78 +244,36 @@ impl Prepared {
     }
 }
 
-fn validate_ram(
+/// Pin the canonical RAM after checking every owned window lies outside it
+/// and every programmed lock inside it.
+fn placed_ram(
     descriptor: &T6020Memory,
     locks: &MemoryController,
     programmed: stela_soc_data::amcc::Programmed,
-    ram: &RegisteredSystemRam,
-) -> Result<()> {
-    let mut regions = ram.placements().collect::<Vec<_>>();
-    regions.sort_by_key(|&(source, _, _)| source);
-    if regions.is_empty() {
-        return Err(refuse!(
-            "T602x memory requires actual registered RAM reservations"
-        ));
-    }
-    let mut mmio = descriptor
+    ram: &Arc<RegisteredSystemRam>,
+) -> Result<super::cold::PinnedRam> {
+    let pinned = super::cold::PinnedRam::new(ram)?;
+    super::cold::check_mmio(ram, &extents(descriptor))?;
+    super::cold::check_locks(ram, &locks.layout, programmed)?;
+    Ok(pinned)
+}
+
+/// Every controller aperture, the PTD bank and the auxiliary bank.
+fn extents(descriptor: &T6020Memory) -> Vec<(u64, u64)> {
+    descriptor
         .apertures
         .iter()
-        .map(|&pa| (pa, stela_soc_data::mcc::t6020::APERTURE_BYTES))
-        .collect::<Vec<_>>();
-    mmio.extend([
-        (descriptor.ptd.physical, stela_soc_data::ptd::PTD_BYTES),
-        descriptor.auxiliary,
-    ]);
-    for &(source, _, bytes) in &regions {
-        let end = source
-            .checked_add(bytes as u64)
-            .ok_or(refuse!("T602x canonical RAM wraps"))?;
-        if mmio.iter().any(|&(pa, size)| {
-            pa.checked_add(size)
-                .is_none_or(|top| pa < end && source < top)
-        }) {
-            return Err(refuse!("T602x MMIO overlaps its actual canonical RAM"));
-        }
-    }
-    for (index, range) in programmed.into_iter().enumerate() {
-        let Some((base, bytes)) = range else {
-            continue;
-        };
-        let group =
-            locks.layout.groups[index].ok_or(refuse!("T602x programmed an absent lock group"))?;
-        let page = 1u64
-            .checked_shl(group.page_size_shift)
-            .ok_or(refuse!("T602x lock page shift is invalid"))?;
-        let end = base
-            .checked_add(bytes)
-            .ok_or(refuse!("T602x programmed lock wraps"))?;
-        if bytes == 0 || !base.is_multiple_of(page) || !bytes.is_multiple_of(page) {
-            return Err(refuse!("T602x programmed lock is empty or unaligned"));
-        }
-        let mut cursor = base;
-        for &(source, _, bytes) in &regions {
-            let top = source
-                .checked_add(bytes as u64)
-                .ok_or(refuse!("T602x canonical RAM wraps"))?;
-            if source <= cursor && cursor < top {
-                cursor = end.min(top);
-            }
-            if cursor == end {
-                break;
-            }
-        }
-        if cursor != end {
-            return Err(refuse!(
-                "T602x programmed lock is not backed by the same actual RAM"
-            ));
-        }
-    }
-    Ok(())
+        .map(|&start| (start, stela_soc_data::mcc::t6020::APERTURE_BYTES))
+        .chain([
+            (descriptor.ptd.physical, stela_soc_data::ptd::PTD_BYTES),
+            descriptor.auxiliary,
+        ])
+        .collect()
 }
 
 impl Lifecycle for Prepared {
     fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
-        self.live_generation()?;
+        self.ram.check()?;
         self.views[0].check_lifecycle(proposed)
     }
     fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
@@ -411,7 +353,7 @@ impl crate::machine::apple::AppleDevices {
         if self.memory_controller.is_some() || self.memory_publication.is_some() {
             return Err(refuse!("T602x memory already has an actual owner"));
         }
-        owner.live_generation()?;
+        owner.ram.check()?;
         let bindings = owner.bindings();
         let id = self
             .bus

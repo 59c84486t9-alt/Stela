@@ -29,6 +29,7 @@ pub use crate::platform::apple::mcc;
 pub use stela_contracts::bus::LifecycleState;
 
 mod canonical;
+pub(crate) mod cold;
 pub mod dcs;
 mod publication;
 mod resource;
@@ -180,22 +181,6 @@ impl Prepared {
     fn ptd_offset(&self) -> u64 {
         self.descriptor.apertures.len() as u64 * mcc::APERTURE_BYTES
     }
-    /// A pair is consuming only at a complete publication entry. The update
-    /// alias, scalar halves and unknown tail keep their own MMIO semantics.
-    pub(super) fn paired_entry(&self, offset: u64, bytes: u8) -> Option<u32> {
-        self.publication_layout().entry(offset, bytes)
-    }
-    pub(super) fn consume_entry(&self, entry: u32, access: &mut Access<'_>) -> Result<[u64; 2]> {
-        let entry = self.ptd.consume_entry(entry, access)?;
-        Ok([entry.value, entry.metadata])
-    }
-    fn status_pair(
-        &self,
-        offset: u64,
-        bytes: u8,
-    ) -> Option<(u64, crate::platform::apple::ptd::transport::status::Width)> {
-        self.publication_layout().status_pair(offset, bytes)
-    }
     pub(super) fn supports_pair(&self, offset: u64, bytes: u8) -> bool {
         self.publication_layout().supports_pair(offset, bytes)
     }
@@ -213,18 +198,8 @@ impl Prepared {
         bytes: u8,
         access: &mut Access<'_>,
     ) -> Result<[u64; 2]> {
-        if let Some(entry) = self.paired_entry(offset, bytes) {
-            return self.consume_entry(entry, access);
-        }
-        let (offset, width) = self
-            .status_pair(offset, bytes)
-            .ok_or(refuse!("unqualified PTD pair read shape"))?;
-        let value = self.ptd.interrupt_snapshot(offset, width)?;
-        Ok(if bytes == 8 {
-            [value.low, value.high]
-        } else {
-            [value.low & u64::from(u32::MAX), value.low >> 32]
-        })
+        self.publication_layout()
+            .read_pair(&self.ptd, offset, bytes, access)
     }
 }
 impl Lifecycle for Prepared {

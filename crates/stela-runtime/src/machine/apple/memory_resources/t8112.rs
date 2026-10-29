@@ -21,7 +21,6 @@ use crate::platform::apple::ptd::Ptd;
 use crate::platform::apple::ptd::transport::IRQ_STATUS;
 use crate::platform::apple::ptd::transport::notifications::LocalNotifications;
 use crate::platform::apple::ptd::transport::notifications::NativeProfile;
-use crate::platform::apple::ptd::transport::status;
 use alloc::{sync::Arc, vec::Vec};
 use stela_contracts::bus::Access;
 use stela_contracts::bus::Direction;
@@ -31,6 +30,7 @@ use stela_contracts::bus::MmioDevice;
 use stela_contracts::bus::MmioError;
 use stela_contracts::bus::Width;
 use stela_contracts::bus::refuse;
+use stela_contracts::refusal::Within;
 use stela_engine::memory::CanonicalRamService;
 use stela_engine::memory::RegisteredSystemRam;
 use stela_soc_data::ptd::Geometry;
@@ -65,18 +65,10 @@ impl Prepared {
         ram: Arc<RegisteredSystemRam>,
     ) -> Result<Self> {
         let (physical, bytes, channels) = descriptor.channels;
-        let end = physical
-            .checked_add(bytes)
-            .ok_or(refuse!("T8112 DCS extent overflows"))?;
         let geometry = Geometry::new(
             (descriptor.ptd.physical, stela_soc_data::ptd::PTD_BYTES),
             descriptor.ptd_updates,
         )?;
-        let bank_end = descriptor
-            .ptd
-            .physical
-            .checked_add(stela_soc_data::ptd::PTD_BYTES)
-            .ok_or(refuse!("T8112 PTD extent overflows"))?;
         if channels != CHANNELS || bytes != DCS_BYTES || !physical.is_multiple_of(CHANNEL_STRIDE) {
             return Err(refuse!(
                 "T8112 DCS placement is not eight complete source-stride channels"
@@ -94,21 +86,14 @@ impl Prepared {
                 "T8112 PTD ranges omit their original interrupt resources"
             ));
         }
-        if physical < bank_end && descriptor.ptd.physical < end {
-            return Err(refuse!("T8112 DCS and PTD physical ownership overlaps"));
-        }
-        for (source, _, bytes) in ram.placements() {
-            let ram_end = source
-                .checked_add(bytes as u64)
-                .ok_or(refuse!("canonical RAM extent overflows"))?;
-            if (physical < ram_end && source < end)
-                || (descriptor.ptd.physical < ram_end && source < bank_end)
-            {
-                return Err(refuse!(
-                    "T8112 MMIO placement overlaps its canonical guest RAM"
-                ));
-            }
-        }
+        super::cold::check_mmio(
+            &ram,
+            &[
+                (physical, bytes),
+                (descriptor.ptd.physical, stela_soc_data::ptd::PTD_BYTES),
+            ],
+        )
+        .within(|| refuse!("T8112 DCS/PTD placement"))?;
         let dcs = NativeDcs::initialized(configuration, lifecycle, Arc::clone(&ram))?;
         // Validate every range against native 256 as well as physical 2048.
         let (ptd, local) =
@@ -206,12 +191,6 @@ impl Prepared {
         // SAFETY: caller keeps the same live closed producer set and RAM hold.
         unsafe { self.dcs.write_ram_drain(offset, width, value, now, memory) }
     }
-    fn paired_entry(&self, offset: u64, bytes: u8) -> Option<u32> {
-        self.publication_layout().entry(offset, bytes)
-    }
-    fn status_pair(&self, offset: u64, bytes: u8) -> Option<(u64, status::Width)> {
-        self.publication_layout().status_pair(offset, bytes)
-    }
     pub(super) fn supports_pair(&self, offset: u64, bytes: u8) -> bool {
         self.publication_layout().supports_pair(offset, bytes)
     }
@@ -229,21 +208,12 @@ impl Prepared {
         bytes: u8,
         access: &mut Access<'_>,
     ) -> Result<[u64; 2]> {
-        if let Some(entry) = self.paired_entry(offset, bytes) {
+        let layout = self.publication_layout();
+        if layout.entry(offset, bytes).is_some() {
             self.start_duties(access)
                 .map_err(|_| refuse!("the PMP's PTD duties could not start"))?;
-            let entry = self.ptd.consume_entry(entry, access)?;
-            return Ok([entry.value, entry.metadata]);
         }
-        let (offset, width) = self
-            .status_pair(offset, bytes)
-            .ok_or(refuse!("unqualified T8112 PTD whole-pair read"))?;
-        let value = self.ptd.interrupt_snapshot(offset, width)?;
-        Ok(if bytes == 8 {
-            [value.low, value.high]
-        } else {
-            [value.low & u64::from(u32::MAX), value.low >> 32]
-        })
+        layout.read_pair(&self.ptd, offset, bytes, access)
     }
     fn start_duties(&self, access: &mut Access<'_>) -> Result<(), MmioError> {
         match &self.duties {

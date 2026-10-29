@@ -1,12 +1,16 @@
 use super::*;
+use crate::platform::apple::pmgr;
 use crate::platform::apple::pmgr::DomainState;
+use crate::platform::apple::pmgr::Pmgr;
 use crate::platform::apple::pmgr::PowerState;
 use alloc::boxed::Box;
 use stela_contracts::bus::Access;
 use stela_contracts::bus::MmioDevice;
+use stela_contracts::bus::Width;
 use stela_contracts::interrupt::InterruptLatch;
 use stela_engine::machine::Devices;
 use stela_soc_data::board::ClockRole;
+use stela_soc_data::board::PowerOwner;
 use stela_soc_data::board::PowerResource;
 use stela_soc_data::pmgr::coverage::Admission;
 use stela_soc_data::pmgr::coverage::Domain;
@@ -86,11 +90,16 @@ fn placed(states: &PowerStates, initial: u8) -> AppleDevices {
 #[test]
 fn source_shared_reg0_resolves_power_clock_and_parent_without_granting_sinks() {
     let (controller, cache, ram, mut states) = components();
-    let shared = controller.apertures[0] + cache.cache.shared.0;
-    assert_eq!(
-        power_domains(&states, shared).unwrap(),
-        [SUPPLY, SUPPLY + 8, SUPPLY + 16]
-    );
+    let plan = Plan::prepare_resources(
+        &controller,
+        &cache,
+        &states,
+        &ram,
+        [None; 4],
+        &configuration(),
+    )
+    .unwrap();
+    assert_eq!(plan.inputs.domains(), [SUPPLY, SUPPLY + 8, SUPPLY + 16]);
     states.resources[0].owner = Some(PowerOwner::Mmio(controller.apertures[0]));
     assert!(
         Plan::prepare_resources(
@@ -133,7 +142,7 @@ fn only_disable_argument_and_live_matching_geometry_can_prepare() {
         &configuration(),
     )
     .unwrap();
-    assert!(Arc::ptr_eq(&plan.ram, &ram));
+    assert!(Arc::ptr_eq(plan.ram.ram(), &ram));
     plan.validate(Some(&controller), Some(&cache)).unwrap();
     plan.validate_power(Some(&states)).unwrap();
     assert!(plan.validate_power(None).is_err());
@@ -227,46 +236,20 @@ fn clock_gated_parent_initializes_both_real_sinks_paused_on_same_ram() {
 }
 
 #[test]
-fn certified_input_free_ap_frontend_owns_same_ram_without_sampling_unrelated_gates() {
+fn input_free_ap_frontend_owns_same_ram_without_sampling_unrelated_gates() {
     let (controller, cache, ram, mut states) = components();
     states.resources[0].clocks.clear();
     states.resources[0].power.clear();
-    assert!(
-        Plan::prepare_resources(
-            &controller,
-            &cache,
-            &states,
-            &ram,
-            [None; 4],
-            &configuration()
-        )
-        .is_err()
-    );
-    let plan = Plan::prepare_resources_with_policy(
+    let plan = Plan::prepare_resources(
         &controller,
         &cache,
         &states,
         &ram,
         [None; 4],
         &configuration(),
-        LifecyclePolicy::SourceQualifiedApFrontend,
     )
     .unwrap();
-    let LifecycleInput::UnswitchedApFrontend(certificate) = &plan.lifecycle else {
-        panic!("expected explicit input-free certificate")
-    };
-    let (_, _, foreign_ram, _) = components();
-    assert!(
-        certificate
-            .initialize(&controller, &cache, &foreign_ram)
-            .is_err()
-    );
-    assert!(
-        certificate
-            .initialize(&controller, &cache, &ram)
-            .unwrap()
-            .clocked
-    );
+    assert!(plan.inputs.is_unswitched());
     plan.validate_power(Some(&states)).unwrap();
     let mut devices = placed(&states, pmgr::POWER_GATED);
     plan.install(&mut devices).unwrap();
@@ -298,19 +281,18 @@ fn certified_input_free_ap_frontend_owns_same_ram_without_sampling_unrelated_gat
 }
 
 #[test]
-fn failed_canonical_ram_refuses_certificate_and_install_without_publication() {
+fn failed_canonical_ram_refuses_preparation_and_install_without_publication() {
     let (controller, cache, ram, mut states) = components();
     states.resources[0].clocks.clear();
     states.resources[0].power.clear();
     let prepare = || {
-        Plan::prepare_resources_with_policy(
+        Plan::prepare_resources(
             &controller,
             &cache,
             &states,
             &ram,
             [None; 4],
             &configuration(),
-            LifecyclePolicy::SourceQualifiedApFrontend,
         )
     };
     let plan = prepare().unwrap();
@@ -321,47 +303,6 @@ fn failed_canonical_ram_refuses_certificate_and_install_without_publication() {
     let mut devices = placed(&states, pmgr::ACTIVE);
     assert!(plan.install(&mut devices).is_err());
     assert!(devices.memory_publication.is_none() && devices.memory_controller.is_none());
-}
-
-#[test]
-fn ap_frontend_selection_preserves_switched_inputs_and_refuses_incomplete_or_virtual_aliases() {
-    let (controller, cache, ram, mut states) = components();
-    let prepare = |states: &PowerStates| {
-        Plan::prepare_resources_with_policy(
-            &controller,
-            &cache,
-            states,
-            &ram,
-            [None; 4],
-            &configuration(),
-            LifecyclePolicy::SourceQualifiedApFrontend,
-        )
-    };
-    let switched = prepare(&states).unwrap();
-    assert!(matches!(switched.lifecycle, LifecycleInput::Switched(_)));
-    let mut devices = placed(&states, pmgr::CLOCK_GATED);
-    switched.install(&mut devices).unwrap();
-    assert!(devices.read(0, cache.channels.0 + 0xec8, 4, 0).is_err());
-    states.resources[0].clocks.clear();
-    states.resources[0].power.clear();
-    let mut alias = states.resources[0].clone();
-    alias.name.push_str(" alias");
-    alias.power.push(id(2));
-    states.resources.push(alias);
-    states.domains[1].address = None;
-    states.domains[1].parents = [None; 4];
-    states.registers.retain(|&address| address != SUPPLY + 8);
-    assert!(
-        power_domains(&states, controller.apertures[0] + cache.cache.shared.0)
-            .unwrap()
-            .is_empty()
-    );
-    assert!(prepare(&states).is_err());
-    states.resources[1].power.clear();
-    states.resources[1].admission = Admission::Unavailable;
-    assert!(prepare(&states).is_err());
-    states.resources.clear();
-    assert!(prepare(&states).is_err());
 }
 
 #[test]
