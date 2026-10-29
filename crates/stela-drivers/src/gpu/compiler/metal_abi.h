@@ -130,6 +130,16 @@
  * bounds it at the most a 32-bit length states. */
 #define STELA_METAL_RECORD_UNBOUNDED 0xffffffffu
 
+/* binding.rs DispatchArguments, which a dynamic kernel reads at the push
+ * constants' arguments address: the stage-in region's origin and size,
+ * where a stage-in kernel's arguments hold them, then the threadgroup's
+ * shape and each threadgroup buffer's offset in threadgroup memory, by
+ * Metal index. */
+#define STELA_METAL_DISPATCH_REGION 0u
+#define STELA_METAL_DISPATCH_SHAPE 24u
+#define STELA_METAL_DISPATCH_OFFSETS 36u
+#define STELA_METAL_DISPATCH_BYTES 160u
+
 /* TessellationArguments, which a patch draw's stages read at the push
  * constants' arguments address. Bindings are (address, length); the draw's
  * control points per patch follow the factor scale, then a uint stride per
@@ -178,6 +188,11 @@ nir_def *stela_metal_load_table(nir_builder *b, enum stela_metal_table table);
 /* stela_air_load_device_value over the push constants. */
 nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_value value,
                                        void *stage);
+
+/* stela_air_threadgroup_offset over the DispatchArguments. Refuses
+ * indices past the table. */
+nir_def *stela_metal_threadgroup_offset(nir_builder *b, const struct stela_air_buffer *buffer,
+                                        void *stage);
 
 /* stela_air_bind_buffer over the argument table: the bound address of the
  * buffer at Metal index buffer->index. Refuses indices past the table. */

@@ -236,6 +236,7 @@ pub struct Specialization {
     pub(super) varying_count: u32,
     pub(super) amplified: u32,
     pub(super) launched_by_grid: u32,
+    pub(super) dynamic_threadgroups: u32,
     pub(super) constant_count: u32,
     pub(super) constants: *const ConstantValue,
     pub(super) tessellation: *const Tessellation,

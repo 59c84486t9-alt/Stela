@@ -129,7 +129,12 @@ struct stela_metal_specialization {
    uint32_t threadgroup_length_count;
    const struct stela_metal_threadgroup_length *threadgroup_lengths;
    const struct stela_metal_linked_varying *varyings;
-   uint32_t varying_count, amplified, launched_by_grid, constant_count;
+   uint32_t varying_count, amplified, launched_by_grid;
+   /* A kernel of indirect commands: its dispatches' DispatchArguments shape
+    * its threadgroups, of at most workgroup_size[0] threads, and place its
+    * threadgroup buffers. */
+   uint32_t dynamic_threadgroups;
+   uint32_t constant_count;
    const struct stela_air_constant_value *constants;
    const struct stela_metal_tessellation *tessellation;
    const struct stela_metal_stage_in *stage_in;
@@ -137,7 +142,7 @@ struct stela_metal_specialization {
    const struct stela_air_linked_function *linked_functions;
    uint32_t module_count, linked_function_count;
 };
-#define STELA_METAL_SPECIALIZATION_BYTES 96u
+#define STELA_METAL_SPECIALIZATION_BYTES 104u
 #define STELA_METAL_MODULE_BYTES 16u
 #define STELA_METAL_LINKED_FUNCTION_BYTES 16u
 /* The metal_abi.h layouts it points to. */

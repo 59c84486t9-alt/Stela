@@ -329,6 +329,7 @@ impl AirCompiler {
             varying_count: count(varyings.len())?,
             amplified: specialization.amplified.into(),
             launched_by_grid: specialization.launched_by_grid.into(),
+            dynamic_threadgroups: specialization.dynamic_threadgroups.into(),
             constant_count: count(constants.len())?,
             constants: constants.as_ptr(),
             tessellation: tessellation.map_or(ptr::null(), ptr::from_ref),

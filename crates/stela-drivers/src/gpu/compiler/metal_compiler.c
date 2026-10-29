@@ -483,6 +483,19 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       resources.bind_threadgroup = bind_threadgroup;
       resources.max_threadgroup_bytes = target->max_threadgroup_bytes;
    }
+   if (specialization->dynamic_threadgroups) {
+      if (stage != STELA_METAL_KERNEL || specialization->threadgroup_length_count) {
+         fail(error, STELA_AIR_INPUT, "dynamic threadgroups of a kernel without lengths");
+         goto done;
+      }
+      /* Threadgroup buffers share what the function's own variables leave. */
+      uint64_t free_bytes = target->max_threadgroup_bytes -
+                            MIN2(reflection->threadgroup_bytes, target->max_threadgroup_bytes);
+      resources.dynamic_shape = true;
+      resources.bind_threadgroup = NULL;
+      resources.dynamic_threadgroup_bytes = (unsigned)(free_bytes & ~(uint64_t)15);
+      resources.threadgroup_offset = stela_metal_threadgroup_offset;
+   }
    if (stage == STELA_METAL_KERNEL) {
       shader = stela_air_to_nir(air, size, entry, target->nir, &resources, error);
       goto done;

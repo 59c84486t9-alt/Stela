@@ -117,6 +117,8 @@ struct translator {
    unsigned max_device_buffers;
    unsigned max_threadgroup_buffers;
    unsigned shared_resources;
+   /* A dynamic kernel's threadgroup memory its dispatches place buffers in. */
+   nir_variable *dynamic_threadgroup;
    unsigned shared_barriers;
    uint64_t shared_layout_bound;
    unsigned private_allocations;
@@ -326,6 +328,7 @@ find_value(struct translator *t, LLVMValueRef llvm)
 
 static nir_def *module_global(struct translator *t, LLVMValueRef global);
 static nir_variable *shared_resource(struct translator *t, uint64_t size, unsigned alignment);
+static nir_variable *dynamic_threadgroup(struct translator *t, const struct stela_air_buffer *buffer);
 static nir_def *stage_narrow(nir_builder *b, nir_def *def, enum stela_air_primitive p);
 
 /* Static pointer authority is separate from the offset/VA in def. */
@@ -490,7 +493,8 @@ device_value(struct translator *t, enum stela_air_device_value value)
       return NULL;
    }
    nir_def *def = t->options->load_device_value(&t->b, value, t->options->binding_data);
-   unsigned components = value == STELA_AIR_DISPATCH_GRID || value == STELA_AIR_PATCH_IDS ? 3 : 1;
+   unsigned components = value == STELA_AIR_DISPATCH_GRID || value == STELA_AIR_PATCH_IDS ||
+                         value == STELA_AIR_THREADGROUP_SHAPE ? 3 : 1;
    if (!def || def->num_components != components || def->bit_size != 32 || !binding_prelude(t)) {
       fail(t, STELA_AIR_ARGUMENT, "invalid device value");
       return NULL;
@@ -505,14 +509,44 @@ workgroup_size(struct translator *t)
    return nir_imm_ivec3(&t->b, (int)size[0], (int)size[1], (int)size[2]);
 }
 
+/* The threadgroup's shape: the workgroup's, or a dynamic kernel's
+ * dispatch's. */
+static nir_def *
+threadgroup_shape(struct translator *t)
+{
+   return t->options->dynamic_shape ? device_value(t, STELA_AIR_THREADGROUP_SHAPE) :
+                                      workgroup_size(t);
+}
+
+/* The thread's position in its threadgroup; in a dynamic kernel, its
+ * linear index's in the shape. */
+static nir_def *
+local_position(struct translator *t)
+{
+   nir_builder *b = &t->b;
+   if (!t->options->dynamic_shape)
+      return nir_load_local_invocation_id(b);
+   nir_def *shape = threadgroup_shape(t);
+   if (!shape)
+      return NULL;
+   /* Threads of an empty shape skip the function; avoid dividing by zero. */
+   nir_def *width = nir_umax_imm(b, nir_channel(b, shape, 0), 1);
+   nir_def *height = nir_umax_imm(b, nir_channel(b, shape, 1), 1);
+   nir_def *index = nir_load_local_invocation_index(b);
+   nir_def *row = nir_udiv(b, index, width);
+   return nir_vec3(b, nir_umod(b, index, width), nir_umod(b, row, height), nir_udiv(b, row, height));
+}
+
 /* Metal's grid starts at zero, with no dispatch-base parameter. Form its ID
  * directly from NIR's workgroup/local builtins; a generic global-ID lowering
  * may add a Vulkan base input. */
 static nir_def *
 grid_position(struct translator *t)
 {
-   return nir_iadd(&t->b, nir_imul(&t->b, nir_load_workgroup_id(&t->b), workgroup_size(t)),
-                   nir_load_local_invocation_id(&t->b));
+   nir_def *shape = threadgroup_shape(t), *local = local_position(t);
+   if (!shape || !local)
+      return NULL;
+   return nir_iadd(&t->b, nir_imul(&t->b, nir_load_workgroup_id(&t->b), shape), local);
 }
 
 /* The threads of this threadgroup that a dispatchThreads grid holds. */
@@ -520,9 +554,9 @@ static nir_def *
 dispatch_size(struct translator *t)
 {
    nir_def *grid = device_value(t, STELA_AIR_DISPATCH_GRID);
-   if (!grid)
+   nir_def *size = threadgroup_shape(t);
+   if (!grid || !size)
       return NULL;
-   nir_def *size = workgroup_size(t);
    nir_def *first = nir_imul(&t->b, nir_load_workgroup_id(&t->b), size);
    nir_def *edge = nir_umin(&t->b, size, nir_isub(&t->b, grid, first));
    return nir_bcsel(&t->b, nir_ieq_imm(&t->b, nir_channel(&t->b, grid, 0), 0), size, edge);
@@ -560,20 +594,21 @@ builtin_value(struct translator *t, enum stela_air_builtin builtin)
    case STELA_AIR_THREAD_POSITION_IN_GRID:
       return grid_position(t);
    case STELA_AIR_THREAD_POSITION_IN_THREADGROUP:
-      return nir_load_local_invocation_id(b);
+      return local_position(t);
    case STELA_AIR_THREADGROUP_POSITION_IN_GRID:
       return nir_load_workgroup_id(b);
    case STELA_AIR_THREADS_PER_THREADGROUP:
-      return workgroup_size(t);
+      return threadgroup_shape(t);
    case STELA_AIR_DISPATCH_THREADS_PER_THREADGROUP:
       return dispatch_size(t);
    case STELA_AIR_THREADGROUPS_PER_GRID:
       return nir_load_num_workgroups(b);
    case STELA_AIR_THREADS_PER_GRID: {
       nir_def *grid = device_value(t, STELA_AIR_DISPATCH_GRID);
-      if (!grid)
+      nir_def *shape = threadgroup_shape(t);
+      if (!grid || !shape)
          return NULL;
-      nir_def *uniform = nir_imul(b, nir_load_num_workgroups(b), workgroup_size(t));
+      nir_def *uniform = nir_imul(b, nir_load_num_workgroups(b), shape);
       return nir_bcsel(b, nir_ieq_imm(b, nir_channel(b, grid, 0), 0), uniform, grid);
    }
    case STELA_AIR_THREAD_INDEX_IN_THREADGROUP:
@@ -581,7 +616,13 @@ builtin_value(struct translator *t, enum stela_air_builtin builtin)
    case STELA_AIR_SIMDGROUP_INDEX_IN_THREADGROUP:
       return nir_load_subgroup_id(b);
    case STELA_AIR_SIMDGROUPS_PER_THREADGROUP:
-      return nir_load_num_subgroups(b);
+      if (!t->options->dynamic_shape)
+         return nir_load_num_subgroups(b);
+      value = threadgroup_shape(t);
+      if (!value)
+         return NULL;
+      return nir_udiv(b, nir_iadd(b, volume(b, value), nir_iadd_imm(b, nir_load_subgroup_size(b), -1)),
+                      nir_load_subgroup_size(b));
    case STELA_AIR_DISPATCH_SIMDGROUPS_PER_THREADGROUP:
       value = dispatch_size(t);
       if (!value)
@@ -591,7 +632,12 @@ builtin_value(struct translator *t, enum stela_air_builtin builtin)
    case STELA_AIR_QUADGROUP_INDEX_IN_THREADGROUP:
       return nir_ushr_imm(b, nir_load_local_invocation_index(b), 2);
    case STELA_AIR_QUADGROUPS_PER_THREADGROUP:
-      return nir_imm_int(b, (int)DIV_ROUND_UP(size[0] * size[1] * size[2], 4));
+      if (!t->options->dynamic_shape)
+         return nir_imm_int(b, (int)DIV_ROUND_UP(size[0] * size[1] * size[2], 4));
+      value = threadgroup_shape(t);
+      if (!value)
+         return NULL;
+      return nir_ushr_imm(b, nir_iadd_imm(b, volume(b, value), 3), 2);
    case STELA_AIR_DISPATCH_QUADGROUPS_PER_THREADGROUP:
       value = dispatch_size(t);
       if (!value)
@@ -757,7 +803,17 @@ compute_arguments(struct translator *t, const struct stela_air_kernel *kernel)
       unsigned shared_size = 0;
       if (buffer) {
          bool threadgroup = desc.address_space == 3;
-         if (threadgroup) {
+         if (threadgroup && t->options->dynamic_threadgroup_bytes) {
+            shared = dynamic_threadgroup(t, &desc);
+            def = shared ? t->options->threadgroup_offset(&t->b, &desc, t->options->binding_data) :
+                           NULL;
+            if (!binding_prelude(t))
+               return false;
+            if (!def || def->num_components != 1 || def->bit_size != 32)
+               return fail(t, STELA_AIR_ARGUMENT, "threadgroup offset callback refused buffer %u", index);
+            def = nir_u2u64(&t->b, def);
+            shared_size = t->options->dynamic_threadgroup_bytes;
+         } else if (threadgroup) {
             struct stela_air_threadgroup_view view = {0};
             if (!t->options->bind_threadgroup ||
                 !t->options->bind_threadgroup(&desc, &view, t->options->binding_data) ||
@@ -894,6 +950,21 @@ shared_resource(struct translator *t, uint64_t size, unsigned alignment)
    t->shared_resources++;
    t->shared_layout_bound += size + alignment - 1;
    return var;
+}
+
+/* A dynamic kernel's threadgroup memory, in which its dispatches place
+ * threadgroup buffers at offsets aligned to 16 bytes. */
+static nir_variable *
+dynamic_threadgroup(struct translator *t, const struct stela_air_buffer *buffer)
+{
+   if (buffer->type_alignment > 16) {
+      fail(t, STELA_AIR_ARGUMENT, "threadgroup buffer %u is aligned past its placement",
+           buffer->argument);
+      return NULL;
+   }
+   if (!t->dynamic_threadgroup)
+      t->dynamic_threadgroup = shared_resource(t, t->options->dynamic_threadgroup_bytes, 16);
+   return t->dynamic_threadgroup;
 }
 
 /* A storage root at offset zero, defined at entry: it dominates every use, even
@@ -3996,14 +4067,28 @@ cfg_declare(struct translator *t)
       if (!(t->exit = new_block(t)))
          return false;
    }
+   /* Threads outside a dispatchThreads grid or a dynamic kernel's shape
+    * skip the function. */
+   nir_def *runs = NULL;
    if (grid) {
-      /* Threads outside a dispatchThreads grid skip the function. */
+      nir_def *position = grid_position(t);
+      if (!position)
+         return false;
+      runs = nir_ior(&t->b, nir_ball(&t->b, nir_ult(&t->b, position, grid)),
+                     nir_ieq_imm(&t->b, nir_channel(&t->b, grid, 0), 0));
+   }
+   if (t->options->dynamic_shape) {
+      nir_def *shape = threadgroup_shape(t);
+      if (!shape)
+         return false;
+      nir_def *inside = nir_ult(&t->b, nir_load_local_invocation_index(&t->b), volume(&t->b, shape));
+      runs = runs ? nir_iand(&t->b, runs, inside) : inside;
+   }
+   if (runs) {
       nir_block *body = new_block(t);
       if (!body)
          return false;
-      nir_def *inside = nir_ball(&t->b, nir_ult(&t->b, grid_position(t), grid));
-      nir_goto_if(&t->b, body, nir_ior(&t->b, inside, nir_ieq_imm(&t->b, nir_channel(&t->b, grid, 0), 0)),
-                  t->exit);
+      nir_goto_if(&t->b, body, runs, t->exit);
       entry = body;
    }
    t->work[0]->start = entry;
@@ -4167,6 +4252,14 @@ translate(const void *bitcode, size_t size, const char *entry,
    }
    if (options->bind_threadgroup && !options->max_threadgroup_bytes) {
       fail(&t, STELA_AIR_INPUT, "threadgroup callback requires an explicit shared-byte limit");
+      return NULL;
+   }
+   if ((options->dynamic_shape && (stage || options->workgroup_size[1] != 1 ||
+                                   options->workgroup_size[2] != 1 || !options->load_device_value)) ||
+       (options->dynamic_threadgroup_bytes &&
+        (!options->dynamic_shape || !options->threadgroup_offset ||
+         options->dynamic_threadgroup_bytes % 16))) {
+      fail(&t, STELA_AIR_INPUT, "dynamic threadgroups are a linear kernel's, with their callbacks");
       return NULL;
    }
    if (options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT &&

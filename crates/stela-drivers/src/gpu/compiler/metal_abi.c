@@ -35,6 +35,11 @@ nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_val
       return load_push(b, 32, STELA_METAL_PUSH_AMPLIFICATION);
    case STELA_AIR_VIEW_MAPPING:
       return load_push(b, 32, STELA_METAL_PUSH_VIEW_MAPPING);
+   case STELA_AIR_THREADGROUP_SHAPE:
+      return nir_load_global(b, 3, 32,
+                             nir_iadd_imm(b, load_push(b, 64, STELA_METAL_PUSH_ARGUMENTS),
+                                          STELA_METAL_DISPATCH_SHAPE),
+                             .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 4);
    case STELA_AIR_PATCH_IDS: {
       /* The tessellation control stage's PATCH0. */
       nir_variable *ids = nir_variable_create(b->shader, nir_var_shader_in, glsl_uvec_type(3),
@@ -45,6 +50,16 @@ nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_val
    }
    }
    return NULL;
+}
+
+nir_def *stela_metal_threadgroup_offset(nir_builder *b, const struct stela_air_buffer *buffer,
+                                        void *stage)
+{
+   (void)stage;
+   if (buffer->index >= STELA_METAL_BUFFERS)
+      return NULL;
+   return load(b, load_push(b, 64, STELA_METAL_PUSH_ARGUMENTS),
+               STELA_METAL_DISPATCH_OFFSETS + 4u * buffer->index, 32);
 }
 
 nir_def *stela_metal_bind_buffer(nir_builder *b, const struct stela_air_buffer *buffer,

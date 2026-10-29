@@ -4,6 +4,7 @@
  * functions. Original LLVM IR fixtures, one AIR module per function as
  * libraries hold them; no Apple output. */
 #include "../metal_compiler.h"
+#include "air_effect_oracle.h"
 #include "air_test_fixture.h"
 #include "util/ralloc.h"
 #include <assert.h>
@@ -75,6 +76,34 @@ static const char *staged =
    " i32 16, !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"out\"}\n"
    "!43 = !{i32 3, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
    " !\"air.arg_name\", !\"tid\"}\n";
+
+/* Stores its position in its threadgroup, the threadgroup's shape and its
+ * position in the grid, and its column to its threadgroup buffer. */
+static const char *shaped =
+   "define void @shaped(ptr addrspace(1) %out, ptr addrspace(3) %shared, <3 x i32> %local,"
+   " <3 x i32> %shape, <3 x i32> %grid) {\n"
+   "store <3 x i32> %local, ptr addrspace(1) %out, align 16\n"
+   "%s = getelementptr i8, ptr addrspace(1) %out, i64 16\n"
+   "store <3 x i32> %shape, ptr addrspace(1) %s, align 16\n"
+   "%g = getelementptr i8, ptr addrspace(1) %out, i64 32\n"
+   "store <3 x i32> %grid, ptr addrspace(1) %g, align 16\n"
+   "%x = extractelement <3 x i32> %local, i32 0\n"
+   "store i32 %x, ptr addrspace(3) %shared, align 4\n"
+   "ret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @shaped, !3, !4}\n!3 = !{}\n!4 = !{!40, !41, !42, !43, !44}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 16, !\"air.arg_type_align_size\","
+   " i32 16, !\"air.arg_type_name\", !\"uint3\", !\"air.arg_name\", !\"out\"}\n"
+   "!41 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 1, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 3, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
+   " !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"shared\"}\n"
+   "!42 = !{i32 2, !\"air.thread_position_in_threadgroup\", !\"air.arg_type_name\", !\"uint3\","
+   " !\"air.arg_name\", !\"local\"}\n"
+   "!43 = !{i32 3, !\"air.threads_per_threadgroup\", !\"air.arg_type_name\", !\"uint3\","
+   " !\"air.arg_name\", !\"shape\"}\n"
+   "!44 = !{i32 4, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint3\","
+   " !\"air.arg_name\", !\"grid\"}\n";
 
 /* Stores the scale constant where it is defined and the required enabled
  * constant is set, in the form Metal.jl's library builder reads. */
@@ -826,11 +855,103 @@ command_encoding_reflects_barriers(void)
    stela_metal_release(shader);
 }
 
+static void
+put32(uint8_t *bytes, uint32_t value)
+{
+   memcpy(bytes, &value, sizeof(value));
+}
+
+static void
+put64(uint8_t *bytes, uint64_t value)
+{
+   memcpy(bytes, &value, sizeof(value));
+}
+
+#define BASE 0x10000ull
+#define TABLE 0x0u
+#define DISPATCH 0x700u
+#define OUT 0x800u
+
+/* One invocation of the shaped kernel, as the local_index thread of
+ * workgroup 1 of a dispatch whose arguments shape its threadgroups 4 by 2
+ * and place its threadgroup buffer at 48 bytes: its effects. */
+static unsigned
+run_shaped(nir_shader *shader, uint32_t local_index, struct air_effect_store *trace,
+           unsigned capacity)
+{
+   static uint8_t memory[0x900];
+   uint8_t push[STELA_METAL_PUSH_BYTES] = {0};
+   memset(memory, 0, sizeof(memory));
+   put64(push + STELA_METAL_PUSH_TABLES, BASE + TABLE);
+   put64(push + STELA_METAL_PUSH_ARGUMENTS, BASE + DISPATCH);
+   put64(memory + TABLE + STELA_METAL_TABLE_BUFFER_ADDRESSES, BASE + OUT);
+   const uint32_t shape[] = {4, 2, 1};
+   for (unsigned i = 0; i < 3; i++)
+      put32(memory + DISPATCH + STELA_METAL_DISPATCH_SHAPE + 4 * i, shape[i]);
+   put32(memory + DISPATCH + STELA_METAL_DISPATCH_OFFSETS + 4, 48);
+   const struct air_effect_environment environment = {
+      .base = BASE, .bytes = memory, .size = sizeof(memory), .push = push,
+      .push_size = sizeof(push), .local_index = local_index, .workgroup = {1, 0, 0},
+   };
+   struct air_effect_run run = air_effect_execute_in(shader, 100000, trace, capacity, &environment);
+   if (run.status != AIR_EFFECT_COMPLETE)
+      fprintf(stderr, "shaped: %s\n", run.detail);
+   assert(run.status == AIR_EFFECT_COMPLETE);
+   return run.stores;
+}
+
+static void
+expect_store(const struct air_effect_store *store, bool shared, uint64_t address,
+             const uint32_t *values, unsigned components)
+{
+   assert(store->shared == shared && store->address == address);
+   assert(store->bits == 32 && store->components == components);
+   for (unsigned i = 0; i < components; i++)
+      assert(store->values[i].u32 == values[i]);
+}
+
+/* A kernel of indirect commands takes each dispatch's threadgroup shape
+ * and threadgroup buffer placement, and its threads past the shape skip
+ * it. */
+static void
+dynamic_kernels_take_their_dispatch_shape(void)
+{
+   struct stela_air_error error;
+   struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .dynamic_threadgroups = 1,
+   };
+   nir_shader *shader = compile(shaped, "shaped", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "shaped: %u %s\n", error.kind, error.detail);
+   assert(shader && shader->info.workgroup_size[0] == 64);
+   /* The threadgroup buffers share all of the target's threadgroup memory. */
+   assert(shader->info.shared_size == target.max_threadgroup_bytes);
+
+   struct air_effect_store trace[8];
+   assert(run_shaped(shader, 5, trace, ARRAY_SIZE(trace)) == 4);
+   expect_store(&trace[0], false, BASE + OUT, (const uint32_t[]){1, 1, 0}, 3);
+   expect_store(&trace[1], false, BASE + OUT + 16, (const uint32_t[]){4, 2, 1}, 3);
+   expect_store(&trace[2], false, BASE + OUT + 32, (const uint32_t[]){5, 1, 0}, 3);
+   expect_store(&trace[3], true, 48, (const uint32_t[]){1}, 1);
+   assert(run_shaped(shader, 8, trace, ARRAY_SIZE(trace)) == 0);
+   stela_metal_release(shader);
+
+   /* Dynamic threadgroups are a kernel's, which takes no lengths. */
+   const struct stela_metal_threadgroup_length lengths[] = {{1, 16}};
+   specialization.threadgroup_length_count = 1;
+   specialization.threadgroup_lengths = lengths;
+   assert(!compile(shaped, "shaped", &specialization, &error) && error.kind == STELA_AIR_INPUT);
+   const struct stela_metal_specialization dynamic = {.dynamic_threadgroups = 1};
+   assert(!compile(fragment, "fragment", &dynamic, &error) &&
+          error.kind == STELA_AIR_INPUT);
+}
+
 int
 main(void)
 {
    glsl_type_singleton_init_or_ref();
    kernels_reflect_and_compile_their_threadgroup_memory();
+   dynamic_kernels_take_their_dispatch_shape();
    render_stages_compile_at_their_linked_locations();
    patch_functions_compile_behind_their_tessellation_stages();
    kernels_compile_with_their_stage_in();

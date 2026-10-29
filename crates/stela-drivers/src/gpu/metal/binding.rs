@@ -464,6 +464,23 @@ const _: () = assert!(
             == ResolveArguments::SLOTS_OFFSET
 );
 
+/// The offsets of what a dynamic kernel's dispatch reads at the push
+/// constants' `arguments`: the stage-in region's origin and size, where a
+/// stage-in kernel's arguments hold them, then the `u32` threadgroup shape
+/// and each threadgroup buffer's `u32` offset in threadgroup memory, by
+/// Metal index ([`Specialization::dynamic_threadgroups`]).
+///
+/// [`Specialization::dynamic_threadgroups`]: super::shader::Specialization::dynamic_threadgroups
+pub struct DispatchArguments;
+
+impl DispatchArguments {
+    pub const REGION_OFFSET: u32 = 0;
+    pub const SHAPE_OFFSET: u32 = 24;
+    pub const OFFSETS_OFFSET: u32 = 36;
+    pub const BYTES: u32 = Self::OFFSETS_OFFSET + 4 * MAX_BUFFER_BINDINGS;
+    pub const ALIGNMENT: u64 = 16;
+}
+
 /// The offsets of a command's device-generated sequence, which the resolve
 /// kernel writes and each indirect commands layout reads at its own token
 /// offsets.
@@ -865,6 +882,19 @@ mod tests {
                 "STELA_METAL_RESOLVE_INHERIT_BUFFERS",
                 ResolveArguments::INHERIT_BUFFERS,
             ),
+            (
+                "STELA_METAL_DISPATCH_REGION",
+                DispatchArguments::REGION_OFFSET,
+            ),
+            (
+                "STELA_METAL_DISPATCH_SHAPE",
+                DispatchArguments::SHAPE_OFFSET,
+            ),
+            (
+                "STELA_METAL_DISPATCH_OFFSETS",
+                DispatchArguments::OFFSETS_OFFSET,
+            ),
+            ("STELA_METAL_DISPATCH_BYTES", DispatchArguments::BYTES),
             (
                 "STELA_METAL_SEQUENCE_PIPELINE",
                 GeneratedSequence::PIPELINE_OFFSET,

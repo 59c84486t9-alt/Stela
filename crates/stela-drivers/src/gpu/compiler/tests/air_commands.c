@@ -238,11 +238,12 @@ static void run(nir_shader *shader, const struct layout *layout)
    /* Structurization's path variables. */
    nir_lower_vars_to_ssa(shader);
    nir_opt_dce(shader);
-   const struct air_effect_memory test = {.base = BASE, .bytes = memory, .size = sizeof(memory),
-                                          .push = push, .push_size = sizeof(push)};
+   const struct air_effect_environment test = {.base = BASE, .bytes = memory,
+                                               .size = sizeof(memory), .push = push,
+                                               .push_size = sizeof(push)};
    struct air_effect_store trace[64];
-   struct air_effect_run result = air_effect_execute_memory(shader, 100000, trace,
-                                                            ARRAY_SIZE(trace), &test);
+   struct air_effect_run result = air_effect_execute_in(shader, 100000, trace, ARRAY_SIZE(trace),
+                                                        &test);
    if (result.status != AIR_EFFECT_COMPLETE) {
       fprintf(stderr, "run: %u %s\n", result.status, result.detail);
       nir_print_shader(shader, stderr);

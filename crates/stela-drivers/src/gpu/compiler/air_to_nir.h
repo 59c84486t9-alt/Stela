@@ -178,6 +178,13 @@ typedef bool (*stela_air_bind_threadgroup)(const struct stela_air_buffer *buffer
                                           struct stela_air_threadgroup_view *view,
                                           void *data);
 
+/* A threadgroup buffer's byte offset, a uint multiple of 16, within the
+ * threadgroup memory that dispatches place buffers in. Emits straight-line
+ * NIR in the entry prelude; returning NULL refuses compilation. */
+typedef nir_def *(*stela_air_threadgroup_offset)(nir_builder *b,
+                                                 const struct stela_air_buffer *buffer,
+                                                 void *data);
+
 struct stela_air_ssbo_view {
    unsigned slot;
    uint64_t buffer_size;
@@ -221,6 +228,8 @@ enum stela_air_device_value {
    /* A post-tessellation vertex function's patch ID, instance ID and base
     * instance as a uvec3. */
    STELA_AIR_PATCH_IDS,
+   /* A dynamic kernel's threadgroup shape as a uvec3. */
+   STELA_AIR_THREADGROUP_SHAPE,
 };
 typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_device_value,
                                                 void *binding_data);
@@ -261,6 +270,16 @@ struct stela_air_options {
     * resources/barriers; NAK callers must additionally stay within UINT16_MAX
     * before its original smem_size conversion. No target limit is inferred. */
    unsigned max_threadgroup_bytes;
+   /* A dynamic kernel, whose dispatches shape its threadgroups: its
+    * workgroup_size is (n, 1, 1) for the most threads a threadgroup holds,
+    * STELA_AIR_THREADGROUP_SHAPE supplies the shape, and threads past it
+    * skip the function. Its dispatches may also place its threadgroup
+    * buffers, within dynamic_threadgroup_bytes of threadgroup memory at
+    * the offsets threadgroup_offset gives, instead of bind_threadgroup's
+    * views. */
+   bool dynamic_shape;
+   unsigned dynamic_threadgroup_bytes;
+   stela_air_threadgroup_offset threadgroup_offset;
    /* Explicit target limits on a thread's private memory (allocas, lowered
     * to NIR scratch) and on the shader's constant data (initialized constant
     * globals, lowered to load_constant over nir_shader::constant_data). Zero

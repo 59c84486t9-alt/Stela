@@ -18,8 +18,10 @@ enum air_effect_status {
    AIR_EFFECT_TRACE_FULL,
 };
 
+/* A store's effect; a shared store's address is its byte offset in shared
+ * memory. */
 struct air_effect_store {
-   bool ssbo;
+   bool ssbo, shared;
    uint64_t slot, address;
    unsigned components, bits;
    nir_const_value values[4];
@@ -37,14 +39,16 @@ struct air_effect_value {
    nir_const_value lanes[4];
 };
 
-/* Little-endian global memory at base, which global loads read and global
- * stores within it update, and the push constants. */
-struct air_effect_memory {
+/* What an execution reads: little-endian global memory at base, which
+ * global loads read and global stores within it update, the push constants,
+ * and the invocation's linear index in its workgroup and workgroup ID. */
+struct air_effect_environment {
    uint64_t base;
    uint8_t *bytes;
    size_t size;
    const uint8_t *push;
    size_t push_size;
+   uint32_t local_index, workgroup[3];
 };
 
 /* Whether a value of shape at address lies within size bytes at base, and
@@ -105,11 +109,11 @@ air_effect_integer_type(nir_alu_type type)
    return base == nir_type_int || base == nir_type_uint || base == nir_type_bool;
 }
 
-/* Runs shader over memory, which may be NULL: then any load is
+/* Runs shader in an environment, which may be NULL: then any load is
  * unsupported. */
 static struct air_effect_run
-air_effect_execute_memory(nir_shader *shader, unsigned budget, struct air_effect_store *trace,
-                          unsigned capacity, const struct air_effect_memory *memory)
+air_effect_execute_in(nir_shader *shader, unsigned budget, struct air_effect_store *trace,
+                      unsigned capacity, const struct air_effect_environment *memory)
 {
    struct air_effect_run run = {.status = AIR_EFFECT_INVALID, .detail = "invalid execution input"};
    struct air_effect_value *values = NULL, *pending = NULL;
@@ -224,6 +228,15 @@ air_effect_execute_memory(nir_shader *shader, unsigned budget, struct air_effect
          }
          case nir_instr_type_intrinsic: {
             nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+            if (memory && (intrinsic->intrinsic == nir_intrinsic_load_local_invocation_index ||
+                           intrinsic->intrinsic == nir_intrinsic_load_workgroup_id)) {
+               bool index = intrinsic->intrinsic == nir_intrinsic_load_local_invocation_index;
+               for (unsigned lane = 0; lane < dest->components; lane++) {
+                  uint32_t value = index ? memory->local_index : memory->workgroup[lane];
+                  dest->lanes[lane] = nir_const_value_for_uint(value, dest->bits);
+               }
+               break;
+            }
             if (memory && (intrinsic->intrinsic == nir_intrinsic_load_global ||
                            intrinsic->intrinsic == nir_intrinsic_load_push_constant)) {
                const struct air_effect_value *at = air_effect_get(values, count, intrinsic->src[0].ssa);
@@ -242,7 +255,8 @@ air_effect_execute_memory(nir_shader *shader, unsigned budget, struct air_effect
                break;
             }
             bool ssbo = intrinsic->intrinsic == nir_intrinsic_store_ssbo;
-            if (!ssbo && intrinsic->intrinsic != nir_intrinsic_store_global)
+            bool shared = intrinsic->intrinsic == nir_intrinsic_store_shared;
+            if (!ssbo && !shared && intrinsic->intrinsic != nir_intrinsic_store_global)
                AIR_EFFECT_FAIL(AIR_EFFECT_UNSUPPORTED, "unevaluated intrinsic on executed path");
             const struct air_effect_value *stored = air_effect_get(values, count, intrinsic->src[0].ssa);
             const struct air_effect_value *address = air_effect_get(values, count, intrinsic->src[ssbo ? 2 : 1].ssa);
@@ -256,13 +270,14 @@ air_effect_execute_memory(nir_shader *shader, unsigned budget, struct air_effect
             if (run.stores == capacity)
                AIR_EFFECT_FAIL(AIR_EFFECT_TRACE_FULL, "effect trace capacity exhausted");
             struct air_effect_store *effect = &trace[run.stores++];
-            *effect = (struct air_effect_store){.ssbo = ssbo,
+            *effect = (struct air_effect_store){.ssbo = ssbo, .shared = shared,
                .slot = slot ? nir_const_value_as_uint(slot->lanes[0], slot->bits) : 0,
-               .address = nir_const_value_as_uint(address->lanes[0], address->bits),
+               .address = nir_const_value_as_uint(address->lanes[0], address->bits) +
+                          (shared ? (uint64_t)nir_intrinsic_base(intrinsic) : 0),
                .components = stored->components, .bits = stored->bits};
             memcpy(effect->values, stored->lanes, stored->components * sizeof(*effect->values));
             size_t offset;
-            if (memory && !ssbo &&
+            if (memory && !ssbo && !shared &&
                 air_effect_within(memory->size, memory->base, effect->address, stored, &offset))
                air_effect_write(memory->bytes + offset, stored);
             break;
@@ -310,7 +325,7 @@ static struct air_effect_run
 air_effect_execute(nir_shader *shader, unsigned budget,
                     struct air_effect_store *trace, unsigned capacity)
 {
-   return air_effect_execute_memory(shader, budget, trace, capacity, NULL);
+   return air_effect_execute_in(shader, budget, trace, capacity, NULL);
 }
 
 #endif

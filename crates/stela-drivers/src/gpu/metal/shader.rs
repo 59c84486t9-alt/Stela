@@ -445,6 +445,14 @@ pub struct Specialization {
     /// has none: the stage mesh draws launch, whose threads outside a
     /// `drawMeshThreads` grid skip the function.
     pub launched_by_grid: bool,
+    /// A kernel of indirect commands, whose dispatches each shape its
+    /// threadgroups and place its threadgroup buffers through their
+    /// [`DispatchArguments`]: its `workgroup_size` is `[n, 1, 1]` for the
+    /// most threads a threadgroup holds, and it takes no
+    /// `threadgroup_lengths`.
+    ///
+    /// [`DispatchArguments`]: super::binding::DispatchArguments
+    pub dynamic_threadgroups: bool,
     /// The functions and libraries the stage links.
     pub linking: Linking,
 }
