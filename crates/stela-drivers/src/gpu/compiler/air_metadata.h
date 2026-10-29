@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 #define AIR_MAX_ARGUMENTS 128
+#define AIR_MAX_CLIP_DISTANCES 8
 #define AIR_MAX_VERTEX_ATTRIBUTES 31u
 #define AIR_MAX_RENDER_TARGETS 8u
 #define AIR_MAX_METADATA_OPERANDS 256
@@ -180,6 +181,7 @@ enum stela_air_stage_semantic {
    STELA_AIR_VERTEX_INPUT, /* A stage-in attribute at location. */
    /* Vertex outputs. */
    STELA_AIR_POINT_SIZE, STELA_AIR_LAYER, STELA_AIR_VIEWPORT,
+   STELA_AIR_CLIP_DISTANCE, /* A [clip_distances x float] leaf. */
    /* Fragment outputs. */
    STELA_AIR_DEPTH, STELA_AIR_SAMPLE_MASK, STELA_AIR_STENCIL,
 };
@@ -217,6 +219,7 @@ struct stela_air_stage_io {
    bool used, invariant;
    /* RENDER_TARGET attachment and dual-source index; VERTEX_INPUT attribute. */
    unsigned location, index;
+   unsigned clip_distances; /* Only CLIP_DISTANCE: 1 to AIR_MAX_CLIP_DISTANCES. */
    const char *name, *type_name, *identifier;
    size_t name_bytes, type_name_bytes, identifier_bytes;
    unsigned member_count;

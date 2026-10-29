@@ -1134,7 +1134,12 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
       } else if (vertex && stela_air_md_string(fields[0], "air.viewport_array_index")) {
          io->semantic = STELA_AIR_VIEWPORT;
       } else if (vertex && stela_air_md_string(fields[0], "air.clip_distance")) {
-         return fail(m, STELA_AIR_ARGUMENT, "clip distance outputs are unsupported");
+         io->semantic = STELA_AIR_CLIP_DISTANCE;
+         if (!stela_air_md_string(fields[f++], "air.clip_distance_array_size") ||
+             !stela_air_md_uint(fields[f++], &io->clip_distances) || !io->clip_distances ||
+             io->clip_distances > AIR_MAX_CLIP_DISTANCES)
+            return fail(m, STELA_AIR_ARGUMENT, "clip distances need an array size of 1 to %u",
+                        AIR_MAX_CLIP_DISTANCES);
       } else if (fragment && stela_air_md_string(fields[0], "air.render_target")) {
          io->semantic = STELA_AIR_RENDER_TARGET;
          /* Dual-source blending writes index 1 of attachment 0. */
@@ -1181,6 +1186,11 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
       case STELA_AIR_POSITION: type = io->primitive == STELA_AIR_FLOAT && io->components == 4; break;
       case STELA_AIR_VARYING: case STELA_AIR_RENDER_TARGET: type = stage_varying(io->primitive); break;
       case STELA_AIR_POINT_SIZE: case STELA_AIR_DEPTH: type = io->primitive == STELA_AIR_FLOAT && scalar; break;
+      case STELA_AIR_CLIP_DISTANCE:
+         type = io->primitive == STELA_AIR_FLOAT && scalar && LLVMGetTypeKind(leaf) == LLVMArrayTypeKind &&
+                LLVMGetArrayLength2(leaf) == io->clip_distances;
+         leaf = type ? LLVMGetElementType(leaf) : leaf;
+         break;
       default: type = integer && scalar; break; /* Layer, viewport, sample mask and stencil. */
       }
       if (!type || !stage_type_matches(leaf, io->primitive, io->components))

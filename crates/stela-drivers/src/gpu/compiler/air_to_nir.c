@@ -1298,6 +1298,56 @@ put_lanes(struct translator *t, LLVMValueRef llvm, nir_def **lanes, unsigned n, 
       fail(t, STELA_AIR_ALLOCATION, "render lane map allocation failed");
 }
 
+/* A clip-distance array, the one aggregate a render aggregate holds. */
+static bool
+clip_array(LLVMTypeRef type)
+{
+   return LLVMGetTypeKind(type) == LLVMArrayTypeKind && LLVMGetArrayLength2(type) &&
+          LLVMGetArrayLength2(type) <= AIR_MAX_CLIP_DISTANCES &&
+          LLVMGetTypeKind(LLVMGetElementType(type)) == LLVMFloatTypeKind;
+}
+
+/* A render aggregate's element count: a packed struct of scalar, vector and
+ * clip-array leaves, or a clip array. Zero for any other type. */
+static unsigned
+aggregate_count(LLVMTypeRef type)
+{
+   if (clip_array(type))
+      return (unsigned)LLVMGetArrayLength2(type);
+   if (LLVMGetTypeKind(type) != LLVMStructTypeKind || LLVMIsOpaqueStruct(type) ||
+       !LLVMIsPackedStruct(type) || !LLVMCountStructElementTypes(type) ||
+       LLVMCountStructElementTypes(type) > AIR_MAX_ARGUMENTS)
+      return 0;
+   for (unsigned i = 0; i < LLVMCountStructElementTypes(type); i++) {
+      LLVMTypeRef element = LLVMStructGetTypeAtIndex(type, i);
+      if (!leaf_shape(element) && !clip_array(element))
+         return 0;
+   }
+   return LLVMCountStructElementTypes(type);
+}
+
+static LLVMTypeRef
+aggregate_element_type(LLVMTypeRef type, unsigned index)
+{
+   return LLVMGetTypeKind(type) == LLVMStructTypeKind ? LLVMStructGetTypeAtIndex(type, index) :
+                                                        LLVMGetElementType(type);
+}
+
+/* An aggregate of `count` elements, copied from `from` or undefined. */
+static struct value *
+new_aggregate(struct translator *t, unsigned count, const struct value *from)
+{
+   struct value *v = rzalloc(t->values, struct value);
+   if (!v || !(v->elements = rzalloc_array(t->values, struct value *, count))) {
+      fail(t, STELA_AIR_ALLOCATION, "aggregate value allocation failed");
+      return NULL;
+   }
+   v->aggregate_count = count;
+   if (from)
+      memcpy(v->elements, from->elements, count * sizeof(*v->elements));
+   return v;
+}
+
 static struct value *
 aggregate_value(struct translator *t, LLVMValueRef llvm)
 {
@@ -1306,53 +1356,73 @@ aggregate_value(struct translator *t, LLVMValueRef llvm)
       if (v->aggregate_count) return v;
       fail(t, STELA_AIR_TYPE, "nonaggregate render value"); return NULL;
    }
-   LLVMTypeRef type = LLVMTypeOf(llvm);
-   if (LLVMGetTypeKind(type) != LLVMStructTypeKind || LLVMIsOpaqueStruct(type) ||
-       !LLVMIsPackedStruct(type) || !LLVMCountStructElementTypes(type) ||
-       LLVMCountStructElementTypes(type) > AIR_MAX_ARGUMENTS ||
-       (!LLVMIsUndef(llvm) && !LLVMIsPoison(llvm))) {
+   unsigned count = aggregate_count(LLVMTypeOf(llvm));
+   if (!count || (!LLVMIsUndef(llvm) && !LLVMIsPoison(llvm))) {
       fail(t, STELA_AIR_TYPE, "unsupported/forward render aggregate"); return NULL;
    }
-   unsigned count = LLVMCountStructElementTypes(type);
-   for (unsigned i = 0; i < count; i++) {
-      if (!leaf_shape(LLVMStructGetTypeAtIndex(type, i))) {
-         fail(t, STELA_AIR_TYPE, "aggregate requires flat scalar/vector leaves"); return NULL;
-      }
-   }
-   v = rzalloc(t->values, struct value);
-   if (!v || !(v->elements = rzalloc_array(t->values, struct value *, count)) ||
-       !_mesa_hash_table_insert(t->values, llvm, v)) {
+   v = new_aggregate(t, count, NULL);
+   if (v && !_mesa_hash_table_insert(t->values, llvm, v)) {
       fail(t, STELA_AIR_ALLOCATION, "aggregate value allocation failed"); return NULL;
    }
-   v->aggregate_count = count;
    return v;
+}
+
+/* `a`, of LLVM type `type`, with `leaf` at the index path, copying each
+ * aggregate on the path. */
+static struct value *
+aggregate_insert(struct translator *t, const struct value *a, LLVMTypeRef type,
+                 const unsigned *indices, unsigned depth, struct value *leaf)
+{
+   if (indices[0] >= a->aggregate_count) {
+      fail(t, STELA_AIR_INSTRUCTION, "invalid aggregate leaf index");
+      return NULL;
+   }
+   struct value *v = new_aggregate(t, a->aggregate_count, a);
+   if (!v)
+      return NULL;
+   if (depth == 1) {
+      v->elements[indices[0]] = leaf;
+      return v;
+   }
+   LLVMTypeRef inner_type = aggregate_element_type(type, indices[0]);
+   const struct value *inner = a->elements[indices[0]];
+   if (!inner && !(inner = new_aggregate(t, aggregate_count(inner_type), NULL)))
+      return NULL;
+   if (!inner->aggregate_count) {
+      fail(t, STELA_AIR_INSTRUCTION, "aggregate index path enters a leaf");
+      return NULL;
+   }
+   v->elements[indices[0]] = aggregate_insert(t, inner, inner_type, indices + 1, depth - 1, leaf);
+   return v->elements[indices[0]] ? v : NULL;
 }
 
 static bool
 stage_value_instruction(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
 {
    if (op == LLVMInsertValue || op == LLVMExtractValue) {
-      if (LLVMGetNumIndices(inst) != 1)
-         return fail(t, STELA_AIR_INSTRUCTION, "nested aggregate indexing unsupported");
+      /* Paths are a struct leaf, an array element or a struct's array element. */
+      unsigned depth = LLVMGetNumIndices(inst);
+      const unsigned *indices = LLVMGetIndices(inst);
       struct value *a = aggregate_value(t, LLVMGetOperand(inst, 0));
-      unsigned index = LLVMGetIndices(inst)[0];
-      if (!a || index >= a->aggregate_count)
-         return fail(t, STELA_AIR_INSTRUCTION, "invalid aggregate leaf index");
+      if (!a || !depth || depth > 2)
+         return fail(t, STELA_AIR_INSTRUCTION, "invalid aggregate index path");
       if (op == LLVMExtractValue) {
-         struct value *leaf = a->elements[index];
+         struct value *leaf = a;
+         for (unsigned i = 0; leaf && i < depth; i++)
+            leaf = indices[i] < leaf->aggregate_count ? leaf->elements[indices[i]] : NULL;
+         if (leaf && leaf->aggregate_count)
+            return _mesa_hash_table_insert(t->values, inst, leaf) != NULL ||
+               fail(t, STELA_AIR_ALLOCATION, "aggregate extraction map failed");
          return (leaf && leaf->def && put_value(t, inst, leaf->def, 0)) ||
             fail(t, STELA_AIR_INSTRUCTION, "undefined/poison aggregate leaf escapes");
       }
-      struct value *leaf = partial_value(t, LLVMGetOperand(inst, 1));
-      if (!leaf) return false;
-      struct value *v = rzalloc(t->values, struct value);
-      if (!v || !(v->elements = ralloc_array(t->values, struct value *, a->aggregate_count)))
-         return fail(t, STELA_AIR_ALLOCATION, "aggregate insertion allocation failed");
-      v->aggregate_count = a->aggregate_count;
-      memcpy(v->elements, a->elements, a->aggregate_count * sizeof(*v->elements));
-      v->elements[index] = leaf;
-      return _mesa_hash_table_insert(t->values, inst, v) != NULL ||
-         fail(t, STELA_AIR_ALLOCATION, "aggregate insertion map failed");
+      LLVMValueRef inserted = LLVMGetOperand(inst, 1);
+      struct value *leaf = aggregate_count(LLVMTypeOf(inserted)) ? aggregate_value(t, inserted) :
+                                                                   partial_value(t, inserted);
+      struct value *v = leaf ? aggregate_insert(t, a, LLVMTypeOf(LLVMGetOperand(inst, 0)), indices,
+                                                depth, leaf) : NULL;
+      return v && (_mesa_hash_table_insert(t->values, inst, v) != NULL ||
+                   fail(t, STELA_AIR_ALLOCATION, "aggregate insertion map failed"));
    }
    struct value *a = partial_value(t, LLVMGetOperand(inst, 0));
    if (!a) return false;
@@ -1399,6 +1469,7 @@ stage_location(struct translator *t, const struct stela_air_stage_io *io)
    case STELA_AIR_POINT_SIZE: return VARYING_SLOT_PSIZ;
    case STELA_AIR_LAYER: return VARYING_SLOT_LAYER;
    case STELA_AIR_VIEWPORT: return VARYING_SLOT_VIEWPORT;
+   case STELA_AIR_CLIP_DISTANCE: return VARYING_SLOT_CLIP_DIST0;
    case STELA_AIR_DEPTH: return FRAG_RESULT_DEPTH;
    case STELA_AIR_SAMPLE_MASK: return FRAG_RESULT_SAMPLE_MASK;
    case STELA_AIR_STENCIL: return FRAG_RESULT_STENCIL;
@@ -1461,10 +1532,17 @@ stage_variable(struct translator *t, const struct stela_air_stage_io *io, bool o
    if (io->semantic == STELA_AIR_LAYER || io->semantic == STELA_AIR_VIEWPORT ||
        io->semantic == STELA_AIR_SAMPLE_MASK || io->semantic == STELA_AIR_STENCIL)
       base = GLSL_TYPE_INT;
+   /* Clip distances are a compact float array, as SPIR-V's ClipDistance is. */
+   bool clip = io->semantic == STELA_AIR_CLIP_DISTANCE;
+   const struct glsl_type *type = clip ? glsl_array_type(glsl_float_type(), io->clip_distances, 0) :
+                                         glsl_vector_type(base, io->components);
    nir_variable *var = nir_variable_create(t->b.shader, output ? nir_var_shader_out : nir_var_shader_in,
-      glsl_vector_type(base, io->components), name);
+                                           type, name);
    if (!var) { fail(t, STELA_AIR_ALLOCATION, "render IO variable allocation failed"); return NULL; }
    var->data.location = stage_location(t, io);
+   var->data.compact = clip;
+   if (clip)
+      t->b.shader->info.clip_distance_array_size = io->clip_distances;
    var->data.index = io->semantic == STELA_AIR_RENDER_TARGET ? io->index : 0;
    var->data.invariant = io->invariant;
    if (io->semantic == STELA_AIR_DEPTH) {
@@ -1583,14 +1661,32 @@ stage_return(struct translator *t, LLVMValueRef inst)
          return fail(t, STELA_AIR_TYPE, "render output aggregate mismatch");
    }
    nir_def *values[AIR_MAX_ARGUMENTS];
+   nir_def *clip[AIR_MAX_CLIP_DISTANCES];
    for (unsigned i = 0; i < t->render.entry.output_count; i++) {
-      values[i] = aggregate ? (aggregate->elements[i] ? aggregate->elements[i]->def : NULL) : get_value(t, returned);
+      const struct stela_air_stage_io *io = &t->render.outputs[i];
+      const struct value *leaf = aggregate ? aggregate->elements[i] : NULL;
+      if (io->semantic == STELA_AIR_CLIP_DISTANCE) {
+         /* The one clip-distance output: every distance is defined. */
+         for (unsigned j = 0; leaf && j < io->clip_distances; j++) {
+            clip[j] = leaf->elements[j] ? leaf->elements[j]->def : NULL;
+            if (!clip[j]) leaf = NULL;
+         }
+         values[i] = leaf ? clip[0] : NULL;
+      } else {
+         values[i] = aggregate ? (leaf ? leaf->def : NULL) : get_value(t, returned);
+      }
       if (!values[i]) return fail(t, STELA_AIR_INSTRUCTION, "undefined/poison render output leaf/lane");
    }
    /* Validate ALL leaves before emitting any output effect. */
    nir_def *layer = NULL, *viewport = NULL;
    for (unsigned i = 0; i < t->render.entry.output_count; i++) {
       const struct stela_air_stage_io *io = &t->render.outputs[i];
+      if (io->semantic == STELA_AIR_CLIP_DISTANCE) {
+         nir_deref_instr *array = nir_build_deref_var(&t->b, t->outputs[i]);
+         for (unsigned j = 0; j < io->clip_distances; j++)
+            nir_store_deref(&t->b, nir_build_deref_array_imm(&t->b, array, j), clip[j], 1);
+         continue;
+      }
       nir_def *value = stage_widen(&t->b, values[i], io->primitive);
       if (t->stage_options->amplified && t->outputs[i] == t->layer)
          layer = value;

@@ -223,6 +223,62 @@ vertex_functions_fetch_attributes_and_write_builtins(void)
    ralloc_free(shader);
 }
 
+#define CLIP_RESULT "<{ <4 x float>, [2 x float] }>"
+
+/* A vertex function writing its position and two clip distances, the second
+ * through a nested index path, then the whole array. */
+static const char *clip_vertex =
+   "define " CLIP_RESULT " @vertex(<4 x float> %p) {\n"
+   "%x = extractelement <4 x float> %p, i32 0\n"
+   "%a0 = insertvalue " CLIP_RESULT " undef, <4 x float> %p, 0\n"
+   "%a1 = insertvalue " CLIP_RESULT " %a0, float %x, 1, 0\n"
+   "%a2 = insertvalue " CLIP_RESULT " %a1, float 2.0, 1, 1\n"
+   "%c0 = insertvalue [2 x float] undef, float 3.0, 0\n"
+   "%c1 = insertvalue [2 x float] %c0, float %x, 1\n"
+   "%a3 = insertvalue " CLIP_RESULT " %a2, [2 x float] %c1, 1\n"
+   "ret " CLIP_RESULT " %a3\n}\n"
+   "!air.vertex = !{!2}\n"
+   "!2 = !{ptr @vertex, !3, !4}\n!3 = !{!30, !31}\n"
+   "!30 = !{!\"air.position\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n"
+   "!31 = !{!\"air.clip_distance\", !\"air.clip_distance_array_size\", i32 2, !\"air.arg_type_name\","
+   " !\"float\", !\"air.arg_name\", !\"mtl_clip_distance\"}\n"
+   "!4 = !{!40}\n"
+   "!40 = !{i32 0, !\"air.vertex_input\", !\"air.location_index\", i32 0, i32 1,"
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"p\"}\n";
+
+static void
+vertex_functions_write_clip_distances(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = translate(clip_vertex, STELA_AIR_VERTEX, false, &error);
+   if (!shader)
+      fprintf(stderr, "clip distances: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_variable *clip = variable(shader, nir_var_shader_out, VARYING_SLOT_CLIP_DIST0, 0);
+   assert(clip && clip->data.compact && glsl_get_length(clip->type) == 2 &&
+          shader->info.clip_distance_array_size == 2);
+   ralloc_free(shader);
+
+   const struct {
+      const char *old, *replacement;
+      enum stela_air_error_kind kind;
+   } cases[] = {
+      /* Every distance is written. */
+      {"%a3 = insertvalue " CLIP_RESULT " %a2, [2 x float] %c1, 1\n",
+       "%a3 = insertvalue " CLIP_RESULT " %a1, [2 x float] undef, 1\n", STELA_AIR_INSTRUCTION},
+      {"i32 2, !\"air.arg_type_name\"", "i32 9, !\"air.arg_type_name\"", STELA_AIR_ARGUMENT},
+      {"i32 2, !\"air.arg_type_name\"", "i32 3, !\"air.arg_type_name\"", STELA_AIR_TYPE},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
+      char *text = change(clip_vertex, cases[i].old, cases[i].replacement);
+      shader = translate(text, STELA_AIR_VERTEX, false, &error);
+      if (shader || error.kind != cases[i].kind)
+         fprintf(stderr, "clip case %u: %u %s\n", i, error.kind, error.detail);
+      assert(!shader && error.kind == cases[i].kind);
+      free(text);
+   }
+}
+
 /* position_only with a buffer `v` in `space` and its body. */
 static char *
 with_buffer(unsigned space, const char *body)
@@ -378,6 +434,7 @@ main(void)
    vertex_functions_fetch_attributes_and_write_builtins();
    vertex_functions_read_constant_data();
    vertex_functions_access_device_buffers();
+   vertex_functions_write_clip_distances();
    fragment_functions_interpolate_and_write_targets();
    refuses_unrepresentable_render_io();
    glsl_type_singleton_decref();
