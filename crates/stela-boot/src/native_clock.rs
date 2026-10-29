@@ -719,12 +719,14 @@ impl Installed {
                 raised: UnsafeCell::new(None),
                 counter: UnsafeCell::new(None),
             });
+            // Complete fallible hardware validation before publishing an IRQ
+            // registration. A changed controller must leave no orphaned Arc.
+            state.rearm(now)?;
             // The explicit raw strong reference is registration ownership;
             // removal is same-CPU IRQ-excluded and precedes from_raw release.
             ACTIVE_GS.store(state.cpu.gs, Ordering::Release);
             ACTIVE_CPU.store(state.cpu.id, Ordering::Release);
             ACTIVE.store(Arc::into_raw(state.clone()).cast_mut(), Ordering::Release);
-            state.rearm(now)?;
             let clock: Arc<dyn Clock> = Arc::new(NativeClock(state.clone()));
             let idle: Arc<dyn Idle> = Arc::new(NativeIdle {
                 state: state.clone(),
@@ -962,18 +964,29 @@ impl Installed {
             }
             return Err(WorkError::Busy);
         }
+        // A source fault must not block time-free cleanup when no guest
+        // deadline needs conversion. If one exists, validate its handback
+        // before removing the registration; failed time cannot cancel it.
+        let guest = self.state.guest.load(Ordering::Relaxed);
+        let now = if guest == NONE {
+            0
+        } else {
+            match self.state.cpu.sample() {
+                Ok(now) => now,
+                Err(error) => {
+                    // SAFETY: same physical CPU's enclosing save. The live
+                    // registration stays pinned with its original deadline.
+                    unsafe { restore(flags) };
+                    return Err(error);
+                }
+            }
+        };
         let pointer = ACTIVE.swap(ptr::null_mut(), Ordering::AcqRel);
         ACTIVE_CPU.store(u32::MAX, Ordering::Release);
         ACTIVE_GS.store(0, Ordering::Release);
         let apic = self.state.cpu.controller();
         // Hand the original guest deadline back to its existing host owner.
         // Closing a driver clock cannot silently cancel that separate timer.
-        let now = self
-            .state
-            .cpu
-            .sample()
-            .unwrap_or_else(|error| self.state.cpu.fatal(error));
-        let guest = self.state.guest.load(Ordering::Relaxed);
         if guest == NONE {
             apic.write(apic::INITIAL, 0);
             apic.write(
