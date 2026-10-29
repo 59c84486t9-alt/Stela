@@ -13,8 +13,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 mod config;
+pub mod endpoint;
 mod native;
-pub mod nvme;
 pub mod remap;
 mod source;
 pub use config::ChildConfig;

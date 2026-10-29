@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Independent posted-config and payload-domain models; authored UNRUN.
+//! Endpoint hierarchy and lifecycle against the independent posted-config and
+//! payload-domain models.
+use super::test_support::*;
 use super::*;
 use crate::bus::{
     dma::{
@@ -9,321 +11,30 @@ use crate::bus::{
     },
     mmio::owned::{
         AddressSpace, InstalledMapping, MapFailure, MapRequest, MappingPlatform, PhysicalSpan,
-        ResourceBacking, ResourceKind,
     },
+    pci::regs,
+    vmd::{VMCAP, VMCONFIG},
 };
-use alloc::collections::BTreeMap;
+use alloc::boxed::Box;
 use core::{
     cell::UnsafeCell,
     ops::Range,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicUsize},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use owned::Lifecycle as _;
 extern crate std;
-use crate::bus::pci::regs;
 use std::sync::Mutex;
 
-const ROOT: usize = 1 << 15;
-const BRIDGE: usize = 1 << 20;
-const NVME: usize = 2 << 20;
-const NVME_BASE: u64 = 0x8000_4000;
-const COMMAND_OFFSET: usize = regs::COMMAND as usize;
+/// The NVMe class code the model's endpoint carries.
+const NVME_CLASS: [u8; 3] = [0x01, 0x08, 0x02];
 
-// The same finite counter scale as the shared independent NVMe peer. This is
-// an admitted software-test budget, not a measured physical CPU calibration.
-// Composed command timeouts use the explicit cfg(test) 1-ms policy; actual
-// public native attachment keeps the shared 30-s controller policy.
-fn model_clock() -> Clock {
-    Clock {
-        ticks_per_microsecond: 1000,
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum Event {
-    Posted(usize, u8, u32),
-    Flushed(usize, u8),
-    Parent(u16),
-    Map(u64),
-    Drain,
-    Unmap(u64),
-    Nvme(&'static str),
-    Wait(u64),
-}
-struct State {
-    parent: BTreeMap<u16, u8>,
-    child: BTreeMap<usize, u8>,
-    pending: Option<(usize, u8, u32)>,
-    events: Vec<Event>,
-    ack_failure: Option<usize>,
-    pm_failure: bool,
-    pm_loses_bar: bool,
-    release_failure: bool,
-    epoch: u64,
-    drained: bool,
-    mappings: BTreeMap<u64, DomainMapping>,
-    next: u64,
-}
-fn get<K: Ord + Copy>(memory: &BTreeMap<K, u8>, keys: impl Iterator<Item = K>) -> u32 {
-    keys.enumerate().fold(0, |value, (i, key)| {
-        value | u32::from(*memory.get(&key).unwrap_or(&0xff)) << (i * 8)
-    })
-}
-impl State {
-    fn parent(&self, offset: u16, width: u8) -> u32 {
-        get(&self.parent, (0..u16::from(width)).map(|i| offset + i))
-    }
-    fn child(&self, offset: usize, width: u8) -> u32 {
-        get(&self.child, (0..usize::from(width)).map(|i| offset + i))
-    }
-    fn set_parent(&mut self, offset: u16, width: u8, value: u32) {
-        for i in 0..u16::from(width) {
-            self.parent.insert(offset + i, (value >> (i * 8)) as u8);
-        }
-    }
-    fn set(&mut self, offset: usize, width: u8, value: u32) {
-        for i in 0..usize::from(width) {
-            self.child.insert(offset + i, (value >> (i * 8)) as u8);
-        }
-    }
-    fn any_master(&self) -> bool {
-        self.parent(regs::COMMAND, 2) & u32::from(regs::COMMAND_MASTER) != 0
-            || self
-                .child
-                .keys()
-                .filter(|offset| **offset & 0xfff == COMMAND_OFFSET)
-                .any(|offset| self.child(*offset, 2) & u32::from(regs::COMMAND_MASTER) != 0)
-    }
-    fn add_function(&mut self, base: usize, class: u32, header: u8, kind: u8) {
-        for offset in 0..4096 {
-            self.child.insert(base + offset, 0);
-        }
-        self.set(base, 4, 0x1234_8086);
-        self.set(base + 8, 4, class);
-        self.set(base + 0xe, 1, u32::from(header));
-        self.set(
-            base + COMMAND_OFFSET,
-            2,
-            u32::from(regs::COMMAND_INTX_DISABLE),
-        );
-        self.set(base + 6, 2, 0x10);
-        self.set(base + 0x34, 1, 0x40);
-        self.set(base + 0x40, 2, 0x10);
-        self.set(base + 0x42, 2, 2 | u32::from(kind) << 4);
-    }
-    fn bridge(&mut self, base: usize, primary: u8, secondary: u8, subordinate: u8) {
-        self.add_function(base, 0x0604_0000, 1, if primary == 0 { 4 } else { 5 });
-        self.set(
-            base + 0x18,
-            4,
-            u32::from(primary) | u32::from(secondary) << 8 | u32::from(subordinate) << 16,
-        );
-        self.set(base + 0x20, 4, 0x8000_8000);
-        self.set(base + 0x24, 4, 0x0000_fff0); // Disabled prefetch window.
-    }
-}
-struct Model {
-    state: Arc<Mutex<State>>,
-    drops: Arc<AtomicUsize>,
-}
-impl Model {
-    fn new() -> Self {
-        let mut state = State {
-            parent: BTreeMap::new(),
-            child: BTreeMap::new(),
-            pending: None,
-            events: Vec::new(),
-            ack_failure: None,
-            pm_failure: false,
-            pm_loses_bar: false,
-            release_failure: false,
-            epoch: 1,
-            drained: false,
-            mappings: BTreeMap::new(),
-            next: 0,
-        };
-        for offset in 0..256 {
-            state.parent.insert(offset, 0);
-        }
-        state.set_parent(0, 4, 0x28c0_8086);
-        state.set_parent(regs::COMMAND, 2, u32::from(regs::COMMAND_INTX_DISABLE));
-        for (index, (base, prefetch)) in [
-            (0x4000_0000u64, false),
-            (0x8000_0000, false),
-            (0x9000_0000, true),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            state.set_parent(
-                0x10 + index as u16 * 8,
-                4,
-                base as u32 | 4 | if prefetch { 8 } else { 0 },
-            );
-            state.set_parent(0x14 + index as u16 * 8, 4, (base >> 32) as u32);
-        }
-        state.bridge(ROOT, 0, 1, 2);
-        state.bridge(BRIDGE, 1, 2, 2);
-        state.add_function(NVME, 0x0108_0200, 0, 0);
-        state.set(NVME + 0x10, 4, NVME_BASE as u32 | 4);
-        Self {
-            state: Arc::new(Mutex::new(state)),
-            drops: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-}
-impl Drop for Model {
-    fn drop(&mut self) {
-        self.drops.fetch_add(1, Ordering::Relaxed);
-    }
-}
-// SAFETY: isolated independent configuration storage. Child writes are posted
-// until an equal-width model read flushes them; no production permission.
-unsafe impl Registers for Model {
-    fn parent_read(&mut self, offset: u16, width: u8) -> Result<u32, Error> {
-        let state = self.state.lock().unwrap();
-        let value = state.parent(offset, width);
-        Ok(if state.release_failure && offset == regs::COMMAND {
-            value | u32::from(regs::COMMAND_MEMORY)
-        } else {
-            value
-        })
-    }
-    fn parent_write(&mut self, offset: u16, width: u8, value: u32) -> Result<(), Error> {
-        let mut state = self.state.lock().unwrap();
-        let old = state.parent(offset, width);
-        state.set_parent(offset, width, value);
-        if offset == regs::COMMAND {
-            if (old | value) & u32::from(regs::COMMAND_MASTER) != 0 {
-                state.drained = false;
-            }
-            state.events.push(Event::Parent(value as u16));
-        }
-        Ok(())
-    }
-    fn bar(&self, index: u8) -> (u64, u64, bool) {
-        match index {
-            0 => (0x4000_0000, 4 << 20, false),
-            2 => (0x8000_0000, 0x100_0000, false),
-            4 => (0x9000_0000, 0x100_0000, true),
-            _ => unreachable!(),
-        }
-    }
-    fn shadow_read(&mut self, _: usize) -> Result<u64, Error> {
-        Err(Error::Mapping)
-    }
-    fn child_read(&mut self, offset: usize, width: u8) -> Result<u32, Error> {
-        let mut state = self.state.lock().unwrap();
-        if let Some((posted, posted_width, value)) = state.pending
-            && posted == offset
-            && posted_width == width
-        {
-            state.pending = None;
-            if [ROOT, BRIDGE, NVME]
-                .into_iter()
-                .any(|base| posted == base + COMMAND_OFFSET)
-                && (state.child(posted, posted_width) | value) & u32::from(regs::COMMAND_MASTER)
-                    != 0
-            {
-                state.drained = false;
-            }
-            let mut value = value;
-            if [ROOT, BRIDGE, NVME]
-                .into_iter()
-                .any(|base| posted == base + 0x84)
-            {
-                let old = state.child(posted, 2);
-                value = value & !0x8000 | if value & 0x8000 == 0 { old & 0x8000 } else { 0 };
-                if state.pm_failure {
-                    value |= 3;
-                }
-                if state.pm_loses_bar {
-                    state.set(NVME + 0x10, 4, 0);
-                }
-            }
-            state.set(posted, posted_width, value);
-            state.events.push(Event::Flushed(posted, posted_width));
-        }
-        let value = state.child(offset, width);
-        Ok(if state.ack_failure == Some(offset) {
-            value & !u32::from(regs::COMMAND_MASTER)
-        } else {
-            value
-        })
-    }
-    fn child_write(&mut self, offset: usize, width: u8, value: u32) -> Result<(), Error> {
-        {
-            let mut state = self.state.lock().unwrap();
-            assert!(state.pending.is_none());
-            state.pending = Some((offset, width, value));
-            state.events.push(Event::Posted(offset, width, value));
-        }
-        // The native Registers contract requires this posted-write
-        // readback, independently of lifecycle's subsequent equality check.
-        let _ = self.child_read(offset, width)?;
-        Ok(())
-    }
-    fn table_read(&mut self, _: u64) -> Result<u32, Error> {
-        Err(Error::Mapping)
-    }
-    fn table_write(&mut self, _: u64, _: u32) -> Result<(), Error> {
-        Err(Error::Mapping)
-    }
-}
-struct Backing {
-    owner: Arc<()>,
-}
-// SAFETY: symbolic exclusive aperture in an isolated topology model; never
-// passed to a production mapping provider or interpreted as RAM.
-unsafe impl ResourceBacking for Backing {
-    fn physical_span(&self) -> PhysicalSpan {
-        PhysicalSpan::new(0x8000_0000, 0x100_0000).unwrap()
-    }
-    fn kind(&self) -> ResourceKind {
-        ResourceKind::Registers
-    }
-}
-fn fixture(model: Model) -> (Host<Model>, FirmwareBar) {
-    let host = match Host::initialize(model) {
-        Ok(host) => host,
-        Err((error, _)) => panic!("host: {error:?}"),
-    };
-    let bar = FirmwareBar {
-        domain: host.domain,
-        child: Address {
-            domain: host.domain,
-            bus: 2,
-            device: 0,
-            function: 0,
-        },
-        low: NVME_BASE as u32 | 4,
-        high: 0,
-        bus_start: NVME_BASE,
-        bytes: 8192,
-        window: host.windows[0],
-        resource: Resource::new(Box::new(Backing {
-            owner: Arc::new(()),
-        })),
-    };
-    (host, bar)
-}
-fn lifecycle(model: Model) -> (Lifecycle<Model>, Arc<Domain>) {
+fn lifecycle(model: Model) -> (Endpoint<Model>, Arc<Domain>) {
     let state = Arc::clone(&model.state);
-    let (mut host, bar) = fixture(model);
-    let hierarchy = Hierarchy::discover(&mut host, &bar).unwrap();
+    let (host, bar) = fixture(model);
     let domain = Arc::new(Domain { state, epoch: 1 });
-    (
-        Lifecycle {
-            host: Some(host),
-            returned: Rc::new(RefCell::new(Returned(None))),
-            hierarchy: Some(hierarchy),
-            domain: Some(domain.clone()),
-            clock: model_clock(),
-            phase: Phase::Claimed,
-        },
-        domain,
-    )
+    let (mut endpoint, _) = Endpoint::new(host, domain.clone(), model_clock());
+    endpoint.discover(&bar, NVME_CLASS).unwrap();
+    (endpoint, domain)
 }
 struct Domain {
     state: Arc<Mutex<State>>,
@@ -467,7 +178,8 @@ fn posted_commands_complete_before_payload_unmap() {
     unsafe { mapping.unmap() }.unwrap();
     assert_eq!(page_drops.load(Ordering::Relaxed), 1);
     assert!(!returned.is_ready());
-    life.release().unwrap();
+    // SAFETY: the model endpoint is stopped and drained, with no mappings left.
+    unsafe { life.release() }.unwrap();
     assert_eq!(drops.load(Ordering::Relaxed), 0);
     assert!(returned.is_ready());
     // SAFETY: this isolated model has no controller handles, real bindings or
@@ -524,7 +236,8 @@ fn abandoned_retired_handle_preserves_the_whole_original_hierarchy() {
     life.disable_dma().unwrap();
     // SAFETY: no model engine started; hierarchy BM-clear acknowledged.
     unsafe { domain.drain_posted_writes() }.unwrap();
-    life.release().unwrap();
+    // SAFETY: the model endpoint is stopped and drained, with no mappings left.
+    unsafe { life.release() }.unwrap();
     assert!(returned.is_ready());
     drop(life);
     drop(returned);
@@ -542,7 +255,7 @@ fn every_ancestor_window_and_unique_firmware_bus_route_is_required() {
         let model = Model::new();
         model.state.lock().unwrap().set(base + offset, 4, value);
         let (mut host, bar) = fixture(model);
-        assert!(Hierarchy::discover(&mut host, &bar).is_err());
+        assert!(Hierarchy::discover(&mut host, &bar, NVME_CLASS).is_err());
     }
     let model = Model::new();
     model
@@ -551,7 +264,7 @@ fn every_ancestor_window_and_unique_firmware_bus_route_is_required() {
         .unwrap()
         .bridge(ROOT + (1 << 15), 0, 1, 2);
     let (mut host, bar) = fixture(model);
-    assert!(Hierarchy::discover(&mut host, &bar).is_err());
+    assert!(Hierarchy::discover(&mut host, &bar, NVME_CLASS).is_err());
 }
 
 #[test]
@@ -566,7 +279,7 @@ fn stopped_siblings_remain_contained_and_a_second_nvme_is_explicitly_refused() {
             .add_function(extra, extra_class, 0, 0);
         let state = model.state.clone();
         let (mut host, bar) = fixture(model);
-        let result = Hierarchy::discover(&mut host, &bar);
+        let result = Hierarchy::discover(&mut host, &bar, NVME_CLASS);
         if extra_class == 0x0108_0200 {
             assert!(matches!(result, Err(Error::UnsupportedDevice)));
         } else {
@@ -633,7 +346,7 @@ fn invalid_timing_precedes_hierarchy_and_capability_config_accesses() {
         let model = Model::new();
         let state = model.state.clone();
         let (mut host, bar) = fixture(model);
-        let mut hierarchy = Hierarchy::discover(&mut host, &bar).unwrap();
+        let mut hierarchy = Hierarchy::discover(&mut host, &bar, NVME_CLASS).unwrap();
         let before = state.lock().unwrap().events.clone();
         let clock = Clock {
             ticks_per_microsecond: rate,
@@ -719,10 +432,10 @@ fn reassignment_removal_and_wrong_host_epoch_never_restart_the_controller() {
         let (mut host, mut bar) = fixture(model);
         if change == 0 {
             bar.domain += 1;
-            assert!(Hierarchy::discover(&mut host, &bar).is_err());
+            assert!(Hierarchy::discover(&mut host, &bar, NVME_CLASS).is_err());
             continue;
         }
-        let mut hierarchy = Hierarchy::discover(&mut host, &bar).unwrap();
+        let mut hierarchy = Hierarchy::discover(&mut host, &bar, NVME_CLASS).unwrap();
         {
             let mut state = state.lock().unwrap();
             match change {
@@ -774,7 +487,8 @@ fn provider_epoch_refusal_and_release_failure_keep_original_resources_pinned() {
     // SAFETY: no engine or payload was started, BM clears acknowledged.
     unsafe { domain.drain_posted_writes() }.unwrap();
     state.lock().unwrap().release_failure = true;
-    assert!(life.release().is_err());
+    // SAFETY: the model endpoint is stopped and drained, with no mappings left.
+    assert!(unsafe { life.release() }.is_err());
     assert_eq!(drops.load(Ordering::Relaxed), 0);
     assert!(Arc::strong_count(&domain) > 1);
     assert_eq!(life.phase, Phase::Quarantined);
@@ -805,7 +519,7 @@ fn malformed_capabilities_active_translation_and_bar_profiles_are_refused() {
             }
         }
         let (mut host, bar) = fixture(model);
-        assert!(Hierarchy::discover(&mut host, &bar).is_err());
+        assert!(Hierarchy::discover(&mut host, &bar, NVME_CLASS).is_err());
     }
     for (low, high, bytes) in [
         (0, 0, 8192),
@@ -929,12 +643,12 @@ fn resource_identity_and_epoch_gate_registry_maps() {
         .owner
         .clone();
     let (wrong, _) = mapping_platform(Arc::new(()));
-    assert!(map_registers(&bar, &wrong).is_err());
+    assert!(bar.map(&wrong).is_err());
     let (authority, platform) = mapping_platform(owner);
     platform.epoch.store(2, Ordering::Relaxed);
-    assert!(map_registers(&bar, &authority).is_err());
+    assert!(bar.map(&authority).is_err());
     platform.epoch.store(1, Ordering::Relaxed);
-    let mut first = map_registers(&bar, &authority).unwrap();
+    let mut first = bar.map(&authority).unwrap();
     assert_eq!(
         first.physical_span().unwrap(),
         PhysicalSpan::new(NVME_BASE, 8192).unwrap()
@@ -968,5 +682,3 @@ fn resource_identity_and_epoch_gate_registry_maps() {
     assert_ne!(unmaps[0], unmaps[1]);
     assert_eq!(unmaps[1], unmaps[2]);
 }
-
-mod composed;

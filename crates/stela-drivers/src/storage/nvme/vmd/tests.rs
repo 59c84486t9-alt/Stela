@@ -3,9 +3,23 @@
 //! All effects run synchronously in one thread. No MappingPlatform callback is
 //! treated as a register-access hook, and no raw device memory races CPU memory.
 use super::*;
-use crate::bus::pci::regs;
+use crate::bus::{
+    dma::{
+        mapping::{Direction, DmaError, DomainMapping},
+        pages::DmaPages,
+    },
+    pci::regs,
+    vmd::endpoint::test_support::*,
+};
+use alloc::vec::Vec;
+use core::{
+    ops::Range,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+extern crate std;
 use crate::{block::BlockDevice, storage::nvme::owned::protocol};
 use protocol::{Fault, Protocol};
+use std::sync::Mutex;
 
 const PATH: [usize; 3] = [ROOT, BRIDGE, NVME];
 const SIBLING: usize = NVME + (1 << 15);
@@ -177,7 +191,7 @@ impl Fixture {
         // The private sequence is exactly the public native sequence; no fake
         // native MMIO permission or physical requester claim is supplied.
         unsafe {
-            attach_with_registers_using(
+            attach_with(
                 self.host.take().unwrap(),
                 self.bar.take().unwrap(),
                 self.domain.as_ref().unwrap().clone(),

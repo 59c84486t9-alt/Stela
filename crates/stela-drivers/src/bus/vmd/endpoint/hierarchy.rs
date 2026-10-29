@@ -199,6 +199,7 @@ impl Hierarchy {
     pub(super) fn discover<R: Registers>(
         host: &mut Host<R>,
         bar: &FirmwareBar,
+        class: [u8; 3],
     ) -> Result<Self, Error> {
         host.check_live()?;
         parent_d0(host)?;
@@ -215,19 +216,19 @@ impl Hierarchy {
         let candidates: Vec<_> = children
             .iter()
             .enumerate()
-            .filter(|(_, function)| function.child.class == crate::storage::nvme::CLASS)
+            .filter(|(_, function)| function.child.class == class)
             .map(|(index, _)| index)
             .collect();
         if candidates.len() != 1 {
             return Err(Error::UnsupportedDevice);
         }
         let selected = candidates[0];
-        let nvme = &children[selected];
-        if nvme.child.address != bar.child
-            || nvme.child.header != 0
-            || !nvme.capabilities.is_pcie()
-            || nvme.bars[0] != bar.low
-            || (bar.low & 6 == 4 && nvme.bars[1] != bar.high)
+        let endpoint = &children[selected];
+        if endpoint.child.address != bar.child
+            || endpoint.child.header != 0
+            || !endpoint.capabilities.is_pcie()
+            || endpoint.bars[0] != bar.low
+            || (bar.low & 6 == 4 && endpoint.bars[1] != bar.high)
         {
             return Err(Error::InvalidResource);
         }
@@ -266,7 +267,7 @@ impl Hierarchy {
                 }
             }
         }
-        let path = Self::path(&children, host.first_bus, nvme.child.address.bus)?;
+        let path = Self::path(&children, host.first_bus, endpoint.child.address.bus)?;
         let (_, prefetch) = bar_address(bar.low, bar.high, bar.bytes)?;
         for &index in &path {
             children[index].bridge.expect("path bridge").routes(

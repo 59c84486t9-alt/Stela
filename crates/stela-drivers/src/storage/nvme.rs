@@ -26,6 +26,7 @@ mod features;
 mod io;
 pub mod owned;
 mod recovery;
+pub mod vmd;
 use core::{
     cell::RefCell,
     sync::atomic::{Ordering, fence},

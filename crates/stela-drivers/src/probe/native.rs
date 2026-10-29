@@ -476,7 +476,7 @@ pub(super) unsafe fn vmd(
     };
     // SAFETY: `bytes` is the child's firmware-assigned BAR0, sized with its
     // decode off, and the stopped hierarchy has no other owner.
-    let bar = match unsafe { vmd::nvme::FirmwareBar::claim(&mut host, child.address, bytes) } {
+    let bar = match unsafe { vmd::endpoint::FirmwareBar::claim(&mut host, child.address, bytes) } {
         Ok(bar) => bar,
         Err(error) => return Err(failed(error, Box::new(host))),
     };
@@ -488,8 +488,17 @@ pub(super) unsafe fn vmd(
     );
     // SAFETY: the mount's domain covers the host's requester and its aliases,
     // its permission issued these mappings, and the hierarchy is stopped.
-    match unsafe { vmd::nvme::attach(host, bar, domain, authority, services.pages(), clock, label) }
-    {
+    match unsafe {
+        crate::storage::nvme::vmd::attach(
+            host,
+            bar,
+            domain,
+            authority,
+            services.pages(),
+            clock,
+            label,
+        )
+    } {
         Ok((attached, hierarchy)) => Ok(Vmd {
             nvme: Some(attached),
             others,
