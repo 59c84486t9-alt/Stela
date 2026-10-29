@@ -149,6 +149,8 @@ pub struct Reflection {
     /// `enum stela_air_patch`.
     pub(super) patch: u32,
     pub(super) patch_control_points: u32,
+    pub(super) barycentrics: u32,
+    pub(super) interpolants: u32,
     pub(super) buffers: [BufferUse; MAX_BUFFER_BINDINGS as usize],
     pub(super) textures: [TextureUse; MAX_TEXTURE_BINDINGS as usize],
     pub(super) samplers: [u32; MAX_SAMPLER_BINDINGS as usize],

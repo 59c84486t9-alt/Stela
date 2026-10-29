@@ -402,6 +402,25 @@ fn reflections_become_interfaces_with_their_provenance() {
 }
 
 #[test]
+fn fragment_interpolation_is_a_feature_of_its_function() {
+    reflecting(|r| {
+        r.stage = 2;
+        r.barycentrics = 1;
+        r.interpolants = 1;
+    });
+    let (mut compiler, library) = with_library();
+    let interface = compiler
+        .reflect(library, "kernel", &Specialization::default())
+        .unwrap();
+    assert!(
+        interface
+            .features
+            .contains(ShaderFeatures::BARYCENTRICS.union(ShaderFeatures::PULL_MODEL_INTERPOLATION))
+    );
+    assert!(compiler.features().contains(interface.features));
+}
+
+#[test]
 fn compilations_carry_their_specialization_and_release_through_the_service() {
     use ffi::primitive::{FLOAT, HALF};
     reflecting(|r| {
@@ -433,6 +452,11 @@ fn compilations_carry_their_specialization_and_release_through_the_service() {
         .compile(library, "kernel", &specialization)
         .unwrap();
     assert!(fragment.interface.discards);
+    assert!(
+        !fragment.interface.features.intersects(
+            ShaderFeatures::BARYCENTRICS.union(ShaderFeatures::PULL_MODEL_INTERPOLATION)
+        )
+    );
     assert_eq!(
         fragment
             .interface

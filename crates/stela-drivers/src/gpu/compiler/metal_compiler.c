@@ -201,7 +201,12 @@ add_input(struct reflecting *r, const struct stela_air_stage_io *io)
    case STELA_AIR_STAGE_BUFFER: return add_buffer(r, &io->buffer, io->argument_buffer);
    case STELA_AIR_STAGE_TEXTURE: return add_texture(r, &io->texture);
    case STELA_AIR_STAGE_SAMPLER: return add_sampler(r, &io->sampler);
-   case STELA_AIR_VARYING: return add_varying(r, io);
+   case STELA_AIR_VARYING:
+      out->interpolants |= io->interpolant;
+      return add_varying(r, io);
+   case STELA_AIR_BARYCENTRIC:
+      out->barycentrics = 1;
+      return true;
    case STELA_AIR_VERTEX_INPUT:
       return add_attribute(r, io->location, io->primitive, io->components);
    case STELA_AIR_CONTROL_POINTS:

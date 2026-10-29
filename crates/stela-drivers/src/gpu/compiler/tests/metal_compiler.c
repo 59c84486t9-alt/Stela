@@ -165,6 +165,26 @@ static const char *fragment =
    "!40 = !{i32 0, !\"air.fragment_input\", !\"user(uv)\", !\"air.center\", !\"air.perspective\","
    " !\"air.arg_type_name\", !\"float2\", !\"air.arg_name\", !\"uv\"}\n";
 
+/* Reads its barycentric coordinates and interpolates its uv at the
+ * centroid. */
+static const char *pulled =
+   "declare <2 x float> @air.interpolate_centroid_perspective.v2f32(ptr addrspace(1))\n"
+   "define <4 x float> @pulled(ptr addrspace(1) %uv, <3 x float> %bary) {\n"
+   "%c = call <2 x float> @air.interpolate_centroid_perspective.v2f32(ptr addrspace(1) %uv)\n"
+   "%x = extractelement <2 x float> %c, i64 0\n"
+   "%v = insertelement <3 x float> %bary, float %x, i64 0\n"
+   "%r = shufflevector <3 x float> %v, <3 x float> %v, <4 x i32> <i32 0, i32 1, i32 2, i32 0>\n"
+   "ret <4 x float> %r\n}\n"
+   "!air.fragment = !{!2}\n"
+   "!2 = !{ptr @pulled, !3, !4}\n!3 = !{!30}\n"
+   "!30 = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\","
+   " !\"air.arg_name\", !\"color\"}\n"
+   "!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.fragment_input\", !\"user(uv)\", !\"air.interpolation_function\","
+   " !\"air.perspective\", !\"air.arg_type_name\", !\"float2\", !\"air.arg_name\", !\"uv\"}\n"
+   "!41 = !{i32 1, !\"air.barycentric_coord\", !\"air.center\", !\"air.perspective\","
+   " !\"air.arg_type_name\", !\"float3\", !\"air.arg_name\", !\"bary\"}\n";
+
 static const char *object =
    "declare void @air.set_threadgroups_per_grid_mesh_properties(ptr addrspace(3), <3 x i32>)\n"
    "define void @object(ptr addrspace(6) %payload, ptr addrspace(3) %grid) {\n"
@@ -326,6 +346,14 @@ render_stages_compile_at_their_linked_locations(void)
    assert(varying(shaders[1], nir_var_shader_in, VARYING_SLOT_VAR0 + 1));
    for (unsigned i = 0; i < 2; i++)
       stela_metal_release(shaders[i]);
+
+   assert(!reflection.barycentrics && !reflection.interpolants);
+   /* Interpolants link as varyings. */
+   assert(reflect(pulled, "pulled", &reflection, &error));
+   assert(reflection.barycentrics && reflection.interpolants && reflection.varying_count == 1);
+   nir_shader *pulling = compile(pulled, "pulled", &specialization, &error);
+   assert(pulling && varying(pulling, nir_var_shader_in, VARYING_SLOT_VAR0 + 1));
+   stela_metal_release(pulling);
 
    /* A varying the pipeline did not link is refused. */
    const struct stela_metal_specialization unlinked = {.varyings = linked, .varying_count = 1};

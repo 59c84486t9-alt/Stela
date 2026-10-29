@@ -73,6 +73,9 @@ struct stela_metal_reflection {
    /* A post-tessellation vertex function's enum stela_air_patch and the
     * control points it declares, zero when it declares none. */
    uint32_t patch, patch_control_points;
+   /* Whether a fragment function reads its barycentric coordinates, and
+    * interpolates an interpolant. */
+   uint32_t barycentrics, interpolants;
    struct stela_metal_buffer_use buffers[STELA_METAL_BUFFERS];
    struct stela_metal_texture_use textures[STELA_METAL_TEXTURES];
    uint32_t samplers[STELA_METAL_SAMPLERS];
@@ -83,7 +86,7 @@ struct stela_metal_reflection {
    struct stela_metal_function_constant function_constants[STELA_METAL_FUNCTION_CONSTANTS];
    char names[STELA_METAL_NAME_BYTES];
 };
-#define STELA_METAL_REFLECTION_BYTES 18280u
+#define STELA_METAL_REFLECTION_BYTES 18288u
 
 /* The target's facts, fixed for a device. nir is the Vulkan driver's
  * compiler options, which must outlive every shader compiled with them. */

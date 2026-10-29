@@ -61,7 +61,9 @@ const FEATURES: ShaderFeatures = ShaderFeatures::COMPUTE
     .union(ShaderFeatures::ARGUMENT_BUFFERS)
     .union(ShaderFeatures::LAYERED_RENDERING)
     .union(ShaderFeatures::VERTEX_AMPLIFICATION)
-    .union(ShaderFeatures::TESSELLATION);
+    .union(ShaderFeatures::TESSELLATION)
+    .union(ShaderFeatures::BARYCENTRICS)
+    .union(ShaderFeatures::PULL_MODEL_INTERPOLATION);
 
 /// LLVM instructions one compilation may lower, legalization included. Far
 /// beyond the functions Metal compiles, it bounds the work of hostile input.
@@ -728,7 +730,12 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
         buffers.iter().any(|buffer| buffer.argument_buffer),
     )
     .with(ShaderFeatures::VERTEX_AMPLIFICATION, r.amplification != 0)
-    .with(ShaderFeatures::TESSELLATION, patch.is_some());
+    .with(ShaderFeatures::TESSELLATION, patch.is_some())
+    .with(ShaderFeatures::BARYCENTRICS, r.barycentrics != 0)
+    .with(
+        ShaderFeatures::PULL_MODEL_INTERPOLATION,
+        r.interpolants != 0,
+    );
     let interface = Interface {
         stage,
         patch,
