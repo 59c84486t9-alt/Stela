@@ -92,6 +92,12 @@ struct translator {
    struct stela_air_render render;
    const struct stela_air_field *fields; /* The entry's argument buffer fields. */
    nir_variable *outputs[AIR_MAX_ARGUMENTS];
+   /* An object or mesh function's mesh grid properties or mesh, its payload,
+    * a mesh's primitive indices, the grid or primitive count any thread may
+    * set, and the block every thread leaves the function through. */
+   LLVMValueRef mesh, mesh_grid;
+   nir_variable *payload, *indices, *mesh_state;
+   nir_block *exit;
    /* An amplified vertex function's layer and viewport outputs. */
    nir_variable *layer, *viewport;
    struct stela_air_error *error;
@@ -355,11 +361,21 @@ pointer_offset(struct value *target, const struct value *origin, uint64_t offset
    target->steps = gcd(origin->steps, steps);
 }
 
-/* Thread, device, constant or threadgroup memory; roots validate the rest. */
+/* Thread, device, constant, threadgroup or object data memory; roots
+ * validate the rest. */
 static bool
 pointer_space(LLVMTypeRef type)
 {
-   return LLVMGetTypeKind(type) == LLVMPointerTypeKind && LLVMGetPointerAddressSpace(type) <= 3;
+   return LLVMGetTypeKind(type) == LLVMPointerTypeKind &&
+          (LLVMGetPointerAddressSpace(type) <= 3 || LLVMGetPointerAddressSpace(type) == 6);
+}
+
+/* A kernel, object or mesh function. */
+static bool
+compute_like(const struct translator *t)
+{
+   return !t->stage_options || t->stage_options->stage == STELA_AIR_OBJECT ||
+          t->stage_options->stage == STELA_AIR_MESH;
 }
 
 static nir_def *
@@ -637,20 +653,45 @@ argument_root(struct translator *t, struct value *value, LLVMValueRef param,
    return true;
 }
 
+/* The object payload: task payload memory, which both stages address from
+ * zero. */
 static bool
-kernel_arguments(struct translator *t, LLVMValueRef fn)
+payload_argument(struct translator *t, LLVMValueRef param, const struct stela_air_buffer *desc)
 {
-   /* The fields outlive this function in the translation's values. */
-   struct stela_air_kernel *kernel = ralloc(t->values, struct stela_air_kernel);
-   if (!kernel)
-      return fail(t, STELA_AIR_ALLOCATION, "AIR kernel reflection allocation failed");
-   if (!stela_air_metadata_kernel(&t->metadata, fn, kernel))
-      return false;
+   if (desc->type_size > t->stage_options->max_payload_bytes)
+      return fail(t, STELA_AIR_LIMIT, "object payload exceeds the target limit");
+   nir_variable *var = nir_variable_create(t->b.shader, nir_var_mem_task_payload,
+      glsl_array_type(glsl_uint8_t_type(), desc->type_size, 1), "air.payload");
+   if (!var || !put_value(t, param, nir_imm_int64(&t->b, 0), desc->access))
+      return fail(t, STELA_AIR_ALLOCATION, "object payload allocation failed");
+   var->data.alignment = desc->type_alignment;
+   struct value *value = find_value(t, param);
+   value->pointer_root = param;
+   value->storage = var;
+   value->storage_size = desc->type_size;
+   t->payload = var;
+   return true;
+}
+
+/* The arguments of a kernel, object or mesh function. */
+static bool
+compute_arguments(struct translator *t, const struct stela_air_kernel *kernel)
+{
    t->fields = kernel->fields;
    bool ssbo_slots[UINT8_MAX + 1] = {false};
    for (unsigned a = 0; a < kernel->count; a++) {
       const struct stela_air_argument *argument = &kernel->arguments[a];
       LLVMValueRef param = argument->value;
+      if (argument->is_mesh || argument->is_mesh_grid) {
+         /* Only the mesh setters take these. */
+         *(argument->is_mesh ? &t->mesh : &t->mesh_grid) = param;
+         continue;
+      }
+      if (argument->is_payload) {
+         if (!payload_argument(t, param, &argument->buffer))
+            return false;
+         continue;
+      }
       if (argument->is_texture || argument->is_sampler) {
          if (!put_resource(t, param, argument->is_texture ? &argument->texture : NULL,
                            &argument->sampler))
@@ -715,6 +756,16 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
       }
    }
    return true;
+}
+
+static bool
+kernel_arguments(struct translator *t, LLVMValueRef fn)
+{
+   /* The fields outlive this function in the translation's values. */
+   struct stela_air_kernel *kernel = ralloc(t->values, struct stela_air_kernel);
+   if (!kernel)
+      return fail(t, STELA_AIR_ALLOCATION, "AIR kernel reflection allocation failed");
+   return stela_air_metadata_kernel(&t->metadata, fn, kernel) && compute_arguments(t, kernel);
 }
 
 static bool
@@ -1522,6 +1573,18 @@ stage_value_instruction(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
    return put_lanes(t, inst, lanes, n, a->bits);
 }
 
+/* The varying map's row for a varying. */
+static const struct stela_air_varying_slot *
+varying_slot(struct translator *t, const struct stela_air_stage_io *io)
+{
+   for (unsigned i = 0; i < t->stage_options->varying_count; i++) {
+      const struct stela_air_varying_slot *v = &t->stage_options->varyings[i];
+      if (v->identifier_bytes == io->identifier_bytes && !memcmp(v->identifier, io->identifier, io->identifier_bytes))
+         return v;
+   }
+   UNREACHABLE("stage map validated before emission");
+}
+
 static unsigned
 stage_location(struct translator *t, const struct stela_air_stage_io *io)
 {
@@ -1536,14 +1599,10 @@ stage_location(struct translator *t, const struct stela_air_stage_io *io)
    case STELA_AIR_DEPTH: return FRAG_RESULT_DEPTH;
    case STELA_AIR_SAMPLE_MASK: return FRAG_RESULT_SAMPLE_MASK;
    case STELA_AIR_STENCIL: return FRAG_RESULT_STENCIL;
+   case STELA_AIR_MESH_PRIMITIVE_ID: return VARYING_SLOT_PRIMITIVE_ID;
    default: break;
    }
-   for (unsigned i = 0; i < t->stage_options->varying_count; i++) {
-      const struct stela_air_varying_slot *v = &t->stage_options->varyings[i];
-      if (v->identifier_bytes == io->identifier_bytes && !memcmp(v->identifier, io->identifier, io->identifier_bytes))
-         return VARYING_SLOT_VAR0 + v->location;
-   }
-   UNREACHABLE("stage map validated before emission");
+   return VARYING_SLOT_VAR0 + varying_slot(t, io)->location;
 }
 
 /* Stage IO crosses the stage boundary in 32-bit lanes: floats for float and
@@ -1593,17 +1652,24 @@ stage_variable(struct translator *t, const struct stela_air_stage_io *io, bool o
       GLSL_TYPE_FLOAT : stage_signed(io->primitive) ? GLSL_TYPE_INT : GLSL_TYPE_UINT;
    /* The indices and masks are ints, as SPIR-V's builtins are. */
    if (io->semantic == STELA_AIR_LAYER || io->semantic == STELA_AIR_VIEWPORT ||
-       io->semantic == STELA_AIR_SAMPLE_MASK || io->semantic == STELA_AIR_STENCIL)
+       io->semantic == STELA_AIR_SAMPLE_MASK || io->semantic == STELA_AIR_STENCIL ||
+       io->semantic == STELA_AIR_MESH_PRIMITIVE_ID)
       base = GLSL_TYPE_INT;
    /* Clip distances are a compact float array, as SPIR-V's ClipDistance is. */
    bool clip = io->semantic == STELA_AIR_CLIP_DISTANCE;
    const struct glsl_type *type = clip ? glsl_array_type(glsl_float_type(), io->clip_distances, 0) :
                                          glsl_vector_type(base, io->components);
+   /* A mesh output has one element per vertex or primitive. */
+   const struct stela_air_stage_entry *entry = &t->render.entry;
+   bool mesh = t->stage_options->stage == STELA_AIR_MESH;
+   if (mesh)
+      type = glsl_array_type(type, io->per_primitive ? entry->max_primitives : entry->max_vertices, 0);
    nir_variable *var = nir_variable_create(t->b.shader, output ? nir_var_shader_out : nir_var_shader_in,
                                            type, name);
    if (!var) { fail(t, STELA_AIR_ALLOCATION, "render IO variable allocation failed"); return NULL; }
    var->data.location = stage_location(t, io);
    var->data.compact = clip;
+   var->data.per_primitive = mesh && io->per_primitive;
    if (clip)
       t->b.shader->info.clip_distance_array_size = io->clip_distances;
    var->data.index = io->semantic == STELA_AIR_RENDER_TARGET ? io->index : 0;
@@ -1622,8 +1688,60 @@ stage_variable(struct translator *t, const struct stela_air_stage_io *io, bool o
                                 INTERP_MODE_NOPERSPECTIVE;
       var->data.centroid = io->sampling == STELA_AIR_CENTROID;
       var->data.sample = io->sampling == STELA_AIR_SAMPLE;
+      /* Mesh primitive data is constant over its primitive. */
+      if (io->semantic == STELA_AIR_VARYING && varying_slot(t, io)->per_primitive) {
+         var->data.per_primitive = true;
+         var->data.interpolation = INTERP_MODE_FLAT;
+         var->data.centroid = var->data.sample = false;
+      }
    }
    return var;
+}
+
+/* A mesh function's shader info and outputs: its data and primitive
+ * indices. */
+static bool
+mesh_outputs(struct translator *t)
+{
+   const struct stela_air_stage_entry *entry = &t->render.entry;
+   if (entry->max_vertices > t->stage_options->max_mesh_vertices ||
+       entry->max_primitives > t->stage_options->max_mesh_primitives)
+      return fail(t, STELA_AIR_LIMIT, "mesh capacities exceed the target limits");
+   shader_info *info = &t->b.shader->info;
+   info->mesh.max_vertices_out = entry->max_vertices;
+   info->mesh.max_primitives_out = entry->max_primitives;
+   info->mesh.primitive_type = entry->topology == STELA_AIR_POINTS ? MESA_PRIM_POINTS :
+                               entry->topology == STELA_AIR_LINES ? MESA_PRIM_LINES :
+                               MESA_PRIM_TRIANGLES;
+   for (unsigned i = 0; i < entry->output_count; i++) {
+      if (!(t->outputs[i] = stage_variable(t, &t->render.outputs[i], true)))
+         return false;
+   }
+   unsigned corners = mesa_vertices_per_prim(info->mesh.primitive_type);
+   t->indices = nir_variable_create(t->b.shader, nir_var_shader_out,
+      glsl_array_type(glsl_vector_type(GLSL_TYPE_UINT, corners), entry->max_primitives, 0),
+      "air.primitive_indices");
+   if (!t->indices)
+      return fail(t, STELA_AIR_ALLOCATION, "mesh index variable allocation failed");
+   t->indices->data.location = VARYING_SLOT_PRIMITIVE_INDICES;
+   t->indices->data.per_primitive = true;
+   return true;
+}
+
+/* The arguments of an object or mesh function, and a mesh function's
+ * outputs. The grid or primitive count lives in threadgroup memory: Metal
+ * lets any thread set it, while Vulkan takes it uniformly at the end. */
+static bool
+mesh_stage_arguments(struct translator *t)
+{
+   if (!compute_arguments(t, &t->render.arguments))
+      return false;
+   bool object = t->stage_options->stage == STELA_AIR_OBJECT;
+   t->mesh_state = nir_variable_create(t->b.shader, nir_var_mem_shared,
+      glsl_array_type(glsl_uint_type(), object ? 3 : 1, 0), "air.mesh_state");
+   if (!t->mesh_state)
+      return fail(t, STELA_AIR_ALLOCATION, "mesh state allocation failed");
+   return object || mesh_outputs(t);
 }
 
 /* A flat int output an amplified vertex function writes for its view. */
@@ -2265,8 +2383,8 @@ synchronization_call(struct translator *t, LLVMValueRef inst, LLVMValueRef calle
       return *lowered = false, true;
    *lowered = true;
    if (kind == THREADGROUP_BARRIER) {
-      if (t->stage_options)
-         return fail(t, STELA_AIR_INSTRUCTION, "threadgroup barriers exist only in kernels");
+      if (!compute_like(t))
+         return fail(t, STELA_AIR_INSTRUCTION, "threadgroup barriers exist only in compute-like functions");
       if (!shared_profile(t))
          return false;
    }
@@ -2460,6 +2578,177 @@ argument_load(struct translator *t, LLVMValueRef inst)
    return true;
 }
 
+/* Object and mesh functions' setters of their mesh grid properties and
+ * mesh, in DXMT's AIR forms: the handle, then indices, then the value. */
+enum mesh_setter {
+   MESH_POSITION, MESH_POINT_SIZE, MESH_CLIP_DISTANCE, MESH_VERTEX_DATA, MESH_PRIMITIVE_DATA,
+   MESH_LAYER, MESH_VIEWPORT, MESH_PRIMITIVE_ID, MESH_INDEX, MESH_PRIMITIVE_COUNT, MESH_GRID,
+};
+
+static const struct {
+   const char *stem;
+   unsigned operands; /* Including the handle. */
+   bool overload; /* The name ends with the value's overload. */
+   enum stela_air_stage_semantic semantic; /* The output it sets, if any. */
+} mesh_setters[] = {
+   [MESH_POSITION] = {"air.set_position_mesh", 3, false, STELA_AIR_POSITION},
+   [MESH_POINT_SIZE] = {"air.set_point_size_mesh", 3, false, STELA_AIR_POINT_SIZE},
+   [MESH_CLIP_DISTANCE] = {"air.set_clip_distance_mesh", 4, false, STELA_AIR_CLIP_DISTANCE},
+   [MESH_VERTEX_DATA] = {"air.set_vertex_data_mesh", 4, true, STELA_AIR_VARYING},
+   [MESH_PRIMITIVE_DATA] = {"air.set_primitive_data_mesh", 4, true, STELA_AIR_VARYING},
+   [MESH_LAYER] = {"air.set_render_target_array_index_mesh", 3, true, STELA_AIR_LAYER},
+   [MESH_VIEWPORT] = {"air.set_viewport_array_index_mesh", 3, true, STELA_AIR_VIEWPORT},
+   [MESH_PRIMITIVE_ID] = {"air.set_primitive_id_mesh", 3, false, STELA_AIR_MESH_PRIMITIVE_ID},
+   [MESH_INDEX] = {"air.set_index_mesh", 3},
+   [MESH_PRIMITIVE_COUNT] = {"air.set_primitive_count_mesh", 2},
+   [MESH_GRID] = {"air.set_threadgroups_per_grid_mesh_properties", 2},
+};
+
+/* The setter a call names, or UINT_MAX. */
+static unsigned
+mesh_setter(LLVMValueRef inst, const char *name, size_t length)
+{
+   unsigned operands = LLVMGetNumArgOperands(inst);
+   for (unsigned s = 0; s < ARRAY_SIZE(mesh_setters); s++) {
+      char expected[96];
+      size_t stem = strlen(mesh_setters[s].stem);
+      memcpy(expected, mesh_setters[s].stem, stem + 1);
+      if (mesh_setters[s].overload && operands) {
+         expected[stem] = '.';
+         stela_air_call_overload(LLVMTypeOf(LLVMGetOperand(inst, operands - 1)), expected + stem + 1,
+                                 sizeof(expected) - stem - 1);
+      }
+      if (stela_air_call_named(name, length, expected))
+         return s;
+   }
+   return UINT_MAX;
+}
+
+/* The output a setter sets; mesh data by its constant data index. */
+static unsigned
+mesh_output(struct translator *t, enum mesh_setter setter, LLVMValueRef data)
+{
+   const struct stela_air_stage_entry *entry = &t->render.entry;
+   for (unsigned i = 0; i < entry->output_count; i++) {
+      const struct stela_air_stage_io *io = &t->render.outputs[i];
+      if (io->semantic != mesh_setters[setter].semantic)
+         continue;
+      if (io->semantic != STELA_AIR_VARYING ||
+          (io->per_primitive == (setter == MESH_PRIMITIVE_DATA) && LLVMIsAConstantInt(data) &&
+           LLVMConstIntGetZExtValue(data) == io->index))
+         return i;
+   }
+   return UINT_MAX;
+}
+
+/* Stores value to element (below count), and below `inner` its index, of
+ * an arrayed output, or the components `mask` names of the element; out of
+ * range, the store is discarded. */
+static bool
+mesh_store(struct translator *t, nir_variable *var, nir_def *element, unsigned count,
+           nir_def *index, unsigned inner, nir_def *value, unsigned mask)
+{
+   nir_builder *b = &t->b;
+   nir_def *inside = nir_ult_imm(b, element, count);
+   if (index)
+      inside = nir_iand(b, inside, nir_ult_imm(b, index, inner));
+   struct memory_guard guard;
+   if (!memory_guard_begin(t, inside, &guard))
+      return false;
+   nir_deref_instr *deref = nir_build_deref_array(b, nir_build_deref_var(b, var), element);
+   if (index)
+      deref = nir_build_deref_array(b, deref, index);
+   nir_store_deref(b, deref, value, mask);
+   memory_guard_end(t, &guard, NULL);
+   return true;
+}
+
+/* Metal's flat index list: index i is corner i % n of primitive i / n. */
+static bool
+mesh_index(struct translator *t, nir_def *index, nir_def *vertex)
+{
+   nir_builder *b = &t->b;
+   unsigned corners = mesa_vertices_per_prim(t->b.shader->info.mesh.primitive_type);
+   nir_def *primitive = nir_udiv_imm(b, index, corners);
+   nir_def *corner = nir_umod_imm(b, index, corners);
+   nir_def *value = nir_replicate(b, nir_u2u32(b, vertex), corners);
+   for (unsigned c = 0; c < corners; c++) {
+      /* Only the matching corner's guard passes. */
+      nir_def *element = nir_bcsel(b, nir_ieq_imm(b, corner, c), primitive,
+                                   nir_imm_int(b, t->render.entry.max_primitives));
+      if (!mesh_store(t, t->indices, element, t->render.entry.max_primitives, NULL, 0, value,
+                      1u << c))
+         return false;
+   }
+   return true;
+}
+
+/* A call of an object or mesh setter; false with no error when the call is
+ * something else. */
+static bool
+mesh_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, const char *name,
+          size_t length, bool *lowered)
+{
+   unsigned setter = mesh_setter(inst, name, length);
+   *lowered = setter != UINT_MAX;
+   if (!*lowered)
+      return true;
+   LLVMValueRef handle = setter == MESH_GRID ? t->mesh_grid : t->mesh;
+   unsigned operands = mesh_setters[setter].operands;
+   if (!handle || !LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee) ||
+       LLVMGetNumArgOperands(inst) != operands || LLVMGetOperand(inst, 0) != handle ||
+       LLVMGetCalledFunctionType(inst) != LLVMGlobalGetValueType(callee) ||
+       LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMVoidTypeKind)
+      return fail(t, STELA_AIR_INSTRUCTION, "mesh setter without its function's mesh or grid");
+   nir_def *values[4] = {NULL};
+   for (unsigned i = 1; i < operands; i++) {
+      if (!(values[i] = get_value(t, LLVMGetOperand(inst, i))))
+         return false;
+   }
+   nir_builder *b = &t->b;
+   nir_def *value = values[operands - 1];
+   for (unsigned i = 1; i + 1 < operands; i++) {
+      if (values[i]->num_components != 1 || values[i]->bit_size != 32)
+         return fail(t, STELA_AIR_TYPE, "mesh setter indices are 32-bit integers");
+   }
+   switch (setter) {
+   case MESH_GRID: {
+      if (value->num_components != 3 || value->bit_size != 32)
+         return fail(t, STELA_AIR_TYPE, "a mesh grid is three 32-bit integers");
+      nir_deref_instr *state = nir_build_deref_var(b, t->mesh_state);
+      for (unsigned i = 0; i < 3; i++)
+         nir_store_deref(b, nir_build_deref_array_imm(b, state, i), nir_channel(b, value, i), 1);
+      return true;
+   }
+   case MESH_PRIMITIVE_COUNT:
+      if (value->num_components != 1 || value->bit_size != 32)
+         return fail(t, STELA_AIR_TYPE, "a primitive count is a 32-bit integer");
+      nir_store_deref(b, nir_build_deref_array_imm(b, nir_build_deref_var(b, t->mesh_state), 0),
+                      value, 1);
+      return true;
+   case MESH_INDEX:
+      if (value->num_components != 1 || value->bit_size != 8)
+         return fail(t, STELA_AIR_TYPE, "a mesh index is an 8-bit vertex");
+      return mesh_index(t, values[1], value);
+   default:
+      break;
+   }
+   bool data = setter == MESH_VERTEX_DATA || setter == MESH_PRIMITIVE_DATA;
+   unsigned output = mesh_output(t, setter, data ? LLVMGetOperand(inst, 1) : NULL);
+   if (output == UINT_MAX)
+      return fail(t, STELA_AIR_INSTRUCTION, "mesh setter of an output the mesh lacks");
+   const struct stela_air_stage_io *io = &t->render.outputs[output];
+   if (!stela_air_metadata_output_type(io, LLVMTypeOf(LLVMGetOperand(inst, operands - 1))))
+      return fail(t, STELA_AIR_TYPE, "mesh setter value differs from its output");
+   const struct stela_air_stage_entry *entry = &t->render.entry;
+   unsigned count = io->per_primitive ? entry->max_primitives : entry->max_vertices;
+   bool clip = setter == MESH_CLIP_DISTANCE;
+   nir_def *element = values[clip || data ? 2 : 1];
+   value = stage_widen(b, value, io->primitive);
+   return mesh_store(t, t->outputs[output], element, count, clip ? values[1] : NULL,
+                     io->clip_distances, value, BITFIELD_MASK(value->num_components));
+}
+
 static bool
 instruction(struct translator *t, LLVMValueRef inst)
 {
@@ -2467,7 +2756,7 @@ instruction(struct translator *t, LLVMValueRef inst)
    t->b.fp_math_ctrl = fp_math_control(inst);
    unsigned components = 0, bits = 0;
    if (op == LLVMRet)
-      return t->stage_options ? stage_return(t, inst) : LLVMGetNumOperands(inst) == 0 || fail(t, STELA_AIR_TYPE, "compute kernel return value");
+      return !compute_like(t) ? stage_return(t, inst) : LLVMGetNumOperands(inst) == 0 || fail(t, STELA_AIR_TYPE, "compute kernel return value");
    if (op == LLVMExtractValue) {
       const struct value *pair = find_value(t, LLVMGetOperand(inst, 0));
       if (pair && pair->members[0])
@@ -2577,6 +2866,10 @@ instruction(struct translator *t, LLVMValueRef inst)
       const char *name = LLVMGetValueName2(callee, &name_length);
       bool lowered;
       if (!texture_call(t, inst, name, name_length, &lowered))
+         return false;
+      if (lowered)
+         return true;
+      if (!mesh_call(t, inst, callee, name, name_length, &lowered))
          return false;
       if (lowered)
          return true;
@@ -3241,6 +3534,40 @@ cfg_declare_phi(struct translator *t, LLVMValueRef inst)
       fail(t, STELA_AIR_ALLOCATION, "AIR PHI value map allocation failed");
 }
 
+/* A workgroup execution barrier ordering threadgroup memory. */
+static void
+workgroup_barrier(struct translator *t)
+{
+   nir_barrier(&t->b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_WORKGROUP,
+               .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_shared);
+}
+
+/* Where every thread of an object or mesh function leaves it: an object
+ * function launches the grid its threads set, carrying its payload; a mesh
+ * function outputs the primitives its threads set, up to its capacity. */
+static void
+mesh_epilogue(struct translator *t)
+{
+   nir_builder *b = &t->b;
+   b->cursor = nir_after_block(t->exit);
+   workgroup_barrier(t);
+   nir_deref_instr *state = nir_build_deref_var(b, t->mesh_state);
+   if (t->stage_options->stage == STELA_AIR_OBJECT) {
+      nir_def *grid[3];
+      for (unsigned i = 0; i < 3; i++)
+         grid[i] = nir_load_deref(b, nir_build_deref_array_imm(b, state, i));
+      unsigned payload = t->payload ? glsl_get_length(t->payload->type) : 0;
+      nir_launch_mesh_workgroups(b, nir_vec(b, grid, 3), .base = 0, .range = payload);
+   } else {
+      const struct stela_air_stage_entry *entry = &t->render.entry;
+      nir_def *count = nir_umin(b, nir_load_deref(b, nir_build_deref_array_imm(b, state, 0)),
+                                nir_imm_int(b, entry->max_primitives));
+      nir_set_vertex_and_primitive_count(b, nir_imm_int(b, entry->max_vertices), count,
+                                         nir_undef(b, 1, 32));
+   }
+   nir_goto(b, b->impl->end_block);
+}
+
 static bool
 cfg_declare(struct translator *t)
 {
@@ -3248,16 +3575,31 @@ cfg_declare(struct translator *t)
    if (!binding_prelude(t))
       return false;
    t->b.impl->structured = false;
-   if (!t->stage_options && t->options->load_device_value) {
-      /* Threads outside a dispatchThreads grid end before the function. */
-      t->b.cursor = nir_after_block(entry);
-      nir_def *grid = device_value(t, STELA_AIR_DISPATCH_GRID);
+   t->b.cursor = nir_after_block(entry);
+   t->exit = t->b.impl->end_block;
+   /* The device value belongs to the straight-line prelude. */
+   bool grid_bounded = !t->stage_options ? t->options->load_device_value != NULL :
+                       compute_like(t) && t->stage_options->launched_by_grid;
+   nir_def *grid = grid_bounded ? device_value(t, STELA_AIR_DISPATCH_GRID) : NULL;
+   if (grid_bounded && !grid)
+      return false;
+   if (t->mesh_state) {
+      /* Every thread clears the state before any sets it. */
+      nir_deref_instr *state = nir_build_deref_var(&t->b, t->mesh_state);
+      for (unsigned i = 0; i < glsl_get_length(t->mesh_state->type); i++)
+         nir_store_deref(&t->b, nir_build_deref_array_imm(&t->b, state, i), nir_imm_int(&t->b, 0), 1);
+      workgroup_barrier(t);
+      if (!(t->exit = new_block(t)))
+         return false;
+   }
+   if (grid) {
+      /* Threads outside a dispatchThreads grid skip the function. */
       nir_block *body = new_block(t);
-      if (!grid || !body)
+      if (!body)
          return false;
       nir_def *inside = nir_ball(&t->b, nir_ult(&t->b, grid_position(t), grid));
       nir_goto_if(&t->b, body, nir_ior(&t->b, inside, nir_ieq_imm(&t->b, nir_channel(&t->b, grid, 0), 0)),
-                  t->b.impl->end_block);
+                  t->exit);
       entry = body;
    }
    t->work[0]->start = entry;
@@ -3297,7 +3639,7 @@ cfg_emit(struct translator *t)
       if (op == LLVMRet) {
          if (!instruction(t, term))
             return false;
-         nir_goto(&t->b, t->b.impl->end_block);
+         nir_goto(&t->b, t->exit);
       } else {
          struct air_block *yes = cfg_block(t, LLVMGetSuccessor(term, 0));
          if (op == LLVMUncondBr) {
@@ -3368,6 +3710,8 @@ cfg_emit(struct translator *t)
             return fail(t, STELA_AIR_CONTROL_FLOW, "PHI sources differ from emitted predecessor edges");
       }
    }
+   if (t->mesh_state)
+      mesh_epilogue(t);
    nir_sort_unstructured_blocks(t->b.impl);
    nir_validate_shader(t->b.shader, "AIR flat CFG before Mesa structurization");
    nir_lower_goto_ifs(t->b.shader);
@@ -3387,18 +3731,21 @@ translate(const void *bitcode, size_t size, const char *entry,
       error = &local_error;
    *error = (struct stela_air_error){0};
    struct translator t = {.options = options, .error = error, .stage_options = stage};
+   bool compute = compute_like(&t);
    if (!bitcode || size < 4 || size > AIR_MAX_BITCODE_BYTES ||
        memcmp(bitcode, "BC\xc0\xde", 4) || !entry || !*entry || !nir_options ||
-       !options || !options->max_instructions || (!stage && (!options->workgroup_size[0] ||
+       !options || !options->max_instructions || (compute && (!options->workgroup_size[0] ||
        !options->workgroup_size[1] || !options->workgroup_size[2]))) {
       fail(&t, STELA_AIR_INPUT, "invalid AIR bitcode/options");
       return NULL;
    }
-   if (stage && ((stage->stage != STELA_AIR_VERTEX && stage->stage != STELA_AIR_FRAGMENT) ||
-       options->workgroup_size[0] || options->workgroup_size[1] || options->workgroup_size[2] ||
-       options->max_threadgroup_bytes || options->bind_threadgroup ||
+   if (stage && (stage->stage < STELA_AIR_VERTEX || stage->stage > STELA_AIR_MESH ||
+       (!compute && (options->workgroup_size[0] || options->workgroup_size[1] ||
+                     options->workgroup_size[2] || options->max_threadgroup_bytes ||
+                     options->bind_threadgroup || stage->launched_by_grid)) ||
+       (stage->amplified && stage->stage != STELA_AIR_VERTEX) ||
        stage->max_varying_slots > VARYING_SLOT_MAX - VARYING_SLOT_VAR0)) {
-      fail(&t, STELA_AIR_INPUT, "render options must not supply compute/shared specializations");
+      fail(&t, STELA_AIR_INPUT, "stage options must suit the function's stage");
       return NULL;
    }
    for (unsigned i = 0; i < 3; i++) {
@@ -3488,8 +3835,18 @@ translate(const void *bitcode, size_t size, const char *entry,
    if (!cfg_prepare(&t, fn))
       goto done;
    t.entry = fn;
-   t.b = nir_builder_init_simple_shader(stage ? (stage->stage == STELA_AIR_VERTEX ?
-      MESA_SHADER_VERTEX : MESA_SHADER_FRAGMENT) : MESA_SHADER_COMPUTE, nir_options, "%s", entry);
+   const struct stela_air_stage_entry *stage_entry = &t.render.entry;
+   if (stage_entry->max_threads && (uint64_t)options->workgroup_size[0] * options->workgroup_size[1] *
+                                   options->workgroup_size[2] > stage_entry->max_threads) {
+      fail(&t, STELA_AIR_LIMIT, "workgroup exceeds the function's maximum threads");
+      goto done;
+   }
+   static const mesa_shader_stage stages[] = {
+      [STELA_AIR_VERTEX] = MESA_SHADER_VERTEX, [STELA_AIR_FRAGMENT] = MESA_SHADER_FRAGMENT,
+      [STELA_AIR_OBJECT] = MESA_SHADER_TASK, [STELA_AIR_MESH] = MESA_SHADER_MESH,
+   };
+   t.b = nir_builder_init_simple_shader(stage ? stages[stage->stage] : MESA_SHADER_COMPUTE,
+                                        nir_options, "%s", entry);
    t.b.fp_math_ctrl = nir_fp_no_fast_math;
    if (options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT && !fp_environment(&t))
       goto done;
@@ -3497,7 +3854,8 @@ translate(const void *bitcode, size_t size, const char *entry,
       t.b.shader->info.workgroup_size[i] = options->workgroup_size[i];
    t.b.shader->info.num_ssbos = options->ssbo_count;
    t.values = _mesa_pointer_hash_table_create(t.cfg_scratch);
-   if (!t.values || !(stage ? stage_arguments(&t, fn) : kernel_arguments(&t, fn))) {
+   if (!t.values || !(!stage ? kernel_arguments(&t, fn) :
+                      compute ? mesh_stage_arguments(&t) : stage_arguments(&t, fn))) {
       fail(&t, STELA_AIR_ALLOCATION, "AIR shader/value map allocation failed");
       goto done;
    }
@@ -3508,7 +3866,13 @@ translate(const void *bitcode, size_t size, const char *entry,
    if (t.fp_checked && half_arithmetic(t.b.shader))
       t.b.shader->info.float_controls_execution_mode |=
          FLOAT_CONTROLS_DENORM_PRESERVE_FP16 | FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP16;
-   if (t.shared_resources) {
+   if (t.payload) {
+      /* Both stages lay the payload out alike: one variable at offset zero. */
+      nir_lower_vars_to_explicit_types(t.b.shader, nir_var_mem_task_payload,
+                                       glsl_get_natural_size_align_bytes);
+      nir_lower_explicit_io(t.b.shader, nir_var_mem_task_payload, nir_address_format_32bit_offset);
+   }
+   if (t.shared_resources || t.mesh_state) {
       nir_lower_vars_to_explicit_types(t.b.shader, nir_var_mem_shared, glsl_get_natural_size_align_bytes);
       if (t.b.shader->info.shared_size > options->max_threadgroup_bytes) {
          fail(&t, STELA_AIR_LIMIT, "aligned shared layout exceeds target/backend byte limit");

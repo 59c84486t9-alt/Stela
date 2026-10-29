@@ -173,15 +173,23 @@ bool stela_air_inspect(const void *bitcode, size_t size, unsigned max_entries,
  * nor MTLB TYPE values. Every string/array is borrowed through callback return.
  * This validates selected entry ABI/reflection, not body execution or hardware.
  * Legacy stela_air_inspect continues its original compute-only acceptance. */
-enum stela_air_stage { STELA_AIR_VERTEX = 1, STELA_AIR_FRAGMENT = 2 };
+/* Object and mesh functions are compute-like: they take kernel builtins,
+ * threadgroup memory and barriers. */
+enum stela_air_stage {
+   STELA_AIR_VERTEX = 1, STELA_AIR_FRAGMENT, STELA_AIR_OBJECT, STELA_AIR_MESH,
+};
 enum stela_air_stage_semantic {
    STELA_AIR_STAGE_BUFFER = 1, STELA_AIR_STAGE_BUILTIN, STELA_AIR_POSITION,
    STELA_AIR_VARYING, STELA_AIR_RENDER_TARGET, STELA_AIR_STAGE_TEXTURE,
    STELA_AIR_STAGE_SAMPLER,
    STELA_AIR_VERTEX_INPUT, /* A stage-in attribute at location. */
-   /* Vertex outputs. */
+   /* Object and mesh inputs: the object payload, a mesh function's mesh and
+    * an object function's mesh grid properties. */
+   STELA_AIR_PAYLOAD, STELA_AIR_MESH_OUTPUT, STELA_AIR_MESH_GRID,
+   /* Vertex and mesh outputs. */
    STELA_AIR_POINT_SIZE, STELA_AIR_LAYER, STELA_AIR_VIEWPORT,
    STELA_AIR_CLIP_DISTANCE, /* A [clip_distances x float] leaf. */
+   STELA_AIR_MESH_PRIMITIVE_ID, /* A mesh primitive's primitive ID. */
    /* Fragment outputs. */
    STELA_AIR_DEPTH, STELA_AIR_SAMPLE_MASK, STELA_AIR_STENCIL,
 };
@@ -217,7 +225,11 @@ struct stela_air_stage_io {
    enum stela_air_sampling sampling;
    enum stela_air_depth_qualifier depth; /* Only DEPTH. */
    bool used, invariant;
-   /* RENDER_TARGET attachment and dual-source index; VERTEX_INPUT attribute. */
+   /* A mesh output each primitive has, rather than each vertex; a fragment
+    * input of one. */
+   bool per_primitive;
+   /* RENDER_TARGET attachment and dual-source index; VERTEX_INPUT attribute;
+    * the data index of a mesh VARYING. */
    unsigned location, index;
    unsigned clip_distances; /* Only CLIP_DISTANCE: 1 to AIR_MAX_CLIP_DISTANCES. */
    const char *name, *type_name, *identifier;
@@ -225,6 +237,8 @@ struct stela_air_stage_io {
    unsigned member_count;
    const struct stela_air_struct_member *members;
 };
+/* The primitives a mesh function outputs. */
+enum stela_air_topology { STELA_AIR_POINTS = 1, STELA_AIR_LINES, STELA_AIR_TRIANGLES };
 struct stela_air_stage_entry {
    enum stela_air_stage stage;
    bool framebuffer_fetch_present, framebuffer_fetch_enabled; /* Compile option, never a fetch operation. */
@@ -232,6 +246,13 @@ struct stela_air_stage_entry {
    size_t name_bytes;
    unsigned input_count, output_count;
    const struct stela_air_stage_io *inputs, *outputs;
+   /* An object or mesh function's air.max_work_group_size, an object
+    * function's air.max_mesh_work_groups; zero when undeclared. */
+   unsigned max_threads, max_mesh_threadgroups;
+   /* A mesh function's vertex and primitive capacities and topology. Its
+    * outputs are its mesh's vertex and primitive data. */
+   unsigned max_vertices, max_primitives;
+   enum stela_air_topology topology;
 };
 typedef bool (*stela_air_visit_stage)(const struct stela_air_inspection *,
                                      const struct stela_air_stage_entry *, void *);
@@ -252,6 +273,7 @@ struct stela_air_varying_slot {
    size_t identifier_bytes;
    enum stela_air_primitive primitive;
    unsigned components, location;
+   bool per_primitive; /* Mesh primitive data rather than vertex data. */
 };
 bool stela_air_link_stage_io(const struct stela_air_stage_entry *vertex,
                              const struct stela_air_stage_entry *fragment,
@@ -338,6 +360,9 @@ struct stela_air_argument {
    /* A buffer argument that is an argument buffer: these are its fields. */
    bool is_argument_buffer;
    struct stela_air_fields fields;
+   /* Object and mesh inputs; the payload's buffer holds its size, alignment
+    * and access. */
+   bool is_payload, is_mesh, is_mesh_grid;
    enum stela_air_builtin builtin; /* Otherwise a builtin input. */
    unsigned components; /* The builtin's lanes. */
    bool plain_buffer_type; /* Reflected MSL builtin scalar/vector, not a struct. */
@@ -367,6 +392,8 @@ bool stela_air_metadata_stage_map(struct stela_air_metadata *, const struct stel
                                  const struct stela_air_varying_slot *, unsigned count, unsigned max_slots);
 bool stela_air_metadata_stage_buffer_type(struct stela_air_metadata *,
                                           const struct stela_air_stage_io *, LLVMTypeRef);
+/* Whether type is an output's reflected scalar or vector type. */
+bool stela_air_metadata_output_type(const struct stela_air_stage_io *io, LLVMTypeRef type);
 
 
 #endif

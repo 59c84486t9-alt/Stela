@@ -153,7 +153,10 @@ struct stela_air_options {
 
 /* Additive VS/FS frontend. No runtime/Metal pipeline is constructed. resources
  * supplies the same actual AS2-readonly view/bounds and FP contract as compute;
- * workgroup_size/max_threadgroup_bytes/bind_threadgroup must be zero/NULL here.
+ * workgroup_size/max_threadgroup_bytes/bind_threadgroup must be zero/NULL for
+ * vertex and fragment functions. Object and mesh functions are compute-like
+ * and take them as kernels do: they become task and mesh shaders, which
+ * keep a few bytes of threadgroup memory for their grid or primitive count.
  * AS2 and AS1 are not interchangeable permissions/address spaces. All declared
  * varying identifiers/types must match the explicit shared VS/FS map. Target
  * IO limits are real caller facts, not inferred Metal family advertisement.
@@ -174,6 +177,13 @@ struct stela_air_stage_options {
     * view's mapping to the render target array and viewport indices it
     * writes, or writes the offsets alone. */
    bool amplified;
+   /* An object function, or a mesh function of a pipeline without one: the
+    * stage drawMeshThreads launches. As a kernel's do, its threads outside
+    * the dispatch grid, which load_device_value supplies, skip the function. */
+   bool launched_by_grid;
+   /* Target limits on an object payload's bytes and a mesh function's
+    * vertices and primitives; zero refuses them. */
+   unsigned max_payload_bytes, max_mesh_vertices, max_mesh_primitives;
 };
 nir_shader *stela_air_stage_to_nir(const void *, size_t, const char *entry,
                                   const nir_shader_compiler_options *,
