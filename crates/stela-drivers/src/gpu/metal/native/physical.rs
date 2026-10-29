@@ -271,6 +271,11 @@ impl FeatureChain {
             sparse_residency_buffer: on(core.sparse_residency_buffer),
             sparse_residency_image_2d: on(core.sparse_residency_image2_d),
             sparse_residency_image_3d: on(core.sparse_residency_image3_d),
+            sparse_residency_samples: SampleCounts::EMPTY
+                .with(SampleCounts::C2, on(core.sparse_residency2_samples))
+                .with(SampleCounts::C4, on(core.sparse_residency4_samples))
+                .with(SampleCounts::C8, on(core.sparse_residency8_samples))
+                .with(SampleCounts::C16, on(core.sparse_residency16_samples)),
             sparse_residency_aliased: on(core.sparse_residency_aliased),
             storage_buffer_8bit_access: on(v12.storage_buffer8_bit_access),
             storage_buffer_16bit_access: on(v11.storage_buffer16_bit_access),
@@ -695,19 +700,29 @@ fn formats(
             ),
             Err(_) => SampleCounts::EMPTY,
         };
-        let sparse = features.sparse_residency_image_2d && {
-            let info = vk::PhysicalDeviceSparseImageFormatInfo2::default()
-                .format(vulkan)
-                .ty(vk::ImageType::TYPE_2D)
-                .samples(vk::SampleCountFlags::TYPE_1)
-                .usage(vk::ImageUsageFlags::SAMPLED)
-                .tiling(vk::ImageTiling::OPTIMAL);
-            // SAFETY: as above; the device supports sparse residency.
-            let count = unsafe {
-                instance.get_physical_device_sparse_image_format_properties2_len(device, &info)
-            };
-            count > 0
+        let sparse_counts = if features.sparse_residency_image_2d {
+            SampleCounts::C1.union(features.sparse_residency_samples)
+        } else {
+            SampleCounts::EMPTY
         };
+        let sparse = (0..u32::BITS)
+            .filter_map(|bit| SampleCounts::single(1 << bit))
+            .filter(|&count| sample_counts.intersection(sparse_counts).contains(count))
+            .filter(|count| {
+                let info = vk::PhysicalDeviceSparseImageFormatInfo2::default()
+                    .format(vulkan)
+                    .ty(vk::ImageType::TYPE_2D)
+                    .samples(vk::SampleCountFlags::from_raw(count.bits()))
+                    .usage(vk::ImageUsageFlags::SAMPLED)
+                    .tiling(vk::ImageTiling::OPTIMAL);
+                // SAFETY: as above; the device supports sparse residency at
+                // this count.
+                let properties = unsafe {
+                    instance.get_physical_device_sparse_image_format_properties2_len(device, &info)
+                };
+                properties > 0
+            })
+            .fold(SampleCounts::EMPTY, SampleCounts::union);
         table.insert(
             format,
             FormatSupport {

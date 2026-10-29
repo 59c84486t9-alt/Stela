@@ -132,12 +132,16 @@ impl Backend for MockBackend {
     fn create_placed_image(&mut self, _: &ImageInfo, _: Memory, _: u64) -> Result<Image> {
         Ok(Image(self.id()))
     }
-    /// RGBA8's standard block, with each layer's tail of one block from
-    /// level 2.
-    fn create_sparse_image(&mut self, _: &ImageInfo) -> Result<(Image, SparseImageRequirements)> {
+    /// RGBA8's standard block at the image's sample count, with each
+    /// layer's tail of one block from level 2.
+    fn create_sparse_image(
+        &mut self,
+        info: &ImageInfo,
+    ) -> Result<(Image, SparseImageRequirements)> {
+        let halvings = info.samples.bits().trailing_zeros();
         let requirements = SparseImageRequirements {
             memory_types: u32::MAX,
-            granularity: [128, 128, 1],
+            granularity: [128 >> halvings.div_ceil(2), 128 >> (halvings / 2), 1],
             mip_tail_first_lod: 2,
             mip_tail_size: 64 << 10,
             mip_tail_offset: 1 << 20,
@@ -1301,6 +1305,56 @@ fn sparse_textures_map_heap_pages_at_commit() {
     );
     device.destroy_texture(sparse).unwrap();
     assert_eq!(device.heap_usage(heap, 1), Ok((0, 4 << 16)));
+    device.destroy_heap(heap).unwrap();
+}
+
+#[test]
+fn multisample_sparse_textures_map_msaa_blocks() {
+    let mut device = device();
+    let heap = device
+        .new_heap(&HeapDescriptor {
+            size: 4 << 16,
+            options: options(StorageMode::Private),
+            heap_type: HeapType::Sparse,
+            sparse_page_size: SparsePageSize::Size64,
+        })
+        .unwrap();
+    // Four-sample RGBA8 blocks are 64 by 64 texels.
+    let descriptor = TextureDescriptor {
+        texture_type: TextureType::D2Multisample,
+        sample_count: 4,
+        width: 128,
+        height: 128,
+        ..texture(PixelFormat::Rgba8Unorm, TextureUsage::RENDER_TARGET)
+    };
+    let sparse = device.new_heap_texture(heap, &descriptor, None).unwrap();
+    assert_eq!(device.sparse_tail(sparse), Ok(Some((1, 0))), "no mip tail");
+    let image = device.sparse_image(sparse).unwrap();
+
+    let mut commands = device.new_command_buffer();
+    commands
+        .begin_resource_state(&mut device.resolver())
+        .unwrap();
+    commands
+        .update_texture_mappings(
+            image,
+            SparseTextureMappingMode::Map,
+            alloc::vec![MappingUpdate {
+                level: 0,
+                slice: 0,
+                region: SparseRegion {
+                    origin: [0; 3],
+                    size: [2, 2, 1],
+                },
+            }],
+        )
+        .unwrap();
+    commands.end_encoding(&mut device.resolver()).unwrap();
+    device.commit(commands).unwrap();
+    let segments = device.backend().submissions.last().unwrap().clone();
+    assert_eq!(segments.last().unwrap().binds.len(), 4);
+    assert_eq!(device.heap_usage(heap, 1), Ok((4 << 16, 0)));
+    device.destroy_texture(sparse).unwrap();
     device.destroy_heap(heap).unwrap();
 }
 

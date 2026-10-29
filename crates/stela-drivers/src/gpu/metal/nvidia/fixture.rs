@@ -259,6 +259,7 @@ fn features(chip: &Chip) -> Features {
         sparse_residency_buffer: true,
         sparse_residency_image_2d: true,
         sparse_residency_image_3d: true,
+        sparse_residency_samples: SAMPLE_COUNTS.difference(SampleCounts::C1),
         sparse_residency_aliased: true,
         storage_buffer_8bit_access: true,
         storage_buffer_16bit_access: true,
@@ -333,7 +334,8 @@ fn formats() -> FormatTable {
         let support = match (description.kind, description.compression) {
             (_, Compression::Bc) => FormatSupport {
                 optimal: F::SAMPLED_IMAGE | F::SAMPLED_IMAGE_FILTER_LINEAR | transfer,
-                sparse: true,
+                sample_counts: SampleCounts::C1,
+                sparse: SampleCounts::C1,
                 ..FormatSupport::default()
             },
             (_, Compression::None)
@@ -376,7 +378,11 @@ fn formats() -> FormatTable {
                     } else {
                         SampleCounts::C1
                     },
-                    sparse: renderable,
+                    sparse: if renderable {
+                        SAMPLE_COUNTS
+                    } else {
+                        SampleCounts::EMPTY
+                    },
                 }
             }
             (_, Compression::None) => FormatSupport {

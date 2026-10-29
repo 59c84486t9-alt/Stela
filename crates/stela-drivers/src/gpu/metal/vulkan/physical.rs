@@ -213,6 +213,8 @@ pub struct Features {
     pub sparse_residency_buffer: bool,
     pub sparse_residency_image_2d: bool,
     pub sparse_residency_image_3d: bool,
+    /// The multisample counts of `sparseResidency{2,4,8,16}Samples`.
+    pub sparse_residency_samples: SampleCounts,
     pub sparse_residency_aliased: bool,
     pub storage_buffer_8bit_access: bool,
     pub storage_buffer_16bit_access: bool,
@@ -343,14 +345,14 @@ impl Memory {
 
 /// Per-format support, from `vkGetPhysicalDeviceFormatProperties2` with
 /// `VkFormatProperties3`, the optimal-tiling 2D image sample counts and
-/// whether sparse residency is available for the format.
+/// the sample counts of its sparse-residency 2D images.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FormatSupport {
     pub optimal: FormatFeatures,
     pub linear: FormatFeatures,
     pub buffer: FormatFeatures,
     pub sample_counts: SampleCounts,
-    pub sparse: bool,
+    pub sparse: SampleCounts,
 }
 
 /// Format support for every format the Metal layer can request; formats the

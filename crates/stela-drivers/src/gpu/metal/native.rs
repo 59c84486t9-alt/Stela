@@ -24,6 +24,7 @@ use super::{
     command_buffer::Segment,
     error::{Error, Result, ensure},
     vulkan::{
+        SampleCounts,
         backend::{Backend, BufferAllocation, Descriptor, Object, Requirements, requirements},
         command::BufferImageCopy,
         object::{
@@ -286,6 +287,7 @@ impl NativeBackend {
                 features.sparse_residency_buffer = false;
                 features.sparse_residency_image_2d = false;
                 features.sparse_residency_image_3d = false;
+                features.sparse_residency_samples = SampleCounts::EMPTY;
                 features.sparse_residency_aliased = false;
             }
             Some((physical, extensions, snapshot, family as u32))

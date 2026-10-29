@@ -278,6 +278,8 @@ pub struct Capabilities {
     counter_sampling: [bool; 5],
     /// Sparse 3D textures, with Vulkan's 3D residency and block shapes.
     sparse_volumes: bool,
+    /// The sample counts of each format's sparse 2D textures.
+    sparse_samples: Vec<(PixelFormat, SampleCounts)>,
     vertex_formats: Vec<VertexFormat>,
     families: Vec<GpuFamily>,
     formats: Vec<(PixelFormat, FormatCapabilities)>,
@@ -376,22 +378,30 @@ impl Capabilities {
     }
 
     /// Texels per sparse tile, following Vulkan's standard block shapes:
-    /// single-sample 2D textures and arrays, and 3D textures where the
-    /// driver has 3D residency.
+    /// 2D textures and arrays at the sample counts the driver has residency
+    /// for, and single-sample 3D textures where it has 3D residency.
     pub fn sparse_tile_size(
         &self,
         texture_type: TextureType,
         format: PixelFormat,
         samples: u64,
     ) -> Option<Size> {
-        let shape = match (texture_type, samples) {
-            (TextureType::D2 | TextureType::D2Array, 1) => Shape::Planar,
-            (TextureType::D3, 1) if self.sparse_volumes => Shape::Volume,
+        let count = u32::try_from(samples).ok().and_then(SampleCounts::single)?;
+        let single = count == SampleCounts::C1;
+        let shape = match texture_type {
+            TextureType::D2 | TextureType::D2Array if single => Shape::Planar(count),
+            TextureType::D2Multisample | TextureType::D2MultisampleArray if !single => {
+                Shape::Planar(count)
+            }
+            TextureType::D3 if single && self.sparse_volumes => Shape::Volume,
             _ => return None,
         };
-        if !self.format(format).contains(FormatCapabilities::SPARSE)
-            || self.limits.sparse_tile_bytes != STANDARD_SPARSE_TILE_BYTES
-        {
+        let counts = self
+            .sparse_samples
+            .iter()
+            .find(|(known, _)| *known == format)
+            .map_or(SampleCounts::EMPTY, |(_, counts)| *counts);
+        if !counts.contains(count) || self.limits.sparse_tile_bytes != STANDARD_SPARSE_TILE_BYTES {
             return None;
         }
         standard_tile_shape(shape, format.describe())
@@ -429,12 +439,15 @@ impl Capabilities {
 /// The standard sparse block shapes this device uses.
 #[derive(Clone, Copy)]
 enum Shape {
-    Planar,
+    /// 2D, at a sample count.
+    Planar(SampleCounts),
     Volume,
 }
 
 /// Texels in one 64 KiB standard sparse block (Vulkan specification,
-/// "Standard Sparse Image Block Shapes"), scaled by the format's block size.
+/// "Standard Sparse Image Block Shapes" and its MSAA table), scaled by the
+/// format's block size. Each doubling of the sample count halves the
+/// single-sample shape, width first.
 fn standard_tile_shape(shape: Shape, description: &Description) -> Option<Size> {
     let bytes = description.block.bytes;
     let index = match bytes {
@@ -454,9 +467,10 @@ fn standard_tile_shape(shape: Shape, description: &Description) -> Option<Size> 
         (16, 16, 16),
     ];
     let (width, height, depth) = match shape {
-        Shape::Planar => {
+        Shape::Planar(samples) => {
             let (width, height) = SHAPES_2D[index];
-            (width, height, 1)
+            let halvings = samples.bits().trailing_zeros();
+            (width >> halvings.div_ceil(2), height >> (halvings / 2), 1)
         }
         Shape::Volume => SHAPES_3D[index],
     };
@@ -730,10 +744,16 @@ impl Derivation<'_> {
                 features.sparse_residency_image_3d
                     && limits.sparse.residency_standard_3d_block_shape,
             ));
-        if sparse {
-            // Multisample residency needs the per-count sparse features,
-            // which the device does not probe.
-            self.gap("sparse multisample textures", Cause::Api);
+        let sparse_samples = if sparse {
+            self.sparse_samples()
+        } else {
+            Vec::new()
+        };
+        let multisample = |(_, counts): &(PixelFormat, SampleCounts)| {
+            !counts.difference(SampleCounts::C1).is_empty()
+        };
+        if sparse && !sparse_samples.iter().any(multisample) {
+            self.gap("sparse multisample textures", Cause::Driver);
         }
 
         let step_rates = self.check(driver(
@@ -889,6 +909,7 @@ impl Derivation<'_> {
             constant_vertex_step,
             counter_sampling,
             sparse_volumes,
+            sparse_samples,
             vertex_formats,
             families: Vec::new(),
             formats,
@@ -928,6 +949,36 @@ impl Derivation<'_> {
             self.gap("extended-range and 4:2:2 pixel formats", Cause::Driver);
         }
         formats
+    }
+
+    /// The formats with sparse 2D textures and their sample counts.
+    fn sparse_samples(&self) -> Vec<(PixelFormat, SampleCounts)> {
+        PixelFormat::ALL
+            .iter()
+            .filter_map(|format| {
+                let realization = format.describe().realization.ok()?;
+                let counts = self.sparse_counts(self.device.formats.get(realization.format));
+                (!counts.is_empty()).then_some((*format, counts))
+            })
+            .collect()
+    }
+
+    /// A format's sparse 2D sample counts: multisample counts need the
+    /// standard multisample block shapes.
+    fn sparse_counts(&self, support: FormatSupport) -> SampleCounts {
+        let features = &self.device.features;
+        let sparse = &self.device.limits.sparse;
+        let counts = SampleCounts::C1
+            .with(
+                features.sparse_residency_samples,
+                sparse.residency_standard_2d_multisample_block_shape,
+            )
+            .intersection(support.sample_counts);
+        if features.sparse_residency_image_2d {
+            support.sparse.intersection(counts)
+        } else {
+            SampleCounts::EMPTY
+        }
     }
 
     fn vertex_formats(&mut self) -> Vec<VertexFormat> {
@@ -1010,7 +1061,7 @@ impl Derivation<'_> {
             .with(C::MSAA, (attachment || depth_stencil) && multisample)
             .with(
                 C::SPARSE,
-                support.sparse && features.sparse_residency_image_2d,
+                self.sparse_counts(support).contains(SampleCounts::C1),
             )
             .with(
                 C::ATOMIC,

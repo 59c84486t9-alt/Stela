@@ -382,10 +382,37 @@ fn sparse_tiles_use_the_standard_64k_block_shapes() {
             depth: 16
         })
     );
+    // Vulkan's MSAA block shapes halve the single-sample shape per doubling,
+    // width first.
+    let planar = |width, height| {
+        Some(Size {
+            width,
+            height,
+            depth: 1,
+        })
+    };
+    assert_eq!(
+        tile(P::R8Unorm, TextureType::D2Multisample, 2),
+        planar(128, 256)
+    );
     assert_eq!(
         tile(P::R8Unorm, TextureType::D2Multisample, 4),
+        planar(128, 128)
+    );
+    assert_eq!(
+        tile(P::Rgba8Unorm, TextureType::D2MultisampleArray, 8),
+        planar(32, 64)
+    );
+    assert_eq!(
+        tile(P::Rgba32Float, TextureType::D2Multisample, 4),
+        planar(32, 32)
+    );
+    assert_eq!(tile(P::R8Unorm, TextureType::D2Multisample, 1), None);
+    assert_eq!(tile(P::R8Unorm, TextureType::D2, 4), None);
+    assert_eq!(
+        tile(P::R8Unorm, TextureType::D2Multisample, 16),
         None,
-        "multisample residency is not probed"
+        "the device has no 16-sample images"
     );
     assert_eq!(
         tile(P::Bc1Rgba, TextureType::D2, 1),
