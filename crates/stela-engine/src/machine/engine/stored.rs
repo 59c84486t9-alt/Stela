@@ -50,6 +50,28 @@ impl SharedTranslation {
     }
 }
 
+/// The Arc payload/header and every privately owned vector allocation. This
+/// excludes allocator bookkeeping and shared immutable preparation storage.
+fn translation_bytes(input_capacity: usize, block: &CompiledBlock) -> usize {
+    use core::mem::size_of;
+    let bytes = [
+        size_of::<SharedTranslation>() + 2 * size_of::<usize>(),
+        input_capacity,
+        block.native.x86_64_code.capacity(),
+        block.native.source_map.capacity() * size_of::<(stela_compiler::GuestAddress, usize)>(),
+        block.direct_exits.capacity() * size_of::<stela_compiler::x86_64::chain::DirectExit>(),
+        block.fault_recovery.capacity() * size_of::<stela_compiler::block::FaultRecovery>(),
+    ];
+    block.fault_recovery.iter().fold(
+        bytes.into_iter().fold(0usize, usize::saturating_add),
+        |total, row| {
+            total.saturating_add(
+                row.bindings.capacity() * size_of::<stela_compiler::block::RecoveryBinding>(),
+            )
+        },
+    )
+}
+
 /// The store a host keeps for the engine.
 pub trait Translations {
     /// The record of the page whose bytes hash to `key`, if the store has
@@ -96,6 +118,9 @@ pub struct Offer {
 }
 
 impl Offer {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        translation_bytes(self.input.capacity(), &self.block)
+    }
     /// Off-path preparation from canonical immutable input. No native template
     /// or copied site can be supplied; this owner emits the block itself.
     pub(crate) fn compile(

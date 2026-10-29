@@ -23,6 +23,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use core::mem::size_of;
 use sha2::Digest as _;
 use stela_crypto::Sha256;
 
@@ -290,6 +291,13 @@ struct Pending {
 /// A shared block's page key, PC and context.
 type SharedKey = (Digest, u64, Digest);
 
+#[derive(Debug)]
+struct SharedEntry {
+    translation: Arc<SharedTranslation>,
+    /// Immutable owner charge, computed once before admission.
+    bytes: usize,
+}
+
 /// One boot's store over the pack it read.
 #[derive(Debug)]
 pub struct Store<'a> {
@@ -300,11 +308,13 @@ pub struct Store<'a> {
     /// take several times the pack's bytes.
     loaded: BTreeMap<Digest, bool>,
     pending: Vec<Pending>,
+    /// Capacity of the retained input buffers; Pending slots are charged separately.
     pending_bytes: usize,
     /// The blocks offered, by page key, PC and context, for the other
-    /// machines sharing the store, oldest first, and the bytes of their
-    /// native code within `shared_bound` ([`Store::share`]).
-    shared: BTreeMap<SharedKey, Arc<SharedTranslation>>,
+    /// machines sharing the store, oldest first. The bound charges retained
+    /// source/template buffers, Arc payloads, index entries and FIFO capacity;
+    /// allocator node slack/bookkeeping and shared Preparation are excluded.
+    shared: BTreeMap<SharedKey, SharedEntry>,
     shared_order: VecDeque<SharedKey>,
     shared_bytes: usize,
     shared_bound: usize,
@@ -350,11 +360,135 @@ impl<'a> Store<'a> {
         }
     }
 
-    /// Keep the native code of offered blocks, up to `bound` bytes, for
+    /// Keep offered blocks and their retained buffers, up to `bound` bytes, for
     /// [`Translations::prepared`]: for machines that share the store. Full,
     /// it forgets the oldest until a new one fits.
     pub fn share(&mut self, bound: usize) {
         self.shared_bound = bound;
+        while self.shared_usage() > bound {
+            if !self.evict_shared() {
+                self.shared_order = VecDeque::new();
+                break;
+            }
+        }
+    }
+
+    fn shared_usage(&self) -> usize {
+        self.shared_bytes
+            .saturating_add(self.shared_order.capacity() * size_of::<SharedKey>())
+    }
+
+    fn evict_shared(&mut self) -> bool {
+        let Some(oldest) = self.shared_order.pop_front() else {
+            return false;
+        };
+        if let Some(evicted) = self.shared.remove(&oldest) {
+            self.shared_bytes -= evicted.bytes;
+        }
+        true
+    }
+
+    fn shared_room(&mut self, key: &SharedKey, incoming: usize) -> bool {
+        loop {
+            let replaced = self.shared.get(key).map_or(0, |old| old.bytes);
+            if self
+                .shared_usage()
+                .saturating_sub(replaced)
+                .saturating_add(incoming)
+                <= self.shared_bound
+            {
+                return true;
+            }
+            if !self.evict_shared() {
+                self.shared_order = VecDeque::new();
+                return false;
+            }
+        }
+    }
+
+    fn keep_shared(&mut self, offer: Offer) {
+        let key = (offer.key(), offer.pc(), offer.context());
+        let bytes = offer
+            .retained_bytes()
+            .saturating_add(size_of::<(SharedKey, SharedEntry)>());
+        if bytes > self.shared_bound || !self.shared_room(&key, bytes) {
+            return;
+        }
+        if !self.shared.contains_key(&key) {
+            // Reuse an actual oldest slot if bulk FIFO growth cannot be allocated.
+            // An empty cache simply declines the optional entry.
+            if self.shared_order.try_reserve(1).is_err() && !self.evict_shared() {
+                return;
+            }
+            if !self.shared_room(&key, bytes) {
+                return;
+            }
+        }
+        let shared = offer.shared();
+        if let Some(present) = self.shared.get_mut(&key) {
+            self.shared_bytes -= present.bytes;
+            *present = SharedEntry {
+                translation: shared,
+                bytes,
+            };
+        } else {
+            self.shared.insert(
+                key,
+                SharedEntry {
+                    translation: shared,
+                    bytes,
+                },
+            );
+            self.shared_order.push_back(key);
+        }
+        self.shared_bytes += bytes;
+    }
+
+    fn keep_pending(&mut self, offer: &Offer) {
+        let inputs = self.pending_bytes.saturating_add(offer.input().len());
+        let slots = MAX_PENDING_BYTES.saturating_sub(inputs) / size_of::<Pending>();
+        if inputs > MAX_PENDING_BYTES || slots <= self.pending.len() {
+            self.counters.dropped += 1;
+            return;
+        }
+        if self.pending.len() == self.pending.capacity() {
+            let capacity = self
+                .pending
+                .capacity()
+                .saturating_mul(2)
+                .max(self.pending.len() + 1)
+                .min(slots);
+            if self
+                .pending
+                .try_reserve_exact(capacity - self.pending.len())
+                .is_err()
+            {
+                self.counters.dropped += 1;
+                return;
+            }
+        }
+        let mut input = Vec::new();
+        if input.try_reserve_exact(offer.input().len()).is_err()
+            || self
+                .pending_bytes
+                .saturating_add(input.capacity())
+                .saturating_add(self.pending.capacity() * size_of::<Pending>())
+                > MAX_PENDING_BYTES
+        {
+            self.counters.dropped += 1;
+            return;
+        }
+        input.extend_from_slice(offer.input());
+        self.pending_bytes += input.capacity();
+        self.counters.offered += 1;
+        self.pending.push(Pending {
+            key: offer.key(),
+            page: offer.page(),
+            pc: offer.pc(),
+            context: offer.context(),
+            input,
+            preparation: Arc::clone(offer.preparation()),
+        });
     }
 
     /// The translator whose records the store keeps.
@@ -493,46 +627,14 @@ impl Translations for Store<'_> {
         pc: u64,
         context: &Digest,
     ) -> Option<Arc<SharedTranslation>> {
-        self.shared.get(&(*key, pc, *context)).cloned()
+        self.shared
+            .get(&(*key, pc, *context))
+            .map(|entry| Arc::clone(&entry.translation))
     }
 
     fn offer(&mut self, offer: Offer) {
-        let (key, page, pc, context) = (offer.key(), offer.page(), offer.pc(), offer.context());
-        let input = offer.input().to_vec();
-        let preparation = Arc::clone(offer.preparation());
-        let shared = offer.shared();
-        let code = shared.block().native.x86_64_code.len();
-        let at = (key, pc, context);
-        if let Some(present) = self.shared.get_mut(&at) {
-            self.shared_bytes = self.shared_bytes - present.block().native.x86_64_code.len() + code;
-            *present = shared;
-        } else if code <= self.shared_bound {
-            while self.shared_bytes + code > self.shared_bound
-                && let Some(oldest) = self.shared_order.pop_front()
-            {
-                if let Some(evicted) = self.shared.remove(&oldest) {
-                    self.shared_bytes -= evicted.block().native.x86_64_code.len();
-                }
-            }
-            self.shared.insert(at, shared);
-            self.shared_bytes += code;
-            self.shared_order.push_back(at);
-        }
-        let bytes = core::mem::size_of::<Pending>() + input.len();
-        if self.pending_bytes + bytes > MAX_PENDING_BYTES {
-            self.counters.dropped += 1;
-            return;
-        }
-        self.pending_bytes += bytes;
-        self.counters.offered += 1;
-        self.pending.push(Pending {
-            key,
-            page,
-            pc,
-            context,
-            input,
-            preparation,
-        });
+        self.keep_pending(&offer);
+        self.keep_shared(offer);
     }
 }
 
@@ -556,16 +658,94 @@ mod tests {
     }
 
     #[test]
+    fn shared_cache_budget_includes_source_and_recovery_owners() {
+        let translator = Digest::of(b"translator");
+        let key = Digest::of(b"page");
+        let first = offer(0x1000, key);
+        let context = first.context();
+        let code = first.block().native.x86_64_code.len();
+        let (mut store, _) = Store::new(translator, None);
+        // The native bytes fit, but their source/template/collection owners do not.
+        store.share(code);
+        store.offer(first);
+        assert!(store.prepared(&key, 0x1000, &context).is_none());
+        assert!(store.shared_order.is_empty());
+    }
+
+    #[test]
+    fn shared_cache_budget_charges_actual_emitted_recovery_buffers() {
+        let key = Digest::of(b"page");
+        let preparation = Arc::new(test_preparation());
+        let context = preparation.context(0x1000);
+        let mut input: Vec<u8> = core::iter::repeat_n(0xf900_0020u32, 16)
+            .chain(core::iter::once(0xd65f_03c0))
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        preparation.admit(&mut input);
+        let offered = Offer::compile(key, 0x1000, 0x1000, context, input, preparation).unwrap();
+        let code = offered.block().native.x86_64_code.len();
+        assert!(!offered.block().fault_recovery.is_empty());
+        assert!(
+            offered.block().fault_recovery.len()
+                * size_of::<stela_compiler::block::FaultRecovery>()
+                > code
+        );
+        let (mut store, _) = Store::new(Digest::of(b"translator"), None);
+        store.share(2 * code);
+        store.offer(offered);
+        assert!(store.prepared(&key, 0x1000, &context).is_none());
+        assert!(store.shared_order.is_empty());
+    }
+
+    #[test]
+    fn shared_cache_replacement_charges_reserved_source_capacity_before_admission() {
+        let translator = Digest::of(b"translator");
+        let key = Digest::of(b"page");
+        let first = offer(0x1000, key);
+        let context = first.context();
+        let preparation = Arc::clone(first.preparation());
+        let mut input = Vec::with_capacity(2 << 20);
+        input.extend_from_slice(first.input());
+        let replacement = Offer::compile(key, 0x1000, 0x1000, context, input, preparation).unwrap();
+        let (mut store, _) = Store::new(translator, None);
+        store.share(1 << 20);
+        store.offer(first);
+        let original = store.prepared(&key, 0x1000, &context).unwrap();
+        store.offer(replacement);
+        let retained = store.prepared(&key, 0x1000, &context).unwrap();
+        assert!(Arc::ptr_eq(&original, &retained));
+        assert_eq!(store.shared_order.len(), 1);
+    }
+
+    #[test]
+    fn reducing_shared_cache_budget_releases_retained_entries_and_fifo_capacity() {
+        let key = Digest::of(b"page");
+        let first = offer(0x1000, key);
+        let context = first.context();
+        let (mut store, _) = Store::new(Digest::of(b"translator"), None);
+        store.share(usize::MAX);
+        store.offer(first);
+        assert!(store.prepared(&key, 0x1000, &context).is_some());
+        store.share(0);
+        assert!(store.prepared(&key, 0x1000, &context).is_none());
+        assert_eq!(store.shared_order.capacity(), 0);
+    }
+
+    #[test]
     fn a_shared_store_hands_offered_blocks_to_other_machines_and_forgets_the_oldest_when_full() {
         let translator = Digest::of(b"translator");
         let key = Digest::of(b"page");
         let (first, second) = (offer(0x1000, key), offer(0x1008, key));
         let code = first.block().native.x86_64_code.len();
+        let bytes = first.clone().retained_bytes() + size_of::<(SharedKey, SharedEntry)>();
+        let mut queue = VecDeque::<SharedKey>::new();
+        queue.try_reserve(1).unwrap();
+        let fifo = queue.capacity() * size_of::<SharedKey>();
         let (mut store, _) = Store::new(translator, None);
         store.offer(first.clone());
         // A store no machine shares keeps no native code.
         assert!(store.prepared(&key, 0x1000, &first.context()).is_none());
-        store.share(code + code / 2);
+        store.share(bytes + bytes / 2 + fifo);
         store.offer(first.clone());
         store.offer(first.clone());
         store.offer(second.clone());
@@ -576,7 +756,7 @@ mod tests {
         );
         assert!(store.prepared(&key, 0x1008, &second.context()).is_some());
         assert!(store.prepared(&key, 0x1000, &first.context()).is_none());
-        store.share(4 * code);
+        store.share(4 * bytes + fifo);
         store.offer(first.clone());
         assert_eq!(
             store
@@ -586,7 +766,7 @@ mod tests {
         );
         // Offered again, a block keeps its one place and its bytes.
         store.offer(first.clone());
-        assert_eq!(store.shared_bytes, 2 * code);
+        assert_eq!(store.shared_bytes, 2 * bytes);
         // Full, the oldest goes first: the second, offered before the first
         // came back.
         let third = offer(0x1010, key);
@@ -613,7 +793,7 @@ mod tests {
         assert!(store.prepared(&key, 0x1008, &second.context()).is_none());
         assert!(store.prepared(&key, 0x1000, &first.context()).is_some());
         assert!(store.prepared(&key, 0x1020, &fifth.context()).is_some());
-        assert!(store.shared_bytes <= 4 * code);
+        assert!(store.shared_usage() <= 4 * bytes + fifo);
         // Every offer still waits for proof.
         assert_eq!(store.pending(), 9);
     }
