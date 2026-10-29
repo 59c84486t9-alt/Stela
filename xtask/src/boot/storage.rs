@@ -316,7 +316,14 @@ pub(super) fn attach_usb_disks(arguments: &Run, command: &mut Process) {
 }
 
 /// `--storage-disk`s, each an NVMe disk with its serial.
-pub(super) fn attach_storage_disks(attached: &[(PathBuf, String)], command: &mut Process) {
+pub(super) fn attach_storage_disks(
+    attached: &[(PathBuf, String)],
+    mdts: Option<u8>,
+    command: &mut Process,
+) {
+    let mdts = mdts
+        .map(|value| format!(",mdts={value}"))
+        .unwrap_or_default();
     for (index, (path, serial)) in attached.iter().enumerate() {
         // Let Write Zeroes with unmap release image-file extents.
         let discard = if path.is_file() { ",discard=unmap" } else { "" };
@@ -327,7 +334,7 @@ pub(super) fn attach_storage_disks(attached: &[(PathBuf, String)], command: &mut
                 option_path(path)
             ))
             .arg("-device")
-            .arg(format!("nvme,drive=ans{index},serial={serial}"));
+            .arg(format!("nvme,drive=ans{index},serial={serial}{mdts}"));
     }
 }
 
@@ -337,7 +344,7 @@ mod tests {
 
     fn drive(path: PathBuf) -> Vec<String> {
         let mut command = Process::new("qemu-system-x86_64");
-        attach_storage_disks(&[(path, "TEST".into())], &mut command);
+        attach_storage_disks(&[(path, "TEST".into())], None, &mut command);
         command
             .get_args()
             .map(|argument| argument.to_str().unwrap().to_owned())
@@ -362,6 +369,31 @@ mod tests {
             ]
         );
         assert_eq!(fs::read(path).unwrap(), [0xa5; 16]);
+    }
+
+    #[test]
+    fn explicit_mdts_applies_to_each_storage_controller() {
+        let directory = tempfile::tempdir().unwrap();
+        let attached = [
+            (directory.path().join("first"), "FIRST".into()),
+            (directory.path().join("second"), "SECOND".into()),
+        ];
+        for mdts in [1, 7, 9] {
+            let mut command = Process::new("qemu-system-x86_64");
+            attach_storage_disks(&attached, Some(mdts), &mut command);
+            let controllers: Vec<_> = command
+                .get_args()
+                .filter_map(|argument| argument.to_str())
+                .filter(|argument| argument.starts_with("nvme,"))
+                .collect();
+            assert_eq!(
+                controllers,
+                [
+                    format!("nvme,drive=ans0,serial=FIRST,mdts={mdts}"),
+                    format!("nvme,drive=ans1,serial=SECOND,mdts={mdts}"),
+                ]
+            );
+        }
     }
 
     #[test]

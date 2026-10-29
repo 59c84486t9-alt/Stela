@@ -819,3 +819,44 @@ fn option_paths_double_their_commas() {
     let path = std::path::Path::new("/tmp/bundles/Mac14,2/variables.fd");
     assert_eq!(option_path(path), "/tmp/bundles/Mac14,,2/variables.fd");
 }
+
+#[test]
+fn storage_mdts_is_optional_typed_and_requires_a_disk() {
+    use clap::Parser;
+    let base = ["xtask", "boot", "run", "--output", "/tmp/run"];
+    for value in ["1", "7", "9"] {
+        let cli = crate::Cli::try_parse_from(base.into_iter().chain([
+            "--storage-disk",
+            "/tmp/disk.raw",
+            "--storage-mdts",
+            value,
+        ]))
+        .unwrap();
+        let crate::Task::Boot(Command::Run(run)) = cli.task else {
+            panic!("boot run");
+        };
+        assert_eq!(run.storage_mdts, Some(value.parse().unwrap()));
+    }
+    let cli =
+        crate::Cli::try_parse_from(base.into_iter().chain(["--storage-disk", "/tmp/disk.raw"]))
+            .unwrap();
+    let crate::Task::Boot(Command::Run(run)) = cli.task else {
+        panic!("boot run");
+    };
+    assert_eq!(run.storage_mdts, None);
+    for extra in [
+        vec!["--storage-mdts", "9"],
+        vec!["--storage-disk", "/tmp/disk.raw", "--storage-mdts", "0"],
+        vec!["--storage-disk", "/tmp/disk.raw", "--storage-mdts", "10"],
+        vec!["--storage-disk", "/tmp/disk.raw", "--storage-mdts", "256"],
+        vec!["--storage-disk", "/tmp/disk.raw", "--storage-mdts", "-1"],
+        vec![
+            "--storage-disk",
+            "/tmp/disk.raw",
+            "--storage-mdts",
+            "11,serial=x",
+        ],
+    ] {
+        assert!(crate::Cli::try_parse_from(base.into_iter().chain(extra)).is_err());
+    }
+}

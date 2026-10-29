@@ -200,6 +200,11 @@ pub struct Run {
     /// defaults to STELAANS; several disks need distinct serials each.
     #[arg(long, requires = "storage_disk", value_parser = parse_storage_serial)]
     storage_serial: Vec<String>,
+    /// Optional QEMU MDTS exponent for every --storage-disk controller.
+    /// Values 1..=9 advertise 2^MDTS minimum pages per command, within
+    /// QEMU's 1024-entry I/O vector limit. Omission keeps QEMU's default.
+    #[arg(long, requires = "storage_disk", value_parser = clap::value_parser!(u8).range(1..=9))]
+    storage_mdts: Option<u8>,
     /// Fresh directory for the boot volume, serial log and run report.
     #[arg(long)]
     output: PathBuf,
@@ -773,7 +778,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     network::attach_usb(&arguments, &paths.output, &mut command)?;
     storage::attach_usb_disks(&arguments, &mut command);
     machine::attach_console(&arguments, &paths.serial, &mut command);
-    storage::attach_storage_disks(&attached, &mut command);
+    storage::attach_storage_disks(&attached, arguments.storage_mdts, &mut command);
     machine::attach_iommu(&arguments, &mut command);
     machine::attach_debugger(&arguments, &mut command);
     let command_line: Vec<String> = std::iter::once(command.get_program())
