@@ -2672,9 +2672,10 @@ fn timer_snapshot_tracks_guest_reads_and_wfi_when_the_clock_lags() {
     // initial observed overshoot remains monotonic, but repeated slow
     // work advances it only by ten per slice, not by host duration.
     for slice in 0..3 {
-        machine.clock.start_slice(slice * 1000, slice * 10, 1);
+        machine.clock.start_slice(|| slice * 1000, slice * 10, 1);
         machine.host.now = (slice + 1) * 1000;
-        machine.clock.end_slice(machine.host.now, (slice + 1) * 10);
+        let now = machine.host.now;
+        machine.clock.end_slice(|| now, (slice + 1) * 10);
     }
     machine.host.now = 3500;
     machine

@@ -646,7 +646,7 @@ fn native_dispatch_preflight_failure_precedes_participant_clock_and_cpu_changes(
         }
         let before_generation = machine.translation_generation;
         let before_regimes = machine.host.regimes.len();
-        let mut expected_clock = *machine.clock;
+        let expected_clock = (machine.clock.last(), machine.clock.host_deadline(1_000));
         machine.host.now = 100;
         let result = machine.processor_write().apply(&[ProcessorChange {
             domain: 1,
@@ -660,7 +660,10 @@ fn native_dispatch_preflight_failure_precedes_participant_clock_and_cpu_changes(
         assert_eq!(machine.slice_end, 123);
         assert_eq!(machine.translation_generation, before_generation);
         assert_eq!(machine.host.regimes.len(), before_regimes);
-        assert_eq!(machine.clock.read(100), expected_clock.read(100));
+        assert_eq!(
+            (machine.clock.last(), machine.clock.host_deadline(1_000)),
+            expected_clock
+        );
     }
 }
 
@@ -743,7 +746,6 @@ fn borrowed_native_settlement_matches_full_canonical_regime_invalidation() {
 #[test]
 fn paused_timer_events_and_timeouts_remain_pending_without_idle_skip_spinning() {
     let mut machine = pair();
-    machine.clock.follow_host();
     machine
         .bind_processor_power(&[core_binding(1, 0), core_binding(2, 1)])
         .unwrap();
@@ -807,7 +809,6 @@ fn monitors_exclude_pause_time() {
         pmu::{self, Context, Pmu},
     };
     let mut machine = board(&[], Board::default(), alloc::vec![identity(0)]);
-    machine.clock.follow_host();
     machine.cpu.retired = 10;
     let context = Context {
         el: 1,

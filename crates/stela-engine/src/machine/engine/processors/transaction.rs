@@ -181,7 +181,7 @@ impl NativeProcessorState<'_> {
         let amu_timed = cpu.amu.as_ref().map(|monitors| monitors.timed());
         if pmu_timed.is_some() || amu_timed.is_some() {
             let now = if pmu_timed == Some(true) || amu_timed == Some(true) {
-                clock.read(self.host.counter())
+                clock.read(|| self.host.counter())
             } else {
                 0
             };
@@ -292,9 +292,9 @@ impl<'a> ProcessorWrite<'a> {
         if changes.is_empty() {
             return Ok(SettledProcessorWrite { owners: self });
         }
-        let host = self.native.host.counter();
-        self.clock.end_slice(host, self.native.statistics.blocks);
-        let now = self.clock.read(host);
+        self.clock
+            .end_slice(|| self.native.host.counter(), self.native.statistics.blocks);
+        let now = self.clock.read(|| self.native.host.counter());
         for change in changes {
             match &mut self.peers[change.pe] {
                 Peer::Running => pause_cpu(self.cpu, self.waiting, now, change.paused),

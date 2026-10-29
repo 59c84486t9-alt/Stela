@@ -6,8 +6,7 @@ use super::*;
 impl<H: Host, D: Devices> Machine<H, D> {
     /// The system counter's count (`clock`).
     pub(super) fn now(&mut self) -> u64 {
-        let host = self.host.counter();
-        self.clock.read(host)
+        self.clock.read(|| self.host.counter())
     }
 
     pub(super) fn lines(&mut self) -> Lines {

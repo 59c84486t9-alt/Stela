@@ -43,6 +43,7 @@ mod regime_state;
 mod scheduler;
 mod system_access;
 mod timing;
+pub use clock::ClockStatus;
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
 pub use native_timing::{NativeInstructionSample, NativeTimingPhase, NativeTimingWork};
 pub use parallel::{
@@ -749,10 +750,10 @@ pub struct Machine<H: Host, D: Devices> {
     /// End waits of every PE by leaping the counter (`clock::Clock::skip_to`).
     idle_skip: bool,
     /// The longest the waits of every PE in one `run` last in all, in
-    /// system counter ticks, before it returns [`Stop::Waiting`]
+    /// host counter ticks, before it returns [`Stop::Waiting`]
     /// (`set_wait_limit`).
     wait_limit: Option<u64>,
-    /// System counter ticks the PEs have waited on the host in this `run`.
+    /// Host counter ticks the PEs have waited on the host in this `run`.
     waited: u64,
     /// The instruction just completed wrote PSTATE.PACM (PACM, or an
     /// exception return), so it does not lapse.

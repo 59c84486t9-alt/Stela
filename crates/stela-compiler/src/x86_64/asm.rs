@@ -613,6 +613,10 @@ impl<'a> Asm<'a> {
         let target = self.code.len();
         resolve_bytes(self.code, patch, target);
     }
+    /// Point `patch` at the earlier position `target` ([`Self::len`]).
+    pub(crate) fn bind_back(&mut self, patch: Patch, target: usize) {
+        resolve_bytes(self.code, patch, target);
+    }
 }
 
 /// Point `patch` in `code` at `target`.

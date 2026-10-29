@@ -326,9 +326,6 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             )));
         }
         let held = self.hold_native_services()?;
-        // Serial fair-share lag cannot represent concurrently executing cores.
-        // This lane observes the checked common host counter without drift.
-        self.clock.follow_host();
         let current = bindings
             .iter()
             .find(|binding| binding.pe == self.current)

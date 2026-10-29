@@ -29,7 +29,8 @@ use super::chain_control;
 use super::{
     CanonicalDeviceMemory, CanonicalDeviceWrite, ConsumedPair, ConsumedScalar, ConsumedWrite,
     DeviceError, DeviceReadShape, Devices, Host, Machine, RequirementKind, Reset, Start, Step,
-    clock::Clock, processors::Peer,
+    clock::{ClockStatus, Pace, SharedClock},
+    processors::Peer,
 };
 use crate::machine::{
     ctrr,
@@ -151,9 +152,9 @@ pub struct Hub {
     kick: Box<dyn Kick>,
     /// Cluster state by physical cluster (MPIDR_EL1 Aff1).
     clusters: Mutex<BTreeMap<u64, Cluster>>,
-    /// The home machine's counter as the board went parallel, which every
-    /// other machine's starts from: each then follows the host's counter.
-    clock: Mutex<Option<Clock>>,
+    /// The count every PE reads, from the home machine's as the board went
+    /// parallel on.
+    clock: Arc<SharedClock>,
     /// The home machine's PE.
     home: AtomicUsize,
     home_owner: AtomicU64,
@@ -219,7 +220,7 @@ impl Hub {
                 .collect(),
             kick: Box::new(kick),
             clusters: Mutex::new(BTreeMap::new()),
-            clock: Mutex::new(None),
+            clock: Arc::new(SharedClock::new(pes)),
             home: AtomicUsize::new(0),
             home_owner: AtomicU64::new(0),
             next_owner: AtomicU64::new(1),
@@ -234,6 +235,12 @@ impl Hub {
 
     pub fn pes(&self) -> usize {
         self.inboxes.len()
+    }
+
+    /// The count every PE reads, at the host's counter `counter`, and the
+    /// PE whose horizon holds it, if one does.
+    pub fn clock(&self, counter: impl FnMut() -> u64) -> ClockStatus {
+        self.clock.status(counter)
     }
 
     /// Enable optional owner observations. This changes no guest, mailbox,
@@ -687,9 +694,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Become the home machine of a board whose PEs each run on their own
     /// host core: the running PE stays here, and every PE held in reset will
-    /// start on its own machine ([`Self::start_parallel`]). The counter
-    /// follows the host's from now on, as no machine can charge another's
-    /// slices, and waits no longer leap it.
+    /// start on its own machine ([`Self::start_parallel`]). Every PE reads
+    /// the hub's [`SharedClock`] from now on, continuing this machine's
+    /// count, and waits no longer leap it.
     pub fn enter_parallel(&mut self, hub: Arc<Hub>) -> Result<(), ParallelAdmissionError> {
         if self.attached.is_some() || self.parallel.is_some() {
             return Err(ParallelAdmissionError::MachineAttached);
@@ -724,8 +731,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             ctrr: self.cpu.ctrr.clone(),
             impdef: self.cpu.apple.impdef.cluster_registers(),
         });
-        self.clock.follow_host();
-        *hub.clock.lock().unwrap_or_else(|e| e.into_inner()) = Some(*self.clock);
+        let host = self.host.counter();
+        let pace = Pace::new(self.profile.counter_frequency);
+        self.clock.seed(&hub.clock, host, pace);
+        self.clock
+            .attach(Arc::clone(&hub.clock), self.current, self.statistics.blocks);
         hub.home.store(self.current, Ordering::Relaxed);
         self.share_kept_pages(hub.pes());
         self.idle_skip = false;
@@ -766,19 +776,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 ParallelAdmissionError::MachineAttached,
             )));
         }
-        let clock = {
-            let retained = hub.clock.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(clock) = retained
-                .as_ref()
-                .copied()
-                .filter(|_| hub.home_owner.load(Ordering::Acquire) != 0)
-            else {
-                return Err(self.unsupported(RequirementKind::ParallelAdmission(
-                    ParallelAdmissionError::HomeUnavailable,
-                )));
-            };
-            clock
-        };
+        if hub.home_owner.load(Ordering::Acquire) == 0 {
+            return Err(self.unsupported(RequirementKind::ParallelAdmission(
+                ParallelAdmissionError::HomeUnavailable,
+            )));
+        }
         let (attached, control) = Attached::new(&hub, self.current, false)
             .map_err(|error| self.unsupported(RequirementKind::ParallelAdmission(error)))?;
         self.adopt_parallel_control(control);
@@ -787,7 +789,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 *peer = Peer::Remote;
             }
         }
-        *self.clock = clock;
+        self.clock
+            .attach(Arc::clone(&hub.clock), self.current, self.statistics.blocks);
         self.idle_skip = false;
         self.cpu.core_locks = core_locks;
         self.cpu.memory_lock = self.devices.memory_lock();

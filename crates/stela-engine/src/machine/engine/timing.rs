@@ -109,12 +109,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Bound the waits of every PE on the host in one `run` to `limit`
-    /// system counter ticks in all, after which it returns [`Stop::Waiting`]
+    /// host counter ticks in all, after which it returns [`Stop::Waiting`]
     /// so the host can take inputs that reach the board from outside it,
-    /// such as its power button. In all, so that a guest whose timers end
-    /// each wait early still returns. The counter keeps following the
-    /// host's meanwhile; an idle skip, which leaps to a deadline at once, is
-    /// not bounded. Without a limit a wait lasts until a deadline.
+    /// such as its power button. Host time, as those inputs arrive in it
+    /// whether or not a horizon holds the count; in all, so that a guest
+    /// whose timers end each wait early still returns. An idle skip, which
+    /// leaps to a deadline at once, is not bounded. Without a limit a wait
+    /// lasts until a deadline.
     pub fn set_wait_limit(&mut self, limit: Option<u64>) {
         self.wait_limit = limit.map(|limit| limit.max(1));
     }

@@ -297,8 +297,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             return Ok(());
         }
-        let host = self.host.counter();
-        self.clock.end_slice(host, self.statistics.blocks);
+        self.clock
+            .end_slice(|| self.host.counter(), self.statistics.blocks);
+        if self.waiting.is_some() || self.processor_paused(self.current) {
+            // Waiting or paused, the PE has nothing for the count to wait on,
+            // including while it serves the host.
+            self.clock.wait(|| self.host.counter());
+        }
         let mut waited = false;
         loop {
             let pass = self.host.counter();
@@ -331,9 +336,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 self.slice_end = self.statistics.blocks + QUANTUM;
                 self.slice_deadline = now + self.profile.counter_frequency / QUANTUM_HZ;
-                let host = self.host.counter();
                 let share = self.runnable();
-                self.clock.start_slice(host, self.statistics.blocks, share);
+                self.clock
+                    .start_slice(|| self.host.counter(), self.statistics.blocks, share);
                 return self.wake();
             }
             // In parallel, only a PE that waits for an interrupt serves the
@@ -361,9 +366,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             let limit = self
                 .wait_limit
-                .map(|limit| now.saturating_add(limit.saturating_sub(self.waited)));
+                .map(|limit| pass.saturating_add(limit.saturating_sub(self.waited)));
+            let deadline = deadline.map(|deadline| self.clock.wake_at(deadline, pass));
             let until = match (deadline, limit) {
-                (_, Some(limit)) if now >= limit => None,
+                (_, Some(limit)) if pass >= limit => None,
                 (Some(deadline), Some(limit)) => Some(deadline.min(limit)),
                 (deadline, limit) => deadline.or(limit),
             };
@@ -379,7 +385,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.statistics.spin_ticks += self.host.counter().wrapping_sub(pass);
             } else {
                 self.statistics.waits += 1;
-                let until = self.clock.host_deadline(until);
                 let until = match run_deadline {
                     Some(deadline) => {
                         let Some(until) = deadline.timer(self.host.counter(), until) else {
@@ -397,7 +402,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.sleep();
                 self.statistics.sleep_ticks += self.host.counter().wrapping_sub(slept);
             }
-            self.waited = self.waited.saturating_add(self.now().saturating_sub(now));
+            self.waited = self
+                .waited
+                .saturating_add(self.host.counter().saturating_sub(pass));
             waited = true;
         }
     }
