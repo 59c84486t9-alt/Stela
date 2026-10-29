@@ -578,6 +578,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
         }
         deadlines.push(self.devices.deadline(now));
+        deadlines.push(self.devices.dma_deadline());
         deadlines.into_iter().flatten().min()
     }
 
@@ -1012,7 +1013,7 @@ mod tests {
         }
         fn deadline(&mut self, now: u64) -> Option<u64> {
             self.counts.push(now);
-            self.dma
+            None
         }
         fn transfer(
             &mut self,
@@ -2447,6 +2448,7 @@ mod tests {
             ..Board::default()
         };
         let mut machine = board(&[WFI], devices, Vec::new());
+        assert_eq!(machine.devices.deadline(machine.host.now), None);
         machine.waiting = Some(Wait {
             kind: WaitKind::Interrupt,
             timeout: None,
