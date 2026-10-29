@@ -11,6 +11,7 @@ pub mod dmar;
 pub mod early_fault;
 pub mod entropy;
 pub mod firmware_state;
+pub mod firmware_time;
 pub mod guarded_stacks;
 pub mod hpet;
 pub mod madt;
