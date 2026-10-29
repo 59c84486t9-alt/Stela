@@ -226,8 +226,10 @@ impl Device {
 
 fn assert_claim_refuses(cfg: Config<'_>) {
     let device = Arc::new(Mutex::new(Device::new(1)));
-    // SAFETY: isolated model; invalid board/platform facts must be rejected.
     assert!(
+        // SAFETY: Model and Domain retain the same mutex-serialized Device
+        // and its owned fixture registers. There is no physical PCI or
+        // firmware actor, and no DMA mapping has been published.
         unsafe {
             Controller::claim(
                 Model(device.clone()),
