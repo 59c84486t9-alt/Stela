@@ -45,6 +45,17 @@ enum stela_air_buffer_access {
    STELA_AIR_READ_WRITE = 3,
 };
 
+/* An AIR module linked with the input's. */
+struct stela_air_module {
+   const void *bitcode;
+   size_t size;
+};
+/* A function a visible function table's handle calls, by name. */
+struct stela_air_linked_function {
+   const char *name;
+   size_t name_bytes;
+};
+
 struct stela_air_buffer {
    unsigned argument;
    unsigned index; /* air.location_index; not an LLVM parameter byte offset. */
@@ -52,6 +63,9 @@ struct stela_air_buffer {
    enum stela_air_buffer_access access;
    unsigned type_size; /* Zero when the input omits this optional reflection. */
    unsigned type_alignment;
+   /* An air.visible_function_table: device memory of 64-bit function
+    * handles, read only. */
+   bool function_table;
 };
 
 
@@ -361,6 +375,10 @@ struct stela_air_metadata {
    bool render; /* Additive decoder mode; legacy compute remains false. */
    bool framebuffer_fetch_present, framebuffer_fetch_enabled;
    bool denorms_disable, fast_math;
+   /* The module's one llvm.ident string, which qualified profiles name, or
+    * NULL; captured by validation, before linking adds others. */
+   const char *ident;
+   unsigned ident_bytes;
    /* Whether air.static_init constructors compute program-scope constants:
     * AS2 globals they store, which are constant data once translation has
     * evaluated them. */
@@ -375,6 +393,9 @@ bool stela_air_named_md(struct stela_air_metadata *m, const char *name,
                         LLVMValueRef *operands, unsigned *count);
 bool stela_air_metadata_layout(struct stela_air_metadata *m);
 bool stela_air_metadata_validate(struct stela_air_metadata *m);
+/* Whether the validated module is the AIR 2.9 / MSL 4.1 output of compiler
+ * 32023.922, which the FP32 and shared-memory profiles qualify. */
+bool stela_air_metadata_qualified(const struct stela_air_metadata *m);
 /* The module's function constants and, when storage is not NULL, the global
  * each is stored in: an AS2 scalar or 2-4 lane vector of integers, half or
  * float, which specialization defines. Indices, names and storage are unique. */

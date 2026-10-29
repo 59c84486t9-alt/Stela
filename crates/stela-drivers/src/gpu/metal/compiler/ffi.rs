@@ -151,6 +151,7 @@ pub struct Reflection {
     pub(super) patch_control_points: u32,
     pub(super) barycentrics: u32,
     pub(super) interpolants: u32,
+    pub(super) function_tables: u32,
     pub(super) buffers: [BufferUse; MAX_BUFFER_BINDINGS as usize],
     pub(super) textures: [TextureUse; MAX_TEXTURE_BINDINGS as usize],
     pub(super) samplers: [u32; MAX_SAMPLER_BINDINGS as usize],
@@ -206,6 +207,22 @@ pub(super) struct ConstantValue {
     pub size: usize,
 }
 
+/// `struct stela_air_module`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Module {
+    pub bitcode: *const c_void,
+    pub size: usize,
+}
+
+/// `struct stela_air_linked_function`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(super) struct LinkedFunction {
+    pub name: *const c_char,
+    pub name_bytes: usize,
+}
+
 /// `struct stela_metal_specialization`.
 #[repr(C)]
 #[derive(Debug)]
@@ -221,6 +238,10 @@ pub struct Specialization {
     pub(super) constants: *const ConstantValue,
     pub(super) tessellation: *const Tessellation,
     pub(super) stage_in: *const StageIn,
+    pub(super) modules: *const Module,
+    pub(super) linked_functions: *const LinkedFunction,
+    pub(super) module_count: u32,
+    pub(super) linked_function_count: u32,
 }
 
 /// `struct stela_metal_tessellation`: the raw values of the pipeline's
@@ -310,6 +331,11 @@ mod tests {
                 size_of::<Tessellation>(),
             ),
             ("STELA_METAL_STAGE_IN_BYTES", size_of::<StageIn>()),
+            ("STELA_METAL_MODULE_BYTES", size_of::<Module>()),
+            (
+                "STELA_METAL_LINKED_FUNCTION_BYTES",
+                size_of::<LinkedFunction>(),
+            ),
         ];
         for (name, value) in expected {
             assert_eq!(define(name), value, "{name}");

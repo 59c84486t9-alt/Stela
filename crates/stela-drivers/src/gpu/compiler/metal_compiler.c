@@ -17,6 +17,10 @@ static_assert(sizeof(struct stela_metal_specialization) == STELA_METAL_SPECIALIZ
               "metal/compiler.rs mirrors the specialization");
 static_assert(sizeof(struct stela_air_constant_value) == STELA_METAL_CONSTANT_VALUE_BYTES,
               "metal/compiler.rs mirrors the constant values");
+static_assert(sizeof(struct stela_air_module) == STELA_METAL_MODULE_BYTES,
+              "metal/compiler.rs mirrors the linked modules");
+static_assert(sizeof(struct stela_air_linked_function) == STELA_METAL_LINKED_FUNCTION_BYTES,
+              "metal/compiler.rs mirrors the linked functions");
 static_assert(sizeof(struct stela_metal_tessellation) == STELA_METAL_PIPELINE_TESSELLATION_BYTES,
               "metal/compiler.rs mirrors the pipeline tessellation");
 static_assert(sizeof(struct stela_metal_stage_in) == STELA_METAL_STAGE_IN_BYTES,
@@ -116,6 +120,7 @@ add_buffer(struct reflecting *r, const struct stela_air_buffer *buffer, bool arg
    }
    if (out->buffer_count == STELA_METAL_BUFFERS)
       return fail(r->error, STELA_AIR_LIMIT, "buffers exceed the table");
+   out->function_tables |= buffer->function_table;
    out->buffers[out->buffer_count++] = (struct stela_metal_buffer_use){
       buffer->index, buffer_access(buffer->access), argument_buffer};
    return true;
@@ -403,7 +408,9 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
    if (!entry || !target || !target->nir || !specialization ||
        (specialization->threadgroup_length_count && !specialization->threadgroup_lengths) ||
        (specialization->varying_count && !specialization->varyings) ||
-       (specialization->constant_count && !specialization->constants)) {
+       (specialization->constant_count && !specialization->constants) ||
+       (specialization->module_count && !specialization->modules) ||
+       (specialization->linked_function_count && !specialization->linked_functions)) {
       fail(error, STELA_AIR_INPUT, "invalid compilation request");
       return NULL;
    }
@@ -457,6 +464,10 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       .fetch_attribute = patch || stage_in ? fetch_attribute : NULL,
       .constants = specialization->constants,
       .constant_count = specialization->constant_count,
+      .modules = specialization->modules,
+      .module_count = specialization->module_count,
+      .linked_functions = specialization->linked_functions,
+      .linked_function_count = specialization->linked_function_count,
    };
    if (compute) {
       memcpy(resources.workgroup_size, specialization->workgroup_size,

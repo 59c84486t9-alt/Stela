@@ -307,6 +307,10 @@ impl AirCompiler {
             constants: constants.as_ptr(),
             tessellation: tessellation.map_or(ptr::null(), ptr::from_ref),
             stage_in: stage_in.map_or(ptr::null(), ptr::from_ref),
+            modules: ptr::null(),
+            linked_functions: ptr::null(),
+            module_count: 0,
+            linked_function_count: 0,
         };
         let mut error = ffi::AirError::NONE;
         let air = selected.air.bitcode;
@@ -736,7 +740,8 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
     .with(
         ShaderFeatures::PULL_MODEL_INTERPOLATION,
         r.interpolants != 0,
-    );
+    )
+    .with(ShaderFeatures::FUNCTION_POINTERS, r.function_tables != 0);
     let interface = Interface {
         stage,
         patch,

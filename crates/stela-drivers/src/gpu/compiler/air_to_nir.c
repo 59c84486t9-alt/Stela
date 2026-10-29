@@ -218,14 +218,7 @@ fp_environment(struct translator *t)
       return true;
    bool ftz = t->options->fp_profile == STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
    if (ftz) {
-      LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS], fields[AIR_MAX_METADATA_OPERANDS];
-      unsigned count, fields_count;
-      if (t->air_minor != 9 || t->language_major != 4 || t->language_minor != 1 ||
-          strcmp(LLVMGetTarget(t->module), "air64_v29-apple-macosx27.2.0") ||
-          !t->denorms_disable || !t->fast_math ||
-          !named_md(t, "llvm.ident", nodes, &count) || count != 1 ||
-          !md_node(t, nodes[0], fields, &fields_count) || fields_count != 1 ||
-          !md_string(fields[0], "Apple metal version 32023.922 (metalfe-32023.922.4)"))
+      if (!stela_air_metadata_qualified(&t->metadata) || !t->denorms_disable || !t->fast_math)
          return fail(t, STELA_AIR_METADATA, "AIR/compiler metadata differs from selected FP32 profile");
    } else if (t->denorms_disable) {
       return fail(t, STELA_AIR_METADATA, "AIR denorms_disable arithmetic requires qualified FP profile");
@@ -3034,9 +3027,12 @@ instruction(struct translator *t, LLVMValueRef inst)
    }
    if (op == LLVMCall) {
       LLVMValueRef callee = LLVMGetCalledValue(inst);
-      /* Inlining leaves only the calls that can reach recursion. */
+      /* Inlining leaves only the calls that can reach recursion, and
+       * dispatch only calls through other pointers than a table's. */
       if (stela_air_defined_function(callee))
          return fail(t, STELA_AIR_INSTRUCTION, "recursive function calls are unsupported");
+      if (!LLVMIsAFunction(callee))
+         return fail(t, STELA_AIR_INSTRUCTION, "function pointers come only from visible function tables");
       if (LLVMIsAFunction(callee)) {
          bool lowered;
          if (!memory_intrinsic(t, inst, LLVMGetIntrinsicID(callee), &lowered))
@@ -3138,6 +3134,9 @@ instruction(struct translator *t, LLVMValueRef inst)
       }
       switch (stela_air_math_call(&math_context, inst, callee, name, name_length, &math)) {
       case STELA_AIR_CALL_OTHER:
+         if (!LLVMGetIntrinsicID(callee) && (name_length < 4 || memcmp(name, "air.", 4)))
+            return fail(t, STELA_AIR_INSTRUCTION, "unresolved external function %.*s",
+                        (int)MIN2(name_length, 160), name);
          return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR function/intrinsic call");
       case STELA_AIR_CALL_FAILED:
          return false;
@@ -4045,8 +4044,12 @@ translate(const void *bitcode, size_t size, const char *entry,
    }
    t.metadata = (struct stela_air_metadata){.module = t.module, .error = error, .render = stage != NULL};
    if (!stela_air_metadata_layout(&t.metadata) || !stela_air_metadata_validate(&t.metadata) ||
+       !stela_air_link_modules(&t.metadata, options->modules, options->module_count) ||
        !stela_air_specialize_constants(&t.metadata, options->constants, options->constant_count) ||
-       !stela_air_construct_constants(&t.metadata) || !stela_air_inline_calls(&t.metadata))
+       !stela_air_construct_constants(&t.metadata) ||
+       !stela_air_dispatch_tables(&t.metadata, options->linked_functions,
+                                  options->linked_function_count) ||
+       !stela_air_inline_calls(&t.metadata))
       goto done;
    t.layout = t.metadata.layout;
    t.air_minor = t.metadata.air_minor;
@@ -4059,6 +4062,8 @@ translate(const void *bitcode, size_t size, const char *entry,
    bool threadgroup_globals;
    if (!stela_air_metadata_globals(&t.metadata, &threadgroup_globals))
       goto done;
+   /* Linking sets the triple again. */
+   target = LLVMGetTarget(t.module);
    char target_prefix[40];
    snprintf(target_prefix, sizeof(target_prefix), "air64_v2%u-apple-macosx", t.air_minor);
    if (strncmp(target, target_prefix, strlen(target_prefix))) {

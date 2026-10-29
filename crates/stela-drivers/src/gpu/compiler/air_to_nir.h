@@ -204,6 +204,15 @@ struct stela_air_options {
     * not declare are ignored. */
    const struct stela_air_constant_value *constants;
    unsigned constant_count;
+   /* Modules linked with the input's, compiled as it was and without
+    * function constants of their own, which define its external functions.
+    * A visible function table's handle i + 1 calls linked_functions[i],
+    * which the input or a module defines; any other handle calls none, and
+    * a call through it returns zero. */
+   const struct stela_air_module *modules;
+   unsigned module_count;
+   const struct stela_air_linked_function *linked_functions;
+   unsigned linked_function_count;
 };
 
 /* Additive VS/FS frontend. No runtime/Metal pipeline is constructed. resources

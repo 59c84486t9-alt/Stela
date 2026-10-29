@@ -187,6 +187,46 @@ static const char *calls =
    "!70 = !{!\"air.visible_output\", !\"air.arg_type_name\", !\"int\"}\n"
    "!80 = !{i32 0, !\"air.visible_input\", !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"x\"}\n";
 
+/* A kernel calling handle tid & 1 of its visible function table, then an
+ * external function a linked module defines, and a function of its own the
+ * table can name. */
+#define TABLES(call)                                                                        \
+   "declare ptr @air.get_function_pointer_visible_function_table(ptr addrspace(1), i32)\n"  \
+   "declare i32 @external(i32)\n"                                                         \
+   "define i32 @doubled(i32 %x) {\n%y = shl i32 %x, 1\nret i32 %y\n}\n"                     \
+   "define void @tables(ptr addrspace(1) %table, ptr addrspace(1) %data, i32 %tid) {\n"     \
+   "%which = and i32 %tid, 1\n"                                                           \
+   "%f = call ptr @air.get_function_pointer_visible_function_table(ptr addrspace(1) %table," \
+   " i32 %which)\n"                                                                       \
+   call                                                                                   \
+   "%w = call i32 @external(i32 %v)\n"                                                    \
+   "store i32 %w, ptr addrspace(1) %data, align 4\nret void\n}\n"                         \
+   "!air.kernel = !{!2}\n!air.visible = !{!5}\n"                                          \
+   "!2 = !{ptr @tables, !3, !4}\n!3 = !{}\n!4 = !{!40, !41, !42}\n"                        \
+   "!5 = !{ptr @doubled, !6, !7}\n!6 = !{!60}\n!7 = !{!70}\n"                              \
+   "!40 = !{i32 0, !\"air.visible_function_table\", !\"air.location_index\", i32 0, i32 1," \
+   " !\"air.read\", !\"air.arg_type_name\", !\"visible_function_table\", !\"air.arg_name\"," \
+   " !\"table\"}\n"                                                                       \
+   "!41 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 1, i32 1, !\"air.read_write\"," \
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\"," \
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"              \
+   "!42 = !{i32 2, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","    \
+   " !\"air.arg_name\", !\"tid\"}\n"                                                       \
+   "!60 = !{!\"air.visible_output\", !\"air.arg_type_name\", !\"int\"}\n"                   \
+   "!70 = !{i32 0, !\"air.visible_input\", !\"air.arg_type_name\", !\"int\", !\"air.arg_name\"," \
+   " !\"x\"}\n"
+
+static const char *tables = TABLES("%v = call i32 %f(i32 %tid)\n");
+/* A table's pointer used as other than a callee. */
+static const char *escaping = TABLES("%v = ptrtoint ptr %f to i32\n");
+/* The library linked with it: the external function and two visible
+ * functions, one of another type. */
+static const char *linked =
+   "define i32 @external(i32 %x) {\n%y = add i32 %x, 7\nret i32 %y\n}\n"
+   "define i32 @negated(i32 %x) {\n%y = sub i32 0, %x\nret i32 %y\n}\n"
+   "define i64 @wide(i64 %x) {\nret i64 %x\n}\n"
+   "!air.visible = !{}\n";
+
 #define VERTEX_RESULT "<{ <4 x float>, <2 x float> }>"
 
 static const char *vertex =
@@ -682,6 +722,65 @@ defined_functions_inline_into_their_callers(void)
           error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "recursive"));
 }
 
+/* compile() with the modules and linked functions of a pipeline. */
+static nir_shader *
+compile_linked(const char *fixture, const char *entry, const char *const *modules,
+               unsigned module_count, const char *const *functions, unsigned function_count,
+               struct stela_air_error *error)
+{
+   LLVMMemoryBufferRef buffers[2];
+   struct stela_air_module linked_modules[2];
+   struct stela_air_linked_function linked_functions[4];
+   assert(module_count <= 2 && function_count <= 4);
+   for (unsigned i = 0; i < module_count; i++) {
+      buffers[i] = bitcode(modules[i]);
+      linked_modules[i] = (struct stela_air_module){LLVMGetBufferStart(buffers[i]),
+                                                    LLVMGetBufferSize(buffers[i])};
+   }
+   for (unsigned i = 0; i < function_count; i++)
+      linked_functions[i] = (struct stela_air_linked_function){functions[i], strlen(functions[i])};
+   const struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .modules = linked_modules, .module_count = module_count,
+      .linked_functions = linked_functions, .linked_function_count = function_count,
+   };
+   nir_shader *shader = compile(fixture, entry, &specialization, error);
+   for (unsigned i = 0; i < module_count; i++)
+      LLVMDisposeMemoryBuffer(buffers[i]);
+   return shader;
+}
+
+/* Calls through visible function tables dispatch over the linked functions,
+ * and external functions resolve to the linked modules'. */
+static void
+linked_functions_resolve_tables_and_externals(void)
+{
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   assert(reflect(tables, "tables", &reflection, &error));
+   assert(reflection.function_tables == 1 && reflection.buffer_count == 2);
+
+   const char *functions[] = {"doubled", "negated", "wide"};
+   nir_shader *shader = compile_linked(tables, "tables", &linked, 1, functions, 3, &error);
+   if (!shader)
+      fprintf(stderr, "tables: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   stela_metal_release(shader);
+
+   /* Without the library, the external function is unresolved. */
+   assert(!compile_linked(tables, "tables", NULL, 0, functions, 1, &error));
+   assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "unresolved external function external"));
+   /* A linked function no module defines. */
+   const char *missing[] = {"doubled", "missing"};
+   assert(!compile_linked(tables, "tables", &linked, 1, missing, 2, &error));
+   assert(error.kind == STELA_AIR_ARGUMENT && strstr(error.detail, "not defined"));
+   /* A table's pointer that escapes its calls. */
+   assert(!compile_linked(escaping, "tables", &linked, 1, functions, 3, &error));
+   assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "only called"));
+   /* A library that defines the kernel's own function again. */
+   const char *twice[] = {linked, "define i32 @doubled(i32 %x) {\nret i32 %x\n}\n!air.visible = !{}\n"};
+   assert(!compile_linked(tables, "tables", twice, 2, functions, 3, &error));
+}
+
 int
 main(void)
 {
@@ -695,6 +794,7 @@ main(void)
    derived_constants_are_constructed_from_their_function_constants();
    arrays_reflect_each_slot();
    defined_functions_inline_into_their_callers();
+   linked_functions_resolve_tables_and_externals();
    glsl_type_singleton_decref();
    puts("metal compiler: ok");
    return 0;

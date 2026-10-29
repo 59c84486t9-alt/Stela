@@ -74,8 +74,9 @@ struct stela_metal_reflection {
     * control points it declares, zero when it declares none. */
    uint32_t patch, patch_control_points;
    /* Whether a fragment function reads its barycentric coordinates, and
-    * interpolates an interpolant. */
-   uint32_t barycentrics, interpolants;
+    * interpolates an interpolant, and whether a function takes a visible
+    * function table. */
+   uint32_t barycentrics, interpolants, function_tables;
    struct stela_metal_buffer_use buffers[STELA_METAL_BUFFERS];
    struct stela_metal_texture_use textures[STELA_METAL_TEXTURES];
    uint32_t samplers[STELA_METAL_SAMPLERS];
@@ -114,7 +115,10 @@ struct stela_metal_linked_varying {
 /* shader.rs Specialization, with a post-tessellation vertex function's
  * pipeline tessellation, and the stage-in layout a kernel or
  * post-tessellation vertex function fetches by; either may be NULL, and
- * every other function has neither. */
+ * every other function has neither. The modules are those of the
+ * pipeline's linked functions and preloaded dynamic libraries, which the
+ * function's module does not hold, and handle i + 1 of a visible function
+ * table calls linked_functions[i] (air_to_nir.h). */
 struct stela_metal_specialization {
    uint32_t workgroup_size[3];
    uint32_t threadgroup_length_count;
@@ -124,8 +128,13 @@ struct stela_metal_specialization {
    const struct stela_air_constant_value *constants;
    const struct stela_metal_tessellation *tessellation;
    const struct stela_metal_stage_in *stage_in;
+   const struct stela_air_module *modules;
+   const struct stela_air_linked_function *linked_functions;
+   uint32_t module_count, linked_function_count;
 };
-#define STELA_METAL_SPECIALIZATION_BYTES 72u
+#define STELA_METAL_SPECIALIZATION_BYTES 96u
+#define STELA_METAL_MODULE_BYTES 16u
+#define STELA_METAL_LINKED_FUNCTION_BYTES 16u
 /* The metal_abi.h layouts it points to. */
 #define STELA_METAL_PIPELINE_TESSELLATION_BYTES 24u
 #define STELA_METAL_STAGE_IN_BYTES 752u

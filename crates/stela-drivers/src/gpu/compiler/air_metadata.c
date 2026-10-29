@@ -68,15 +68,18 @@ stela_air_named_md(struct stela_air_metadata *t, const char *name, LLVMValueRef 
 }
 
 bool
+stela_air_metadata_qualified(const struct stela_air_metadata *t)
+{
+   static const char ident[] = "Apple metal version 32023.922 (metalfe-32023.922.4)";
+   return t->air_minor == 9 && t->language_major == 4 && t->language_minor == 1 &&
+          !strcmp(LLVMGetTarget(t->module), "air64_v29-apple-macosx27.2.0") && t->ident &&
+          t->ident_bytes == strlen(ident) && !memcmp(t->ident, ident, t->ident_bytes);
+}
+
+bool
 stela_air_metadata_shared_profile(struct stela_air_metadata *t)
 {
-   LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS], fields[AIR_MAX_METADATA_OPERANDS];
-   unsigned count, fields_count;
-   if (t->air_minor != 9 || t->language_major != 4 || t->language_minor != 1 ||
-       strcmp(LLVMGetTarget(t->module), "air64_v29-apple-macosx27.2.0") ||
-       !stela_air_named_md(t, "llvm.ident", nodes, &count) || count != 1 ||
-       !stela_air_md_node(t, nodes[0], fields, &fields_count) || fields_count != 1 ||
-       !stela_air_md_string(fields[0], "Apple metal version 32023.922 (metalfe-32023.922.4)"))
+   if (!stela_air_metadata_qualified(t))
       return fail(t, STELA_AIR_METADATA, "shared-memory AIR/compiler profile is unqualified");
    if (LLVMPointerSizeForAS(t->layout, 3) != 8)
       return fail(t, STELA_AIR_TARGET, "shared-memory AIR pointers require 64-bit layout");
@@ -367,6 +370,18 @@ stela_air_metadata_validate(struct stela_air_metadata *t)
    }
    t->denorms_disable = seen & 1;
    t->fast_math = seen & 2;
+   /* The identity is observational: its absence or shape refuses nothing. */
+   struct stela_air_error ident_error = {0};
+   struct stela_air_metadata observed = *t;
+   observed.error = &ident_error;
+   LLVMValueRef idents[AIR_MAX_METADATA_OPERANDS], ident[AIR_MAX_METADATA_OPERANDS];
+   unsigned ident_count, ident_fields;
+   t->ident = NULL;
+   t->ident_bytes = 0;
+   if (stela_air_named_md(&observed, "llvm.ident", idents, &ident_count) && ident_count == 1 &&
+       stela_air_md_node(&observed, idents[0], ident, &ident_fields) && ident_fields == 1 &&
+       ident[0] && LLVMIsAMDString(ident[0]))
+      t->ident = LLVMGetMDString(ident[0], &t->ident_bytes);
    /* Arithmetic requires an explicit qualified FP policy for this private AIR
     * option. Exact storage/shared access and integer operations do not depend
     * on FP denorm mode. */
@@ -1438,7 +1453,8 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          }
       }
       bool indirect = stela_air_md_string(fields[1], "air.indirect_buffer");
-      bool buffer = indirect || stela_air_md_string(fields[1], "air.buffer");
+      bool table = stela_air_md_string(fields[1], "air.visible_function_table");
+      bool buffer = indirect || table || stela_air_md_string(fields[1], "air.buffer");
       unsigned lanes = 0;
       enum stela_air_builtin builtin = builtin_input(fields[1], render, &lanes);
       bool position = render && render->entry.stage == STELA_AIR_FRAGMENT &&
@@ -1471,7 +1487,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       if (builtin && builtins[builtin])
          return fail(t, STELA_AIR_METADATA, "duplicate builtin argument");
       builtins[builtin] = true;
-      struct stela_air_buffer desc = {.argument = index};
+      struct stela_air_buffer desc = {.argument = index, .function_table = table};
       struct stela_air_texture texture_desc = {.argument = index};
       struct stela_air_sampler sampler_desc = {.argument = index};
       bool has_access = false;
@@ -1637,6 +1653,11 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          type_components = 0;
       } else if (buffer) {
          LLVMTypeRef type = LLVMTypeOf(param);
+         /* A visible function table is device memory its type implies. */
+         if (table && !has_as) {
+            desc.address_space = 1;
+            has_as = true;
+         }
          /* Device and constant buffers share the buffer indices; render
           * functions have no threadgroup memory, and constant is read-only. */
          if (!has_location || !has_as || !desc.access || desc.address_space < 1 ||
@@ -2177,20 +2198,8 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
       .language_major = m.language_major, .language_minor = m.language_minor,
       .denorms_disable = m.denorms_disable, .fast_math = m.fast_math,
       .function_constants = constants, .function_constant_count = constant_count,
+      .ident = m.ident, .ident_bytes = m.ident_bytes,
    };
-   /* The identity is observational: its absence or shape refuses nothing. */
-   struct stela_air_error ident_error = {0};
-   struct stela_air_metadata observed = m;
-   observed.error = &ident_error;
-   LLVMValueRef idents[AIR_MAX_METADATA_OPERANDS], ident[AIR_MAX_METADATA_OPERANDS];
-   unsigned ident_count, ident_fields;
-   if (stela_air_named_md(&observed, "llvm.ident", idents, &ident_count) && ident_count == 1 &&
-       stela_air_md_node(&observed, idents[0], ident, &ident_fields) && ident_fields == 1 &&
-       ident[0] && LLVMIsAMDString(ident[0])) {
-      unsigned bytes;
-      info.ident = LLVMGetMDString(ident[0], &bytes);
-      info.ident_bytes = bytes;
-   }
    if (render_name) {
       struct stela_air_render render;
       if (!stela_air_metadata_stage(&m, LLVMGetNamedFunction(m.module, render_name), stage, &render)) goto done;
