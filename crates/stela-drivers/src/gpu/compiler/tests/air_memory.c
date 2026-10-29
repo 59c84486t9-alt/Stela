@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
-/* Thread memory (allocas), LLVM's memory intrinsics and constant data
- * (initialized constant globals). Original LLVM IR fixtures; no Apple output. */
+/* Thread memory (allocas), LLVM's memory intrinsics, constant data
+ * (initialized constant globals) and constant buffers. Original LLVM IR
+ * fixtures; no Apple output. */
 #include "../metal_abi.h"
 #include "compiler/air_to_nir.h"
 #include "air_test_fixture.h"
@@ -21,17 +22,20 @@ static const char *module =
    "target datalayout = \"e-p:64:64-i32:32-i64:64-f32:32-v128:128-n8:16:32\"\n"
    "target triple = \"air64_v29-apple-macosx27.2.0\"\n";
 
-static const char *metadata =
-   "!air.kernel = !{!2}\n!2 = !{ptr @kernel, !3, !4}\n!3 = !{}\n!4 = !{!40}\n"
-   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
-   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
-   " i32 4, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"out\"}\n"
-   "!air.version = !{!20}\n!air.language_version = !{!21}\n!llvm.ident = !{!22}\n"
-   "!air.compile_options = !{!23, !24, !25}\n"
-   "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n"
-   "!22 = !{!\"Apple metal version 32023.922 (metalfe-32023.922.4)\"}\n"
-   "!23 = !{!\"air.compile.denorms_disable\"}\n!24 = !{!\"air.compile.fast_math_enable\"}\n"
-   "!25 = !{!\"air.compile.framebuffer_fetch_enable\"}\n";
+/* A kernel's argument list, its device buffer `out` (!40) and the versions. */
+#define KERNEL_ARGUMENTS(list) \
+   "!air.kernel = !{!2}\n!2 = !{ptr @kernel, !3, !4}\n!3 = !{}\n!4 = !{" list "}\n" \
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\"," \
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\"," \
+   " i32 4, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"out\"}\n" \
+   "!air.version = !{!20}\n!air.language_version = !{!21}\n!llvm.ident = !{!22}\n" \
+   "!air.compile_options = !{!23, !24, !25}\n" \
+   "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n" \
+   "!22 = !{!\"Apple metal version 32023.922 (metalfe-32023.922.4)\"}\n" \
+   "!23 = !{!\"air.compile.denorms_disable\"}\n!24 = !{!\"air.compile.fast_math_enable\"}\n" \
+   "!25 = !{!\"air.compile.framebuffer_fetch_enable\"}\n"
+
+static const char *metadata = KERNEL_ARGUMENTS("!40");
 
 static const char *intrinsics =
    "declare void @llvm.lifetime.start.p0(i64, ptr)\n"
@@ -56,13 +60,12 @@ static const struct limits defaults = {.private_bytes = 1024, .constant_bytes = 
 static struct stela_metal_stage primary = {.table = STELA_METAL_TABLE_PRIMARY};
 
 static nir_shader *
-translate(const char *globals, const char *body, const nir_shader_compiler_options *options,
-          stela_air_bind_buffer bind, const struct limits *limits, struct stela_air_error *error)
+translate_kernel(const char *declarations, const char *definition, const char *kernel_metadata,
+                 const nir_shader_compiler_options *options, stela_air_bind_buffer bind,
+                 const struct limits *limits, struct stela_air_error *error)
 {
-   char definition[4096], declarations[4096];
-   snprintf(definition, sizeof(definition), "define void @kernel(ptr addrspace(1) %%out) {\n%s}\n", body);
-   snprintf(declarations, sizeof(declarations), "%s%s", globals, intrinsics);
-   LLVMMemoryBufferRef input = stela_air_test_custom_bitcode(module, declarations, definition, metadata);
+   LLVMMemoryBufferRef input =
+      stela_air_test_custom_bitcode(module, declarations, definition, kernel_metadata);
    const struct stela_air_options o = {
       .workgroup_size = {1, 1, 1}, .max_instructions = 10000,
       .bind_buffer = bind, .binding_data = &primary,
@@ -74,6 +77,16 @@ translate(const char *globals, const char *body, const nir_shader_compiler_optio
                                          "kernel", options, &o, error);
    LLVMDisposeMemoryBuffer(input);
    return shader;
+}
+
+static nir_shader *
+translate(const char *globals, const char *body, const nir_shader_compiler_options *options,
+          stela_air_bind_buffer bind, const struct limits *limits, struct stela_air_error *error)
+{
+   char definition[4096], declarations[4096];
+   snprintf(definition, sizeof(definition), "define void @kernel(ptr addrspace(1) %%out) {\n%s}\n", body);
+   snprintf(declarations, sizeof(declarations), "%s%s", globals, intrinsics);
+   return translate_kernel(declarations, definition, metadata, options, bind, limits, error);
 }
 
 #ifdef STELA_AIR_TEST_NAK
@@ -319,6 +332,48 @@ constant_data_lowers_to_load_constant(void)
            use, &defaults, STELA_AIR_TYPE);
 }
 
+/* A constant buffer `scale` (!41) with `access`. */
+#define SCALE_ARGUMENT(access) \
+   "!41 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 1, i32 1, !\"" access "\"," \
+   " !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\"," \
+   " i32 4, !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"scale\"}\n"
+
+/* A kernel's constant buffer is a read-only root, beside its device buffer. */
+static void
+kernels_read_constant_buffers(void)
+{
+   static const char *kernel_metadata = KERNEL_ARGUMENTS("!40, !41") SCALE_ARGUMENT("air.read");
+   const struct {
+      const char *body;
+      enum stela_air_error_kind kind;
+   } cases[] = {
+      {"%s = load float, ptr addrspace(2) %scale, align 4\n"
+       "%p = getelementptr float, ptr addrspace(2) %scale, i64 1\n"
+       "%t = load float, ptr addrspace(2) %p, align 4\n%r = fadd fast float %s, %t\n"
+       "store float %r, ptr addrspace(1) %out, align 4\nret void\n", STELA_AIR_OK},
+      {"store float 1.0, ptr addrspace(2) %scale, align 4\nret void\n", STELA_AIR_MEMORY},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
+      char definition[1024];
+      snprintf(definition, sizeof(definition),
+               "define void @kernel(ptr addrspace(1) %%out, ptr addrspace(2) %%scale) {\n%s}\n",
+               cases[i].body);
+      struct stela_air_error error;
+      nir_shader *shader = translate_kernel("", definition, kernel_metadata, &nir_options,
+                                            stela_metal_bind_buffer, &defaults, &error);
+      if (error.kind != cases[i].kind)
+         fprintf(stderr, "%s: %u %s\n", cases[i].body, error.kind, error.detail);
+      assert(error.kind == cases[i].kind && !shader == (cases[i].kind != STELA_AIR_OK));
+      ralloc_free(shader);
+   }
+   /* Constant buffers are read-only. */
+   static const char *writable = KERNEL_ARGUMENTS("!40, !41") SCALE_ARGUMENT("air.read_write");
+   struct stela_air_error error;
+   assert(!translate_kernel("", "define void @kernel(ptr addrspace(1) %out, ptr addrspace(2) %scale) {\n"
+                            "ret void\n}\n", writable, &nir_options, stela_metal_bind_buffer, &defaults, &error) &&
+          error.kind == STELA_AIR_ARGUMENT);
+}
+
 int
 main(void)
 {
@@ -326,6 +381,7 @@ main(void)
    thread_memory_lowers_to_scratch();
    memory_intrinsics_lower_to_chunks();
    constant_data_lowers_to_load_constant();
+   kernels_read_constant_buffers();
    glsl_type_singleton_decref();
    puts("air memory: ok");
    return 0;

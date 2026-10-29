@@ -330,15 +330,6 @@ pointer_space(LLVMTypeRef type)
    return LLVMGetTypeKind(type) == LLVMPointerTypeKind && LLVMGetPointerAddressSpace(type) <= 3;
 }
 
-/* The LLVM address space of a resource's pointers. */
-static unsigned
-pointer_resource_space(const struct value *value)
-{
-   if (value->storage)
-      return value->storage->data.mode == nir_var_mem_shared ? 3 : 0;
-   return value->constant_data || value->constant_view ? 2 : 1;
-}
-
 static nir_def *
 get_value(struct translator *t, LLVMValueRef llvm)
 {
@@ -900,8 +891,7 @@ gep(struct translator *t, LLVMValueRef inst, const struct value **origin)
 {
    struct value *base = pointer_value(t, LLVMGetOperand(inst, 0));
    LLVMTypeRef result_type = LLVMTypeOf(inst);
-   if (!base || !base->access || LLVMGetTypeKind(result_type) != LLVMPointerTypeKind ||
-       LLVMGetPointerAddressSpace(result_type) != pointer_resource_space(base)) {
+   if (!base || !base->access || LLVMGetTypeKind(result_type) != LLVMPointerTypeKind) {
       fail(t, STELA_AIR_MEMORY, "GEP requires a validated buffer/shared pointer");
       return NULL;
    }
@@ -1530,16 +1520,16 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
          if (t->options->bind_ssbo) {
             if (!t->options->bind_ssbo(&io->buffer, &slot, t->options->binding_data) ||
                 slot >= t->options->ssbo_count || slots[slot])
-               return fail(t, STELA_AIR_ARGUMENT, "invalid constant-buffer SSBO binding");
+               return fail(t, STELA_AIR_ARGUMENT, "invalid render buffer SSBO binding");
             slots[slot] = true; def = nir_imm_int64(&t->b, 0);
          } else {
             if (!t->options->bind_buffer)
-               return fail(t, STELA_AIR_ARGUMENT, "unbound readonly constant view");
+               return fail(t, STELA_AIR_ARGUMENT, "unbound render buffer");
             def = t->options->bind_buffer(&t->b, &io->buffer, t->options->binding_data);
             if (!binding_prelude(t))
                return false;
             if (!def || def->num_components != 1 || def->bit_size != 64)
-               return fail(t, STELA_AIR_ARGUMENT, "invalid/unbound readonly constant view");
+               return fail(t, STELA_AIR_ARGUMENT, "invalid/unbound render buffer");
          }
       } else if (io->semantic == STELA_AIR_STAGE_BUILTIN) {
          def = builtin_argument(t, io->builtin, param);
@@ -1558,7 +1548,11 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
       if (!put_value(t, param, def, io->buffer.access)) return false;
       if (io->semantic == STELA_AIR_STAGE_BUFFER) {
          struct value *v = find_value(t, param);
-         v->constant_view = io; v->view_root = true; v->pointer_root = param;
+         if (io->buffer.address_space == 2) {
+            v->constant_view = io;
+            v->view_root = true;
+         }
+         v->pointer_root = param;
          v->ssbo = t->options->bind_ssbo != NULL; v->ssbo_slot = slot;
       }
    }
@@ -2713,8 +2707,7 @@ pointer_anchor(struct translator *t, LLVMValueRef llvm)
       value = pointer_value(t, llvm);
    if (!value || !value->access || value->pointer_root != llvm ||
        !pointer_space(LLVMTypeOf(llvm)) || !value->def ||
-       value->def->num_components != 1 || value->def->bit_size != 64 ||
-       LLVMGetPointerAddressSpace(LLVMTypeOf(llvm)) != pointer_resource_space(value)) {
+       value->def->num_components != 1 || value->def->bit_size != 64) {
       fail(t, STELA_AIR_MEMORY, "pointer PHI dependency lacks validated resource origin");
       return NULL;
    }

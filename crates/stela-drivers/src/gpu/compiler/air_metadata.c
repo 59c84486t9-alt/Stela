@@ -933,19 +933,23 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          type_components = 0;
       } else if (buffer) {
          LLVMTypeRef type = LLVMTypeOf(param);
-         if (!has_location || !has_as || !desc.access ||
-             (render ? desc.address_space != 2 : (desc.address_space != 1 && desc.address_space != 3)) ||
+         /* Device and constant buffers share the buffer indices; render
+          * functions have no threadgroup memory, and constant is read-only. */
+         if (!has_location || !has_as || !desc.access || desc.address_space < 1 ||
+             desc.address_space > (render ? 2 : 3) ||
+             (desc.address_space == 2 && desc.access != STELA_AIR_READ) ||
              LLVMGetTypeKind(type) != LLVMPointerTypeKind ||
              LLVMGetPointerAddressSpace(type) != desc.address_space)
             return fail(t, STELA_AIR_ARGUMENT, "unsupported buffer %u", index);
          bool shared = desc.address_space == 3;
          bool *indices = shared ? shared_indices : buffer_indices;
-         unsigned limit = shared ? t->max_threadgroup_buffers : render ? t->max_constant_buffers : t->max_device_buffers;
+         unsigned limit = shared ? t->max_threadgroup_buffers :
+                          desc.address_space == 2 ? t->max_constant_buffers : t->max_device_buffers;
          if (indices[desc.index] || (limit && desc.index >= limit))
             return fail(t, STELA_AIR_METADATA, "duplicate buffer or location exceeds AIR module limit");
          indices[desc.index] = true;
-         if (render && (desc.access != STELA_AIR_READ || !has_size || !has_align ||
-                        !desc.type_size || !desc.type_alignment))
+         if (render && desc.address_space == 2 && (!has_size || !has_align ||
+                                                   !desc.type_size || !desc.type_alignment))
             return fail(t, STELA_AIR_ARGUMENT, "render constant view must be reflected and readonly");
          if (shared && (!has_size || !has_align || !desc.type_size || !desc.type_alignment))
             return fail(t, STELA_AIR_ARGUMENT, "invalid/unbound threadgroup buffer %u", index);
@@ -988,7 +992,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          io->used = LLVMGetFirstUse(param) != NULL;
          if (unused && io->used)
             return fail(t, STELA_AIR_METADATA, "used fragment input marked unused");
-         if (buffer && !stage_struct(t, render, io, struct_info))
+         if (buffer && desc.address_space == 2 && !stage_struct(t, render, io, struct_info))
             return false;
       }
       kernel->arguments[a] = (struct stela_air_argument) {

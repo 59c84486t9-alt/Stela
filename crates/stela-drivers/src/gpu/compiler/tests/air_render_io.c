@@ -223,6 +223,46 @@ vertex_functions_fetch_attributes_and_write_builtins(void)
    ralloc_free(shader);
 }
 
+/* position_only with a buffer `v` in `space` and its body. */
+static char *
+with_buffer(unsigned space, const char *body)
+{
+   char definition[1024], argument[512];
+   snprintf(definition, sizeof(definition),
+            "define <4 x float> @vertex(<4 x float> %%p, ptr addrspace(%u) %%v) {\n%s}\n", space, body);
+   snprintf(argument, sizeof(argument),
+            "!4 = !{!40, !41}\n"
+            "!41 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+            " !\"air.address_space\", i32 %u, !\"air.arg_type_size\", i32 16, !\"air.arg_type_align_size\","
+            " i32 16, !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"v\"}\n", space);
+   char *signature = change(position_only, "define <4 x float> @vertex(<4 x float> %p) {\nret <4 x float> %p\n}\n",
+                            definition);
+   char *text = change(signature, "!4 = !{!40}\n", argument);
+   free(signature);
+   return text;
+}
+
+/* A vertex function reads and writes a device buffer. */
+static void
+vertex_functions_access_device_buffers(void)
+{
+   char *text = with_buffer(1, "%l = load <4 x float>, ptr addrspace(1) %v, align 16\n"
+                               "%w = getelementptr <4 x float>, ptr addrspace(1) %v, i64 1\n"
+                               "store <4 x float> %p, ptr addrspace(1) %w, align 16\nret <4 x float> %l\n");
+   struct stela_air_error error = {0};
+   nir_shader *shader = translate(text, STELA_AIR_VERTEX, false, &error);
+   if (!shader)
+      fprintf(stderr, "device buffer: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   ralloc_free(shader);
+   free(text);
+
+   /* Render functions have no threadgroup buffers. */
+   text = with_buffer(3, "ret <4 x float> %p\n");
+   assert(!translate(text, STELA_AIR_VERTEX, false, &error) && error.kind == STELA_AIR_ARGUMENT);
+   free(text);
+}
+
 /* A vertex function reads constant data, as a table of positions. */
 static void
 vertex_functions_read_constant_data(void)
@@ -337,6 +377,7 @@ main(void)
    glsl_type_singleton_init_or_ref();
    vertex_functions_fetch_attributes_and_write_builtins();
    vertex_functions_read_constant_data();
+   vertex_functions_access_device_buffers();
    fragment_functions_interpolate_and_write_targets();
    refuses_unrepresentable_render_io();
    glsl_type_singleton_decref();
