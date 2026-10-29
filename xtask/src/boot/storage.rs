@@ -318,13 +318,87 @@ pub(super) fn attach_usb_disks(arguments: &Run, command: &mut Process) {
 /// `--storage-disk`s, each an NVMe disk with its serial.
 pub(super) fn attach_storage_disks(attached: &[(PathBuf, String)], command: &mut Process) {
     for (index, (path, serial)) in attached.iter().enumerate() {
+        // Let Write Zeroes with unmap release image-file extents.
+        let discard = if path.is_file() { ",discard=unmap" } else { "" };
         command
             .arg("-drive")
             .arg(format!(
-                "if=none,id=ans{index},format=raw,file={}",
+                "if=none,id=ans{index},format=raw,file={}{discard}",
                 option_path(path)
             ))
             .arg("-device")
             .arg(format!("nvme,drive=ans{index},serial={serial}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn drive(path: PathBuf) -> Vec<String> {
+        let mut command = Process::new("qemu-system-x86_64");
+        attach_storage_disks(&[(path, "TEST".into())], &mut command);
+        command
+            .get_args()
+            .map(|argument| argument.to_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn image_files_allow_unmap_and_keep_escaped_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("raw,image.img");
+        fs::write(&path, [0xa5; 16]).unwrap();
+        assert_eq!(
+            drive(path.clone()),
+            [
+                "-drive".to_owned(),
+                format!(
+                    "if=none,id=ans0,format=raw,file={},discard=unmap",
+                    option_path(&path)
+                ),
+                "-device".to_owned(),
+                "nvme,drive=ans0,serial=TEST".to_owned(),
+            ]
+        );
+        assert_eq!(fs::read(path).unwrap(), [0xa5; 16]);
+    }
+
+    #[test]
+    fn non_files_keep_the_default_discard_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        for path in [
+            directory.path().to_owned(),
+            directory.path().join("missing"),
+        ] {
+            assert!(
+                !drive(path)
+                    .iter()
+                    .any(|argument| argument.contains("discard="))
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_use_the_backing_file_type() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let image = directory.path().join("image");
+        fs::write(&image, []).unwrap();
+        for (name, target, unmap) in [
+            ("regular", image.as_path(), true),
+            ("device", Path::new("/dev/null"), false),
+        ] {
+            let path = directory.path().join(name);
+            symlink(target, &path).unwrap();
+            assert_eq!(
+                drive(path)
+                    .iter()
+                    .any(|argument| argument.contains(",discard=unmap")),
+                unmap,
+            );
+        }
     }
 }
