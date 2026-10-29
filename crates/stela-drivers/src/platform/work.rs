@@ -1601,6 +1601,29 @@ impl<const N: usize> Runtime<N> {
             })
         }
     }
+    /// Check actual CPU/policy/lifetime/current-role eligibility for a firmware
+    /// queue join before a caller mutates C handler state. This does not capture
+    /// a flush boundary, run/accept work, attest progress or synchronize an IRQ.
+    /// A successful check is not a future execution or provider capability.
+    pub fn check_firmware_join(&self, queue: FirmwareQueue) -> Result<(), WorkError> {
+        self.queue.process()?;
+        if self.retired.get() || self.queue.abandoned.load(Ordering::Acquire) {
+            return Err(WorkError::Closed);
+        }
+        if self.layout != Layout::NativeFirmware16 {
+            return Err(WorkError::Unavailable);
+        }
+        let current = self.current.get();
+        if current != NONE {
+            self.current_id()?;
+            // SAFETY: actual current frame was checked; its immutable lane is
+            // fixed before publication and is never changed by a callback/IRQ.
+            if unsafe { (*self.task(current)).lane == queue.lane() } {
+                return Err(WorkError::WouldDeadlock);
+            }
+        }
+        Ok(())
+    }
     /// Join only the selected firmware queue's jobs accepted before this call.
     /// Ordinary callbacks queued later, including same-queue chains, belong to
     /// a later flush boundary. This matches pinned Linux flush_workqueue;
@@ -1617,23 +1640,8 @@ impl<const N: usize> Runtime<N> {
         queue: FirmwareQueue,
         deadline: u64,
     ) -> Result<(), WorkError> {
-        self.queue.process()?;
-        if self.retired.get() || self.queue.abandoned.load(Ordering::Acquire) {
-            return Err(WorkError::Closed);
-        }
-        if self.layout != Layout::NativeFirmware16 {
-            return Err(WorkError::Unavailable);
-        }
+        self.check_firmware_join(queue)?;
         let lane = queue.lane();
-        let current = self.current.get();
-        if current != NONE {
-            self.current_id()?;
-            // SAFETY: actual current frame was checked; its immutable lane is
-            // fixed before publication and is never changed by a callback/IRQ.
-            if unsafe { (*self.task(current)).lane == lane } {
-                return Err(WorkError::WouldDeadlock);
-            }
-        }
         let boundary = self.queue.lock()?.state().next;
         loop {
             let current = self.current.get();

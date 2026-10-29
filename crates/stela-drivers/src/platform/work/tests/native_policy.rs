@@ -338,6 +338,16 @@ fn native_admission_rejects_legacy_jobs_without_claiming_or_reinterpreting_them(
             .join_firmware(FirmwareQueue::Gpe, cpu.ticks() + 1_000_000_000),
         Err(WorkError::Unavailable)
     );
+    assert_eq!(
+        executor.runtime().check_firmware_join(FirmwareQueue::Gpe),
+        Err(WorkError::Unavailable)
+    );
+    assert_eq!(
+        executor
+            .runtime()
+            .check_firmware_join(FirmwareQueue::Notify),
+        Err(WorkError::Unavailable)
+    );
     queue.close().unwrap();
     executor
         .runtime()
@@ -508,6 +518,14 @@ unsafe extern "C" fn gpe_self_join(p: *mut c_void) {
     let f = unsafe { scene(p) };
     f.event(40);
     assert_eq!(
+        f.runtime().check_firmware_join(FirmwareQueue::Gpe),
+        Err(WorkError::WouldDeadlock)
+    );
+    assert_eq!(
+        f.runtime().check_firmware_join(FirmwareQueue::Notify),
+        Ok(())
+    );
+    assert_eq!(
         f.runtime().join_firmware(
             FirmwareQueue::Gpe,
             f.runtime().queue.cpu.ticks() + 1_000_000_000
@@ -520,6 +538,11 @@ unsafe extern "C" fn notify_self_join(p: *mut c_void) {
     // SAFETY: live queue-owned Scene, executing on an actual Notify frame.
     let f = unsafe { scene(p) };
     f.event(42);
+    assert_eq!(
+        f.runtime().check_firmware_join(FirmwareQueue::Notify),
+        Err(WorkError::WouldDeadlock)
+    );
+    assert_eq!(f.runtime().check_firmware_join(FirmwareQueue::Gpe), Ok(()));
     assert_eq!(
         f.runtime().join_firmware(
             FirmwareQueue::Notify,
@@ -566,6 +589,11 @@ unsafe extern "C" fn portal_queue_join(p: *mut c_void) {
     // SAFETY: this actual Portal frame borrows the queue-retained Scene.
     let f = unsafe { scene(p) };
     f.event(50);
+    assert_eq!(f.runtime().check_firmware_join(FirmwareQueue::Gpe), Ok(()));
+    assert_eq!(
+        f.runtime().check_firmware_join(FirmwareQueue::Notify),
+        Ok(())
+    );
     f.runtime()
         .join_firmware(
             FirmwareQueue::Gpe,
@@ -653,12 +681,28 @@ fn minimum_sixteen_slot_queue_reserves_foreground_after_general_saturation() {
         unsafe { r.queue.execute(Kind::Notify, count_queued, p) }.unwrap();
     }
     assert_eq!(count.load(Ordering::Relaxed), 0);
+    let next = r.queue.lock().unwrap().state().next;
+    let flags = cpu.flags();
+    assert_eq!(r.check_firmware_join(FirmwareQueue::Gpe), Ok(()));
+    assert_eq!(r.check_firmware_join(FirmwareQueue::Notify), Ok(()));
+    assert_eq!(r.queue.lock().unwrap().state().next, next);
+    assert_eq!(count.load(Ordering::Relaxed), 0);
+    assert_eq!(cpu.flags(), flags);
+    assert_eq!(r.current_id(), Err(WorkError::Unavailable));
     // SAFETY: Foreground retains the context across admission and every switched peer.
     unsafe { r.call_foreground(count_queued, p, cpu.ticks() + 1_000_000_000) }.unwrap();
     r.drain(cpu.ticks() + 1_000_000_000).unwrap();
     assert_eq!(count.load(Ordering::Relaxed), 16);
     // SAFETY: no producer remains and all16 admitted callbacks actually returned.
     unsafe { r.retire() }.unwrap();
+    assert_eq!(
+        r.check_firmware_join(FirmwareQueue::Gpe),
+        Err(WorkError::Closed)
+    );
+    assert_eq!(
+        r.check_firmware_join(FirmwareQueue::Notify),
+        Err(WorkError::Closed)
+    );
     assert_eq!(
         r.join_firmware(FirmwareQueue::Gpe, cpu.ticks() + 1_000_000_000),
         Err(WorkError::Closed)
