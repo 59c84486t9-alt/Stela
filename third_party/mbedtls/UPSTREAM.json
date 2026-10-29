@@ -1,0 +1,11 @@
+{
+  "name": "Mbed TLS",
+  "version": "3.6.7 LTS",
+  "archive_sha256": "a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6",
+  "release": "https://github.com/Mbed-TLS/mbedtls/releases/tag/mbedtls-3.6.7",
+  "source": "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2",
+  "scope": "Unmodified configured C/source/header envelope; disabled modules compile empty. No TLS engine/AES/GCM/Everest selected.",
+  "license": "Apache-2.0 OR GPL-2.0-or-later; full upstream LICENSE retained",
+  "native_combined_license_choice": "GPL-2.0-or-later option; final distribution review and notices pending",
+  "patches": []
+}
