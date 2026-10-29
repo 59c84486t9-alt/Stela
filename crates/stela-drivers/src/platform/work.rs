@@ -9,6 +9,7 @@
 //! supply a genuine dispatcher policy that permits hardware IRQ progress and
 //! actual main-owned interrupt metadata, plus IRQ-safe allocation/synchronizers.
 //! This module alone does not qualify that provider.
+use crate::bus::dma::memory::{MemoryError, PinnedPages};
 #[cfg(target_arch = "x86_64")]
 use alloc::vec::Vec;
 use alloc::{boxed::Box, sync::Arc};
@@ -143,6 +144,21 @@ pub unsafe trait Cpu: Send + Sync {
 pub unsafe trait StackBacking: Send + Sync {
     fn bounds(&self) -> Range<usize>;
     fn guard(&self) -> Range<usize>;
+    /// Export a real allocation/mapping pin from this backing's resource owner.
+    /// The caller independently checks exact usable coverage/cache/granules;
+    /// an incompatible actual view is refused, never treated as stack access.
+    /// Metadata setup is fallible and nonblocking, without queue reentry, root
+    /// changes, migration or parking. No replacement RAM or PA/VA labels may
+    /// stand in for the real retained allocation and mapping owner.
+    ///
+    /// # Safety
+    /// The caller exclusively owns genuinely never-entered, fully zeroed usable
+    /// backing, with no live frame/DMA/other byte user. Every successful pin
+    /// satisfies PageBacking's real ownership contract, including initial zero
+    /// and mapping retention. No C stack/address/current permission follows.
+    unsafe fn pin_cold_pages(&self) -> Result<PinnedPages, MemoryError> {
+        Err(MemoryError::Unavailable)
+    }
 }
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub struct Stack {
