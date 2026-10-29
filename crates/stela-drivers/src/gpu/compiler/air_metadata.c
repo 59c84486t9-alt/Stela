@@ -82,79 +82,118 @@ stela_air_metadata_shared_profile(struct stela_air_metadata *t)
    return true;
 }
 
+/* Fixed storage of integer and floating scalars, 2-4 lane vectors, arrays and
+ * structs, at most UINT32_MAX bytes. */
 static bool
-shared_storage_size(struct stela_air_metadata *t, LLVMTypeRef type, unsigned depth,
-                     uint64_t *size)
+storage_size(struct stela_air_metadata *t, LLVMTypeRef type, unsigned depth, unsigned *budget,
+             uint64_t *size)
 {
-   if (depth == 32)
-      return fail(t, STELA_AIR_LIMIT, "shared storage type nesting exceeded");
-   if (LLVMGetTypeKind(type) == LLVMArrayTypeKind) {
+   if (depth == 32 || !*budget)
+      return fail(t, STELA_AIR_LIMIT, "global storage type budget exceeded");
+   (*budget)--;
+   bool valid;
+   switch (LLVMGetTypeKind(type)) {
+   case LLVMArrayTypeKind: {
       uint64_t element;
-      if (!shared_storage_size(t, LLVMGetElementType(type), depth + 1, &element))
+      if (!storage_size(t, LLVMGetElementType(type), depth + 1, budget, &element))
          return false;
-      uint64_t length = LLVMGetArrayLength2(type);
-      if (!length || length > UINT32_MAX / element)
-         return fail(t, STELA_AIR_LIMIT, "shared storage array extent exceeded");
-   } else {
-      LLVMTypeRef scalar = type;
-      if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
-         unsigned components = LLVMGetVectorSize(type);
-         if (components < 2 || components > 4)
-            return fail(t, STELA_AIR_TYPE, "shared globals require fixed integer/FP32 scalar/vector arrays");
-         scalar = LLVMGetElementType(type);
-      }
-      bool valid = LLVMGetTypeKind(scalar) == LLVMFloatTypeKind;
-      if (LLVMGetTypeKind(scalar) == LLVMIntegerTypeKind) {
-         unsigned bits = LLVMGetIntTypeWidth(scalar);
-         valid = bits == 8 || bits == 16 || bits == 32 || bits == 64;
-      }
-      if (!valid)
-         return fail(t, STELA_AIR_TYPE, "shared globals require fixed integer/FP32 scalar/vector arrays");
+      if (element && LLVMGetArrayLength2(type) > UINT32_MAX / element)
+         return fail(t, STELA_AIR_LIMIT, "global storage size exceeded");
+      valid = true;
+      break;
    }
-   /* Aggregate extents were bounded before invoking fixed-size LLVM queries. */
+   case LLVMStructTypeKind:
+      if (LLVMIsOpaqueStruct(type))
+         return fail(t, STELA_AIR_TYPE, "globals require fixed integer or floating storage");
+      for (unsigned i = 0; i < LLVMCountStructElementTypes(type); i++) {
+         uint64_t field;
+         if (!storage_size(t, LLVMStructGetTypeAtIndex(type, i), depth + 1, budget, &field))
+            return false;
+      }
+      valid = true;
+      break;
+   case LLVMVectorTypeKind: {
+      LLVMTypeKind element = LLVMGetTypeKind(LLVMGetElementType(type));
+      unsigned components = LLVMGetVectorSize(type);
+      uint64_t bytes;
+      valid = components >= 2 && components <= 4 && element != LLVMArrayTypeKind &&
+              element != LLVMStructTypeKind && element != LLVMVectorTypeKind;
+      if (valid && !storage_size(t, LLVMGetElementType(type), depth + 1, budget, &bytes))
+         return false;
+      break;
+   }
+   case LLVMIntegerTypeKind: {
+      unsigned bits = LLVMGetIntTypeWidth(type);
+      valid = bits == 8 || bits == 16 || bits == 32 || bits == 64;
+      break;
+   }
+   case LLVMHalfTypeKind:
+   case LLVMFloatTypeKind:
+      valid = true;
+      break;
+   default:
+      valid = false;
+      break;
+   }
+   if (!valid)
+      return fail(t, STELA_AIR_TYPE, "globals require fixed integer or floating storage");
+   /* Extents were bounded before invoking fixed-size LLVM queries. */
    *size = LLVMABISizeOfType(t->layout, type);
-   return (*size && *size <= UINT32_MAX) ||
-      fail(t, STELA_AIR_LIMIT, "shared storage allocation size exceeded");
+   return *size <= UINT32_MAX || fail(t, STELA_AIR_LIMIT, "global storage size exceeded");
 }
 
+/* Threadgroup memory is an undefined internal AS3 global; constant data is an
+ * initialized internal or private AS2 constant. */
 bool
-stela_air_metadata_shared_global(struct stela_air_metadata *t, LLVMValueRef global,
-                    uint64_t *size, unsigned *alignment)
+stela_air_metadata_global(struct stela_air_metadata *t, LLVMValueRef global,
+                          struct stela_air_global *info)
 {
    const char *section = LLVMGetSection(global);
    LLVMValueRef initializer = LLVMGetInitializer(global);
-   if (LLVMGetPointerAddressSpace(LLVMTypeOf(global)) != 3 ||
-       LLVMGetLinkage(global) != LLVMInternalLinkage || LLVMIsThreadLocal(global) ||
-       LLVMIsGlobalConstant(global) || LLVMIsExternallyInitialized(global) ||
-       (section && *section) || !initializer || !LLVMIsUndef(initializer) || LLVMIsPoison(initializer))
-      return fail(t, STELA_AIR_TARGET, "unsupported global/shared initializer or storage ABI");
+   unsigned space = LLVMGetPointerAddressSpace(LLVMTypeOf(global));
+   LLVMLinkage linkage = LLVMGetLinkage(global);
+   bool constant = LLVMIsGlobalConstant(global);
+   bool threadgroup = space == 3 && !constant && linkage == LLVMInternalLinkage && initializer &&
+                      LLVMIsUndef(initializer) && !LLVMIsPoison(initializer);
+   bool data = space == 2 && constant && initializer &&
+               (linkage == LLVMInternalLinkage || linkage == LLVMPrivateLinkage);
+   if ((!threadgroup && !data) || LLVMIsThreadLocal(global) || LLVMIsExternallyInitialized(global) ||
+       (section && *section))
+      return fail(t, STELA_AIR_TARGET, "unsupported global storage or initializer ABI");
    size_t metadata_count;
    LLVMValueMetadataEntry *metadata = LLVMGlobalCopyAllMetadata(global, &metadata_count);
    LLVMDisposeValueMetadataEntries(metadata);
    if (metadata_count)
-      return fail(t, STELA_AIR_TARGET, "unsupported shared global metadata");
+      return fail(t, STELA_AIR_TARGET, "unsupported global metadata");
+   if (LLVMPointerSizeForAS(t->layout, space) != 8)
+      return fail(t, STELA_AIR_TARGET, "global pointers require 64-bit layout");
    LLVMTypeRef type = LLVMGlobalGetValueType(global);
-   if (!shared_storage_size(t, type, 0, size))
+   unsigned budget = 4096;
+   *info = (struct stela_air_global){.constant = constant};
+   if (!storage_size(t, type, 0, &budget, &info->size))
       return false;
-   *alignment = LLVMGetAlignment(global);
-   if (!*alignment)
-      *alignment = LLVMABIAlignmentOfType(t->layout, type);
-   return (*alignment && !(*alignment & (*alignment - 1))) ||
-      fail(t, STELA_AIR_TYPE, "unsupported shared global alignment");
+   if (!info->size)
+      return fail(t, STELA_AIR_TYPE, "globals require nonempty storage");
+   info->alignment = LLVMGetAlignment(global);
+   if (!info->alignment)
+      info->alignment = LLVMABIAlignmentOfType(t->layout, type);
+   return (info->alignment && !(info->alignment & (info->alignment - 1))) ||
+      fail(t, STELA_AIR_TYPE, "unsupported global alignment");
 }
 
 bool
-stela_air_metadata_shared_globals(struct stela_air_metadata *t)
+stela_air_metadata_globals(struct stela_air_metadata *t, bool *threadgroup)
 {
    unsigned count = 0;
+   *threadgroup = false;
    for (LLVMValueRef global = LLVMGetFirstGlobal(t->module); global;
         global = LLVMGetNextGlobal(global)) {
-      uint64_t size;
-      unsigned alignment;
+      struct stela_air_global info;
       if (++count > AIR_MAX_ARGUMENTS)
-         return fail(t, STELA_AIR_LIMIT, "shared global count exceeded");
-      if (!stela_air_metadata_shared_global(t, global, &size, &alignment))
+         return fail(t, STELA_AIR_LIMIT, "global count exceeded");
+      if (!stela_air_metadata_global(t, global, &info))
          return false;
+      *threadgroup |= !info.constant;
    }
    return true;
 }
@@ -417,7 +456,7 @@ texture_type(const char *name, unsigned bytes, struct stela_air_texture *texture
 /* This is reflection admission, not a change to executable/NIR admission.
  * Reject unknown function metadata/string attributes and unqualified globals
  * instead of claiming absent annotations/constants/static-resource reflection.
- * The known internal undef AS3 storage ABI does not add a function argument;
+ * Threadgroup memory and constant data globals add no function argument;
  * actual selected-entry allocation remains the original NIR compiler's work. The
  * accepted strings are standard LLVM code-generation/FP attributes observed in
  * the retained original AIR, not arbitrary app or compiler-name exceptions. */
@@ -431,8 +470,9 @@ complete_reflection(struct stela_air_metadata *m, LLVMValueRef fn,
       struct stela_air_error observed_error = {0};
       struct stela_air_metadata observed = *m;
       observed.error = &observed_error;
-      if (!stela_air_metadata_shared_profile(&observed) ||
-          !stela_air_metadata_shared_globals(&observed))
+      bool threadgroup;
+      if (!stela_air_metadata_globals(&observed, &threadgroup) ||
+          (threadgroup && !stela_air_metadata_shared_profile(&observed)))
          return false;
    }
    size_t metadata_count;
@@ -1005,8 +1045,11 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
    if (!stela_air_metadata_shared_profile(m)) return false;
    if (LLVMPointerSizeForAS(m->layout, 2) != 8)
       return fail(m, STELA_AIR_TARGET, "render constant pointers require 64-bit layout");
-   if (LLVMGetFirstGlobal(m->module))
-      return fail(m, STELA_AIR_TARGET, "render globals/sampler storage are unsupported");
+   bool threadgroup;
+   if (!stela_air_metadata_globals(m, &threadgroup))
+      return false;
+   if (threadgroup)
+      return fail(m, STELA_AIR_TARGET, "render functions have no threadgroup memory");
    *r = (struct stela_air_render){0};
    r->entry.stage = stage;
    r->entry.framebuffer_fetch_present = m->framebuffer_fetch_present;

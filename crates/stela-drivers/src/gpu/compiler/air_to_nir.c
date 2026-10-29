@@ -30,8 +30,11 @@ struct value {
    LLVMValueRef pointer_root; /* Proven resource identity, never a numeric address. */
    bool ssbo;
    unsigned ssbo_slot;
-   nir_variable *shared;
-   unsigned shared_size;
+   /* Threadgroup or thread memory's variable, or, without one, constant data
+    * at constant_base in the shader's data. Either is storage_size bytes. */
+   nir_variable *storage;
+   bool constant_data;
+   unsigned storage_size, constant_base;
    const struct stela_air_stage_io *constant_view; /* Borrowed only during translation. */
    bool view_root;
    /* Partial render values have no vector def until every lane is defined.
@@ -89,6 +92,8 @@ struct translator {
    unsigned shared_resources;
    unsigned shared_barriers;
    uint64_t shared_layout_bound;
+   unsigned private_allocations;
+   uint64_t private_layout_bound;
    bool denorms_disable;
    bool fast_math;
    bool fp_checked;
@@ -299,8 +304,40 @@ find_value(struct translator *t, LLVMValueRef llvm)
    return entry ? entry->data : NULL;
 }
 
-static nir_def *shared_global(struct translator *t, LLVMValueRef global);
+static nir_def *module_global(struct translator *t, LLVMValueRef global);
 static nir_variable *shared_resource(struct translator *t, uint64_t size, unsigned alignment);
+
+/* Static pointer authority is separate from the offset/VA in def. */
+static void
+pointer_authority(struct value *target, const struct value *root, bool view_root)
+{
+   target->pointer_root = root->pointer_root;
+   target->access = root->access;
+   target->ssbo = root->ssbo;
+   target->ssbo_slot = root->ssbo_slot;
+   target->storage = root->storage;
+   target->constant_data = root->constant_data;
+   target->storage_size = root->storage_size;
+   target->constant_base = root->constant_base;
+   target->constant_view = root->constant_view;
+   target->view_root = view_root;
+}
+
+/* Thread, device, constant or threadgroup memory; roots validate the rest. */
+static bool
+pointer_space(LLVMTypeRef type)
+{
+   return LLVMGetTypeKind(type) == LLVMPointerTypeKind && LLVMGetPointerAddressSpace(type) <= 3;
+}
+
+/* The LLVM address space of a resource's pointers. */
+static unsigned
+pointer_resource_space(const struct value *value)
+{
+   if (value->storage)
+      return value->storage->data.mode == nir_var_mem_shared ? 3 : 0;
+   return value->constant_data || value->constant_view ? 2 : 1;
+}
 
 static nir_def *
 get_value(struct translator *t, LLVMValueRef llvm)
@@ -311,7 +348,7 @@ get_value(struct translator *t, LLVMValueRef llvm)
       return value->def;
    }
    if (LLVMIsAGlobalVariable(llvm))
-      return shared_global(t, llvm);
+      return module_global(t, llvm);
    unsigned components, bits;
    if (!value_shape(LLVMTypeOf(llvm), &components, &bits)) {
       fail(t, STELA_AIR_TYPE, "unsupported AIR operand type");
@@ -342,6 +379,15 @@ get_value(struct translator *t, LLVMValueRef llvm)
    }
    fail(t, STELA_AIR_INSTRUCTION, "undefined/poison/forward/constant-expression operand");
    return NULL;
+}
+
+/* A pointer operand's value, materializing a module global on first use. */
+static struct value *
+pointer_value(struct translator *t, LLVMValueRef pointer)
+{
+   if (LLVMIsAGlobalVariable(pointer) && !get_value(t, pointer))
+      return NULL;
+   return find_value(t, pointer);
 }
 
 /* A texture or sampler argument's value, which only texture calls use. */
@@ -616,8 +662,8 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
          find_value(t, param)->pointer_root = param;
       if (shared) {
          struct value *value = find_value(t, param);
-         value->shared = shared;
-         value->shared_size = shared_size;
+         value->storage = shared;
+         value->storage_size = shared_size;
       } else if (buffer && t->options->bind_ssbo) {
          struct value *value = find_value(t, param);
          value->ssbo = true;
@@ -695,51 +741,167 @@ shared_resource(struct translator *t, uint64_t size, unsigned alignment)
    return var;
 }
 
-static bool
-shared_global_info(struct translator *t, LLVMValueRef global,
-                   uint64_t *size, unsigned *alignment)
+/* A storage root at offset zero, defined at entry: it dominates every use, even
+ * when first referenced in conditional or loop code. Memory effects keep their
+ * source cursor. */
+static struct value *
+storage_root(struct translator *t, LLVMValueRef llvm, unsigned access)
 {
-   return stela_air_metadata_shared_global(&t->metadata, global, size, alignment);
+   nir_builder entry = nir_builder_at(nir_before_impl(t->b.impl));
+   if (!put_value(t, llvm, nir_imm_int64(&entry, 0), access))
+      return NULL;
+   struct value *value = find_value(t, llvm);
+   value->pointer_root = llvm;
+   return value;
 }
 
+/* The bytes of a constant initializer of `type`, which the data starts
+ * zeroed: undefined bytes may hold any value. */
 static bool
-shared_globals(struct translator *t)
+constant_bytes(struct translator *t, LLVMValueRef value, LLVMTypeRef type, uint8_t *bytes,
+               unsigned depth)
 {
-   return stela_air_metadata_shared_globals(&t->metadata);
+   if (depth == 32)
+      return fail(t, STELA_AIR_LIMIT, "constant data nesting exceeded");
+   if (LLVMIsAConstantAggregateZero(value) || LLVMIsUndef(value) ||
+       !LLVMABISizeOfType(t->layout, type))
+      return true;
+   LLVMTypeKind kind = LLVMGetTypeKind(type);
+   if (kind == LLVMIntegerTypeKind || kind == LLVMHalfTypeKind || kind == LLVMFloatTypeKind) {
+      unsigned bits = kind == LLVMIntegerTypeKind ? LLVMGetIntTypeWidth(type) :
+                      kind == LLVMHalfTypeKind ? 16 : 32;
+      /* LLVM serializes its APFloat bits, as for immediate operands. */
+      LLVMValueRef encoded = kind == LLVMIntegerTypeKind ? value :
+         LLVMConstBitCast(value, LLVMIntTypeInContext(t->context, bits));
+      if (!LLVMIsAConstantInt(encoded))
+         return fail(t, STELA_AIR_TYPE, "unsupported constant data initializer");
+      uint64_t encoding = LLVMConstIntGetZExtValue(encoded);
+      for (unsigned i = 0; i < bits / 8; i++)
+         bytes[i] = encoding >> (8 * i);
+      return true;
+   }
+   uint64_t count = kind == LLVMStructTypeKind ? LLVMCountStructElementTypes(type) :
+                    kind == LLVMArrayTypeKind ? LLVMGetArrayLength2(type) : LLVMGetVectorSize(type);
+   for (uint64_t i = 0; i < count; i++) {
+      LLVMValueRef element = LLVMGetAggregateElement(value, (unsigned)i);
+      if (!element)
+         return fail(t, STELA_AIR_TYPE, "unsupported constant data initializer");
+      LLVMTypeRef element_type = kind == LLVMStructTypeKind ?
+         LLVMStructGetTypeAtIndex(type, (unsigned)i) : LLVMGetElementType(type);
+      /* Vectors bit-pack their lanes; arrays step by allocation size. */
+      uint64_t offset = kind == LLVMStructTypeKind ? LLVMOffsetOfElement(t->layout, type, (unsigned)i) :
+         i * (kind == LLVMVectorTypeKind ? LLVMStoreSizeOfType(t->layout, element_type) :
+                                           LLVMABISizeOfType(t->layout, element_type));
+      if (!constant_bytes(t, element, element_type, bytes + offset, depth + 1))
+         return false;
+   }
+   return true;
+}
+
+/* Lays a constant global out in the shader's constant data at `base`. */
+static bool
+constant_data(struct translator *t, LLVMValueRef global, const struct stela_air_global *info,
+              unsigned *base)
+{
+   nir_shader *shader = t->b.shader;
+   uint64_t start = ALIGN_POT((uint64_t)shader->constant_data_size, info->alignment);
+   if (start + info->size > t->options->max_constant_bytes)
+      return fail(t, STELA_AIR_LIMIT, "constant data exceeds the target limit");
+   if (LLVMByteOrder(t->layout) != LLVMLittleEndian)
+      return fail(t, STELA_AIR_TARGET, "constant data requires a little-endian layout");
+   uint8_t *data = rerzalloc_size(shader, shader->constant_data, shader->constant_data_size,
+                                  start + info->size);
+   if (!data)
+      return fail(t, STELA_AIR_ALLOCATION, "constant data allocation failed");
+   shader->constant_data = data;
+   shader->constant_data_size = start + info->size;
+   *base = start;
+   return constant_bytes(t, LLVMGetInitializer(global), LLVMGlobalGetValueType(global),
+                         data + start, 0);
 }
 
 static nir_def *
-shared_global(struct translator *t, LLVMValueRef global)
+module_global(struct translator *t, LLVMValueRef global)
 {
-   uint64_t size;
-   unsigned alignment;
-   if (!shared_global_info(t, global, &size, &alignment))
+   struct stela_air_global info;
+   if (!stela_air_metadata_global(&t->metadata, global, &info))
       return NULL;
-   nir_variable *var = shared_resource(t, size, alignment);
-   if (!var)
+   nir_variable *var = NULL;
+   unsigned base = 0;
+   if (info.constant ? !constant_data(t, global, &info, &base) :
+                       !(var = shared_resource(t, info.size, info.alignment)))
       return NULL;
-   /* A global's logical base dominates every use, even if its first reference
-    * occurs inside conditional/loop code. Only this pure offset is inserted at
-    * entry; storage is still undef and memory effects keep their source cursor. */
-   nir_builder entry = nir_builder_at(nir_before_impl(t->b.impl));
-   if (!put_value(t, global, nir_imm_int64(&entry, 0), STELA_AIR_READ_WRITE))
+   struct value *value = storage_root(t, global, info.constant ? STELA_AIR_READ : STELA_AIR_READ_WRITE);
+   if (!value)
       return NULL;
-   struct value *value = find_value(t, global);
-   value->shared = var;
-   value->shared_size = (unsigned)size;
-   value->pointer_root = global;
+   value->storage = var;
+   value->constant_data = info.constant;
+   value->storage_size = (unsigned)info.size;
+   value->constant_base = base;
    return value->def;
+}
+
+/* An entry-block alloca of a fixed size: thread memory. */
+static struct value *
+private_allocation(struct translator *t, LLVMValueRef alloca)
+{
+   struct value *value = find_value(t, alloca);
+   if (value)
+      return value;
+   LLVMTypeRef type = LLVMGetAllocatedType(alloca);
+   LLVMValueRef count = LLVMGetOperand(alloca, 0);
+   if (LLVMGetInstructionParent(alloca) != LLVMGetEntryBasicBlock(t->entry) ||
+       !LLVMIsAConstantInt(count) || LLVMGetPointerAddressSpace(LLVMTypeOf(alloca)) != 0) {
+      fail(t, STELA_AIR_MEMORY, "thread memory requires a fixed entry-block allocation");
+      return NULL;
+   }
+   if (LLVMPointerSizeForAS(t->layout, 0) != 8) {
+      fail(t, STELA_AIR_TARGET, "thread memory pointers require 64-bit layout");
+      return NULL;
+   }
+   unsigned budget = 4096;
+   if (!fixed_storage_type(t, type, 0, &budget))
+      return NULL;
+   uint64_t element = LLVMABISizeOfType(t->layout, type), length = LLVMConstIntGetZExtValue(count);
+   uint64_t limit = t->options->max_private_bytes;
+   unsigned alignment = LLVMGetAlignment(alloca);
+   if (!element || !length || length > limit / element ||
+       !alignment || (alignment & (alignment - 1)) ||
+       t->private_layout_bound + element * length + alignment - 1 > limit) {
+      fail(t, STELA_AIR_LIMIT, "thread memory size/alignment exceeds the target limit");
+      return NULL;
+   }
+   uint64_t size = element * length;
+   nir_variable *var = nir_local_variable_create(t->b.impl,
+      glsl_array_type(glsl_uint8_t_type(), (unsigned)size, 1), "air.private");
+   if (!var) {
+      fail(t, STELA_AIR_ALLOCATION, "thread memory variable allocation failed");
+      return NULL;
+   }
+   var->data.alignment = alignment;
+   t->private_allocations++;
+   t->private_layout_bound += size + alignment - 1;
+   value = storage_root(t, alloca, STELA_AIR_READ_WRITE);
+   if (value) {
+      value->storage = var;
+      value->storage_size = (unsigned)size;
+   }
+   return value;
+}
+
+static bool
+thread_memory(const struct value *value)
+{
+   return value->storage && value->storage->data.mode == nir_var_function_temp;
 }
 
 static nir_def *
 gep(struct translator *t, LLVMValueRef inst, const struct value **origin)
 {
-   if (LLVMIsAGlobalVariable(LLVMGetOperand(inst, 0)) && !get_value(t, LLVMGetOperand(inst, 0)))
-      return NULL;
-   struct value *base = find_value(t, LLVMGetOperand(inst, 0));
+   struct value *base = pointer_value(t, LLVMGetOperand(inst, 0));
    LLVMTypeRef result_type = LLVMTypeOf(inst);
    if (!base || !base->access || LLVMGetTypeKind(result_type) != LLVMPointerTypeKind ||
-       LLVMGetPointerAddressSpace(result_type) != (base->shared ? 3 : base->constant_view ? 2 : 1)) {
+       LLVMGetPointerAddressSpace(result_type) != pointer_resource_space(base)) {
       fail(t, STELA_AIR_MEMORY, "GEP requires a validated buffer/shared pointer");
       return NULL;
    }
@@ -905,25 +1067,35 @@ ssbo_access(struct translator *t, const struct value *address, nir_def *stored,
    return memory_guard_end(t, &guard, loaded);
 }
 
+/* Begins a guard for an access of `bytes` within a storage_size view. LLVM64
+ * offsets are compared before narrowing, so an out-of-view access never
+ * truncates into another allocation or a valid low offset. */
+static bool
+storage_guard_begin(struct translator *t, const struct value *address, unsigned bytes,
+                    struct memory_guard *guard)
+{
+   nir_builder *b = &t->b;
+   nir_def *valid = address->storage_size >= bytes ?
+      nir_uge(b, nir_imm_int64(b, address->storage_size - bytes), address->def) : nir_imm_false(b);
+   return memory_guard_begin(t, valid, guard);
+}
+
+/* An access to threadgroup or thread memory, through its byte variable. */
 static nir_def *
-shared_access(struct translator *t, const struct value *address, nir_def *stored,
-              const struct atomic *atomic, enum gl_access_qualifier access,
-              unsigned components, unsigned bits, unsigned alignment)
+variable_access(struct translator *t, const struct value *address, nir_def *stored,
+                const struct atomic *atomic, enum gl_access_qualifier access,
+                unsigned components, unsigned bits, unsigned alignment)
 {
    nir_builder *b = &t->b;
    unsigned bytes = components * (bits / 8);
-   /* Preserve LLVM64 offsets and resource provenance. An out-of-view access
-    * never truncates into another shared allocation or a valid low offset. */
-   nir_def *valid = address->shared_size >= bytes ?
-      nir_uge(b, nir_imm_int64(b, address->shared_size - bytes), address->def) : nir_imm_false(b);
    struct memory_guard guard;
-   if (!memory_guard_begin(t, valid, &guard))
+   if (!storage_guard_begin(t, address, bytes, &guard))
       return NULL;
-   nir_deref_instr *byte = nir_build_deref_array(b, nir_build_deref_var(b, address->shared),
+   nir_deref_instr *byte = nir_build_deref_array(b, nir_build_deref_var(b, address->storage),
                                                 nir_u2u32(b, address->def));
    const struct glsl_type *type = glsl_vector_type(glsl_get_base_type(glsl_uintN_t_type(bits)), components);
    nir_deref_instr *typed = nir_build_deref_cast_with_alignment(b, &byte->def,
-      nir_var_mem_shared, type, bytes, alignment, 0);
+      address->storage->data.mode, type, bytes, alignment, 0);
    nir_def *loaded = NULL;
    if (atomic && atomic->compare)
       loaded = nir_deref_atomic_swap(b, bits, &typed->def, atomic->compare, atomic->data,
@@ -934,6 +1106,20 @@ shared_access(struct translator *t, const struct value *address, nir_def *stored
       nir_store_deref_with_access(b, typed, stored, BITFIELD_MASK(components), access);
    else
       loaded = nir_load_deref_with_access(b, typed, access);
+   return memory_guard_end(t, &guard, loaded);
+}
+
+/* A load of constant data. */
+static nir_def *
+constant_access(struct translator *t, const struct value *address, unsigned components,
+                unsigned bits, unsigned alignment)
+{
+   struct memory_guard guard;
+   if (!storage_guard_begin(t, address, components * (bits / 8), &guard))
+      return NULL;
+   nir_def *loaded = nir_load_constant(&t->b, components, bits, nir_u2u32(&t->b, address->def),
+                                       .base = address->constant_base,
+                                       .range = address->storage_size, .align_mul = alignment);
    return memory_guard_end(t, &guard, loaded);
 }
 
@@ -962,8 +1148,10 @@ memory_access(struct translator *t, const struct value *address, nir_def *stored
               const struct atomic *atomic, enum gl_access_qualifier access,
               unsigned components, unsigned bits, unsigned alignment)
 {
-   if (address->shared)
-      return shared_access(t, address, stored, atomic, access, components, bits, alignment);
+   if (address->storage)
+      return variable_access(t, address, stored, atomic, access, components, bits, alignment);
+   if (address->constant_data)
+      return constant_access(t, address, components, bits, alignment);
    if (address->ssbo)
       return ssbo_access(t, address, stored, atomic, access, components, bits, alignment);
    return global_access(t, address, stored, atomic, access, components, bits, alignment);
@@ -987,11 +1175,10 @@ atomic_access(struct translator *t, LLVMValueRef inst, LLVMValueRef pointer, nir
       return fail(t, STELA_AIR_TYPE, "unsupported atomic operand type");
    if (alignment < bits / 8)
       return fail(t, STELA_AIR_MEMORY, "atomic access is not naturally aligned");
-   if (LLVMIsAGlobalVariable(pointer) && !get_value(t, pointer))
-      return false;
-   const struct value *address = find_value(t, pointer);
-   if (!address || (address->access & STELA_AIR_READ_WRITE) != STELA_AIR_READ_WRITE)
-      return fail(t, STELA_AIR_MEMORY, "atomic access lacks a bound read-write pointer");
+   const struct value *address = pointer_value(t, pointer);
+   if (!address || (address->access & STELA_AIR_READ_WRITE) != STELA_AIR_READ_WRITE ||
+       thread_memory(address))
+      return fail(t, STELA_AIR_MEMORY, "atomic access lacks a device or threadgroup read-write pointer");
    nir_def *data = get_value(t, operand);
    nir_def *expected = compare ? get_value(t, compare) : NULL;
    if (!data || (compare && !expected))
@@ -1934,6 +2121,88 @@ synchronization_call(struct translator *t, LLVMValueRef inst, LLVMValueRef calle
    return true;
 }
 
+enum { MEMORY_INTRINSIC_ACCESSES = 256 };
+
+/* A call's alignment attribute on pointer argument `argument`, or 1. */
+static unsigned
+argument_alignment(LLVMValueRef call, unsigned argument)
+{
+   unsigned kind = LLVMGetEnumAttributeKindForName("align", strlen("align"));
+   /* Attribute index 0 is the return value; arguments follow it. */
+   LLVMAttributeRef attribute = LLVMGetCallSiteEnumAttribute(call, 1 + argument, kind);
+   return attribute ? (unsigned)LLVMGetEnumAttributeValue(attribute) : 1;
+}
+
+/* LLVM's lifetime markers, and memset, memcpy and memmove of a constant
+ * length, in chunks of the largest size the alignment allows, up to 16 bytes.
+ * A copy loads every chunk before storing any, so overlap is handled too. */
+static bool
+memory_intrinsic(struct translator *t, LLVMValueRef inst, unsigned intrinsic, bool *lowered)
+{
+   enum { LIFETIME_START, LIFETIME_END, SET, COPY, MOVE };
+   static const char *const names[] = {
+      [LIFETIME_START] = "llvm.lifetime.start", [LIFETIME_END] = "llvm.lifetime.end",
+      [SET] = "llvm.memset", [COPY] = "llvm.memcpy", [MOVE] = "llvm.memmove",
+   };
+   unsigned operation = ARRAY_SIZE(names);
+   for (unsigned i = 0; intrinsic && i < ARRAY_SIZE(names); i++) {
+      if (intrinsic == LLVMLookupIntrinsicID(names[i], strlen(names[i])))
+         operation = i;
+   }
+   *lowered = operation < ARRAY_SIZE(names);
+   /* Contents are undefined outside a lifetime, so the stored ones refine them. */
+   if (!*lowered || operation <= LIFETIME_END)
+      return true;
+   LLVMValueRef length = LLVMGetOperand(inst, 2), is_volatile = LLVMGetOperand(inst, 3);
+   if (!LLVMIsAConstantInt(length) || !LLVMIsAConstantInt(is_volatile) ||
+       LLVMConstIntGetZExtValue(is_volatile) || LLVMGetNumOperandBundles(inst))
+      return fail(t, STELA_AIR_MEMORY, "memory intrinsics take a constant length and no volatile");
+   const struct value *destination = pointer_value(t, LLVMGetOperand(inst, 0));
+   const struct value *source = operation == SET ? NULL : pointer_value(t, LLVMGetOperand(inst, 1));
+   nir_def *fill = operation == SET ? get_value(t, LLVMGetOperand(inst, 1)) : NULL;
+   if (t->error->kind != STELA_AIR_OK)
+      return false;
+   /* A render constant view's root takes only loads of its reflected type. */
+   if (!destination || !(destination->access & STELA_AIR_WRITE) ||
+       (operation != SET && (!source || !(source->access & STELA_AIR_READ) || source->view_root)))
+      return fail(t, STELA_AIR_MEMORY, "memory intrinsic lacks a bound writable/readable pointer");
+   unsigned alignment = argument_alignment(inst, 0);
+   if (source)
+      alignment = MIN2(alignment, argument_alignment(inst, 1));
+   uint64_t bytes = LLVMConstIntGetZExtValue(length);
+   unsigned chunks[MEMORY_INTRINSIC_ACCESSES], count = 0;
+   for (uint64_t offset = 0, size = MIN2(alignment, 16); offset < bytes; offset += size) {
+      while (size > bytes - offset)
+         size /= 2;
+      if (count == ARRAY_SIZE(chunks))
+         return fail(t, STELA_AIR_LIMIT, "memory intrinsic exceeds the access budget");
+      chunks[count++] = size;
+   }
+   nir_def *values[MEMORY_INTRINSIC_ACCESSES];
+   for (unsigned pass = 0; pass < 2; pass++) {
+      uint64_t offset = 0;
+      for (unsigned i = 0; i < count; offset += chunks[i++]) {
+         unsigned components = chunks[i] >= 4 ? chunks[i] / 4 : 1;
+         unsigned bits = chunks[i] >= 4 ? 32 : chunks[i] * 8;
+         if (!pass && !source) {
+            nir_def *pattern = nir_imul_imm(&t->b, nir_u2uN(&t->b, fill, bits),
+                                            0x01010101u & BITFIELD_MASK(bits));
+            values[i] = nir_replicate(&t->b, pattern, components);
+            continue;
+         }
+         struct value at = pass ? *destination : *source;
+         at.def = nir_iadd_imm(&t->b, at.def, offset);
+         nir_def *loaded = memory_access(t, &at, pass ? values[i] : NULL, NULL, 0,
+                                         components, bits, chunks[i]);
+         if (t->error->kind != STELA_AIR_OK)
+            return false;
+         if (!pass)
+            values[i] = loaded;
+      }
+   }
+   return true;
+}
+
 static bool
 instruction(struct translator *t, LLVMValueRef inst)
 {
@@ -1949,6 +2218,8 @@ instruction(struct translator *t, LLVMValueRef inst)
    }
    if (op == LLVMAtomicRMW || op == LLVMAtomicCmpXchg)
       return atomic_instruction(t, inst, op);
+   if (op == LLVMAlloca)
+      return private_allocation(t, inst) != NULL;
    if (t->stage_options && (op == LLVMInsertValue || op == LLVMExtractValue || op == LLVMShuffleVector ||
                             op == LLVMExtractElement || op == LLVMInsertElement))
       return stage_value_instruction(t, inst, op);
@@ -1960,34 +2231,17 @@ instruction(struct translator *t, LLVMValueRef inst)
       nir_def *def = gep(t, inst, &origin);
       if (!def || !put_value(t, inst, def, origin->access))
          return false;
-      struct value *value = find_value(t, inst);
-      value->pointer_root = origin->pointer_root;
-      value->ssbo = origin->ssbo;
-      value->ssbo_slot = origin->ssbo_slot;
-      value->shared = origin->shared;
-      value->shared_size = origin->shared_size;
-      value->constant_view = origin->constant_view;
+      pointer_authority(find_value(t, inst), origin, false);
       return true;
    }
    if (op == LLVMBitCast) {
       unsigned src_components, src_bits;
       LLVMTypeRef source = LLVMTypeOf(LLVMGetOperand(inst, 0));
-      if (LLVMGetTypeKind(source) == LLVMPointerTypeKind &&
-          LLVMGetTypeKind(LLVMTypeOf(inst)) == LLVMPointerTypeKind &&
-          (LLVMGetPointerAddressSpace(source) == 1 || LLVMGetPointerAddressSpace(source) == 3 ||
-           (t->stage_options && LLVMGetPointerAddressSpace(source) == 2)) &&
-          LLVMGetPointerAddressSpace(LLVMTypeOf(inst)) == LLVMGetPointerAddressSpace(source)) {
-         const struct value *origin = find_value(t, LLVMGetOperand(inst, 0));
+      if (pointer_space(source) && LLVMTypeOf(inst) == source) {
+         const struct value *origin = pointer_value(t, LLVMGetOperand(inst, 0));
          if (!origin || !origin->access || !put_value(t, inst, origin->def, origin->access))
             return fail(t, STELA_AIR_MEMORY, "pointer identity cast lacks buffer provenance");
-         struct value *value = find_value(t, inst);
-         value->pointer_root = origin->pointer_root;
-         value->ssbo = origin->ssbo;
-         value->ssbo_slot = origin->ssbo_slot;
-         value->shared = origin->shared;
-         value->shared_size = origin->shared_size;
-         value->constant_view = origin->constant_view;
-         value->view_root = origin->view_root;
+         pointer_authority(find_value(t, inst), origin, origin->view_root);
          return true;
       }
       if (!value_shape(source, &src_components, &src_bits) ||
@@ -1999,6 +2253,13 @@ instruction(struct translator *t, LLVMValueRef inst)
    }
    if (op == LLVMCall) {
       LLVMValueRef callee = LLVMGetCalledValue(inst);
+      if (LLVMIsAFunction(callee)) {
+         bool lowered;
+         if (!memory_intrinsic(t, inst, LLVMGetIntrinsicID(callee), &lowered))
+            return false;
+         if (lowered)
+            return true;
+      }
       if (LLVMIsAFunction(callee)) {
          unsigned intrinsic = LLVMGetIntrinsicID(callee);
          static const char *const counts[] = {
@@ -2181,11 +2442,10 @@ instruction(struct translator *t, LLVMValueRef inst)
       LLVMIntPredicate predicate = LLVMGetICmpPredicate(inst);
       if (predicate != LLVMIntEQ && predicate != LLVMIntNE)
          return fail(t, STELA_AIR_TYPE, "pointer relational comparison unsupported");
-      LLVMValueRef left = LLVMGetOperand(inst, 0), right = LLVMGetOperand(inst, 1);
-      if ((LLVMIsAGlobalVariable(left) && !get_value(t, left)) ||
-          (LLVMIsAGlobalVariable(right) && !get_value(t, right)))
+      const struct value *a = pointer_value(t, LLVMGetOperand(inst, 0));
+      const struct value *b = a ? pointer_value(t, LLVMGetOperand(inst, 1)) : NULL;
+      if (t->error->kind != STELA_AIR_OK)
          return false;
-      const struct value *a = find_value(t, left), *b = find_value(t, right);
       if (!same_pointer_resource(a, b) || !a->def || !b->def ||
           a->def->num_components != 1 || b->def->num_components != 1 ||
           a->def->bit_size != 64 || b->def->bit_size != 64)
@@ -2196,16 +2456,15 @@ instruction(struct translator *t, LLVMValueRef inst)
          nir_ieq(&t->b, a->def, b->def) : nir_ine(&t->b, a->def, b->def), 0);
    }
    if (op == LLVMLoad || op == LLVMStore) {
-      LLVMValueRef pointer = LLVMGetOperand(inst, op == LLVMStore ? 1 : 0);
-      if (LLVMIsAGlobalVariable(pointer) && !get_value(t, pointer))
-         return false;
-      struct value *address = find_value(t, pointer);
+      struct value *address = pointer_value(t, LLVMGetOperand(inst, op == LLVMStore ? 1 : 0));
       unsigned required = op == LLVMStore ? STELA_AIR_WRITE : STELA_AIR_READ;
       LLVMAtomicOrdering ordering = LLVMGetOrdering(inst);
       bool atomic = ordering != LLVMAtomicOrderingNotAtomic;
       if (!address || !(address->access & required) || LLVMGetVolatile(inst) ||
           (atomic && ordering != LLVMAtomicOrderingUnordered && ordering != LLVMAtomicOrderingMonotonic))
          return fail(t, STELA_AIR_MEMORY, "unsupported volatile/ordered/unbound/disallowed memory access");
+      if (atomic && (thread_memory(address) || address->constant_data))
+         return fail(t, STELA_AIR_MEMORY, "atomic access to thread memory or constant data");
       if (op == LLVMStore && !value_shape(LLVMTypeOf(LLVMGetOperand(inst, 0)), &components, &bits))
          return fail(t, STELA_AIR_TYPE, "unsupported store type");
       if (bits == 1)
@@ -2421,26 +2680,13 @@ cfg_prepare(struct translator *t, LLVMValueRef fn)
    return true;
 }
 
-/* Static pointer authority is separate from the offset/VA in def. */
-static void
-pointer_authority(struct value *target, const struct value *root, bool view_root)
-{
-   target->pointer_root = root->pointer_root;
-   target->access = root->access;
-   target->ssbo = root->ssbo;
-   target->ssbo_slot = root->ssbo_slot;
-   target->shared = root->shared;
-   target->shared_size = root->shared_size;
-   target->constant_view = root->constant_view;
-   target->view_root = view_root;
-}
-
 static bool
 same_pointer_resource(const struct value *a, const struct value *b)
 {
    return a && b && a->pointer_root && a->pointer_root == b->pointer_root &&
       a->access == b->access && a->ssbo == b->ssbo && a->ssbo_slot == b->ssbo_slot &&
-      a->shared == b->shared && a->shared_size == b->shared_size &&
+      a->storage == b->storage && a->constant_data == b->constant_data &&
+      a->storage_size == b->storage_size && a->constant_base == b->constant_base &&
       a->constant_view == b->constant_view;
 }
 
@@ -2457,29 +2703,18 @@ pointer_node(struct translator *t, LLVMValueRef llvm)
    return entry ? entry->data : NULL;
 }
 
-static bool
-pointer_space(struct translator *t, LLVMTypeRef type)
-{
-   if (LLVMGetTypeKind(type) != LLVMPointerTypeKind)
-      return false;
-   unsigned space = LLVMGetPointerAddressSpace(type);
-   return space == 1 || space == 3 || (t->stage_options && space == 2);
-}
-
 static struct value *
 pointer_anchor(struct translator *t, LLVMValueRef llvm)
 {
    struct value *value = find_value(t, llvm);
-   if (!value && LLVMIsAGlobalVariable(llvm)) {
-      if (!shared_global(t, llvm))
-         return NULL;
-      value = find_value(t, llvm);
-   }
+   if (!value && LLVMIsAAllocaInst(llvm))
+      value = private_allocation(t, llvm);
+   else if (!value && LLVMIsAGlobalVariable(llvm))
+      value = pointer_value(t, llvm);
    if (!value || !value->access || value->pointer_root != llvm ||
-       !pointer_space(t, LLVMTypeOf(llvm)) || !value->def ||
+       !pointer_space(LLVMTypeOf(llvm)) || !value->def ||
        value->def->num_components != 1 || value->def->bit_size != 64 ||
-       LLVMGetPointerAddressSpace(LLVMTypeOf(llvm)) !=
-          (value->shared ? 3 : value->constant_view ? 2 : 1)) {
+       LLVMGetPointerAddressSpace(LLVMTypeOf(llvm)) != pointer_resource_space(value)) {
       fail(t, STELA_AIR_MEMORY, "pointer PHI dependency lacks validated resource origin");
       return NULL;
    }
@@ -2644,9 +2879,11 @@ pointer_provenance(struct translator *t)
          if (LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMPointerTypeKind)
             continue;
          LLVMOpcode op = LLVMGetInstructionOpcode(inst);
+         if (op == LLVMAlloca)
+            continue; /* A root, like arguments and globals. */
          if (op != LLVMPHI && op != LLVMGetElementPtr && op != LLVMBitCast)
             return fail(t, STELA_AIR_TYPE, "unsupported pointer provenance producer");
-         if (!pointer_space(t, LLVMTypeOf(inst)) ||
+         if (!pointer_space(LLVMTypeOf(inst)) ||
              (op != LLVMPHI && LLVMTypeOf(LLVMGetOperand(inst, 0)) != LLVMTypeOf(inst)))
             return fail(t, STELA_AIR_MEMORY, "unsupported pointer provenance address space");
          struct pointer_node *node = &t->pointers[next++];
@@ -2655,6 +2892,7 @@ pointer_provenance(struct translator *t)
             return fail(t, STELA_AIR_ALLOCATION, "pointer provenance insertion failed");
       }
    }
+   t->pointer_count = next; /* Allocations are roots, not nodes. */
    return pointer_solve(t, dfs, stack, false) && pointer_solve(t, dfs, stack, true);
 }
 
@@ -2663,7 +2901,7 @@ cfg_phi_shape(struct translator *t, LLVMTypeRef type, unsigned *leaves)
 {
    unsigned components, bits;
    *leaves = 0;
-   if (value_shape(type, &components, &bits) || pointer_space(t, type))
+   if (value_shape(type, &components, &bits) || pointer_space(type))
       return true;
    if (!t->stage_options || LLVMGetTypeKind(type) != LLVMStructTypeKind ||
        LLVMIsOpaqueStruct(type) || !LLVMIsPackedStruct(type) ||
@@ -2681,7 +2919,7 @@ static struct value *
 cfg_phi_leaf(struct translator *t, LLVMTypeRef type)
 {
    unsigned components, bits;
-   if (pointer_space(t, type)) {
+   if (pointer_space(type)) {
       components = 1;
       bits = 64;
    } else if (!value_shape(type, &components, &bits)) {
@@ -2725,7 +2963,7 @@ cfg_declare_phi(struct translator *t, LLVMValueRef inst)
       if (!value)
          return false;
    }
-   if (pointer_space(t, type)) {
+   if (pointer_space(type)) {
       struct pointer_node *node = pointer_node(t, inst);
       struct value *root = node ? find_value(t, node->root) : NULL;
       if (!root)
@@ -2960,7 +3198,8 @@ translate(const void *bitcode, size_t size, const char *entry,
    t.max_threadgroup_buffers = t.metadata.max_threadgroup_buffers;
    t.denorms_disable = t.metadata.denorms_disable;
    t.fast_math = t.metadata.fast_math;
-   if (!shared_globals(&t))
+   bool threadgroup_globals;
+   if (!stela_air_metadata_globals(&t.metadata, &threadgroup_globals))
       goto done;
    char target_prefix[40];
    snprintf(target_prefix, sizeof(target_prefix), "air64_v2%u-apple-macosx", t.air_minor);
@@ -3009,6 +3248,15 @@ translate(const void *bitcode, size_t size, const char *entry,
          goto done;
       }
       nir_lower_explicit_io(t.b.shader, nir_var_mem_shared, nir_address_format_32bit_offset);
+   }
+   if (t.private_allocations) {
+      nir_lower_vars_to_explicit_types(t.b.shader, nir_var_function_temp, glsl_get_natural_size_align_bytes);
+      if (t.b.shader->scratch_size > options->max_private_bytes) {
+         fail(&t, STELA_AIR_LIMIT, "aligned thread memory layout exceeds the target limit");
+         goto done;
+      }
+      nir_lower_explicit_io(t.b.shader, nir_var_function_temp, nir_address_format_32bit_offset);
+      nir_remove_dead_variables(t.b.shader, nir_var_function_temp, NULL);
    }
    if (stage || t.shared_resources || t.shared_barriers)
       nir_shader_gather_info(t.b.shader, nir_shader_get_entrypoint(t.b.shader));

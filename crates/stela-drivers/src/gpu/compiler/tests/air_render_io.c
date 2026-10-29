@@ -146,7 +146,7 @@ translate(const char *text, enum stela_air_stage stage, bool amplified,
       .resources = {
          .max_instructions = 10000, .bind_buffer = stela_metal_bind_buffer, .binding_data = &primary,
          .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41,
-         .load_device_value = stela_metal_load_device_value,
+         .load_device_value = stela_metal_load_device_value, .max_constant_bytes = 65536,
       },
    };
    const char *name = stage == STELA_AIR_VERTEX ? "vertex" : "fragment";
@@ -221,6 +221,32 @@ vertex_functions_fetch_attributes_and_write_builtins(void)
    assert(typed(variable(shader, nir_var_shader_out, VARYING_SLOT_LAYER, 0), GLSL_TYPE_INT, 1));
    assert(typed(variable(shader, nir_var_shader_out, VARYING_SLOT_VIEWPORT, 0), GLSL_TYPE_INT, 1));
    ralloc_free(shader);
+}
+
+/* A vertex function reads constant data, as a table of positions. */
+static void
+vertex_functions_read_constant_data(void)
+{
+   char *table = change(position_only, "define <4 x float> @vertex(<4 x float> %p) {\nret <4 x float> %p\n}\n",
+      "@positions = internal addrspace(2) constant [3 x <4 x float>] [<4 x float> zeroinitializer,"
+      " <4 x float> <float 1.0, float 0.0, float 0.0, float 1.0>,"
+      " <4 x float> <float 0.0, float 1.0, float 0.0, float 1.0>], align 16\n"
+      "define <4 x float> @vertex(<4 x float> %p) {\n"
+      "%x = extractelement <4 x float> %p, i32 0\n%i = fptoui float %x to i32\n"
+      "%e = getelementptr [3 x <4 x float>], ptr addrspace(2) @positions, i32 0, i32 %i\n"
+      "%v = load <4 x float>, ptr addrspace(2) %e, align 16\nret <4 x float> %v\n}\n");
+   struct stela_air_error error = {0};
+   nir_shader *shader = translate(table, STELA_AIR_VERTEX, false, &error);
+   if (!shader)
+      fprintf(stderr, "constant data: %u %s\n", error.kind, error.detail);
+   assert(shader && shader->constant_data_size == 48);
+   ralloc_free(shader);
+   free(table);
+
+   /* Render functions have no threadgroup memory. */
+   char *shared = change(position_only, "define", "@s = internal addrspace(3) global i32 undef, align 4\ndefine");
+   assert(!translate(shared, STELA_AIR_VERTEX, false, &error) && error.kind == STELA_AIR_TARGET);
+   free(shared);
 }
 
 static void
@@ -310,6 +336,7 @@ main(void)
 {
    glsl_type_singleton_init_or_ref();
    vertex_functions_fetch_attributes_and_write_builtins();
+   vertex_functions_read_constant_data();
    fragment_functions_interpolate_and_write_targets();
    refuses_unrepresentable_render_io();
    glsl_type_singleton_decref();

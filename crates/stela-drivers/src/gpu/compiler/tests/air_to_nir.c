@@ -1803,7 +1803,7 @@ shared_contracts(void)
    for (unsigned i = 0; i < ARRAY_SIZE(globals); i++)
       shared_refusal("ret void\n", globals[i], STELA_AIR_TARGET);
    shared_refusal("ret void\n", "@s = internal addrspace(3) global [4294967296 x i32] undef\n", STELA_AIR_LIMIT);
-   shared_refusal("ret void\n", "@s = internal addrspace(3) global {i32,i32} undef\n", STELA_AIR_TYPE);
+   shared_refusal("ret void\n", "@s = internal addrspace(3) global {i32,ptr} undef\n", STELA_AIR_TYPE);
    shared_refusal("store atomic i32 1, ptr addrspace(3) @s seq_cst, align 4\nret void\n",
       "@s = internal addrspace(3) global i32 undef, align 4\n", STELA_AIR_MEMORY);
    shared_refusal("store volatile i32 1, ptr addrspace(3) @s, align 4\nret void\n",
@@ -2639,6 +2639,8 @@ shared_reflection_tests(void)
       "@s = internal addrspace(3) global [3 x [4 x <4 x float>]] undef, align 16\n",
       "@s = internal unnamed_addr addrspace(3) global [32 x i32] undef, align 4\n",
       "@s = internal addrspace(3) global i64 undef\n", /* Original ABI alignment. */
+      "@s = internal addrspace(3) global {i32,i32} undef, align 4\n",
+      "@s = internal addrspace(3) global half undef, align 2\n",
    };
    for (unsigned i = 0; i < ARRAY_SIZE(good); i++)
       shared_reflection_case(good[i], true);
@@ -2654,8 +2656,7 @@ shared_reflection_tests(void)
       "@s = internal addrspace(3) global i32 undef, align 4, !custom !77\n!77 = !{!\"unqualified\"}\n",
       "@s = internal addrspace(3) global [0 x i32] undef, align 4\n",
       "@s = internal addrspace(3) global [4294967296 x i32] undef, align 4\n",
-      "@s = internal addrspace(3) global {i32,i32} undef, align 4\n",
-      "@s = internal addrspace(3) global half undef, align 2\n",
+      "@s = internal addrspace(3) global {i32,ptr} undef, align 8\n",
       "@s = internal addrspace(3) global i1 undef, align 1\n",
       "@s = internal addrspace(3) global <8 x i32> undef, align 32\n",
    };

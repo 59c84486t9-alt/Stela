@@ -288,9 +288,16 @@ bool stela_air_metadata_validate(struct stela_air_metadata *m);
  * by the selected entry's original NIR path. Errors use m->error; observational
  * consumers must supply their own local error state. */
 bool stela_air_metadata_shared_profile(struct stela_air_metadata *m);
-bool stela_air_metadata_shared_global(struct stela_air_metadata *m, LLVMValueRef global,
-                                      uint64_t *size, unsigned *alignment);
-bool stela_air_metadata_shared_globals(struct stela_air_metadata *m);
+/* A module global: threadgroup memory, or constant data with an initializer. */
+struct stela_air_global {
+   bool constant;
+   uint64_t size;
+   unsigned alignment;
+};
+bool stela_air_metadata_global(struct stela_air_metadata *m, LLVMValueRef global,
+                               struct stela_air_global *info);
+/* Validates every global; `threadgroup` reports any threadgroup memory. */
+bool stela_air_metadata_globals(struct stela_air_metadata *m, bool *threadgroup);
 
 struct stela_air_argument {
    LLVMValueRef value; /* Borrowed, decoder/compiler internal only. */

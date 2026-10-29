@@ -124,6 +124,11 @@ struct stela_air_options {
     * resources/barriers; NAK callers must additionally stay within UINT16_MAX
     * before its original smem_size conversion. No target limit is inferred. */
    unsigned max_threadgroup_bytes;
+   /* Explicit target limits on a thread's private memory (allocas, lowered
+    * to NIR scratch) and on the shader's constant data (initialized constant
+    * globals, lowered to load_constant over nir_shader::constant_data). Zero
+    * refuses that storage. */
+   unsigned max_private_bytes, max_constant_bytes;
    /* Texture and sampler arguments; zero refuses them. */
    stela_air_bind_texture bind_texture;
    stela_air_bind_sampler bind_sampler;
