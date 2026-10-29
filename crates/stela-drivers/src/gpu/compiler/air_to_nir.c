@@ -2,6 +2,7 @@
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_to_nir.h"
 #include "air_math.h"
+#include "air_simd.h"
 #include "air_texture.h"
 #include "llvm-c/Analysis.h"
 #include "llvm-c/BitReader.h"
@@ -41,8 +42,9 @@ struct value {
    /* Texture and sampler arguments, used only as texture call operands. */
    const struct stela_air_texture *texture;
    const struct stela_air_sampler *sampler;
-   /* A texture call's {texel, residency} result: the texel. */
-   nir_def *texel;
+   /* A two-member result: a texture call's {texel, residency} or cmpxchg's
+    * {old value, exchanged}. A NULL member is unsupported. */
+   nir_def *members[2];
 };
 
 bool
@@ -276,6 +278,17 @@ put_value(struct translator *t, LLVMValueRef llvm, nir_def *def, unsigned access
       .components = def->num_components, .bits = def->bit_size};
    if (!_mesa_hash_table_insert(t->values, llvm, value))
       return fail(t, STELA_AIR_ALLOCATION, "AIR value map allocation failed");
+   return true;
+}
+
+static bool
+put_pair(struct translator *t, LLVMValueRef llvm, nir_def *first, nir_def *second)
+{
+   struct value *value = rzalloc(t->values, struct value);
+   if (!value || !_mesa_hash_table_insert(t->values, llvm, value))
+      return fail(t, STELA_AIR_ALLOCATION, "AIR pair allocation failed");
+   value->members[0] = first;
+   value->members[1] = second;
    return true;
 }
 
@@ -852,8 +865,16 @@ memory_guard_end(struct translator *t, const struct memory_guard *guard, nir_def
    return &phi->def;
 }
 
+/* A relaxed atomic read-modify-write of `data`, compared with `compare` for a
+ * compare-exchange. */
+struct atomic {
+   nir_atomic_op op;
+   nir_def *data, *compare;
+};
+
 static nir_def *
 ssbo_access(struct translator *t, const struct value *address, nir_def *stored,
+            const struct atomic *atomic, enum gl_access_qualifier access,
             unsigned components, unsigned bits, unsigned alignment)
 {
    nir_builder *b = &t->b;
@@ -872,16 +893,22 @@ ssbo_access(struct translator *t, const struct value *address, nir_def *stored,
    if (!memory_guard_begin(t, valid, &guard))
       return NULL;
    nir_def *offset = nir_u2u32(b, address->def);
-   if (stored)
-      nir_store_ssbo(b, stored, slot, offset, .align_mul = alignment);
+   if (atomic && atomic->compare)
+      loaded = nir_ssbo_atomic_swap(b, bits, slot, offset, atomic->compare, atomic->data,
+                                    .atomic_op = atomic->op);
+   else if (atomic)
+      loaded = nir_ssbo_atomic(b, bits, slot, offset, atomic->data, .atomic_op = atomic->op);
+   else if (stored)
+      nir_store_ssbo(b, stored, slot, offset, .align_mul = alignment, .access = access);
    else
-      loaded = nir_load_ssbo(b, components, bits, slot, offset, .align_mul = alignment);
+      loaded = nir_load_ssbo(b, components, bits, slot, offset, .align_mul = alignment, .access = access);
    return memory_guard_end(t, &guard, loaded);
 }
 
 static nir_def *
 shared_access(struct translator *t, const struct value *address, nir_def *stored,
-               unsigned components, unsigned bits, unsigned alignment)
+              const struct atomic *atomic, enum gl_access_qualifier access,
+              unsigned components, unsigned bits, unsigned alignment)
 {
    nir_builder *b = &t->b;
    unsigned bytes = components * (bits / 8);
@@ -898,11 +925,120 @@ shared_access(struct translator *t, const struct value *address, nir_def *stored
    nir_deref_instr *typed = nir_build_deref_cast_with_alignment(b, &byte->def,
       nir_var_mem_shared, type, bytes, alignment, 0);
    nir_def *loaded = NULL;
-   if (stored)
-      nir_store_deref(b, typed, stored, BITFIELD_MASK(components));
+   if (atomic && atomic->compare)
+      loaded = nir_deref_atomic_swap(b, bits, &typed->def, atomic->compare, atomic->data,
+                                     .atomic_op = atomic->op);
+   else if (atomic)
+      loaded = nir_deref_atomic(b, bits, &typed->def, atomic->data, .atomic_op = atomic->op);
+   else if (stored)
+      nir_store_deref_with_access(b, typed, stored, BITFIELD_MASK(components), access);
    else
-      loaded = nir_load_deref(b, typed);
+      loaded = nir_load_deref_with_access(b, typed, access);
    return memory_guard_end(t, &guard, loaded);
+}
+
+static nir_def *
+global_access(struct translator *t, const struct value *address, nir_def *stored,
+              const struct atomic *atomic, enum gl_access_qualifier access,
+              unsigned components, unsigned bits, unsigned alignment)
+{
+   nir_builder *b = &t->b;
+   if (atomic && atomic->compare)
+      return nir_global_atomic_swap(b, bits, address->def, atomic->compare, atomic->data,
+                                    .atomic_op = atomic->op);
+   if (atomic)
+      return nir_global_atomic(b, bits, address->def, atomic->data, .atomic_op = atomic->op);
+   if (stored) {
+      nir_store_global(b, stored, address->def, .align_mul = alignment, .access = access);
+      return NULL;
+   }
+   return nir_load_global(b, components, bits, address->def, .align_mul = alignment, .access = access);
+}
+
+/* One access at `address`: a load, a store of `stored` or an atomic, which
+ * return the loaded or old value. */
+static nir_def *
+memory_access(struct translator *t, const struct value *address, nir_def *stored,
+              const struct atomic *atomic, enum gl_access_qualifier access,
+              unsigned components, unsigned bits, unsigned alignment)
+{
+   if (address->shared)
+      return shared_access(t, address, stored, atomic, access, components, bits, alignment);
+   if (address->ssbo)
+      return ssbo_access(t, address, stored, atomic, access, components, bits, alignment);
+   return global_access(t, address, stored, atomic, access, components, bits, alignment);
+}
+
+/* An atomic `op` of `operand` at `pointer`, negated first when `negate`;
+ * `compare` makes it a compare-exchange whose result is {old value,
+ * exchanged}. Atomics act on 32- and 64-bit integers, and exchange and add
+ * also on floats. NIR's atomics are device-scope, which refines every Metal
+ * scope. */
+static bool
+atomic_access(struct translator *t, LLVMValueRef inst, LLVMValueRef pointer, nir_atomic_op op,
+              bool negate, LLVMValueRef operand, LLVMValueRef compare, unsigned alignment)
+{
+   unsigned components, bits;
+   LLVMTypeRef type = LLVMTypeOf(operand);
+   bool floating = LLVMGetTypeKind(type) == LLVMFloatTypeKind;
+   if (!value_shape(type, &components, &bits) || components != 1 ||
+       (floating ? compare || (op != nir_atomic_op_xchg && op != nir_atomic_op_fadd) :
+                   (bits != 32 && bits != 64) || op == nir_atomic_op_fadd))
+      return fail(t, STELA_AIR_TYPE, "unsupported atomic operand type");
+   if (alignment < bits / 8)
+      return fail(t, STELA_AIR_MEMORY, "atomic access is not naturally aligned");
+   if (LLVMIsAGlobalVariable(pointer) && !get_value(t, pointer))
+      return false;
+   const struct value *address = find_value(t, pointer);
+   if (!address || (address->access & STELA_AIR_READ_WRITE) != STELA_AIR_READ_WRITE)
+      return fail(t, STELA_AIR_MEMORY, "atomic access lacks a bound read-write pointer");
+   nir_def *data = get_value(t, operand);
+   nir_def *expected = compare ? get_value(t, compare) : NULL;
+   if (!data || (compare && !expected))
+      return false;
+   if (negate)
+      data = floating ? nir_ixor(&t->b, data, nir_imm_int(&t->b, INT32_MIN)) : nir_ineg(&t->b, data);
+   const struct atomic atomic = {op, data, expected};
+   nir_def *old = memory_access(t, address, NULL, &atomic, 0, 1, bits, alignment);
+   if (!old)
+      return false;
+   return compare ? put_pair(t, inst, old, nir_ieq(&t->b, old, expected)) : put_value(t, inst, old, 0);
+}
+
+/* LLVM's atomicrmw and cmpxchg. Metal's atomics are relaxed, so stronger
+ * orderings are refused rather than approximated. */
+static bool
+atomic_instruction(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
+{
+   bool exchange = op == LLVMAtomicCmpXchg;
+   bool relaxed = exchange ?
+      LLVMGetCmpXchgSuccessOrdering(inst) == LLVMAtomicOrderingMonotonic &&
+      LLVMGetCmpXchgFailureOrdering(inst) == LLVMAtomicOrderingMonotonic :
+      LLVMGetOrdering(inst) == LLVMAtomicOrderingMonotonic;
+   if (!relaxed)
+      return fail(t, STELA_AIR_MEMORY, "only relaxed (monotonic) atomics are supported");
+   nir_atomic_op atomic = nir_atomic_op_cmpxchg;
+   bool negate = false;
+   if (!exchange) {
+      switch (LLVMGetAtomicRMWBinOp(inst)) {
+      case LLVMAtomicRMWBinOpXchg: atomic = nir_atomic_op_xchg; break;
+      case LLVMAtomicRMWBinOpSub: negate = true; FALLTHROUGH;
+      case LLVMAtomicRMWBinOpAdd: atomic = nir_atomic_op_iadd; break;
+      case LLVMAtomicRMWBinOpAnd: atomic = nir_atomic_op_iand; break;
+      case LLVMAtomicRMWBinOpOr: atomic = nir_atomic_op_ior; break;
+      case LLVMAtomicRMWBinOpXor: atomic = nir_atomic_op_ixor; break;
+      case LLVMAtomicRMWBinOpMax: atomic = nir_atomic_op_imax; break;
+      case LLVMAtomicRMWBinOpMin: atomic = nir_atomic_op_imin; break;
+      case LLVMAtomicRMWBinOpUMax: atomic = nir_atomic_op_umax; break;
+      case LLVMAtomicRMWBinOpUMin: atomic = nir_atomic_op_umin; break;
+      case LLVMAtomicRMWBinOpFSub: negate = true; FALLTHROUGH;
+      case LLVMAtomicRMWBinOpFAdd: atomic = nir_atomic_op_fadd; break;
+      default: return fail(t, STELA_AIR_INSTRUCTION, "unsupported atomicrmw operation");
+      }
+   }
+   return atomic_access(t, inst, LLVMGetOperand(inst, 0), atomic, negate,
+                        LLVMGetOperand(inst, exchange ? 2 : 1),
+                        exchange ? LLVMGetOperand(inst, 1) : NULL, LLVMGetAlignment(inst));
 }
 
 static nir_def *
@@ -1642,22 +1778,160 @@ texture_call(struct translator *t, LLVMValueRef inst, const char *name, size_t n
       return true;
    if (!pair)
       return put_value(t, inst, result, 0);
-   struct value *value = rzalloc(t->values, struct value);
-   if (!value || !_mesa_hash_table_insert(t->values, inst, value))
-      return fail(t, STELA_AIR_ALLOCATION, "AIR texel allocation failed");
-   value->texel = result;
-   return true;
+   /* Sparse residency feedback is unsupported. */
+   return put_pair(t, inst, result, NULL);
 }
 
-/* extractvalue of a texture call's {texel, residency} result. */
+/* extractvalue of a two-member result. */
 static bool
-texel_member(struct translator *t, LLVMValueRef inst, const struct value *pair)
+pair_member(struct translator *t, LLVMValueRef inst, const struct value *pair)
 {
    if (LLVMGetNumIndices(inst) != 1)
-      return fail(t, STELA_AIR_INSTRUCTION, "nested texel indexing");
-   if (LLVMGetIndices(inst)[0] != 0)
+      return fail(t, STELA_AIR_INSTRUCTION, "nested pair indexing");
+   unsigned index = LLVMGetIndices(inst)[0];
+   if (index > 1 || !pair->members[index])
       return fail(t, STELA_AIR_INSTRUCTION, "sparse texture residency feedback is unsupported");
-   return put_value(t, inst, pair->texel, 0);
+   return put_value(t, inst, pair->members[index], 0);
+}
+
+/* AIR's relaxed atomics, air.atomic.<global|local>.<operation>.<type>(pointer,
+ * operand, i32 order, i32 scope, i1 volatile), as DXMT's AIR builder
+ * (src/airconv/nt/air_builder.cpp) names them. Exchange takes a sign-free type
+ * ("i32", "f32"); the others a signed ("s.i32"), unsigned ("u.i32") or float
+ * ("f.f32") type, whose sign selects min and max. */
+static bool
+air_atomic_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, const char *name,
+                size_t length, bool *lowered)
+{
+   static const char *const spaces[] = {"air.atomic.global.", "air.atomic.local."};
+   unsigned space = 0;
+   while (space < ARRAY_SIZE(spaces) &&
+          (length <= strlen(spaces[space]) || memcmp(name, spaces[space], strlen(spaces[space]))))
+      space++;
+   *lowered = space < ARRAY_SIZE(spaces);
+   if (!*lowered)
+      return true;
+   if (!LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee) ||
+       LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
+       LLVMGetInstructionCallConv(inst) != LLVMCCallConv || LLVMGetNumArgOperands(inst) != 5 ||
+       LLVMCountParams(callee) != 5 || LLVMIsFunctionVarArg(LLVMGlobalGetValueType(callee)) ||
+       LLVMGetCalledFunctionType(inst) != LLVMGlobalGetValueType(callee) ||
+       LLVMGetNumOperandBundles(inst))
+      return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR atomic call signature");
+   LLVMValueRef pointer = LLVMGetOperand(inst, 0), operand = LLVMGetOperand(inst, 1);
+   LLVMTypeRef type = LLVMTypeOf(operand);
+   if (LLVMGetTypeKind(LLVMTypeOf(pointer)) != LLVMPointerTypeKind ||
+       LLVMGetPointerAddressSpace(LLVMTypeOf(pointer)) != (space ? 3u : 1u) ||
+       LLVMTypeOf(inst) != type)
+      return fail(t, STELA_AIR_INSTRUCTION, "AIR atomic types disagree with its name");
+   for (unsigned i = 2; i < 5; i++) {
+      LLVMValueRef value = LLVMGetOperand(inst, i);
+      if (!LLVMIsAConstantInt(value) || LLVMGetIntTypeWidth(LLVMTypeOf(value)) != (i == 4 ? 1u : 32u))
+         return fail(t, STELA_AIR_INSTRUCTION, "AIR atomic order, scope and volatility must be constants");
+   }
+   if (LLVMConstIntGetZExtValue(LLVMGetOperand(inst, 2)))
+      return fail(t, STELA_AIR_MEMORY, "only relaxed AIR atomics are supported");
+   /* Float atomics add and subtract; the integer forms are unsigned, signed. */
+   static const struct {
+      const char *name;
+      nir_atomic_op integer[2];
+      bool floating, negate;
+   } operations[] = {
+      {"add", {nir_atomic_op_iadd, nir_atomic_op_iadd}, true, false},
+      {"sub", {nir_atomic_op_iadd, nir_atomic_op_iadd}, true, true},
+      {"and", {nir_atomic_op_iand, nir_atomic_op_iand}, false, false},
+      {"or", {nir_atomic_op_ior, nir_atomic_op_ior}, false, false},
+      {"xor", {nir_atomic_op_ixor, nir_atomic_op_ixor}, false, false},
+      {"min", {nir_atomic_op_umin, nir_atomic_op_imin}, false, false},
+      {"max", {nir_atomic_op_umax, nir_atomic_op_imax}, false, false},
+   };
+   char overload[16], expected[64];
+   stela_air_call_overload(type, overload, sizeof(overload));
+   bool floating = LLVMGetTypeKind(type) == LLVMFloatTypeKind;
+   unsigned alignment = LLVMABIAlignmentOfType(t->layout, type);
+   snprintf(expected, sizeof(expected), "%sxchg.%s", spaces[space], overload);
+   if (stela_air_call_named(name, length, expected))
+      return atomic_access(t, inst, pointer, nir_atomic_op_xchg, false, operand, NULL, alignment);
+   for (unsigned i = 0; i < ARRAY_SIZE(operations); i++) {
+      if (floating && !operations[i].floating)
+         continue;
+      for (unsigned sign = 0; sign < (floating ? 1u : 2u); sign++) {
+         snprintf(expected, sizeof(expected), "%s%s.%s.%s", spaces[space], operations[i].name,
+                  floating ? "f" : sign ? "s" : "u", overload);
+         if (stela_air_call_named(name, length, expected))
+            return atomic_access(t, inst, pointer,
+                                 floating ? nir_atomic_op_fadd : operations[i].integer[sign],
+                                 operations[i].negate, operand, NULL, alignment);
+      }
+   }
+   return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR atomic function");
+}
+
+/* AIR's barriers and fences, with DXMT's memory flags: 1 device, 2
+ * threadgroup and 4 texture memory. A barrier is (flags, scope), as DXMT
+ * emits, or (flags, order, scope), as the observed Apple compiler emits; a
+ * fence is (flags, order, scope). Orders are C++'s, 0 relaxed and 5
+ * sequentially consistent, which NIR's acquire-release barrier implements as
+ * SPIR-V's does. Scopes are 1 threadgroup, 2 device and 4 SIMD-group; barriers
+ * take only the threadgroup scope both sources record. */
+static bool
+synchronization_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee,
+                     const char *name, size_t length, bool *lowered)
+{
+   enum { THREADGROUP_BARRIER, SIMDGROUP_BARRIER, FENCE } kind;
+   if (stela_air_call_named(name, length, "air.wg.barrier"))
+      kind = THREADGROUP_BARRIER;
+   else if (stela_air_call_named(name, length, "air.simdgroup.barrier"))
+      kind = SIMDGROUP_BARRIER;
+   else if (stela_air_call_named(name, length, "air.atomic.fence"))
+      kind = FENCE;
+   else
+      return *lowered = false, true;
+   *lowered = true;
+   if (kind == THREADGROUP_BARRIER) {
+      if (t->stage_options)
+         return fail(t, STELA_AIR_INSTRUCTION, "threadgroup barriers exist only in kernels");
+      if (!shared_profile(t))
+         return false;
+   }
+   unsigned count = LLVMGetNumArgOperands(inst);
+   unsigned convergent = LLVMGetEnumAttributeKindForName("convergent", strlen("convergent"));
+   if ((kind == THREADGROUP_BARRIER && !t->options->max_threadgroup_bytes) ||
+       !LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee) ||
+       LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
+       LLVMGetInstructionCallConv(inst) != LLVMCCallConv ||
+       (count != 3 && (kind == FENCE || count != 2)) || LLVMCountParams(callee) != count ||
+       LLVMIsFunctionVarArg(LLVMGlobalGetValueType(callee)) ||
+       LLVMGetCalledFunctionType(inst) != LLVMGlobalGetValueType(callee) ||
+       LLVMGetNumOperandBundles(inst) || LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMVoidTypeKind ||
+       (kind != FENCE && (!LLVMGetEnumAttributeAtIndex(callee, LLVMAttributeFunctionIndex, convergent) ||
+                          !LLVMGetCallSiteEnumAttribute(inst, LLVMAttributeFunctionIndex, convergent))))
+      return fail(t, STELA_AIR_INSTRUCTION, "unsupported/unconfigured barrier or fence signature");
+   unsigned values[3];
+   for (unsigned i = 0; i < count; i++) {
+      LLVMValueRef operand = LLVMGetOperand(inst, i);
+      if (!LLVMIsAConstantInt(operand) || LLVMGetIntTypeWidth(LLVMTypeOf(operand)) != 32)
+         return fail(t, STELA_AIR_INSTRUCTION, "unsupported barrier or fence memory flags/order/scope");
+      values[i] = LLVMConstIntGetZExtValue(operand);
+   }
+   unsigned flags = values[0], order = count == 3 ? values[1] : 5, scope = values[count - 1];
+   if (flags & ~7u || (kind == FENCE ? order != 0 && order != 5 : order != 5) ||
+       (kind == FENCE ? scope != 1 && scope != 2 && scope != 4 : scope != 1))
+      return fail(t, STELA_AIR_INSTRUCTION, "unsupported barrier or fence memory flags/order/scope");
+   nir_variable_mode modes = (flags & 1 ? nir_var_mem_ssbo | nir_var_mem_global : 0) |
+                             (flags & 2 ? nir_var_mem_shared : 0) | (flags & 4 ? nir_var_image : 0);
+   bool ordered = modes && order;
+   mesa_scope execution = kind == THREADGROUP_BARRIER ? SCOPE_WORKGROUP :
+                          kind == SIMDGROUP_BARRIER ? SCOPE_SUBGROUP : SCOPE_NONE;
+   /* A relaxed fence orders nothing. */
+   if (!ordered && execution == SCOPE_NONE)
+      return true;
+   nir_barrier(&t->b, .execution_scope = execution,
+               .memory_scope = !ordered ? SCOPE_NONE : scope == 2 ? SCOPE_DEVICE :
+                               scope == 4 ? SCOPE_SUBGROUP : SCOPE_WORKGROUP,
+               .memory_semantics = ordered ? NIR_MEMORY_ACQ_REL : 0, .memory_modes = ordered ? modes : 0);
+   t->shared_barriers++;
+   return true;
 }
 
 static bool
@@ -1670,9 +1944,11 @@ instruction(struct translator *t, LLVMValueRef inst)
       return t->stage_options ? stage_return(t, inst) : LLVMGetNumOperands(inst) == 0 || fail(t, STELA_AIR_TYPE, "compute kernel return value");
    if (op == LLVMExtractValue) {
       const struct value *pair = find_value(t, LLVMGetOperand(inst, 0));
-      if (pair && pair->texel)
-         return texel_member(t, inst, pair);
+      if (pair && pair->members[0])
+         return pair_member(t, inst, pair);
    }
+   if (op == LLVMAtomicRMW || op == LLVMAtomicCmpXchg)
+      return atomic_instruction(t, inst, op);
    if (t->stage_options && (op == LLVMInsertValue || op == LLVMExtractValue || op == LLVMShuffleVector ||
                             op == LLVMExtractElement || op == LLVMInsertElement))
       return stage_value_instruction(t, inst, op);
@@ -1781,47 +2057,34 @@ instruction(struct translator *t, LLVMValueRef inst)
          return false;
       if (lowered)
          return true;
-      if (name_length == strlen("air.wg.barrier") && !memcmp(name, "air.wg.barrier", name_length)) {
-         if (!shared_profile(t))
-            return false;
-         unsigned convergent = LLVMGetEnumAttributeKindForName("convergent", strlen("convergent"));
-         if (!t->options->max_threadgroup_bytes || !LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee) ||
-             LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
-             LLVMGetInstructionCallConv(inst) != LLVMCCallConv || LLVMGetNumArgOperands(inst) != 3 ||
-             LLVMCountParams(callee) != 3 || LLVMIsFunctionVarArg(LLVMGlobalGetValueType(callee)) ||
-             LLVMGetCalledFunctionType(inst) != LLVMGlobalGetValueType(callee) ||
-             LLVMGetNumOperandBundles(inst) ||
-             LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMVoidTypeKind ||
-             !LLVMGetEnumAttributeAtIndex(callee, LLVMAttributeFunctionIndex, convergent) ||
-             !LLVMGetCallSiteEnumAttribute(inst, LLVMAttributeFunctionIndex, convergent))
-            return fail(t, STELA_AIR_INSTRUCTION, "unsupported/unconfigured workgroup barrier signature");
-         const unsigned expected[] = {2, 5, 1};
-         for (unsigned i = 0; i < ARRAY_SIZE(expected); i++) {
-            LLVMValueRef operand = LLVMGetOperand(inst, i);
-            if (!LLVMIsAConstantInt(operand) || LLVMGetIntTypeWidth(LLVMTypeOf(operand)) != 32 ||
-                LLVMConstIntGetZExtValue(operand) != expected[i])
-               return fail(t, STELA_AIR_INSTRUCTION, "unsupported workgroup barrier memory flags/order/scope");
-         }
-         /* Qualified MSL collective: all WG threads rendezvous, publishing
-          * ordinary shared-memory reads/writes. No atomic SC order, device or
-          * image memory scope is implemented by this observed form. */
-         nir_barrier(&t->b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_WORKGROUP,
-            .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_shared);
-         t->shared_barriers++;
+      if (!synchronization_call(t, inst, callee, name, name_length, &lowered))
+         return false;
+      if (lowered)
          return true;
-      }
+      if (!air_atomic_call(t, inst, callee, name, name_length, &lowered))
+         return false;
+      if (lowered)
+         return true;
       nir_def *math;
-      const struct stela_air_math_context math_context = {
+      const struct stela_air_call_context math_context = {
          .b = &t->b, .error = t->error, .translator = t,
          .fragment = t->stage_options && t->stage_options->stage == STELA_AIR_FRAGMENT,
          .operand = texture_operand, .fp_environment = math_environment,
       };
-      switch (stela_air_math_call(&math_context, inst, callee, name, name_length, &math)) {
-      case STELA_AIR_MATH_OTHER:
-         return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR function/intrinsic call");
-      case STELA_AIR_MATH_FAILED:
+      switch (stela_air_simd_call(&math_context, inst, callee, name, name_length, &math)) {
+      case STELA_AIR_CALL_OTHER:
+         break;
+      case STELA_AIR_CALL_FAILED:
          return false;
-      case STELA_AIR_MATH_LOWERED:
+      case STELA_AIR_CALL_LOWERED:
+         return put_value(t, inst, math, 0);
+      }
+      switch (stela_air_math_call(&math_context, inst, callee, name, name_length, &math)) {
+      case STELA_AIR_CALL_OTHER:
+         return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR function/intrinsic call");
+      case STELA_AIR_CALL_FAILED:
+         return false;
+      case STELA_AIR_CALL_LOWERED:
          break;
       }
       return !math || put_value(t, inst, math, 0);
@@ -1938,13 +2201,19 @@ instruction(struct translator *t, LLVMValueRef inst)
          return false;
       struct value *address = find_value(t, pointer);
       unsigned required = op == LLVMStore ? STELA_AIR_WRITE : STELA_AIR_READ;
+      LLVMAtomicOrdering ordering = LLVMGetOrdering(inst);
+      bool atomic = ordering != LLVMAtomicOrderingNotAtomic;
       if (!address || !(address->access & required) || LLVMGetVolatile(inst) ||
-          LLVMGetOrdering(inst) != LLVMAtomicOrderingNotAtomic)
-         return fail(t, STELA_AIR_MEMORY, "unsupported volatile/atomic/unbound/disallowed memory access");
+          (atomic && ordering != LLVMAtomicOrderingUnordered && ordering != LLVMAtomicOrderingMonotonic))
+         return fail(t, STELA_AIR_MEMORY, "unsupported volatile/ordered/unbound/disallowed memory access");
       if (op == LLVMStore && !value_shape(LLVMTypeOf(LLVMGetOperand(inst, 0)), &components, &bits))
          return fail(t, STELA_AIR_TYPE, "unsupported store type");
       if (bits == 1)
          return fail(t, STELA_AIR_MEMORY, "sub-byte memory access unsupported");
+      if (atomic && (components != 1 || (bits != 32 && bits != 64) || LLVMGetAlignment(inst) < bits / 8))
+         return fail(t, STELA_AIR_MEMORY, "relaxed atomic loads and stores take aligned 32- or 64-bit scalars");
+      /* Relaxed atomic loads and stores are single, coherent accesses. */
+      enum gl_access_qualifier access = atomic ? ACCESS_ATOMIC | ACCESS_COHERENT : 0;
       if (address->view_root && op == LLVMLoad &&
           !stela_air_metadata_stage_buffer_type(&t->metadata, address->constant_view, LLVMTypeOf(inst)))
          return false;
@@ -1955,20 +2224,11 @@ instruction(struct translator *t, LLVMValueRef inst)
          nir_def *value = get_value(t, LLVMGetOperand(inst, 0));
          if (!value)
             return false;
-         if (address->shared)
-            shared_access(t, address, value, components, bits, alignment);
-         else if (address->ssbo)
-            ssbo_access(t, address, value, components, bits, alignment);
-         else
-            nir_store_global(&t->b, value, address->def, .align_mul = alignment);
+         memory_access(t, address, value, NULL, access, components, bits, alignment);
          return t->error->kind == STELA_AIR_OK;
       }
-      if (address->shared)
-         return put_value(t, inst, shared_access(t, address, NULL, components, bits, alignment), 0);
-      if (address->ssbo)
-         return put_value(t, inst, ssbo_access(t, address, NULL, components, bits, alignment), 0);
-      return put_value(t, inst, nir_load_global(&t->b, components, bits,
-                       address->def, .align_mul = alignment), 0);
+      return put_value(t, inst, memory_access(t, address, NULL, NULL, access, components, bits,
+                                              alignment), 0);
    }
    /* The remaining arithmetic is integer-only. Flags restricting defined
     * LLVM inputs (nuw/nsw/exact) need no extra NIR operation on those inputs;

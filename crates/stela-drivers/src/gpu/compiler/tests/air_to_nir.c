@@ -1772,8 +1772,7 @@ shared_global_dominance(void)
 static void
 shared_contracts(void)
 {
-   const char *flags[] = {"i32 0, i32 5, i32 1", "i32 1, i32 5, i32 1",
-      "i32 4, i32 5, i32 1", "i32 6, i32 5, i32 1", "i32 2, i32 0, i32 1",
+   const char *flags[] = {"i32 8, i32 5, i32 1", "i32 2, i32 0, i32 1",
       "i32 2, i32 2, i32 1", "i32 2, i32 4, i32 1", "i32 2, i32 5, i32 0",
       "i32 2, i32 5, i32 2", "i32 %tid, i32 5, i32 1"};
    for (unsigned i = 0; i < ARRAY_SIZE(flags); i++) {
@@ -1805,7 +1804,7 @@ shared_contracts(void)
       shared_refusal("ret void\n", globals[i], STELA_AIR_TARGET);
    shared_refusal("ret void\n", "@s = internal addrspace(3) global [4294967296 x i32] undef\n", STELA_AIR_LIMIT);
    shared_refusal("ret void\n", "@s = internal addrspace(3) global {i32,i32} undef\n", STELA_AIR_TYPE);
-   shared_refusal("store atomic i32 1, ptr addrspace(3) @s monotonic, align 4\nret void\n",
+   shared_refusal("store atomic i32 1, ptr addrspace(3) @s seq_cst, align 4\nret void\n",
       "@s = internal addrspace(3) global i32 undef, align 4\n", STELA_AIR_MEMORY);
    shared_refusal("store volatile i32 1, ptr addrspace(3) @s, align 4\nret void\n",
       "@s = internal addrspace(3) global i32 undef, align 4\n", STELA_AIR_MEMORY);
@@ -2374,7 +2373,7 @@ tests(void)
    metadata_refusal("air.compile.fast_math_enable", "air.compile.future_semantics", STELA_AIR_METADATA);
    expect_refusal("%v = fadd float 1.0, 2.0\nret void\n", "", 100, STELA_AIR_METADATA);
    expect_refusal("%v = load volatile i32, ptr addrspace(1) %out, align 4\nret void\n", "", 100, STELA_AIR_MEMORY);
-   expect_refusal("%v = load atomic i32, ptr addrspace(1) %out monotonic, align 4\nret void\n", "", 100, STELA_AIR_MEMORY);
+   expect_refusal("%v = load atomic i32, ptr addrspace(1) %out acquire, align 4\nret void\n", "", 100, STELA_AIR_MEMORY);
    expect_refusal("%v = freeze i32 poison\nret void\n", "", 100, STELA_AIR_INSTRUCTION);
    expect_refusal("call void @helper()\nret void\n", "declare void @helper()\n", 100, STELA_AIR_INSTRUCTION);
    expect_refusal("store i32 %later, ptr addrspace(1) %out, align 4\n%later = add i32 %tid, 1\nret void\n", "", 100, STELA_AIR_VERIFY);
