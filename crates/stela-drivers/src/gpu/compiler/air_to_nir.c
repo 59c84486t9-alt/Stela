@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_to_nir.h"
+#include "air_texture.h"
 #include "llvm-c/Analysis.h"
 #include "llvm-c/BitReader.h"
 #include "llvm-c/Core.h"
@@ -36,6 +37,11 @@ struct value {
    nir_def *lanes[4];
    unsigned components, bits, aggregate_count;
    struct value **elements;
+   /* Texture and sampler arguments, used only as texture call operands. */
+   const struct stela_air_texture *texture;
+   const struct stela_air_sampler *sampler;
+   /* A texture call's {texel, residency} result: the texel. */
+   nir_def *texel;
 };
 
 bool
@@ -289,6 +295,32 @@ get_value(struct translator *t, LLVMValueRef llvm)
    return NULL;
 }
 
+/* A texture or sampler argument's value, which only texture calls use. */
+static bool
+put_resource(struct translator *t, LLVMValueRef param, const struct stela_air_texture *texture,
+             const struct stela_air_sampler *sampler)
+{
+   struct value *value = rzalloc(t->values, struct value);
+   if (!value)
+      return fail(t, STELA_AIR_ALLOCATION, "AIR resource value allocation failed");
+   if (texture) {
+      struct stela_air_texture *copy = ralloc(t->values, struct stela_air_texture);
+      if (!copy)
+         return fail(t, STELA_AIR_ALLOCATION, "AIR texture allocation failed");
+      *copy = *texture;
+      value->texture = copy;
+   } else {
+      struct stela_air_sampler *copy = ralloc(t->values, struct stela_air_sampler);
+      if (!copy)
+         return fail(t, STELA_AIR_ALLOCATION, "AIR sampler allocation failed");
+      *copy = *sampler;
+      value->sampler = copy;
+   }
+   if (!_mesa_hash_table_insert(t->values, param, value))
+      return fail(t, STELA_AIR_ALLOCATION, "AIR value map allocation failed");
+   return true;
+}
+
 static bool
 binding_prelude(struct translator *t)
 {
@@ -308,6 +340,12 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
    for (unsigned a = 0; a < kernel.count; a++) {
       const struct stela_air_argument *argument = &kernel.arguments[a];
       LLVMValueRef param = argument->value;
+      if (argument->is_texture || argument->is_sampler) {
+         if (!put_resource(t, param, argument->is_texture ? &argument->texture : NULL,
+                           &argument->sampler))
+            return false;
+         continue;
+      }
       struct stela_air_buffer desc = argument->buffer;
       unsigned index = desc.argument, components = argument->components;
       bool buffer = argument->is_buffer;
@@ -876,6 +914,12 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
       LLVMValueRef param = LLVMGetParam(fn, io->argument);
       nir_def *def;
       unsigned slot = 0;
+      if (io->semantic == STELA_AIR_STAGE_TEXTURE || io->semantic == STELA_AIR_STAGE_SAMPLER) {
+         bool texture = io->semantic == STELA_AIR_STAGE_TEXTURE;
+         if (!put_resource(t, param, texture ? &io->texture : NULL, &io->sampler))
+            return false;
+         continue;
+      }
       if (io->semantic == STELA_AIR_STAGE_BUFFER) {
          /* Full stage metadata/layout validation has already completed. An
           * actually unused declaration needs no resource binding or SSA value;
@@ -1202,6 +1246,70 @@ integer_funnel(struct translator *t, LLVMValueRef inst, LLVMValueRef callee,
 
 static bool same_pointer_resource(const struct value *a, const struct value *b);
 
+static nir_def *
+texture_operand(void *translator, LLVMValueRef value)
+{
+   return get_value(translator, value);
+}
+
+static const struct stela_air_texture *
+texture_argument(void *translator, LLVMValueRef value)
+{
+   const struct value *v = find_value(translator, value);
+   return v ? v->texture : NULL;
+}
+
+static const struct stela_air_sampler *
+sampler_argument(void *translator, LLVMValueRef value)
+{
+   const struct value *v = find_value(translator, value);
+   return v ? v->sampler : NULL;
+}
+
+/* A call of one of AIR's texture functions; false with no error when the
+ * call is something else. */
+static bool
+texture_call(struct translator *t, LLVMValueRef inst, const char *name, size_t name_length,
+             bool *lowered)
+{
+   const struct stela_air_texture_context context = {
+      .b = &t->b, .options = t->options, .error = t->error, .translator = t,
+      .operand = texture_operand, .texture = texture_argument, .sampler = sampler_argument,
+   };
+   nir_def *result;
+   bool pair;
+   switch (stela_air_texture_call(&context, inst, name, name_length, &result, &pair)) {
+   case STELA_AIR_TEXTURE_OTHER:
+      *lowered = false;
+      return true;
+   case STELA_AIR_TEXTURE_FAILED:
+      return false;
+   case STELA_AIR_TEXTURE_LOWERED:
+      break;
+   }
+   *lowered = true;
+   if (!result)
+      return true;
+   if (!pair)
+      return put_value(t, inst, result, 0);
+   struct value *value = rzalloc(t->values, struct value);
+   if (!value || !_mesa_hash_table_insert(t->values, inst, value))
+      return fail(t, STELA_AIR_ALLOCATION, "AIR texel allocation failed");
+   value->texel = result;
+   return true;
+}
+
+/* extractvalue of a texture call's {texel, residency} result. */
+static bool
+texel_member(struct translator *t, LLVMValueRef inst, const struct value *pair)
+{
+   if (LLVMGetNumIndices(inst) != 1)
+      return fail(t, STELA_AIR_INSTRUCTION, "nested texel indexing");
+   if (LLVMGetIndices(inst)[0] != 0)
+      return fail(t, STELA_AIR_INSTRUCTION, "sparse texture residency feedback is unsupported");
+   return put_value(t, inst, pair->texel, 0);
+}
+
 static bool
 instruction(struct translator *t, LLVMValueRef inst)
 {
@@ -1210,6 +1318,11 @@ instruction(struct translator *t, LLVMValueRef inst)
    unsigned components = 0, bits = 0;
    if (op == LLVMRet)
       return t->stage_options ? stage_return(t, inst) : LLVMGetNumOperands(inst) == 0 || fail(t, STELA_AIR_TYPE, "compute kernel return value");
+   if (op == LLVMExtractValue) {
+      const struct value *pair = find_value(t, LLVMGetOperand(inst, 0));
+      if (pair && pair->texel)
+         return texel_member(t, inst, pair);
+   }
    if (t->stage_options && (op == LLVMInsertValue || op == LLVMExtractValue || op == LLVMShuffleVector ||
                             op == LLVMExtractElement || op == LLVMInsertElement))
       return stage_value_instruction(t, inst, op);
@@ -1315,6 +1428,11 @@ instruction(struct translator *t, LLVMValueRef inst)
       }
       size_t name_length = 0;
       const char *name = LLVMGetValueName2(callee, &name_length);
+      bool lowered;
+      if (!texture_call(t, inst, name, name_length, &lowered))
+         return false;
+      if (lowered)
+         return true;
       if (name_length == strlen("air.wg.barrier") && !memcmp(name, "air.wg.barrier", name_length)) {
          if (!shared_profile(t))
             return false;

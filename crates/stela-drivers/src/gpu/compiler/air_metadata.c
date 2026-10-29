@@ -351,6 +351,68 @@ primitive_type(LLVMValueRef name, unsigned *components)
    return STELA_AIR_PRIMITIVE_UNKNOWN;
 }
 
+/* A texture's reflected type name, "<type><<component>, <access>>" with
+ * optional spaces: the MTLTextureType and component type. The access comes
+ * from the argument's own access key. */
+static bool
+texture_type(const char *name, unsigned bytes, struct stela_air_texture *texture)
+{
+   static const struct {
+      const char *name;
+      enum stela_air_texture_type type;
+      bool depth;
+   } types[] = {
+      {"texture1d", STELA_AIR_TEXTURE_1D}, {"texture1d_array", STELA_AIR_TEXTURE_1D_ARRAY},
+      {"texture2d", STELA_AIR_TEXTURE_2D}, {"texture2d_array", STELA_AIR_TEXTURE_2D_ARRAY},
+      {"texture2d_ms", STELA_AIR_TEXTURE_2D_MS},
+      {"texture2d_ms_array", STELA_AIR_TEXTURE_2D_MS_ARRAY},
+      {"texture3d", STELA_AIR_TEXTURE_3D}, {"texturecube", STELA_AIR_TEXTURE_CUBE},
+      {"texturecube_array", STELA_AIR_TEXTURE_CUBE_ARRAY},
+      {"texture_buffer", STELA_AIR_TEXTURE_BUFFER},
+      {"depth2d", STELA_AIR_TEXTURE_2D, true}, {"depth2d_array", STELA_AIR_TEXTURE_2D_ARRAY, true},
+      {"depth2d_ms", STELA_AIR_TEXTURE_2D_MS, true},
+      {"depth2d_ms_array", STELA_AIR_TEXTURE_2D_MS_ARRAY, true},
+      {"depthcube", STELA_AIR_TEXTURE_CUBE, true},
+      {"depthcube_array", STELA_AIR_TEXTURE_CUBE_ARRAY, true},
+   };
+   static const struct {
+      const char *name;
+      enum stela_air_primitive primitive;
+   } components[] = {
+      {"float", STELA_AIR_FLOAT}, {"half", STELA_AIR_HALF}, {"int", STELA_AIR_INT},
+      {"uint", STELA_AIR_UINT}, {"short", STELA_AIR_SHORT}, {"ushort", STELA_AIR_USHORT},
+   };
+   const char *open = memchr(name, '<', bytes);
+   const char *end = name + bytes;
+   if (!open || end[-1] != '>')
+      return false;
+   size_t type_bytes = (size_t)(open - name);
+   const char *component = open + 1;
+   while (component < end && *component == ' ')
+      component++;
+   const char *comma = memchr(component, ',', (size_t)(end - component));
+   if (!comma)
+      return false;
+   size_t component_bytes = (size_t)(comma - component);
+   while (component_bytes && component[component_bytes - 1] == ' ')
+      component_bytes--;
+   texture->type = 0;
+   for (unsigned i = 0; i < ARRAY_SIZE(types); i++) {
+      if (strlen(types[i].name) == type_bytes && !memcmp(types[i].name, name, type_bytes)) {
+         texture->type = types[i].type;
+         texture->depth = types[i].depth;
+      }
+   }
+   texture->primitive = STELA_AIR_PRIMITIVE_UNKNOWN;
+   for (unsigned i = 0; i < ARRAY_SIZE(components); i++) {
+      if (strlen(components[i].name) == component_bytes &&
+          !memcmp(components[i].name, component, component_bytes))
+         texture->primitive = components[i].primitive;
+   }
+   return texture->type && texture->primitive &&
+          (!texture->depth || texture->primitive == STELA_AIR_FLOAT);
+}
+
 /* This is reflection admission, not a change to executable/NIR admission.
  * Reject unknown function metadata/string attributes and unqualified globals
  * instead of claiming absent annotations/constants/static-resource reflection.
@@ -594,6 +656,8 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
    bool used[AIR_MAX_ARGUMENTS] = {false};
    bool buffer_indices[AIR_MAX_ARGUMENTS] = {false};
    bool shared_indices[AIR_MAX_ARGUMENTS] = {false};
+   bool texture_indices[AIR_MAX_TEXTURES] = {false};
+   bool sampler_indices[AIR_MAX_SAMPLERS] = {false};
    for (unsigned a = 0; a < argc; a++) {
       LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
       unsigned fields_count, index;
@@ -628,14 +692,21 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
                       stela_air_md_string(fields[1], "air.position");
       bool varying = render && render->entry.stage == STELA_AIR_FRAGMENT &&
                      stela_air_md_string(fields[1], "air.fragment_input");
-      if ((render && thread_id) || (!buffer && !thread_id && !vertex_id && !position && !varying))
+      bool texture = stela_air_md_string(fields[1], "air.texture");
+      bool sampler = stela_air_md_string(fields[1], "air.sampler");
+      if ((render && thread_id) ||
+          (!buffer && !thread_id && !vertex_id && !position && !varying && !texture && !sampler))
          return fail(t, STELA_AIR_ARGUMENT, "unsupported AIR argument kind at %u", index);
       struct stela_air_buffer desc = {.argument = index};
+      struct stela_air_texture texture_desc = {.argument = index};
+      struct stela_air_sampler sampler_desc = {.argument = index};
+      bool has_access = false;
       struct stela_air_stage_io *io = render ? &render->inputs[a] : NULL;
       if (io) {
          *io = (struct stela_air_stage_io){.argument = index,
             .semantic = buffer ? STELA_AIR_STAGE_BUFFER : vertex_id ? STELA_AIR_VERTEX_ID :
-                        position ? STELA_AIR_POSITION : STELA_AIR_VARYING};
+                        position ? STELA_AIR_POSITION : texture ? STELA_AIR_STAGE_TEXTURE :
+                        sampler ? STELA_AIR_STAGE_SAMPLER : STELA_AIR_VARYING};
       }
       unsigned first_field = 2;
       if (varying) {
@@ -653,7 +724,26 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       unsigned name_bytes = 0, type_name_bytes = 0;
       for (unsigned f = first_field; f < fields_count;) {
          LLVMValueRef key = fields[f++];
-         if (stela_air_md_string(key, "air.read") || stela_air_md_string(key, "air.write") ||
+         if (texture && (stela_air_md_string(key, "air.sample") || stela_air_md_string(key, "air.read") ||
+                         stela_air_md_string(key, "air.write") || stela_air_md_string(key, "air.read_write"))) {
+            if (has_access)
+               return fail(t, STELA_AIR_METADATA, "duplicate texture access");
+            texture_desc.access = stela_air_md_string(key, "air.sample") ? STELA_AIR_TEXTURE_SAMPLE :
+                                  stela_air_md_string(key, "air.read") ? STELA_AIR_TEXTURE_READ :
+                                  stela_air_md_string(key, "air.write") ? STELA_AIR_TEXTURE_WRITE :
+                                  STELA_AIR_TEXTURE_READ_WRITE;
+            has_access = true;
+         } else if ((texture || sampler) && stela_air_md_string(key, "air.location_index")) {
+            unsigned *slot = texture ? &texture_desc.index : &sampler_desc.index;
+            unsigned locations;
+            if (has_location || f + 2 > fields_count || !stela_air_md_uint(fields[f], slot) ||
+                !stela_air_md_uint(fields[f + 1], &locations))
+               return fail(t, STELA_AIR_METADATA, "invalid/duplicate texture or sampler location");
+            if (locations != 1)
+               return fail(t, STELA_AIR_ARGUMENT, "texture and sampler arrays are unsupported");
+            has_location = true;
+            f += 2;
+         } else if (stela_air_md_string(key, "air.read") || stela_air_md_string(key, "air.write") ||
              stela_air_md_string(key, "air.read_write")) {
             if (!buffer || desc.access)
                return fail(t, STELA_AIR_METADATA, "duplicate/inapplicable buffer access");
@@ -711,7 +801,24 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          }
       }
       unsigned components = 0;
-      if (buffer) {
+      if (texture || sampler) {
+         LLVMTypeRef type = LLVMTypeOf(param);
+         unsigned space = texture ? 1 : 2;
+         if (!has_location || !has_type_name || LLVMGetTypeKind(type) != LLVMPointerTypeKind ||
+             LLVMGetPointerAddressSpace(type) != space)
+            return fail(t, STELA_AIR_ARGUMENT, "unsupported texture or sampler %u", index);
+         if (texture && (!has_access || !texture_type(type_name, type_name_bytes, &texture_desc)))
+            return fail(t, STELA_AIR_ARGUMENT, "unsupported texture type at %u", index);
+         if (sampler && (type_name_bytes != strlen("sampler") || memcmp(type_name, "sampler", type_name_bytes)))
+            return fail(t, STELA_AIR_ARGUMENT, "unsupported sampler type at %u", index);
+         unsigned slot = texture ? texture_desc.index : sampler_desc.index;
+         bool *indices = texture ? texture_indices : sampler_indices;
+         if (slot >= (texture ? AIR_MAX_TEXTURES : AIR_MAX_SAMPLERS) || indices[slot])
+            return fail(t, STELA_AIR_METADATA, "duplicate or out-of-range texture or sampler location");
+         indices[slot] = true;
+         primitive = STELA_AIR_PRIMITIVE_UNKNOWN;
+         type_components = 0;
+      } else if (buffer) {
          LLVMTypeRef type = LLVMTypeOf(param);
          if (!has_location || !has_as || !desc.access ||
              (render ? desc.address_space != 2 : (desc.address_space != 1 && desc.address_space != 3)) ||
@@ -750,6 +857,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       }
       if (io) {
          io->buffer = desc; io->primitive = primitive; io->components = type_components;
+         io->texture = texture_desc; io->sampler = sampler_desc;
          io->name = name; io->name_bytes = name_bytes;
          io->type_name = type_name; io->type_name_bytes = type_name_bytes;
          io->used = LLVMGetFirstUse(param) != NULL;
@@ -762,6 +870,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       }
       kernel->arguments[a] = (struct stela_air_argument) {
          .value = param, .buffer = desc, .is_buffer = buffer, .components = components,
+         .texture = texture_desc, .sampler = sampler_desc, .is_texture = texture, .is_sampler = sampler,
          .plain_buffer_type = primitive != STELA_AIR_PRIMITIVE_UNKNOWN,
          .name = name, .name_bytes = name_bytes, .type_name = type_name, .type_name_bytes = type_name_bytes,
          .primitive = primitive, .type_components = type_components, .used = LLVMGetFirstUse(param) != NULL,
@@ -1144,7 +1253,8 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
       for (unsigned a = 0; a < entries[i].kernel.count; a++) {
          const struct stela_air_argument *arg = &entries[i].kernel.arguments[a];
          args[a] = (struct stela_air_argument_info) {
-            .buffer = arg->buffer, .kind = arg->is_buffer ? 1 : 2, .components = arg->components,
+            .buffer = arg->buffer, .kind = arg->is_buffer ? 1 : arg->is_texture ? 3 : arg->is_sampler ? 4 : 2,
+            .texture = arg->texture, .sampler = arg->sampler, .components = arg->components,
             .plain_buffer_type = arg->plain_buffer_type,
             .name = arg->name, .name_bytes = arg->name_bytes,
             .type_name = arg->type_name, .type_name_bytes = arg->type_name_bytes,

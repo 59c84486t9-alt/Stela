@@ -1,0 +1,816 @@
+/* SPDX-License-Identifier: MIT */
+/* AIR's texture functions, as Apple's compiler emits them and DXMT's AIR
+ * builder (src/airconv/nt/air_builder.cpp) records them. Each function's name
+ * spells the operation, the texture's AIR type and its texel type; this file
+ * rebuilds the exact name from the texture argument's reflection, so a call
+ * whose type disagrees with its argument is refused rather than guessed. The
+ * operands follow in a fixed order that depends on the texture type:
+ *
+ *   sample[_compare]  texture, sampler, [i32 1 for depth], coord, [array],
+ *                     [compare reference], [i1 offset present, offset],
+ *                     i1 lod is level, f32 lod or bias, f32 min lod, i32 access
+ *   sample_..._grad   texture, sampler, [i32 1], coord, [array], dPdx, dPdy,
+ *                     f32 min lod, [i1, offset], i32 access
+ *   read              texture, [i32 1], position, [cube face], [array],
+ *                     [sample], [lod], i32 access
+ *   write             texture, position, [cube face], [array], texel, [lod],
+ *                     i32 access
+ *   gather[_compare]  texture, sampler, [i32 1], coord, [array],
+ *                     [compare reference], [i1, offset], [component],
+ *                     i32 access
+ *   get_*             texture, [lod for width, height and depth]
+ *   calculate_*_lod   texture, sampler, coord, i32 access
+ *   fence             texture
+ *
+ * Sample, read and gather return {texel, i8 residency}. */
+#include "air_texture.h"
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+/* Indexed by enum stela_air_texture_type. */
+static const struct shape {
+   const char *name, *depth; /* AIR type names; no depth variant when NULL. */
+   enum glsl_sampler_dim dim;
+   bool array, mipmapped;
+   unsigned coords;    /* Sample coordinate components. */
+   unsigned positions; /* Read and write position components. */
+} shapes[] = {
+   [STELA_AIR_TEXTURE_1D] = {"texture_1d", NULL, GLSL_SAMPLER_DIM_1D, false, true, 1, 1},
+   [STELA_AIR_TEXTURE_1D_ARRAY] = {"texture_1d_array", NULL, GLSL_SAMPLER_DIM_1D, true, true, 1, 1},
+   [STELA_AIR_TEXTURE_2D] = {"texture_2d", "depth_2d", GLSL_SAMPLER_DIM_2D, false, true, 2, 2},
+   [STELA_AIR_TEXTURE_2D_ARRAY] = {"texture_2d_array", "depth_2d_array", GLSL_SAMPLER_DIM_2D, true,
+                                   true, 2, 2},
+   [STELA_AIR_TEXTURE_2D_MS] = {"texture_2d_ms", "depth_2d_ms", GLSL_SAMPLER_DIM_MS, false, false,
+                                2, 2},
+   [STELA_AIR_TEXTURE_2D_MS_ARRAY] = {"texture_2d_ms_array", "depth_2d_ms_array",
+                                      GLSL_SAMPLER_DIM_MS, true, false, 2, 2},
+   [STELA_AIR_TEXTURE_3D] = {"texture_3d", NULL, GLSL_SAMPLER_DIM_3D, false, true, 3, 3},
+   [STELA_AIR_TEXTURE_CUBE] = {"texture_cube", "depth_cube", GLSL_SAMPLER_DIM_CUBE, false, true,
+                               3, 2},
+   [STELA_AIR_TEXTURE_CUBE_ARRAY] = {"texture_cube_array", "depth_cube_array",
+                                     GLSL_SAMPLER_DIM_CUBE, true, true, 3, 2},
+   [STELA_AIR_TEXTURE_BUFFER] = {"texture_buffer_1d", NULL, GLSL_SAMPLER_DIM_BUF, false, false,
+                                 1, 1},
+};
+
+enum operation {
+   SAMPLE, SAMPLE_COMPARE, SAMPLE_GRAD, READ, WRITE, GATHER, GATHER_COMPARE,
+   WIDTH, HEIGHT, DEPTH, ARRAY_SIZE, MIP_LEVELS, SAMPLES, CLAMPED_LOD, UNCLAMPED_LOD, FENCE,
+};
+
+/* Each operation's name stem, and whether its name ends in the texel type. */
+static const struct {
+   const char *stem;
+   bool typed;
+} operations[] = {
+   [SAMPLE] = {"sample", true}, [SAMPLE_COMPARE] = {"sample_compare", true},
+   [SAMPLE_GRAD] = {"sample", true}, [READ] = {"read", true}, [WRITE] = {"write", true},
+   [GATHER] = {"gather", true}, [GATHER_COMPARE] = {"gather_compare", true},
+   [WIDTH] = {"get_width"}, [HEIGHT] = {"get_height"}, [DEPTH] = {"get_depth"},
+   [ARRAY_SIZE] = {"get_array_size"}, [MIP_LEVELS] = {"get_num_mip_levels"},
+   [SAMPLES] = {"get_num_samples"}, [CLAMPED_LOD] = {"calculate_clamped_lod"},
+   [UNCLAMPED_LOD] = {"calculate_unclamped_lod"}, [FENCE] = {"fence"},
+};
+
+struct call {
+   const struct stela_air_texture_context *c;
+   nir_builder *b;
+   LLVMValueRef inst;
+   const struct stela_air_texture *texture;
+   const struct shape *shape;
+   unsigned next, count;
+   bool coherent;
+};
+
+static bool
+fail(const struct call *call, const char *fmt, ...)
+{
+   struct stela_air_error *error = call->c->error;
+   if (error->kind == STELA_AIR_OK) {
+      error->kind = STELA_AIR_INSTRUCTION;
+      va_list args;
+      va_start(args, fmt);
+      vsnprintf(error->detail, sizeof(error->detail), fmt, args);
+      va_end(args);
+   }
+   return false;
+}
+
+static bool
+integer_texels(const struct stela_air_texture *texture)
+{
+   return texture->primitive != STELA_AIR_FLOAT && texture->primitive != STELA_AIR_HALF;
+}
+
+static enum glsl_base_type
+base_type(const struct stela_air_texture *texture)
+{
+   switch (texture->primitive) {
+   case STELA_AIR_INT:
+   case STELA_AIR_SHORT:
+      return GLSL_TYPE_INT;
+   case STELA_AIR_UINT:
+   case STELA_AIR_USHORT:
+      return GLSL_TYPE_UINT;
+   default:
+      return GLSL_TYPE_FLOAT;
+   }
+}
+
+static bool
+storage(const struct stela_air_texture *texture)
+{
+   return texture->access == STELA_AIR_TEXTURE_WRITE ||
+          texture->access == STELA_AIR_TEXTURE_READ_WRITE;
+}
+
+/* The descriptor type the texture's accesses need. */
+static const struct glsl_type *
+descriptor_type(const struct stela_air_texture *texture)
+{
+   const struct shape *shape = &shapes[texture->type];
+   return storage(texture) ? glsl_image_type(shape->dim, shape->array, base_type(texture))
+                           : glsl_texture_type(shape->dim, shape->array, base_type(texture));
+}
+
+/* The texel type's overload suffix: ".v4f32", ".s.v4i32", ".f32" for depth. */
+static const char *
+overload(const struct stela_air_texture *texture, bool gather)
+{
+   if (texture->depth)
+      return gather ? ".v4f32" : ".f32";
+   switch (texture->primitive) {
+   case STELA_AIR_HALF: return ".v4f16";
+   case STELA_AIR_INT: return ".s.v4i32";
+   case STELA_AIR_UINT: return ".u.v4i32";
+   case STELA_AIR_SHORT: return ".s.v4i16";
+   case STELA_AIR_USHORT: return ".u.v4i16";
+   default: return ".v4f32";
+   }
+}
+
+static bool
+named(const struct call *call, enum operation op, bool coherent, const char *name, size_t bytes)
+{
+   const struct stela_air_texture *texture = call->texture;
+   const char *type = texture->depth ? call->shape->depth : call->shape->name;
+   const char *texel = "";
+   if (operations[op].typed)
+      texel = op == GATHER_COMPARE ? ".f32" : overload(texture, op == GATHER);
+   char expected[96];
+   int length = snprintf(expected, sizeof(expected), "air.%s_%s%s%s%s", operations[op].stem, type,
+                         op == SAMPLE_GRAD ? "_grad" : "", coherent ? ".device_coherent" : "",
+                         texel);
+   return length > 0 && (size_t)length == bytes && !memcmp(expected, name, bytes);
+}
+
+static bool
+type_is(LLVMTypeRef type, unsigned components, LLVMTypeKind kind, unsigned bits)
+{
+   if (components > 1) {
+      if (LLVMGetTypeKind(type) != LLVMVectorTypeKind || LLVMGetVectorSize(type) != components)
+         return false;
+      type = LLVMGetElementType(type);
+   }
+   if (LLVMGetTypeKind(type) != kind)
+      return false;
+   return kind != LLVMIntegerTypeKind || LLVMGetIntTypeWidth(type) == bits;
+}
+
+/* The LLVM shape of the shader's texel type. */
+static void
+texel_shape(const struct stela_air_texture *texture, bool gather, unsigned *components,
+            LLVMTypeKind *kind, unsigned *bits)
+{
+   *components = texture->depth && !gather ? 1 : 4;
+   *kind = texture->primitive == STELA_AIR_HALF ? LLVMHalfTypeKind :
+           integer_texels(texture) ? LLVMIntegerTypeKind : LLVMFloatTypeKind;
+   *bits = texture->primitive == STELA_AIR_SHORT || texture->primitive == STELA_AIR_USHORT ? 16 : 32;
+}
+
+static bool
+texel_type(const struct call *call, LLVMTypeRef type, bool gather)
+{
+   unsigned components, bits;
+   LLVMTypeKind kind;
+   texel_shape(call->texture, gather, &components, &kind, &bits);
+   return type_is(type, components, kind, bits);
+}
+
+/* The call returns {texel, i8}. */
+static bool
+pair_type(const struct call *call, bool gather)
+{
+   LLVMTypeRef type = LLVMTypeOf(call->inst);
+   return LLVMGetTypeKind(type) == LLVMStructTypeKind && LLVMCountStructElementTypes(type) == 2 &&
+          texel_type(call, LLVMStructGetTypeAtIndex(type, 0), gather) &&
+          type_is(LLVMStructGetTypeAtIndex(type, 1), 1, LLVMIntegerTypeKind, 8);
+}
+
+static LLVMValueRef
+take(struct call *call)
+{
+   if (call->next >= call->count) {
+      fail(call, "texture call has too few operands");
+      return NULL;
+   }
+   return LLVMGetOperand(call->inst, call->next++);
+}
+
+/* The next operand as NIR, of the given LLVM shape. */
+static nir_def *
+operand(struct call *call, unsigned components, LLVMTypeKind kind, unsigned bits)
+{
+   LLVMValueRef value = take(call);
+   if (!value)
+      return NULL;
+   if (!type_is(LLVMTypeOf(value), components, kind, bits)) {
+      fail(call, "texture call operand %u has an unexpected type", call->next - 1);
+      return NULL;
+   }
+   return call->c->operand(call->c->translator, value);
+}
+
+static nir_def *
+uint_operand(struct call *call)
+{
+   return operand(call, 1, LLVMIntegerTypeKind, 32);
+}
+
+static nir_def *
+float_operand(struct call *call, unsigned components)
+{
+   return operand(call, components, LLVMFloatTypeKind, 32);
+}
+
+static bool
+constant(struct call *call, unsigned bits, uint64_t *value)
+{
+   LLVMValueRef operand = take(call);
+   if (!operand)
+      return false;
+   if (!LLVMIsAConstantInt(operand) || !type_is(LLVMTypeOf(operand), 1, LLVMIntegerTypeKind, bits))
+      return fail(call, "texture call operand %u must be a constant i%u", call->next - 1, bits);
+   *value = LLVMConstIntGetZExtValue(operand);
+   return true;
+}
+
+static bool
+expect(struct call *call, unsigned bits, uint64_t expected, const char *what)
+{
+   uint64_t value;
+   if (!constant(call, bits, &value))
+      return false;
+   return value == expected || fail(call, "unsupported texture %s %llu", what,
+                                    (unsigned long long)value);
+}
+
+/* Whether the operand just taken is all-zero bits: 0, or +0.0. */
+static bool
+zero_operand(const struct call *call)
+{
+   return LLVMIsNull(LLVMGetOperand(call->inst, call->next - 1));
+}
+
+/* The optional texel offset: an i1 presence flag and the offset. */
+static bool
+offset(struct call *call, nir_def **offset)
+{
+   unsigned components = call->shape->coords;
+   if (call->shape->dim == GLSL_SAMPLER_DIM_CUBE)
+      return true;
+   uint64_t present;
+   if (!constant(call, 1, &present))
+      return false;
+   nir_def *value = operand(call, components, LLVMIntegerTypeKind, 32);
+   if (!value)
+      return false;
+   *offset = present && !zero_operand(call) ? value : NULL;
+   return true;
+}
+
+static bool
+finished(const struct call *call)
+{
+   return call->next == call->count || fail(call, "texture call has too many operands");
+}
+
+static nir_deref_instr *
+texture_deref(const struct call *call)
+{
+   const struct stela_air_options *options = call->c->options;
+   const struct glsl_type *type = descriptor_type(call->texture);
+   nir_deref_instr *deref = options->bind_texture ?
+      options->bind_texture(call->b, call->texture, type, options->binding_data) : NULL;
+   if (!deref || deref->type != type) {
+      fail(call, "texture %u is unbound or bound to another type", call->texture->index);
+      return NULL;
+   }
+   return deref;
+}
+
+static nir_deref_instr *
+sampler_deref(struct call *call)
+{
+   LLVMValueRef value = take(call);
+   if (!value)
+      return NULL;
+   const struct stela_air_sampler *sampler = call->c->sampler(call->c->translator, value);
+   if (!sampler) {
+      fail(call, "texture call samples with a value that is not a sampler argument");
+      return NULL;
+   }
+   const struct stela_air_options *options = call->c->options;
+   nir_deref_instr *deref = options->bind_sampler ?
+      options->bind_sampler(call->b, sampler, integer_texels(call->texture), options->binding_data) :
+      NULL;
+   if (!deref || deref->type != glsl_bare_sampler_type()) {
+      fail(call, "sampler %u is unbound", sampler->index);
+      return NULL;
+   }
+   return deref;
+}
+
+struct tex {
+   nir_texop op;
+   nir_deref_instr *texture, *sampler;
+   nir_def *coord, *comparator, *offset, *lod, *bias, *min_lod, *ddx, *ddy, *ms_index;
+   unsigned component;
+   bool shadow;
+};
+
+static nir_def *
+emit(const struct call *call, const struct tex *t)
+{
+   const struct {
+      nir_tex_src_type type;
+      nir_def *def;
+   } sources[] = {
+      {nir_tex_src_texture_deref, &t->texture->def},
+      {nir_tex_src_sampler_deref, t->sampler ? &t->sampler->def : NULL},
+      {nir_tex_src_coord, t->coord}, {nir_tex_src_comparator, t->comparator},
+      {nir_tex_src_offset, t->offset}, {nir_tex_src_lod, t->lod}, {nir_tex_src_bias, t->bias},
+      {nir_tex_src_min_lod, t->min_lod}, {nir_tex_src_ddx, t->ddx}, {nir_tex_src_ddy, t->ddy},
+      {nir_tex_src_ms_index, t->ms_index},
+   };
+   unsigned count = 0;
+   for (unsigned i = 0; i < ARRAY_SIZE(sources); i++)
+      count += sources[i].def != NULL;
+   nir_tex_instr *tex = nir_tex_instr_create(call->b->shader, count);
+   for (unsigned i = 0, n = 0; i < ARRAY_SIZE(sources); i++) {
+      if (sources[i].def)
+         tex->src[n++] = nir_tex_src_for_ssa(sources[i].type, sources[i].def);
+   }
+   tex->op = t->op;
+   tex->sampler_dim = call->shape->dim;
+   tex->is_array = call->shape->array;
+   tex->is_shadow = t->shadow;
+   tex->is_new_style_shadow = t->shadow;
+   tex->component = t->component;
+   if (t->coord)
+      tex->coord_components = t->coord->num_components;
+   switch (t->op) {
+   case nir_texop_txs:
+   case nir_texop_query_levels:
+   case nir_texop_texture_samples:
+      tex->dest_type = nir_type_int32;
+      break;
+   case nir_texop_lod:
+      tex->dest_type = nir_type_float32;
+      break;
+   default:
+      tex->dest_type = nir_get_nir_type_for_glsl_base_type(base_type(call->texture));
+      break;
+   }
+   nir_def_init(&tex->instr, &tex->def, nir_tex_instr_dest_size(tex), 32);
+   nir_builder_instr_insert(call->b, &tex->instr);
+   return &tex->def;
+}
+
+/* A 32-bit texel as the shader's texel type: one float for depth, 16-bit
+ * components for half, short and ushort textures. */
+static nir_def *
+texel(const struct call *call, nir_def *value, bool gather)
+{
+   nir_builder *b = call->b;
+   if (call->texture->depth)
+      return gather || value->num_components == 1 ? value : nir_channel(b, value, 0);
+   switch (call->texture->primitive) {
+   case STELA_AIR_HALF: return nir_f2f16(b, value);
+   case STELA_AIR_SHORT: return nir_i2i16(b, value);
+   case STELA_AIR_USHORT: return nir_u2u16(b, value);
+   default: return value;
+   }
+}
+
+/* The coordinate with an array layer appended: a float for sampling. */
+static nir_def *
+layered(const struct call *call, nir_def *coord, nir_def *layer, bool sample)
+{
+   if (!layer)
+      return coord;
+   nir_def *components[4];
+   for (unsigned i = 0; i < coord->num_components; i++)
+      components[i] = nir_channel(call->b, coord, i);
+   components[coord->num_components] = sample ? nir_u2f32(call->b, layer) : layer;
+   return nir_vec(call->b, components, coord->num_components + 1);
+}
+
+static bool
+sample(struct call *call, enum operation op, nir_def **result)
+{
+   const struct shape *shape = call->shape;
+   bool compare = op == SAMPLE_COMPARE;
+   if (call->texture->access != STELA_AIR_TEXTURE_SAMPLE)
+      return fail(call, "sampling a texture without sample access");
+   if (shape->dim == GLSL_SAMPLER_DIM_MS || shape->dim == GLSL_SAMPLER_DIM_BUF)
+      return fail(call, "sampling a multisample or buffer texture");
+   if (compare && !call->texture->depth)
+      return fail(call, "comparing a texture that is not a depth texture");
+   if (!pair_type(call, false))
+      return fail(call, "texture sample has an unexpected result type");
+   struct tex t = {.op = nir_texop_tex, .shadow = compare};
+   if (!(t.texture = texture_deref(call)) || !(t.sampler = sampler_deref(call)))
+      return false;
+   if (call->texture->depth && !expect(call, 32, 1, "depth operand"))
+      return false;
+   nir_def *coord = float_operand(call, shape->coords);
+   nir_def *layer = shape->array ? uint_operand(call) : NULL;
+   if (!coord || (shape->array && !layer))
+      return false;
+   t.coord = layered(call, coord, layer, true);
+   if (compare && !(t.comparator = float_operand(call, 1)))
+      return false;
+   bool fragment = call->b->shader->info.stage == MESA_SHADER_FRAGMENT;
+   if (op == SAMPLE_GRAD) {
+      t.op = nir_texop_txd;
+      if (!(t.ddx = float_operand(call, shape->coords)) ||
+          !(t.ddy = float_operand(call, shape->coords)) || !(t.min_lod = float_operand(call, 1)))
+         return false;
+      if (zero_operand(call))
+         t.min_lod = NULL;
+      if (!offset(call, &t.offset))
+         return false;
+   } else {
+      if (!offset(call, &t.offset))
+         return false;
+      uint64_t level;
+      if (!constant(call, 1, &level))
+         return false;
+      nir_def *lod = float_operand(call, 1);
+      bool zero_lod = lod && zero_operand(call);
+      nir_def *min_lod = lod ? float_operand(call, 1) : NULL;
+      if (!min_lod)
+         return false;
+      bool zero_min = zero_operand(call);
+      if (level) {
+         t.op = nir_texop_txl;
+         t.lod = lod;
+      } else if (fragment) {
+         t.op = zero_lod ? nir_texop_tex : nir_texop_txb;
+         t.bias = zero_lod ? NULL : lod;
+      } else {
+         /* No implicit derivatives outside fragment functions: Metal samples
+          * from the base level, biased. */
+         t.op = nir_texop_txl;
+         t.lod = lod;
+      }
+      if (!zero_min) {
+         if (t.op == nir_texop_txl)
+            t.lod = nir_fmax(call->b, t.lod, min_lod);
+         else
+            t.min_lod = min_lod;
+      }
+   }
+   if (!expect(call, 32, STELA_AIR_TEXTURE_SAMPLE, "access operand") || !finished(call))
+      return false;
+   *result = texel(call, emit(call, &t), false);
+   return true;
+}
+
+static bool
+gather(struct call *call, enum operation op, nir_def **result)
+{
+   const struct shape *shape = call->shape;
+   bool compare = op == GATHER_COMPARE;
+   if (call->texture->access != STELA_AIR_TEXTURE_SAMPLE)
+      return fail(call, "gathering from a texture without sample access");
+   if (shape->dim != GLSL_SAMPLER_DIM_2D && shape->dim != GLSL_SAMPLER_DIM_CUBE)
+      return fail(call, "gathering from a texture that is not 2D or cube");
+   if (compare && !call->texture->depth)
+      return fail(call, "comparing a texture that is not a depth texture");
+   if (!pair_type(call, true))
+      return fail(call, "texture gather has an unexpected result type");
+   struct tex t = {.op = nir_texop_tg4, .shadow = compare};
+   if (!(t.texture = texture_deref(call)) || !(t.sampler = sampler_deref(call)))
+      return false;
+   if (call->texture->depth && !expect(call, 32, 1, "depth operand"))
+      return false;
+   nir_def *coord = float_operand(call, shape->coords);
+   nir_def *layer = shape->array ? uint_operand(call) : NULL;
+   if (!coord || (shape->array && !layer))
+      return false;
+   t.coord = layered(call, coord, layer, true);
+   if (compare && !(t.comparator = float_operand(call, 1)))
+      return false;
+   if (!offset(call, &t.offset))
+      return false;
+   if (!call->texture->depth) {
+      uint64_t component;
+      if (!constant(call, 32, &component))
+         return false;
+      if (component > 3)
+         return fail(call, "gathering component %llu", (unsigned long long)component);
+      t.component = (unsigned)component;
+   }
+   if (!expect(call, 32, STELA_AIR_TEXTURE_SAMPLE, "access operand") || !finished(call))
+      return false;
+   *result = texel(call, emit(call, &t), true);
+   return true;
+}
+
+/* An image coordinate: the position, then the cube face (plus six per
+ * layer of a cube array) or the layer, padded to four components. */
+static nir_def *
+image_coord(const struct call *call, nir_def *position, nir_def *face, nir_def *layer)
+{
+   nir_builder *b = call->b;
+   nir_def *components[4];
+   unsigned n = 0;
+   for (unsigned i = 0; i < position->num_components; i++)
+      components[n++] = nir_channel(b, position, i);
+   if (face)
+      components[n++] = layer ? nir_iadd(b, face, nir_imul_imm(b, layer, 6)) : face;
+   else if (layer)
+      components[n++] = layer;
+   while (n < 4)
+      components[n++] = nir_imm_int(b, 0);
+   return nir_vec(b, components, 4);
+}
+
+/* The optional constant lod of an image access, which must be 0: a storage
+ * view holds one level. */
+static bool
+image_lod(struct call *call)
+{
+   if (!call->shape->mipmapped)
+      return true;
+   LLVMValueRef value = take(call);
+   if (!value)
+      return false;
+   if (!type_is(LLVMTypeOf(value), 1, LLVMIntegerTypeKind, 32) || !LLVMIsAConstantInt(value) ||
+       LLVMConstIntGetZExtValue(value))
+      return fail(call, "accessing a storage texture level other than a constant 0");
+   return true;
+}
+
+static bool
+read_texel(struct call *call, nir_def **result)
+{
+   const struct shape *shape = call->shape;
+   const struct stela_air_texture *texture = call->texture;
+   if (texture->access == STELA_AIR_TEXTURE_WRITE)
+      return fail(call, "reading a write-only texture");
+   if (!pair_type(call, false))
+      return fail(call, "texture read has an unexpected result type");
+   bool image = texture->access == STELA_AIR_TEXTURE_READ_WRITE;
+   if (shape->dim == GLSL_SAMPLER_DIM_CUBE && !image)
+      return fail(call, "reading a cube texture without read_write access");
+   nir_deref_instr *deref = texture_deref(call);
+   if (!deref)
+      return false;
+   if (texture->depth && !expect(call, 32, 1, "depth operand"))
+      return false;
+   nir_def *position = operand(call, shape->positions, LLVMIntegerTypeKind, 32);
+   nir_def *face = position && shape->dim == GLSL_SAMPLER_DIM_CUBE ? uint_operand(call) : NULL;
+   nir_def *layer = position && shape->array ? uint_operand(call) : NULL;
+   nir_def *sample = position && shape->dim == GLSL_SAMPLER_DIM_MS ? uint_operand(call) : NULL;
+   if (!position || (shape->dim == GLSL_SAMPLER_DIM_CUBE && !face) || (shape->array && !layer) ||
+       (shape->dim == GLSL_SAMPLER_DIM_MS && !sample))
+      return false;
+   nir_builder *b = call->b;
+   nir_def *value;
+   if (image) {
+      if (!image_lod(call) || !expect(call, 32, texture->access, "access operand") ||
+          !finished(call))
+         return false;
+      value = nir_image_deref_load(b, 4, 32, &deref->def, image_coord(call, position, face, layer),
+                                   sample ? sample : nir_undef(b, 1, 32), nir_imm_int(b, 0),
+                                   .image_dim = shape->dim, .image_array = shape->array,
+                                   .access = call->coherent ? ACCESS_COHERENT : 0,
+                                   .dest_type = nir_get_nir_type_for_glsl_base_type(base_type(texture)));
+   } else {
+      struct tex t = {.op = sample ? nir_texop_txf_ms : nir_texop_txf, .texture = deref,
+                      .coord = layered(call, position, layer, false), .ms_index = sample};
+      if (shape->mipmapped && !(t.lod = uint_operand(call)))
+         return false;
+      if (!expect(call, 32, texture->access, "access operand") || !finished(call))
+         return false;
+      value = emit(call, &t);
+   }
+   *result = texel(call, value, false);
+   return true;
+}
+
+static bool
+write_texel(struct call *call)
+{
+   const struct shape *shape = call->shape;
+   const struct stela_air_texture *texture = call->texture;
+   if (!storage(texture))
+      return fail(call, "writing a texture without write access");
+   if (texture->depth || shape->dim == GLSL_SAMPLER_DIM_MS)
+      return fail(call, "writing a depth or multisample texture");
+   if (LLVMGetTypeKind(LLVMTypeOf(call->inst)) != LLVMVoidTypeKind)
+      return fail(call, "texture write has a result");
+   nir_deref_instr *deref = texture_deref(call);
+   if (!deref)
+      return false;
+   nir_def *position = operand(call, shape->positions, LLVMIntegerTypeKind, 32);
+   nir_def *face = position && shape->dim == GLSL_SAMPLER_DIM_CUBE ? uint_operand(call) : NULL;
+   nir_def *layer = position && shape->array ? uint_operand(call) : NULL;
+   if (!position || (shape->dim == GLSL_SAMPLER_DIM_CUBE && !face) || (shape->array && !layer))
+      return false;
+   unsigned components, bits;
+   LLVMTypeKind kind;
+   texel_shape(texture, false, &components, &kind, &bits);
+   nir_def *value = operand(call, components, kind, bits);
+   if (!value || !image_lod(call) || !expect(call, 32, texture->access, "access operand") ||
+       !finished(call))
+      return false;
+   nir_builder *b = call->b;
+   switch (texture->primitive) {
+   case STELA_AIR_HALF: value = nir_f2f32(b, value); break;
+   case STELA_AIR_SHORT: value = nir_i2i32(b, value); break;
+   case STELA_AIR_USHORT: value = nir_u2u32(b, value); break;
+   default: break;
+   }
+   nir_image_deref_store(b, &deref->def, image_coord(call, position, face, layer),
+                         nir_undef(b, 1, 32), value, nir_imm_int(b, 0), .image_dim = shape->dim,
+                         .image_array = shape->array,
+                         .access = call->coherent ? ACCESS_COHERENT : 0,
+                         .src_type = nir_get_nir_type_for_glsl_base_type(base_type(texture)));
+   return true;
+}
+
+static bool
+query(struct call *call, enum operation op, nir_def **result)
+{
+   const struct shape *shape = call->shape;
+   bool image = storage(call->texture);
+   if (!type_is(LLVMTypeOf(call->inst), 1, LLVMIntegerTypeKind, 32))
+      return fail(call, "texture query has an unexpected result type");
+   /* The size components: width, height, depth or layers. */
+   unsigned dimensions = shape->dim == GLSL_SAMPLER_DIM_1D || shape->dim == GLSL_SAMPLER_DIM_BUF ? 1 :
+                         shape->dim == GLSL_SAMPLER_DIM_3D ? 3 : 2;
+   unsigned channel = op == WIDTH ? 0 : op == HEIGHT ? 1 : op == DEPTH ? 2 : dimensions;
+   if ((op == HEIGHT && dimensions < 2) || (op == DEPTH && dimensions < 3) ||
+       (op == ARRAY_SIZE && !shape->array) || (op == SAMPLES && shape->dim != GLSL_SAMPLER_DIM_MS) ||
+       (op == MIP_LEVELS && !shape->mipmapped))
+      return fail(call, "texture query does not apply to its texture type");
+   nir_deref_instr *deref = texture_deref(call);
+   if (!deref)
+      return false;
+   nir_builder *b = call->b;
+   bool sized = op == WIDTH || op == HEIGHT || op == DEPTH || op == ARRAY_SIZE;
+   nir_def *lod = NULL;
+   if ((op == WIDTH || op == HEIGHT || op == DEPTH) && shape->mipmapped) {
+      if (image) {
+         if (!image_lod(call))
+            return false;
+      } else if (!(lod = uint_operand(call))) {
+         return false;
+      }
+   }
+   if (!finished(call))
+      return false;
+   unsigned size = dimensions + shape->array;
+   if (image) {
+      if (op == MIP_LEVELS)
+         return fail(call, "querying the levels of a storage texture");
+      nir_def *value = op == SAMPLES ?
+         nir_image_deref_samples(b, 32, &deref->def, .image_dim = shape->dim,
+                                 .image_array = shape->array) :
+         nir_image_deref_size(b, size, 32, &deref->def, nir_imm_int(b, 0),
+                              .image_dim = shape->dim, .image_array = shape->array);
+      *result = sized ? nir_channel(b, value, channel) : value;
+      return true;
+   }
+   struct tex t = {.texture = deref};
+   if (sized) {
+      t.op = nir_texop_txs;
+      if (shape->dim != GLSL_SAMPLER_DIM_BUF && shape->dim != GLSL_SAMPLER_DIM_MS)
+         t.lod = lod ? lod : nir_imm_int(b, 0);
+      *result = nir_channel(b, emit(call, &t), channel);
+   } else {
+      t.op = op == SAMPLES ? nir_texop_texture_samples : nir_texop_query_levels;
+      *result = emit(call, &t);
+   }
+   return true;
+}
+
+static bool
+lod(struct call *call, enum operation op, nir_def **result)
+{
+   const struct shape *shape = call->shape;
+   if (call->b->shader->info.stage != MESA_SHADER_FRAGMENT)
+      return fail(call, "calculating a level of detail outside a fragment function");
+   if (call->texture->access != STELA_AIR_TEXTURE_SAMPLE ||
+       shape->dim == GLSL_SAMPLER_DIM_MS || shape->dim == GLSL_SAMPLER_DIM_BUF)
+      return fail(call, "calculating a level of detail of a texture that is not sampled");
+   if (!type_is(LLVMTypeOf(call->inst), 1, LLVMFloatTypeKind, 32))
+      return fail(call, "level of detail has an unexpected result type");
+   struct tex t = {.op = nir_texop_lod};
+   if (!(t.texture = texture_deref(call)) || !(t.sampler = sampler_deref(call)) ||
+       !(t.coord = float_operand(call, shape->coords)) ||
+       !expect(call, 32, STELA_AIR_TEXTURE_SAMPLE, "access operand") || !finished(call))
+      return false;
+   /* x is the clamped level of detail, y the unclamped one. */
+   *result = nir_channel(call->b, emit(call, &t), op == CLAMPED_LOD ? 0 : 1);
+   return true;
+}
+
+static bool
+fence(struct call *call)
+{
+   if (!storage(call->texture))
+      return fail(call, "fencing a texture without write access");
+   if (LLVMGetTypeKind(LLVMTypeOf(call->inst)) != LLVMVoidTypeKind || !finished(call))
+      return fail(call, "texture fence has an unexpected signature");
+   /* Makes the thread's earlier writes visible to its later reads. */
+   nir_barrier(call->b, .memory_scope = SCOPE_WORKGROUP, .memory_semantics = NIR_MEMORY_ACQ_REL,
+               .memory_modes = nir_var_image);
+   return true;
+}
+
+enum stela_air_texture_status
+stela_air_texture_call(const struct stela_air_texture_context *context, LLVMValueRef inst,
+                       const char *name, size_t name_bytes, nir_def **result, bool *pair)
+{
+   *result = NULL;
+   *pair = false;
+   if (!LLVMGetNumArgOperands(inst))
+      return STELA_AIR_TEXTURE_OTHER;
+   const struct stela_air_texture *texture =
+      context->texture(context->translator, LLVMGetOperand(inst, 0));
+   if (!texture)
+      return STELA_AIR_TEXTURE_OTHER;
+   struct call call = {
+      .c = context, .b = context->b, .inst = inst, .texture = texture,
+      .shape = &shapes[texture->type], .next = 1, .count = LLVMGetNumArgOperands(inst),
+   };
+   LLVMValueRef callee = LLVMGetCalledValue(inst);
+   if (!LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee) ||
+       LLVMGetCalledFunctionType(inst) != LLVMGlobalGetValueType(callee) ||
+       LLVMGetNumOperandBundles(inst)) {
+      fail(&call, "texture call is not a direct call of an AIR declaration");
+      return STELA_AIR_TEXTURE_FAILED;
+   }
+   int op = -1;
+   for (unsigned o = 0; o < ARRAY_SIZE(operations) && op < 0; o++) {
+      bool coherent_forms = o == READ || o == WRITE;
+      for (unsigned coherent = 0; coherent <= coherent_forms && op < 0; coherent++) {
+         if (named(&call, (enum operation)o, coherent, name, name_bytes)) {
+            op = (int)o;
+            call.coherent = coherent;
+         }
+      }
+   }
+   if (op < 0) {
+      fail(&call, "unsupported texture function %.*s", (int)name_bytes, name);
+      return STELA_AIR_TEXTURE_FAILED;
+   }
+   bool lowered;
+   switch ((enum operation)op) {
+   case SAMPLE:
+   case SAMPLE_COMPARE:
+   case SAMPLE_GRAD:
+      lowered = sample(&call, (enum operation)op, result);
+      *pair = true;
+      break;
+   case READ:
+      lowered = read_texel(&call, result);
+      *pair = true;
+      break;
+   case GATHER:
+   case GATHER_COMPARE:
+      lowered = gather(&call, (enum operation)op, result);
+      *pair = true;
+      break;
+   case WRITE:
+      lowered = write_texel(&call);
+      break;
+   case CLAMPED_LOD:
+   case UNCLAMPED_LOD:
+      lowered = lod(&call, (enum operation)op, result);
+      break;
+   case FENCE:
+      lowered = fence(&call);
+      break;
+   default:
+      lowered = query(&call, (enum operation)op, result);
+      break;
+   }
+   return lowered ? STELA_AIR_TEXTURE_LOWERED : STELA_AIR_TEXTURE_FAILED;
+}

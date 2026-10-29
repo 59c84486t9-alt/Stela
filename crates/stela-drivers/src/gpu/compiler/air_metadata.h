@@ -65,11 +65,44 @@ enum stela_air_primitive {
    STELA_AIR_PRIMITIVE_UNKNOWN,
    STELA_AIR_CHAR, STELA_AIR_UCHAR, STELA_AIR_SHORT, STELA_AIR_USHORT,
    STELA_AIR_INT, STELA_AIR_UINT, STELA_AIR_LONG, STELA_AIR_ULONG, STELA_AIR_FLOAT,
+   STELA_AIR_HALF, /* Texture components only. */
 };
+
+/* MTLTextureType, as the texture's reflected type name spells it. */
+enum stela_air_texture_type {
+   STELA_AIR_TEXTURE_1D = 1, STELA_AIR_TEXTURE_1D_ARRAY,
+   STELA_AIR_TEXTURE_2D, STELA_AIR_TEXTURE_2D_ARRAY,
+   STELA_AIR_TEXTURE_2D_MS, STELA_AIR_TEXTURE_2D_MS_ARRAY,
+   STELA_AIR_TEXTURE_3D, STELA_AIR_TEXTURE_CUBE, STELA_AIR_TEXTURE_CUBE_ARRAY,
+   STELA_AIR_TEXTURE_BUFFER,
+};
+/* access::sample/read/write/read_write; the values are AIR's access operand. */
+enum stela_air_texture_access {
+   STELA_AIR_TEXTURE_SAMPLE, STELA_AIR_TEXTURE_READ, STELA_AIR_TEXTURE_WRITE,
+   STELA_AIR_TEXTURE_READ_WRITE,
+};
+/* A [[texture(index)]] argument. depth marks the depth* types, whose texels
+ * are one float. primitive is the component type: FLOAT, HALF, INT, UINT,
+ * SHORT or USHORT. */
+struct stela_air_texture {
+   unsigned argument, index;
+   enum stela_air_texture_type type;
+   enum stela_air_texture_access access;
+   enum stela_air_primitive primitive;
+   bool depth;
+};
+/* A [[sampler(index)]] argument. */
+struct stela_air_sampler {
+   unsigned argument, index;
+};
+#define AIR_MAX_TEXTURES 128u
+#define AIR_MAX_SAMPLERS 16u
 
 struct stela_air_argument_info {
    struct stela_air_buffer buffer;
-   unsigned kind; /* 1=buffer, 2=thread_position_in_grid. */
+   unsigned kind; /* 1=buffer, 2=thread_position_in_grid, 3=texture, 4=sampler. */
+   struct stela_air_texture texture; /* kind 3 */
+   struct stela_air_sampler sampler; /* kind 4 */
    unsigned components;
    bool plain_buffer_type;
    const char *name, *type_name;
@@ -97,7 +130,8 @@ bool stela_air_inspect(const void *bitcode, size_t size, unsigned max_entries,
 enum stela_air_stage { STELA_AIR_VERTEX = 1, STELA_AIR_FRAGMENT = 2 };
 enum stela_air_stage_semantic {
    STELA_AIR_STAGE_BUFFER = 1, STELA_AIR_VERTEX_ID, STELA_AIR_POSITION,
-   STELA_AIR_VARYING, STELA_AIR_RENDER_TARGET,
+   STELA_AIR_VARYING, STELA_AIR_RENDER_TARGET, STELA_AIR_STAGE_TEXTURE,
+   STELA_AIR_STAGE_SAMPLER,
 };
 enum stela_air_interpolation {
    STELA_AIR_INTERPOLATION_NONE, STELA_AIR_PERSPECTIVE,
@@ -114,6 +148,8 @@ struct stela_air_stage_io {
    enum stela_air_stage_semantic semantic;
    unsigned argument; /* LLVM argument or ordered return leaf, as applicable. */
    struct stela_air_buffer buffer; /* Only STAGE_BUFFER; AS2 remains readonly. */
+   struct stela_air_texture texture; /* Only STAGE_TEXTURE. */
+   struct stela_air_sampler sampler; /* Only STAGE_SAMPLER. */
    enum stela_air_primitive primitive;
    unsigned components;
    enum stela_air_interpolation interpolation;
@@ -197,7 +233,9 @@ bool stela_air_metadata_shared_globals(struct stela_air_metadata *m);
 struct stela_air_argument {
    LLVMValueRef value; /* Borrowed, decoder/compiler internal only. */
    struct stela_air_buffer buffer;
-   bool is_buffer;
+   struct stela_air_texture texture;
+   struct stela_air_sampler sampler;
+   bool is_buffer, is_texture, is_sampler;
    unsigned components; /* Scalar/uint3 thread-position input. */
    bool plain_buffer_type; /* Reflected MSL builtin scalar/vector, not a struct. */
    const char *name, *type_name;

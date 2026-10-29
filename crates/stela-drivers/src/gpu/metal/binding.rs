@@ -477,6 +477,9 @@ mod tests {
                 PushConstants::VIEW_MAPPING_OFFSET,
             ),
             ("STELA_METAL_BUFFERS", MAX_BUFFER_BINDINGS),
+            ("STELA_METAL_TEXTURES", MAX_TEXTURE_BINDINGS),
+            ("STELA_METAL_SAMPLERS", MAX_SAMPLER_BINDINGS),
+            ("STELA_METAL_HEAP_SET", HEAP_SET),
             (
                 "STELA_METAL_TABLE_BUFFER_ADDRESSES",
                 ArgumentTable::BUFFER_ADDRESSES_OFFSET,
@@ -518,6 +521,54 @@ mod tests {
         ];
         for (name, value) in expected {
             assert_eq!(define(name), value, "{name}");
+        }
+        // C enums count from zero in declaration order.
+        let enumerators = |name: &str| -> Vec<&str> {
+            let body = header
+                .split(&alloc::format!("enum {name} {{"))
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap_or_else(|| panic!("metal_abi.h does not declare {name}"));
+            body.lines()
+                .filter_map(|line| line.trim().split(',').next())
+                .filter(|enumerator| enumerator.starts_with("STELA_"))
+                .collect()
+        };
+        let heap = [
+            ("STELA_METAL_HEAP_SAMPLED_IMAGES", HeapArray::SampledImages),
+            ("STELA_METAL_HEAP_STORAGE_IMAGES", HeapArray::StorageImages),
+            ("STELA_METAL_HEAP_SAMPLERS", HeapArray::Samplers),
+            (
+                "STELA_METAL_HEAP_UNIFORM_TEXEL_BUFFERS",
+                HeapArray::UniformTexelBuffers,
+            ),
+            (
+                "STELA_METAL_HEAP_STORAGE_TEXEL_BUFFERS",
+                HeapArray::StorageTexelBuffers,
+            ),
+        ];
+        let declared = enumerators("stela_metal_heap_array");
+        assert_eq!(declared.len(), heap.len());
+        for (name, array) in heap {
+            assert_eq!(
+                declared.iter().position(|&declared| declared == name),
+                Some(array.raw() as usize),
+                "{name}"
+            );
+        }
+        let tables = [
+            ("STELA_METAL_TABLE_PRIMARY", TableSlot::Primary),
+            ("STELA_METAL_TABLE_FRAGMENT", TableSlot::Fragment),
+            ("STELA_METAL_TABLE_MESH", TableSlot::Mesh),
+        ];
+        let declared = enumerators("stela_metal_table");
+        assert_eq!(declared.len(), tables.len());
+        for (name, slot) in tables {
+            assert_eq!(
+                declared.iter().position(|&declared| declared == name),
+                Some(slot.raw() as usize),
+                "{name}"
+            );
         }
         assert_eq!(
             AccumulateArguments::WORKGROUP_SIZE,

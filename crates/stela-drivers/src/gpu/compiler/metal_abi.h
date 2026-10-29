@@ -20,6 +20,8 @@
 #define STELA_METAL_PUSH_VIEW_MAPPING 48u
 
 #define STELA_METAL_BUFFERS 31u
+#define STELA_METAL_TEXTURES 128u
+#define STELA_METAL_SAMPLERS 16u
 #define STELA_METAL_TABLE_BUFFER_ADDRESSES 0u
 #define STELA_METAL_TABLE_BUFFER_LENGTHS 248u
 #define STELA_METAL_TABLE_TEXTURES 496u
@@ -38,6 +40,21 @@
 #define STELA_METAL_SELECT_COUNT 16u
 #define STELA_METAL_KERNEL_WORKGROUP 64u
 
+/* Descriptor set 0 is the device's bindless heap: one array per
+ * binding.rs HeapArray, indexed by the halves of a texture's or sampler's
+ * MTLResourceID. A texture's low half names its sampled image or uniform
+ * texel buffer, its high half its storage image or storage texel buffer; a
+ * sampler's low half names its float-border sampler, its high half its
+ * integer-border twin. */
+#define STELA_METAL_HEAP_SET 0u
+enum stela_metal_heap_array {
+   STELA_METAL_HEAP_SAMPLED_IMAGES,
+   STELA_METAL_HEAP_STORAGE_IMAGES,
+   STELA_METAL_HEAP_SAMPLERS,
+   STELA_METAL_HEAP_UNIFORM_TEXEL_BUFFERS,
+   STELA_METAL_HEAP_STORAGE_TEXEL_BUFFERS,
+};
+
 /* binding.rs TableSlot: the push-constant table a stage reads. */
 enum stela_metal_table {
    STELA_METAL_TABLE_PRIMARY, /* Vertex, kernel and object functions. */
@@ -45,7 +62,7 @@ enum stela_metal_table {
    STELA_METAL_TABLE_MESH,
 };
 
-/* The binding_data of stela_metal_bind_buffer. */
+/* The binding_data of the stela_metal_bind_* callbacks. */
 struct stela_metal_stage {
    enum stela_metal_table table;
 };
@@ -57,6 +74,17 @@ nir_def *stela_metal_load_table(nir_builder *b, enum stela_metal_table table);
  * buffer at Metal index buffer->index. Refuses indices past the table. */
 nir_def *stela_metal_bind_buffer(nir_builder *b, const struct stela_air_buffer *buffer,
                                  void *stage);
+
+/* stela_air_bind_texture over the argument table and the heap: the heap
+ * element the texture's MTLResourceID names. Refuses indices past the
+ * table. */
+nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air_texture *texture,
+                                          const struct glsl_type *type, void *stage);
+
+/* stela_air_bind_sampler likewise, of the sampler's float- or integer-border
+ * descriptor. */
+nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air_sampler *sampler,
+                                          bool integer, void *stage);
 
 /* The device's internal kernels, entry point "main", in workgroups of
  * STELA_METAL_KERNEL_WORKGROUP threads. Options may be NULL: the Vulkan

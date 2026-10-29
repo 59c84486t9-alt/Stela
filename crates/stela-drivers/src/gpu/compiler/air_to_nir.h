@@ -30,6 +30,22 @@ typedef nir_def *(*stela_air_bind_buffer)(nir_builder *b,
 typedef bool (*stela_air_bind_ssbo)(const struct stela_air_buffer *buffer,
                                    unsigned *slot, void *data);
 
+/* Resolve a texture argument to the deref of a descriptor of type, which its
+ * accesses need: an image type (nir_var_image) for write and read_write
+ * access, otherwise a texture type (nir_var_uniform). Called at each use,
+ * where it must emit straight-line NIR at the cursor. Returning NULL refuses
+ * compilation. */
+typedef nir_deref_instr *(*stela_air_bind_texture)(nir_builder *b,
+                                                   const struct stela_air_texture *texture,
+                                                   const struct glsl_type *type, void *data);
+
+/* Resolve a sampler argument for a use with a texture whose texels are
+ * integers (integer is the border color class), as bind_texture does, to a
+ * deref of glsl_bare_sampler_type(). */
+typedef nir_deref_instr *(*stela_air_bind_sampler)(nir_builder *b,
+                                                   const struct stela_air_sampler *sampler,
+                                                   bool integer, void *data);
+
 struct stela_air_threadgroup_view {
    uint64_t size; /* Exact nonempty per-dispatch byte extent, not type_size. */
    unsigned alignment;
@@ -94,6 +110,9 @@ struct stela_air_options {
     * resources/barriers; NAK callers must additionally stay within UINT16_MAX
     * before its original smem_size conversion. No target limit is inferred. */
    unsigned max_threadgroup_bytes;
+   /* Texture and sampler arguments; zero refuses them. */
+   stela_air_bind_texture bind_texture;
+   stela_air_bind_sampler bind_sampler;
 };
 
 /* Additive VS/FS frontend. No runtime/Metal pipeline is constructed. resources

@@ -171,7 +171,7 @@ if stela_air_llvm != ''
   )
   stela_air = static_library(
     'stela_air_to_nir',
-    ['air_to_nir.c', 'air_metadata.c'],
+    ['air_to_nir.c', 'air_metadata.c', 'air_texture.c'],
     include_directories : [inc_include, inc_src, inc_gpu],
     dependencies : [idep_nir, idep_mesautil, stela_air_llvm_dep],
   )
@@ -258,6 +258,15 @@ if stela_air_llvm != ''
     build_rpath : fs.parent(stela_air_llvm),
   )
   test('stela_air_stage', stela_air_stage_test, suite : 'stela')
+  stela_air_texture_test = executable(
+    'stela_air_texture_test',
+    'tests/air_texture.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : [idep_stela_air],
+    link_with : stela_metal_abi,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_texture', stela_air_texture_test, suite : 'stela')
   if with_nvidia
     stela_nvidia_air_render_test = executable(
       'stela_nvidia_air_render_test',
