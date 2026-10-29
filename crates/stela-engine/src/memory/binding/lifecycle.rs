@@ -1,6 +1,6 @@
 //! Transactions that pause a domain for a service.
 use super::*;
-use crate::memory::{MemoryRegion, ProtectionError, host_protection};
+use crate::memory::{MemoryRegion, ProtectionError, host_protection, protection::ProtectionChange};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -43,18 +43,20 @@ impl OwnedMemory {
         Ok(views)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(in crate::memory) fn protect_shared(
         &mut self,
-        address: u64,
-        bytes: u64,
-        readable: bool,
-        writable: bool,
+        change: ProtectionChange,
         next: Vec<MemoryRegion>,
         rollback: Vec<(u64, u64, i32)>,
         service: Option<&super::super::domain::MemoryServiceLoan>,
         mut protect: impl FnMut(u64, u64, i32) -> Result<(), Option<i32>>,
     ) -> Result<(), ProtectionError> {
+        let ProtectionChange {
+            address,
+            bytes,
+            readable,
+            writable,
+        } = change;
         use ProtectionError as E;
         let shared = self.shared.as_ref().expect("bound lifecycle");
         shared.check().map_err(|_| E::AddressSpaceUnusable)?;
@@ -284,10 +286,12 @@ mod tests {
             let mut host_calls = 0;
             assert_eq!(
                 memory.protect_data_with_service(
-                    address,
-                    page,
-                    false,
-                    false,
+                    ProtectionChange {
+                        address,
+                        bytes: page,
+                        readable: false,
+                        writable: false
+                    },
                     Some(&wrong),
                     |_, _, _| {
                         host_calls += 1;
@@ -317,14 +321,23 @@ mod tests {
             let loan = domain.service_loan().unwrap();
             let mut calls = 0;
             assert_eq!(
-                owner.protect_data_with_service(base, page, true, false, Some(&loan), |_, _, _| {
-                    calls += 1;
-                    if calls == 1 || !restore {
-                        Err(Some(libc::EACCES))
-                    } else {
-                        Ok(())
+                owner.protect_data_with_service(
+                    ProtectionChange {
+                        address: base,
+                        bytes: page,
+                        readable: true,
+                        writable: false
+                    },
+                    Some(&loan),
+                    |_, _, _| {
+                        calls += 1;
+                        if calls == 1 || !restore {
+                            Err(Some(libc::EACCES))
+                        } else {
+                            Ok(())
+                        }
                     }
-                }),
+                ),
                 Err(ProtectionError::HostFailure {
                     errno: Some(libc::EACCES),
                     rollback_succeeded: restore,

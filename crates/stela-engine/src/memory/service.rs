@@ -1,5 +1,7 @@
 //! A guest service's access to the memory owner, thread and domain.
 
+#[cfg(host_memory)]
+use super::protection::ProtectionChange;
 use super::{
     AllocateDataError, AllocateDataRequest, DataAllocation, MemoryRegion, OwnedMemory,
     PendingDataAllocation, ProtectionError, SharedBindingError,
@@ -110,10 +112,12 @@ impl<P: DataPolicy> GuestServiceMemory<'_, P> {
         self.check()
             .map_err(|_| ProtectionError::AddressSpaceUnusable)?;
         self.owner.protect_data_with_service(
-            address,
-            bytes,
-            readable,
-            writable,
+            ProtectionChange {
+                address,
+                bytes,
+                readable,
+                writable,
+            },
             Some(&self.service),
             |base, length, protection| {
                 // SAFETY: the transaction validated every page, and the service
