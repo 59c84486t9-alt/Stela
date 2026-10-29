@@ -45,6 +45,47 @@
 #define STELA_METAL_SELECT_COUNT 16u
 #define STELA_METAL_KERNEL_WORKGROUP 64u
 
+/* indirect/record.rs RecordLayout: a GPU-resident indirect command buffer
+ * at its gpuResourceID. A header of uint words leads: the record stride and
+ * count, the record offsets of the two buffer tables (vertex and fragment,
+ * or kernel), their slot counts, and the record offset and count of the
+ * words (vertex strides, zero for the pipeline's, or threadgroup memory
+ * lengths). Records follow the header. Each opens with its uint action,
+ * uint barrier flag and 64-bit pipeline handle; render records then hold
+ * their vertex or index count, instance count, first vertex, base vertex,
+ * base instance and MTLPrimitiveType, then the index buffer's 64-bit address,
+ * uint byte length and MTLIndexType; compute records the uint grid and
+ * threadgroup size, and the stage-in region's origin, size and set flag. A
+ * table holds its slots' 64-bit addresses, then their 64-bit lengths. */
+#define STELA_METAL_INDIRECT_HEADER_BYTES 64u
+#define STELA_METAL_INDIRECT_STRIDE 0u
+#define STELA_METAL_INDIRECT_COUNT 4u
+#define STELA_METAL_INDIRECT_TABLES 8u
+#define STELA_METAL_INDIRECT_TABLE_SLOTS 16u
+#define STELA_METAL_INDIRECT_WORDS 24u
+#define STELA_METAL_INDIRECT_WORD_COUNT 28u
+#define STELA_METAL_RECORD_ACTION 0u
+#define STELA_METAL_RECORD_BARRIER 4u
+#define STELA_METAL_RECORD_PIPELINE 8u
+#define STELA_METAL_RECORD_VERTICES 16u
+#define STELA_METAL_RECORD_INSTANCES 20u
+#define STELA_METAL_RECORD_FIRST_VERTEX 24u
+#define STELA_METAL_RECORD_BASE_VERTEX 28u
+#define STELA_METAL_RECORD_BASE_INSTANCE 32u
+#define STELA_METAL_RECORD_PRIMITIVE 36u
+#define STELA_METAL_RECORD_INDEX_ADDRESS 40u
+#define STELA_METAL_RECORD_INDEX_LENGTH 48u
+#define STELA_METAL_RECORD_INDEX_TYPE 52u
+#define STELA_METAL_RECORD_GRID 16u
+#define STELA_METAL_RECORD_THREADS 28u
+#define STELA_METAL_RECORD_STAGE_IN_ORIGIN 40u
+#define STELA_METAL_RECORD_STAGE_IN_SIZE 52u
+#define STELA_METAL_RECORD_STAGE_IN 64u
+#define STELA_METAL_RECORD_DRAW 1u
+#define STELA_METAL_RECORD_DRAW_INDEXED 2u
+#define STELA_METAL_RECORD_DISPATCH 1u
+#define STELA_METAL_RECORD_DISPATCH_THREADS 2u
+
 /* TessellationArguments, which a patch draw's stages read at the push
  * constants' arguments address. Bindings are (address, length); the draw's
  * control points per patch follow the factor scale, then a uint stride per

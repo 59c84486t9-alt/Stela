@@ -19,7 +19,10 @@ use crate::gpu::metal::{
     capabilities::Size,
     error::Error,
     hazard::FULL,
-    indirect::{IndirectCommandBuffer, IndirectCommandBufferDescriptor, IndirectCommandBufferId},
+    indirect::{
+        IndirectCommandBuffer, IndirectCommandBufferDescriptor, IndirectCommandBufferId,
+        RecordLayout,
+    },
     nvidia::fixture::capabilities,
     pass::{AttachedTexture, AttachmentDescriptor, RenderPassDescriptor, Target, render_pass},
     pipeline::{
@@ -122,6 +125,30 @@ impl Resolver for MockResolver {
     ) -> Result<Arc<IndirectCommandBuffer>> {
         let known = self.indirect.get(id.0 as usize);
         known.cloned().ok_or(Error::Invalid("unknown object"))
+    }
+
+    /// Places records in buffer `2000 + id` at address `id << 44`.
+    fn indirect_records(
+        &mut self,
+        id: IndirectCommandBufferId,
+    ) -> Result<(RecordLayout, BufferRef)> {
+        let known = self.indirect.get_mut(id.0 as usize);
+        let contents = Arc::make_mut(known.ok_or(Error::Invalid("unknown object"))?);
+        let layout = match contents.records() {
+            Some(layout) => *layout,
+            None => {
+                let (layout, _) = contents.resident_image()?;
+                contents.make_resident(layout);
+                layout
+            }
+        };
+        let records = BufferRef {
+            buffer: Buffer(2000 + u64::from(id.0)),
+            offset: 0,
+            address: u64::from(id.0) << 44,
+            length: layout.bytes(),
+        };
+        Ok((layout, records))
     }
 
     fn update_indirect_commands(
@@ -1732,7 +1759,7 @@ fn vertex_buffers(commands: &[Command]) -> Vec<Buffer> {
 #[test]
 fn indirect_draws_replay_and_restore_the_encoder() {
     let mut icb = render_icb(3);
-    icb.render_command(1).unwrap().reset();
+    icb.render_command(1).unwrap().reset().unwrap();
     let mut indexed = icb.render_command(2).unwrap();
     indexed
         .draw_indexed_primitives(
@@ -1941,7 +1968,7 @@ fn indirect_dispatches_compile_their_variants() {
     let mut second = icb.compute_command(1).unwrap();
     second.set_compute_pipeline_state(&state).unwrap();
     second.set_kernel_buffer(buffer(4, 64), 0, 0).unwrap();
-    second.set_barrier();
+    second.set_barrier().unwrap();
     second
         .concurrent_dispatch_threads([100, 1, 1], threads(32))
         .unwrap();
@@ -2024,4 +2051,69 @@ fn blits_reset_and_copy_indirect_commands() {
     assert!(copied[1].action.is_some() && copied[2].action.is_some());
     let reset = resolver.indirect[0].commands(0..2).unwrap();
     assert!(reset[0].action.is_some() && reset[1].action.is_none());
+}
+
+#[test]
+fn blits_copy_records_of_resident_buffers_in_order() {
+    let descriptor = IndirectCommandBufferDescriptor {
+        inherit_pipeline_state: true,
+        inherit_cull_mode: true,
+        ..icb_descriptor(IndirectCommandType::DRAW)
+    };
+    let new = || IndirectCommandBuffer::new(&capabilities(), &descriptor, 3).unwrap();
+    let mut source = new();
+    source
+        .render_command(0)
+        .unwrap()
+        .draw_primitives(PrimitiveType::Point, 0, 3, 1, 0)
+        .unwrap();
+    let narrow = IndirectCommandBufferDescriptor {
+        max_vertex_buffer_bind_count: 1,
+        ..descriptor
+    };
+    let narrow = IndirectCommandBuffer::new(&capabilities(), &narrow, 3).unwrap();
+    let mut resolver = MockResolver {
+        indirect: [source, new(), new(), narrow].map(Arc::new).to_vec(),
+        ..MockResolver::default()
+    };
+    let id = IndirectCommandBufferId;
+    let (layout, records) = resolver.indirect_records(id(1)).unwrap();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands.begin_blit().unwrap();
+    // Into a resident buffer, the CPU's commands land as records.
+    commands
+        .copy_indirect_commands(&mut resolver, id(0), 0..2, id(1), 1)
+        .unwrap();
+    assert!(resolver.indirect[0].records().is_none());
+    // From one, the destination becomes resident.
+    commands
+        .copy_indirect_commands(&mut resolver, id(1), 0..3, id(2), 0)
+        .unwrap();
+    assert!(resolver.indirect[2].records().is_some());
+    assert!(
+        commands
+            .copy_indirect_commands(&mut resolver, id(1), 0..1, id(3), 0)
+            .is_err(),
+        "the layouts differ"
+    );
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let copies: Vec<_> = recording.segments[0]
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::CopyBuffer { src, dst, regions } => Some((*src, *dst, regions[0])),
+            _ => None,
+        })
+        .collect();
+    let stride = u64::from(layout.stride);
+    assert_eq!(copies.len(), 2);
+    assert_eq!(
+        (copies[0].1, copies[0].2.dst_offset, copies[0].2.size),
+        (records.buffer, layout.record(1), 2 * stride)
+    );
+    assert_eq!(
+        (copies[1].0, copies[1].2.src_offset, copies[1].2.size),
+        (records.buffer, layout.record(0), 3 * stride)
+    );
 }

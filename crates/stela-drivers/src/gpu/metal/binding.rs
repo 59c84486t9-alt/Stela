@@ -524,6 +524,7 @@ mod tests {
     use super::*;
     use crate::gpu::metal::{
         abi::{TessellationFactorStepFunction, TessellationPartitionMode, Winding},
+        indirect::RecordLayout,
         nvidia::{CHIPS, fixture::nvk},
         vertex::{StageInStep, StepFunction},
     };
@@ -591,6 +592,67 @@ mod tests {
             (
                 "STELA_METAL_ACCUMULATE_RUN_BYTES",
                 AccumulateArguments::RUN_BYTES,
+            ),
+            (
+                "STELA_METAL_INDIRECT_HEADER_BYTES",
+                RecordLayout::HEADER_BYTES,
+            ),
+            ("STELA_METAL_INDIRECT_STRIDE", RecordLayout::HEADER_STRIDE),
+            ("STELA_METAL_INDIRECT_COUNT", RecordLayout::HEADER_COUNT),
+            ("STELA_METAL_INDIRECT_TABLES", RecordLayout::HEADER_TABLES),
+            (
+                "STELA_METAL_INDIRECT_TABLE_SLOTS",
+                RecordLayout::HEADER_TABLE_SLOTS,
+            ),
+            ("STELA_METAL_INDIRECT_WORDS", RecordLayout::HEADER_WORDS),
+            (
+                "STELA_METAL_INDIRECT_WORD_COUNT",
+                RecordLayout::HEADER_WORD_COUNT,
+            ),
+            ("STELA_METAL_RECORD_ACTION", RecordLayout::ACTION),
+            ("STELA_METAL_RECORD_BARRIER", RecordLayout::BARRIER),
+            ("STELA_METAL_RECORD_PIPELINE", RecordLayout::PIPELINE),
+            ("STELA_METAL_RECORD_VERTICES", RecordLayout::VERTICES),
+            ("STELA_METAL_RECORD_INSTANCES", RecordLayout::INSTANCES),
+            (
+                "STELA_METAL_RECORD_FIRST_VERTEX",
+                RecordLayout::FIRST_VERTEX,
+            ),
+            ("STELA_METAL_RECORD_BASE_VERTEX", RecordLayout::BASE_VERTEX),
+            (
+                "STELA_METAL_RECORD_BASE_INSTANCE",
+                RecordLayout::BASE_INSTANCE,
+            ),
+            ("STELA_METAL_RECORD_PRIMITIVE", RecordLayout::PRIMITIVE),
+            (
+                "STELA_METAL_RECORD_INDEX_ADDRESS",
+                RecordLayout::INDEX_ADDRESS,
+            ),
+            (
+                "STELA_METAL_RECORD_INDEX_LENGTH",
+                RecordLayout::INDEX_LENGTH,
+            ),
+            ("STELA_METAL_RECORD_INDEX_TYPE", RecordLayout::INDEX_TYPE),
+            ("STELA_METAL_RECORD_GRID", RecordLayout::GRID),
+            ("STELA_METAL_RECORD_THREADS", RecordLayout::THREADS),
+            (
+                "STELA_METAL_RECORD_STAGE_IN_ORIGIN",
+                RecordLayout::STAGE_IN_ORIGIN,
+            ),
+            (
+                "STELA_METAL_RECORD_STAGE_IN_SIZE",
+                RecordLayout::STAGE_IN_SIZE,
+            ),
+            ("STELA_METAL_RECORD_STAGE_IN", RecordLayout::STAGE_IN),
+            ("STELA_METAL_RECORD_DRAW", RecordLayout::DRAW),
+            (
+                "STELA_METAL_RECORD_DRAW_INDEXED",
+                RecordLayout::DRAW_INDEXED,
+            ),
+            ("STELA_METAL_RECORD_DISPATCH", RecordLayout::DISPATCH),
+            (
+                "STELA_METAL_RECORD_DISPATCH_THREADS",
+                RecordLayout::DISPATCH_THREADS,
             ),
             ("STELA_METAL_SELECT_RANGE", SelectArguments::RANGE_OFFSET),
             ("STELA_METAL_SELECT_FLAGS", SelectArguments::FLAGS_OFFSET),

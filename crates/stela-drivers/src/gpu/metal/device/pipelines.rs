@@ -5,10 +5,7 @@
 //! [`FunctionHandle`]s, which the compiler's dispatch reads.
 use super::{BufferId, ComputePipelineId, Device, FunctionId, RenderPipelineId, Slab};
 use crate::gpu::metal::{
-    abi::{
-        CpuCacheMode, FunctionType, HazardTrackingMode, PrimitiveTopologyClass, ResourceOptions,
-        StorageMode,
-    },
+    abi::{FunctionType, PrimitiveTopologyClass},
     command_buffer::{ComputePipelineState, RenderPipelineState},
     error::{Error, Result, ensure, require},
     pipeline::{
@@ -727,18 +724,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .filter(|&bytes| bytes != 0)
             .ok_or(INVALID)?;
         let zeros = alloc::vec![0; usize::try_from(bytes).map_err(|_| INVALID)?];
-        let options = ResourceOptions {
-            cpu_cache_mode: CpuCacheMode::DefaultCache,
-            storage_mode: StorageMode::Shared,
-            hazard_tracking_mode: HazardTrackingMode::Default,
-        };
-        let table = self.new_buffer(bytes, options)?;
-        let (memory, offset, _) = self.buffer_memory(table)?;
-        if let Err(error) = self.backend.write_memory(memory, offset, &zeros) {
-            self.destroy_buffer(table)?;
-            return Err(error);
-        }
-        Ok(table)
+        self.new_shared_buffer(&zeros)
     }
 
     /// `setFunction:atIndex:` and `setFunctions:withRange:`: writes

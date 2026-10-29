@@ -28,7 +28,7 @@ use crate::gpu::metal::{
         render::PassBoundary,
     },
     error::{Error, Result, ensure, require},
-    indirect::{IndirectCommandBuffer, IndirectCommandBufferId},
+    indirect::{IndirectCommandBuffer, IndirectCommandBufferId, RecordLayout},
     pass::{
         self, AttachedTexture, AttachmentDescriptor, AttachmentView, RenderPassDescriptor,
         RenderPassPlan, RenderingAttachment, Target,
@@ -335,6 +335,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     pub fn commit(&mut self, commands: CommandBuffer) -> Result<u64> {
         let serial = self.submitted + 1;
         let completion = (self.timeline, serial);
+        self.flush_indirect_writes()?;
         let recording = commands.commit(&mut self.resolver(), completion)?;
         for (_, mapping) in &recording.mappings {
             match mapping {
@@ -868,6 +869,13 @@ impl<B: Backend, C: Compiler> Resolver for DeviceResolver<'_, B, C> {
         id: IndirectCommandBufferId,
     ) -> Result<Arc<IndirectCommandBuffer>> {
         self.device.indirect_snapshot(id)
+    }
+
+    fn indirect_records(
+        &mut self,
+        id: IndirectCommandBufferId,
+    ) -> Result<(RecordLayout, BufferRef)> {
+        self.device.indirect_records(id)
     }
 
     fn update_indirect_commands(

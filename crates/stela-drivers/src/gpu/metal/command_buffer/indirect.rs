@@ -24,7 +24,7 @@ use crate::gpu::metal::{
     hazard::{RENDER_PASS, Use},
     indirect::{
         IndirectAction, IndirectBuffer, IndirectCommand, IndirectCommandBufferDescriptor,
-        IndirectCommandBufferId,
+        IndirectCommandBufferId, RecordLayout,
     },
     shader::Stage,
     upload::Upload,
@@ -87,6 +87,11 @@ impl CommandBuffer {
             descriptor.renders() == renders,
             "the encoder does not execute the indirect command buffer's command types",
         )?;
+        if buffer.records().is_some() {
+            return Err(Error::Unsupported(
+                "executing GPU-resident indirect command buffers",
+            ));
+        }
         let (commands, gate) = match range {
             ExecutionRange::Direct(range) => (buffer.commands(range)?, None),
             ExecutionRange::Indirect {
@@ -216,9 +221,12 @@ impl CommandBuffer {
             self.render_memory_barrier(resolver, scope, stages, stages)?;
         }
         if !descriptor.inherit_pipeline_state {
-            let id = command.pipeline.ok_or(Error::Invalid(
-                "an indirect command draws without a pipeline state",
-            ))?;
+            let id = command
+                .pipeline
+                .ok_or(Error::Invalid(
+                    "an indirect command draws without a pipeline state",
+                ))?
+                .id;
             let current = render(&mut self.encoder)?
                 .pipeline
                 .as_ref()
@@ -432,9 +440,12 @@ impl CommandBuffer {
             self.compute_memory_barrier(BarrierScope::BUFFERS | BarrierScope::TEXTURES)?;
         }
         if !descriptor.inherit_pipeline_state {
-            let id = command.pipeline.ok_or(Error::Invalid(
-                "an indirect command dispatches without a pipeline state",
-            ))?;
+            let id = command
+                .pipeline
+                .ok_or(Error::Invalid(
+                    "an indirect command dispatches without a pipeline state",
+                ))?
+                .id;
             let state = compute(&mut self.encoder)?;
             if state.pipeline.as_ref().map(|state| state.id) != Some(id) {
                 state.pipeline = Some(resolver.compute_pipeline_state(id)?);
@@ -463,7 +474,8 @@ impl CommandBuffer {
         })
     }
 
-    /// `resetCommandsInBuffer:withRange:` of the blit encoder.
+    /// `resetCommandsInBuffer:withRange:` of the blit encoder, which
+    /// zeroes a GPU-resident buffer's records in order.
     pub fn reset_commands(
         &mut self,
         resolver: &mut dyn Resolver,
@@ -471,10 +483,19 @@ impl CommandBuffer {
         range: Range<usize>,
     ) -> Result<()> {
         self.blit()?;
-        resolver.update_indirect_commands(id, &mut |buffer| buffer.reset(range.clone()))
+        if resolver.indirect_commands(id)?.records().is_none() {
+            return resolver
+                .update_indirect_commands(id, &mut |buffer| buffer.reset(range.clone()));
+        }
+        let (layout, records) = resolver.indirect_records(id)?;
+        let range = record_range(&layout, range)?;
+        self.fill_buffer(resolver, records, range.start, range.end - range.start, 0)
     }
 
     /// `copyIndirectCommandBuffer:sourceRange:destination:destinationIndex:`.
+    /// A copy from a GPU-resident buffer makes the destination GPU-resident
+    /// and copies records in order; one into a GPU-resident buffer places
+    /// the source's commands as records.
     pub fn copy_indirect_commands(
         &mut self,
         resolver: &mut dyn Resolver,
@@ -484,13 +505,47 @@ impl CommandBuffer {
         index: usize,
     ) -> Result<()> {
         self.blit()?;
-        let source = resolver.indirect_commands(source)?;
-        resolver.update_indirect_commands(destination, &mut |buffer| {
-            buffer.copy_from(&source, range.clone(), index)
-        })
+        let contents = resolver.indirect_commands(source)?;
+        let resident = contents.records().is_some();
+        if !resident && resolver.indirect_commands(destination)?.records().is_none() {
+            return resolver.update_indirect_commands(destination, &mut |buffer| {
+                buffer.copy_from(&contents, range.clone(), index)
+            });
+        }
+        let (layout, records) = resolver.indirect_records(destination)?;
+        let end = index.checked_add(range.len()).ok_or(Error::Invalid(
+            "range extends past the indirect command buffer",
+        ))?;
+        let target = record_range(&layout, index..end)?;
+        let size = target.end - target.start;
+        let (source, offset) = if resident {
+            let (source_layout, source_records) = resolver.indirect_records(source)?;
+            ensure(
+                RecordLayout {
+                    count: layout.count,
+                    ..source_layout
+                } == layout,
+                "copies between indirect command buffers of one record layout",
+            )?;
+            (source_records, record_range(&source_layout, range)?.start)
+        } else {
+            let bytes = resolver
+                .indirect_commands(destination)?
+                .records_of(&contents, range)?;
+            let alignment = u64::from(RecordLayout::RECORD_ALIGNMENT);
+            let upload = self.recorder.upload(resolver, &bytes, alignment)?;
+            let source = BufferRef {
+                buffer: upload.buffer,
+                offset: upload.offset,
+                address: upload.address,
+                length: size,
+            };
+            (source, 0)
+        };
+        self.copy_buffer(source, offset, records, target.start, size)
     }
 
-    /// `optimizeIndirectCommandBuffer:withRange:`: replays already bind
+    /// `optimizeIndirectCommandBuffer:withRange:`: executions already bind
     /// only state that changes, so the commands stay as they are.
     pub fn optimize_indirect_commands(
         &mut self,
@@ -499,6 +554,19 @@ impl CommandBuffer {
         range: Range<usize>,
     ) -> Result<()> {
         self.blit()?;
-        resolver.indirect_commands(id)?.commands(range).map(|_| ())
+        let size = resolver.indirect_commands(id)?.size();
+        ensure(
+            range.start <= range.end && range.end <= size,
+            "range extends past the indirect command buffer",
+        )
     }
+}
+
+/// The buffer offsets of the records of `range`.
+fn record_range(layout: &RecordLayout, range: Range<usize>) -> Result<Range<u64>> {
+    ensure(
+        range.start <= range.end && range.end <= layout.count as usize,
+        "range extends past the indirect command buffer",
+    )?;
+    Ok(layout.record(range.start)..layout.record(range.end))
 }

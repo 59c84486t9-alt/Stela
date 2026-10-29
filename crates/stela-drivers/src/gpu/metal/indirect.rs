@@ -11,8 +11,17 @@
 //! and visibility all apply unchanged.
 //!
 //! Contents are read when an execution is encoded, and blit resets and
-//! copies apply when they are encoded, in encoding order. Shaders cannot
-//! encode commands, which needs the compiler's
+//! copies apply when they are encoded, in encoding order.
+//!
+//! Handing out a buffer's GPU address (its `gpuResourceID`) makes it
+//! GPU-resident: from then on its commands are [records](RecordLayout) in
+//! device memory, which shaders may write too. CPU encoding writes each
+//! changed field to its record before the next command buffer commits,
+//! blit resets and copies run on the GPU in order, and encoders execute
+//! the records. Records hold what the GPU can express: draws and indexed
+//! draws under the encoder's rasterizer state, of pipelines that support
+//! indirect command buffers, and dispatches. Shaders cannot encode
+//! commands, which needs the compiler's
 //! [`ShaderFeatures::INDIRECT_COMMAND_ENCODING`].
 //!
 //! [`ShaderFeatures::INDIRECT_COMMAND_ENCODING`]: super::capabilities::ShaderFeatures::INDIRECT_COMMAND_ENCODING
@@ -32,6 +41,11 @@ use super::{
 };
 use alloc::vec::Vec;
 use core::ops::Range;
+use record::{Field, Writes};
+
+mod record;
+
+pub use record::RecordLayout;
 
 /// A render pipeline's place in the device's execution sets: its state
 /// class and its index in the class's set. Its `gpuResourceID` is
@@ -216,12 +230,20 @@ impl IndirectAction {
     }
 }
 
+/// The pipeline state an indirect command sets: its device id and its
+/// `gpuResourceID`, zero when GPU-resident commands cannot switch to it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandPipeline {
+    pub id: u64,
+    pub handle: u64,
+}
+
 /// One command; the default is a reset command, which does nothing.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct IndirectCommand {
-    /// The device id of the command's pipeline state, unless the buffer
-    /// inherits the encoder's.
-    pub pipeline: Option<u64>,
+    /// The command's pipeline state, unless the buffer inherits the
+    /// encoder's.
+    pub pipeline: Option<CommandPipeline>,
     /// The command's buffers, unless the buffer inherits the encoder's.
     pub buffers: Vec<IndirectBuffer>,
     /// Kernel threadgroup memory lengths by index.
@@ -235,11 +257,23 @@ pub struct IndirectCommand {
     pub action: Option<IndirectAction>,
 }
 
+/// A GPU-resident buffer's record layout, and the CPU's encoding writes
+/// that have yet to reach its device memory.
+#[derive(Clone, Debug, PartialEq)]
+struct Records {
+    layout: RecordLayout,
+    writes: Vec<(u64, Vec<u8>)>,
+}
+
 /// `MTLIndirectCommandBuffer`'s contents.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IndirectCommandBuffer {
     descriptor: IndirectCommandBufferDescriptor,
+    /// The commands as the CPU encoded them. Once the buffer is
+    /// GPU-resident, the records are the contents, and these hold only
+    /// what each CPU encoding call writes to its record.
     commands: Vec<IndirectCommand>,
+    records: Option<Records>,
 }
 
 impl IndirectCommandBuffer {
@@ -264,6 +298,7 @@ impl IndirectCommandBuffer {
         Ok(Self {
             descriptor: *descriptor,
             commands,
+            records: None,
         })
     }
 
@@ -276,17 +311,66 @@ impl IndirectCommandBuffer {
         self.commands.len()
     }
 
-    /// The commands of `range`.
+    /// The record layout of a GPU-resident buffer.
+    pub fn records(&self) -> Option<&RecordLayout> {
+        self.records.as_ref().map(|records| &records.layout)
+    }
+
+    /// The layout and initial contents of the buffer's records, for the
+    /// device to place before [`make_resident`](Self::make_resident).
+    pub fn resident_image(&self) -> Result<(RecordLayout, Vec<u8>)> {
+        let layout = RecordLayout::new(&self.descriptor, self.commands.len())?;
+        Ok((layout, layout.image(&self.commands)?))
+    }
+
+    /// Makes the records the contents once the device placed them.
+    pub fn make_resident(&mut self, layout: RecordLayout) {
+        debug_assert!(self.records.is_none());
+        self.records = Some(Records {
+            layout,
+            writes: Vec::new(),
+        });
+    }
+
+    /// The CPU's encoding writes since the last call, as (buffer offset,
+    /// bytes) of the records, in encoding order.
+    pub fn take_writes(&mut self) -> Vec<(u64, Vec<u8>)> {
+        self.records
+            .as_mut()
+            .map_or_else(Vec::new, |records| core::mem::take(&mut records.writes))
+    }
+
+    pub fn has_writes(&self) -> bool {
+        self.records
+            .as_ref()
+            .is_some_and(|records| !records.writes.is_empty())
+    }
+
+    /// The commands of `range`, which a GPU-resident buffer keeps only in
+    /// its records.
     pub fn commands(&self, range: Range<usize>) -> Result<&[IndirectCommand]> {
+        ensure(
+            self.records.is_none(),
+            "the indirect command buffer is GPU-resident",
+        )?;
         self.commands.get(range).ok_or(Error::Invalid(
             "range extends past the indirect command buffer",
         ))
     }
 
-    fn command(&mut self, index: usize) -> Result<&mut IndirectCommand> {
-        self.commands
+    fn target(&mut self, index: usize) -> Result<Target<'_>> {
+        let command = self
+            .commands
             .get_mut(index)
-            .ok_or(Error::Invalid("index past the indirect command buffer"))
+            .ok_or(Error::Invalid("index past the indirect command buffer"))?;
+        let record = self.records.as_mut().map(|records| Record {
+            layout: records.layout,
+            writes: Writes {
+                record: records.layout.record(index),
+                writes: &mut records.writes,
+            },
+        });
+        Ok(Target { command, record })
     }
 
     /// `indirectRenderCommandAtIndex:`.
@@ -297,7 +381,7 @@ impl IndirectCommandBuffer {
         )?;
         Ok(IndirectRenderCommand {
             descriptor: self.descriptor,
-            command: self.command(index)?,
+            target: self.target(index)?,
         })
     }
 
@@ -309,24 +393,35 @@ impl IndirectCommandBuffer {
         )?;
         Ok(IndirectComputeCommand {
             descriptor: self.descriptor,
-            command: self.command(index)?,
+            target: self.target(index)?,
         })
     }
 
-    /// `resetWithRange:` and the blit `resetCommandsInBuffer:withRange:`.
+    /// `resetWithRange:`, and the blit `resetCommandsInBuffer:withRange:`
+    /// of a buffer that is not GPU-resident.
     pub fn reset(&mut self, range: Range<usize>) -> Result<()> {
         self.commands
-            .get_mut(range)
+            .get_mut(range.clone())
             .ok_or(Error::Invalid(
                 "range extends past the indirect command buffer",
             ))?
             .fill_with(IndirectCommand::default);
+        if let Some(records) = &mut self.records {
+            let bytes = records.layout.stride as usize * range.len();
+            let start = records.layout.record(range.start);
+            records.writes.push((start, alloc::vec![0; bytes]));
+        }
         Ok(())
     }
 
-    /// `copyIndirectCommandBuffer:sourceRange:destination:destinationIndex:`.
-    /// Every copied command must be one this buffer could have encoded.
+    /// `copyIndirectCommandBuffer:sourceRange:destination:destinationIndex:`
+    /// between buffers that are not GPU-resident. Every copied command must
+    /// be one this buffer could have encoded.
     pub fn copy_from(&mut self, source: &Self, range: Range<usize>, index: usize) -> Result<()> {
+        ensure(
+            self.records.is_none(),
+            "the indirect command buffer is GPU-resident",
+        )?;
         let commands = source.commands(range)?;
         let end = index
             .checked_add(commands.len())
@@ -339,6 +434,20 @@ impl IndirectCommandBuffer {
         }
         self.commands[index..end].clone_from_slice(commands);
         Ok(())
+    }
+
+    /// The records, in this GPU-resident buffer's layout, of the commands of
+    /// `range` of `source`, which is not; a blit copy places them. Every
+    /// command must be one this buffer could have encoded.
+    pub fn records_of(&self, source: &Self, range: Range<usize>) -> Result<Vec<u8>> {
+        let layout = self.records().ok_or(Error::Invalid(
+            "the indirect command buffer is not GPU-resident",
+        ))?;
+        let commands = source.commands(range)?;
+        for command in commands {
+            self.descriptor.admits(command)?;
+        }
+        layout.records(commands)
     }
 }
 
@@ -374,58 +483,141 @@ impl IndirectCommandBufferDescriptor {
     }
 }
 
-/// Encodes one command of `stage`'s buffer slots and checks the descriptor.
-fn set_buffer(
-    descriptor: &IndirectCommandBufferDescriptor,
-    command: &mut IndirectCommand,
-    binding: IndirectBuffer,
-) -> Result<()> {
-    ensure(
-        !descriptor.inherit_buffers,
-        "the indirect command buffer inherits buffers",
-    )?;
-    ensure(
-        u64::from(binding.index) < descriptor.buffer_count(binding.stage),
-        "buffer index exceeds the indirect command buffer's bind count",
-    )?;
-    ensure(
-        binding.offset <= binding.buffer.length,
-        "buffer offset beyond the buffer",
-    )?;
-    command
-        .buffers
-        .retain(|bound| (bound.stage, bound.index) != (binding.stage, binding.index));
-    command.buffers.push(binding);
-    Ok(())
+/// A GPU-resident command's record and where its writes go.
+struct Record<'a> {
+    layout: RecordLayout,
+    writes: Writes<'a>,
 }
 
-fn set_action(
-    descriptor: &IndirectCommandBufferDescriptor,
-    command: &mut IndirectCommand,
-    action: IndirectAction,
-) -> Result<()> {
-    ensure(
-        descriptor.command_types.contains(action.command_type()),
-        "the command type is not in the indirect command buffer's types",
-    )?;
-    command.action = Some(action);
-    Ok(())
+/// The command an encoding call changes.
+struct Target<'a> {
+    command: &'a mut IndirectCommand,
+    record: Option<Record<'a>>,
+}
+
+impl Target<'_> {
+    /// Applies `edit`, and writes `field` of the result to a GPU-resident
+    /// record; the command is unchanged when either fails.
+    fn edit(
+        &mut self,
+        field: Field,
+        edit: impl FnOnce(&mut IndirectCommand) -> Result<()>,
+    ) -> Result<()> {
+        let Some(record) = &mut self.record else {
+            return edit(self.command);
+        };
+        let mut command = self.command.clone();
+        edit(&mut command)?;
+        let mut writes = Vec::new();
+        let mut sink = Writes {
+            record: record.writes.record,
+            writes: &mut writes,
+        };
+        record.layout.write(&mut sink, &command, field)?;
+        record.writes.writes.append(&mut writes);
+        *self.command = command;
+        Ok(())
+    }
+
+    /// Encodes one of `stage`'s buffer slots and checks the descriptor.
+    fn set_buffer(
+        &mut self,
+        descriptor: &IndirectCommandBufferDescriptor,
+        binding: IndirectBuffer,
+    ) -> Result<()> {
+        ensure(
+            !descriptor.inherit_buffers,
+            "the indirect command buffer inherits buffers",
+        )?;
+        ensure(
+            u64::from(binding.index) < descriptor.buffer_count(binding.stage),
+            "buffer index exceeds the indirect command buffer's bind count",
+        )?;
+        ensure(
+            binding.offset <= binding.buffer.length,
+            "buffer offset beyond the buffer",
+        )?;
+        self.edit(Field::Buffer(binding.stage, binding.index), |command| {
+            command
+                .buffers
+                .retain(|bound| (bound.stage, bound.index) != (binding.stage, binding.index));
+            command.buffers.push(binding);
+            Ok(())
+        })
+    }
+
+    fn set_action(
+        &mut self,
+        descriptor: &IndirectCommandBufferDescriptor,
+        action: IndirectAction,
+    ) -> Result<()> {
+        ensure(
+            descriptor.command_types.contains(action.command_type()),
+            "the command type is not in the indirect command buffer's types",
+        )?;
+        self.edit(Field::Action, |command| {
+            command.action = Some(action);
+            Ok(())
+        })
+    }
+
+    fn set_pipeline(
+        &mut self,
+        descriptor: &IndirectCommandBufferDescriptor,
+        pipeline: CommandPipeline,
+    ) -> Result<()> {
+        ensure(
+            !descriptor.inherit_pipeline_state,
+            "the indirect command buffer inherits pipeline state",
+        )?;
+        self.edit(Field::Pipeline, |command| {
+            command.pipeline = Some(pipeline);
+            Ok(())
+        })
+    }
+
+    fn set_barrier(&mut self, barrier: bool) -> Result<()> {
+        self.edit(Field::Barrier, |command| {
+            command.barrier = barrier;
+            Ok(())
+        })
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        self.edit(Field::Record, |command| {
+            *command = IndirectCommand::default();
+            Ok(())
+        })
+    }
+
+    /// Sets a rasterizer state part, which GPU-resident buffers inherit.
+    fn set_raster(&mut self, inherited: bool, set: impl FnOnce(&mut RasterState)) -> Result<()> {
+        ensure(
+            !inherited,
+            "the indirect command buffer inherits the rasterizer state part",
+        )?;
+        ensure(
+            self.record.is_none(),
+            "GPU-resident indirect command buffers inherit rasterizer state",
+        )?;
+        set(&mut self.command.raster);
+        Ok(())
+    }
 }
 
 /// `MTLIndirectRenderCommand`.
 pub struct IndirectRenderCommand<'a> {
     descriptor: IndirectCommandBufferDescriptor,
-    command: &'a mut IndirectCommand,
+    target: Target<'a>,
 }
 
 impl IndirectRenderCommand<'_> {
     pub fn set_render_pipeline_state(&mut self, state: &RenderPipelineState) -> Result<()> {
-        ensure(
-            !self.descriptor.inherit_pipeline_state,
-            "the indirect command buffer inherits pipeline state",
-        )?;
-        self.command.pipeline = Some(state.id);
-        Ok(())
+        let pipeline = CommandPipeline {
+            id: state.id,
+            handle: state.indirect.map_or(0, IndirectPipeline::handle),
+        };
+        self.target.set_pipeline(&self.descriptor, pipeline)
     }
 
     /// `set{Vertex,Fragment,Object,Mesh}Buffer:offset:atIndex:`.
@@ -444,7 +636,7 @@ impl IndirectRenderCommand<'_> {
             offset,
             stride: None,
         };
-        set_buffer(&self.descriptor, self.command, binding)
+        self.target.set_buffer(&self.descriptor, binding)
     }
 
     /// `setVertexBuffer:offset:attributeStride:atIndex:`.
@@ -466,71 +658,59 @@ impl IndirectRenderCommand<'_> {
             offset,
             stride: Some(stride),
         };
-        set_buffer(&self.descriptor, self.command, binding)
+        self.target.set_buffer(&self.descriptor, binding)
     }
 
     pub fn set_cull_mode(&mut self, mode: CullMode) -> Result<()> {
-        ensure(
-            !self.descriptor.inherit_cull_mode,
-            "the indirect command buffer inherits the cull mode",
-        )?;
-        self.command.raster.cull_mode = mode;
-        Ok(())
+        self.target
+            .set_raster(self.descriptor.inherit_cull_mode, |raster| {
+                raster.cull_mode = mode;
+            })
     }
 
     pub fn set_front_facing_winding(&mut self, winding: Winding) -> Result<()> {
-        ensure(
-            !self.descriptor.inherit_front_facing_winding,
-            "the indirect command buffer inherits the winding",
-        )?;
-        self.command.raster.winding = winding;
-        Ok(())
+        self.target
+            .set_raster(self.descriptor.inherit_front_facing_winding, |raster| {
+                raster.winding = winding;
+            })
     }
 
     pub fn set_depth_bias(&mut self, constant: f32, slope: f32, clamp: f32) -> Result<()> {
-        ensure(
-            !self.descriptor.inherit_depth_bias,
-            "the indirect command buffer inherits the depth bias",
-        )?;
-        self.command.raster.depth_bias = [constant, slope, clamp];
-        Ok(())
+        self.target
+            .set_raster(self.descriptor.inherit_depth_bias, |raster| {
+                raster.depth_bias = [constant, slope, clamp];
+            })
     }
 
     pub fn set_depth_stencil_state(&mut self, state: Option<&DepthStencilState>) -> Result<()> {
-        ensure(
-            !self.descriptor.inherit_depth_stencil_state,
-            "the indirect command buffer inherits the depth-stencil state",
-        )?;
-        self.command.raster.depth_stencil = state.copied().unwrap_or_default();
-        Ok(())
+        self.target
+            .set_raster(self.descriptor.inherit_depth_stencil_state, |raster| {
+                raster.depth_stencil = state.copied().unwrap_or_default();
+            })
     }
 
     pub fn set_triangle_fill_mode(&mut self, mode: TriangleFillMode) -> Result<()> {
-        ensure(
-            !self.descriptor.inherit_triangle_fill_mode,
-            "the indirect command buffer inherits the fill mode",
-        )?;
-        self.command.raster.fill_mode = mode;
-        Ok(())
+        self.target
+            .set_raster(self.descriptor.inherit_triangle_fill_mode, |raster| {
+                raster.fill_mode = mode;
+            })
     }
 
     pub fn set_depth_clip_mode(&mut self, mode: DepthClipMode) -> Result<()> {
-        ensure(
-            !self.descriptor.inherit_depth_clip_mode,
-            "the indirect command buffer inherits the depth clip mode",
-        )?;
-        self.command.raster.clip_mode = mode;
-        Ok(())
+        self.target
+            .set_raster(self.descriptor.inherit_depth_clip_mode, |raster| {
+                raster.clip_mode = mode;
+            })
     }
 
     /// `setBarrier`.
-    pub fn set_barrier(&mut self) {
-        self.command.barrier = true;
+    pub fn set_barrier(&mut self) -> Result<()> {
+        self.target.set_barrier(true)
     }
 
     /// `clearBarrier`.
-    pub fn clear_barrier(&mut self) {
-        self.command.barrier = false;
+    pub fn clear_barrier(&mut self) -> Result<()> {
+        self.target.set_barrier(false)
     }
 
     /// `drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:`.
@@ -549,7 +729,7 @@ impl IndirectRenderCommand<'_> {
             instance_count,
             base_instance,
         };
-        set_action(&self.descriptor, self.command, action)
+        self.target.set_action(&self.descriptor, action)
     }
 
     /// `drawIndexedPrimitives:indexCount:indexType:indexBuffer:…`.
@@ -575,7 +755,7 @@ impl IndirectRenderCommand<'_> {
             base_vertex,
             base_instance,
         };
-        set_action(&self.descriptor, self.command, action)
+        self.target.set_action(&self.descriptor, action)
     }
 
     /// `drawPatches:…` and `drawIndexedPatches:…`; `factors` is the
@@ -597,7 +777,7 @@ impl IndirectRenderCommand<'_> {
             base_instance,
             factors,
         };
-        set_action(&self.descriptor, self.command, action)
+        self.target.set_action(&self.descriptor, action)
     }
 
     /// `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`.
@@ -612,7 +792,7 @@ impl IndirectRenderCommand<'_> {
             object_threads,
             mesh_threads,
         };
-        set_action(&self.descriptor, self.command, action)
+        self.target.set_action(&self.descriptor, action)
     }
 
     /// `drawMeshThreads:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`.
@@ -627,29 +807,29 @@ impl IndirectRenderCommand<'_> {
             object_threads,
             mesh_threads,
         };
-        set_action(&self.descriptor, self.command, action)
+        self.target.set_action(&self.descriptor, action)
     }
 
     /// `reset`.
-    pub fn reset(&mut self) {
-        *self.command = IndirectCommand::default();
+    pub fn reset(&mut self) -> Result<()> {
+        self.target.reset()
     }
 }
 
 /// `MTLIndirectComputeCommand`.
 pub struct IndirectComputeCommand<'a> {
     descriptor: IndirectCommandBufferDescriptor,
-    command: &'a mut IndirectCommand,
+    target: Target<'a>,
 }
 
 impl IndirectComputeCommand<'_> {
     pub fn set_compute_pipeline_state(&mut self, state: &ComputePipelineState) -> Result<()> {
-        ensure(
-            !self.descriptor.inherit_pipeline_state,
-            "the indirect command buffer inherits pipeline state",
-        )?;
-        self.command.pipeline = Some(state.id);
-        Ok(())
+        // Compute pipelines have no GPU-resident form yet.
+        let pipeline = CommandPipeline {
+            id: state.id,
+            handle: 0,
+        };
+        self.target.set_pipeline(&self.descriptor, pipeline)
     }
 
     /// `setKernelBuffer:offset:atIndex:`.
@@ -661,7 +841,7 @@ impl IndirectComputeCommand<'_> {
             offset,
             stride: None,
         };
-        set_buffer(&self.descriptor, self.command, binding)
+        self.target.set_buffer(&self.descriptor, binding)
     }
 
     /// `setThreadgroupMemoryLength:atIndex:`.
@@ -670,25 +850,31 @@ impl IndirectComputeCommand<'_> {
             u64::from(index) < self.descriptor.max_kernel_threadgroup_memory_bind_count,
             "threadgroup memory index exceeds the bind count",
         )?;
-        let lengths = &mut self.command.threadgroup_lengths;
-        lengths.retain(|&(slot, _)| slot != index);
-        lengths.push((index, length));
-        Ok(())
+        self.target
+            .edit(Field::ThreadgroupLength(index), |command| {
+                let lengths = &mut command.threadgroup_lengths;
+                lengths.retain(|&(slot, _)| slot != index);
+                lengths.push((index, length));
+                Ok(())
+            })
     }
 
     /// `setStageInRegion:`.
-    pub fn set_stage_in_region(&mut self, origin: [u64; 3], size: [u64; 3]) {
-        self.command.stage_in = Some((origin, size));
+    pub fn set_stage_in_region(&mut self, origin: [u64; 3], size: [u64; 3]) -> Result<()> {
+        self.target.edit(Field::StageIn, |command| {
+            command.stage_in = Some((origin, size));
+            Ok(())
+        })
     }
 
     /// `setBarrier`.
-    pub fn set_barrier(&mut self) {
-        self.command.barrier = true;
+    pub fn set_barrier(&mut self) -> Result<()> {
+        self.target.set_barrier(true)
     }
 
     /// `clearBarrier`.
-    pub fn clear_barrier(&mut self) {
-        self.command.barrier = false;
+    pub fn clear_barrier(&mut self) -> Result<()> {
+        self.target.set_barrier(false)
     }
 
     pub fn concurrent_dispatch_threadgroups(
@@ -700,17 +886,17 @@ impl IndirectComputeCommand<'_> {
             threadgroups,
             threads,
         };
-        set_action(&self.descriptor, self.command, action)
+        self.target.set_action(&self.descriptor, action)
     }
 
     pub fn concurrent_dispatch_threads(&mut self, grid: [u32; 3], threads: Size) -> Result<()> {
         let action = IndirectAction::DispatchThreads { grid, threads };
-        set_action(&self.descriptor, self.command, action)
+        self.target.set_action(&self.descriptor, action)
     }
 
     /// `reset`.
-    pub fn reset(&mut self) {
-        *self.command = IndirectCommand::default();
+    pub fn reset(&mut self) -> Result<()> {
+        self.target.reset()
     }
 }
 

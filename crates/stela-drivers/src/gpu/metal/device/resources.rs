@@ -1,7 +1,7 @@
 //! Buffers, textures, samplers and heaps.
 use super::{BufferId, Device, HeapId, SamplerId, Slab, TextureId};
 use crate::gpu::metal::{
-    abi::{HeapType, ResourceOptions, StorageMode, TextureType},
+    abi::{CpuCacheMode, HazardTrackingMode, HeapType, ResourceOptions, StorageMode, TextureType},
     binding::{HeapArray, NULL_DESCRIPTOR, ResourceId},
     command_buffer::{BufferRef, blit::BufferLayout},
     error::{Error, Result, ensure, require},
@@ -138,6 +138,22 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             backing: Backing::Owned(allocation.allocated),
             dependents: 0,
         })))
+    }
+
+    /// A shared buffer of the device's own that holds `bytes`.
+    pub(super) fn new_shared_buffer(&mut self, bytes: &[u8]) -> Result<BufferId> {
+        let options = ResourceOptions {
+            cpu_cache_mode: CpuCacheMode::DefaultCache,
+            storage_mode: StorageMode::Shared,
+            hazard_tracking_mode: HazardTrackingMode::Default,
+        };
+        let buffer = self.new_buffer(bytes.len() as u64, options)?;
+        let (memory, offset, _) = self.buffer_memory(buffer)?;
+        if let Err(error) = self.backend.write_memory(memory, offset, bytes) {
+            self.destroy_buffer(buffer)?;
+            return Err(error);
+        }
+        Ok(buffer)
     }
 
     pub fn buffer(&self, id: BufferId) -> Result<BufferRef> {

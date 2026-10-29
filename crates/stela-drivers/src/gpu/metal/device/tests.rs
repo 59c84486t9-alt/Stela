@@ -21,7 +21,7 @@ use crate::gpu::metal::{
         indirect::ExecutionRange,
     },
     heap::HeapDescriptor,
-    indirect::IndirectCommandBufferDescriptor,
+    indirect::{IndirectCommandBufferDescriptor, RecordLayout},
     nvidia::{CHIPS, Chip, PcieLink, fixture::nvk},
     pipeline::{
         ColorAttachmentDescriptor, MAX_COLOR_ATTACHMENTS, RenderTargets, TessellationDescriptor,
@@ -1779,4 +1779,84 @@ fn indirect_commands_execute_snapshots_of_their_buffer() {
     assert_eq!(device.indirect_command_buffer(icb).unwrap().size(), 2);
     device.destroy_indirect_command_buffer(icb).unwrap();
     assert!(device.indirect_command_buffer(icb).is_err());
+}
+
+#[test]
+fn handing_out_an_indirect_address_keeps_commands_as_records() {
+    let mut device = device();
+    let descriptor = IndirectCommandBufferDescriptor {
+        command_types: IndirectCommandType::DRAW,
+        inherit_pipeline_state: true,
+        inherit_buffers: false,
+        inherit_cull_mode: true,
+        inherit_depth_stencil_state: true,
+        inherit_depth_bias: true,
+        inherit_depth_clip_mode: true,
+        inherit_front_facing_winding: true,
+        inherit_triangle_fill_mode: true,
+        max_vertex_buffer_bind_count: 1,
+        max_fragment_buffer_bind_count: 0,
+        max_kernel_buffer_bind_count: 0,
+        max_kernel_threadgroup_memory_bind_count: 0,
+        max_object_buffer_bind_count: 0,
+        max_mesh_buffer_bind_count: 0,
+        support_ray_tracing: false,
+        support_dynamic_attribute_stride: false,
+    };
+    let icb = device.new_indirect_command_buffer(&descriptor, 2).unwrap();
+    device
+        .indirect_command_buffer_mut(icb)
+        .unwrap()
+        .render_command(1)
+        .unwrap()
+        .draw_primitives(PrimitiveType::Point, 0, 5, 1, 0)
+        .unwrap();
+    let address = device.indirect_command_buffer_resource_id(icb).unwrap();
+    assert_eq!(device.indirect_command_buffer_resource_id(icb), Ok(address));
+    let layout = *device
+        .indirect_command_buffer(icb)
+        .unwrap()
+        .records()
+        .unwrap();
+    let (memory, base, image) = device.backend().writes.last().unwrap().clone();
+    assert_eq!(image.len() as u64, layout.bytes());
+    let record = layout.record(1) as usize;
+    assert_eq!(image[record], RecordLayout::DRAW as u8);
+
+    // CPU encoding reaches the records when the next command buffer commits.
+    device
+        .indirect_command_buffer_mut(icb)
+        .unwrap()
+        .render_command(1)
+        .unwrap()
+        .reset()
+        .unwrap();
+    let written = device.backend().writes.len();
+    let commands = device.new_command_buffer();
+    device.commit(commands).unwrap();
+    let mut action = [0xff; 4];
+    device
+        .backend()
+        .read_memory(memory, base + layout.record(1), &mut action)
+        .unwrap();
+    assert_eq!(action, [0; 4]);
+    assert_eq!(device.backend().writes.len(), written + 1);
+
+    let mut commands = device.new_command_buffer();
+    commands.begin_blit().unwrap();
+    commands
+        .reset_commands(&mut device.resolver(), icb, 0..2)
+        .unwrap();
+    commands.end_encoding(&mut device.resolver()).unwrap();
+    device.commit(commands).unwrap();
+    let segments = device.backend().submissions.last().unwrap().clone();
+    let fill = segments[0]
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            Command::FillBuffer { offset, size, .. } => Some((*offset, *size)),
+            _ => None,
+        });
+    assert_eq!(fill, Some((layout.record(0), 2 * u64::from(layout.stride))));
+    device.destroy_indirect_command_buffer(icb).unwrap();
 }

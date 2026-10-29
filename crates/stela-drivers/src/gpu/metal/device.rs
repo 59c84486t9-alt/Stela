@@ -10,14 +10,13 @@ use super::{
     binding::{DescriptorHeap, HeapArray, HeapLayout, ResourceId},
     capabilities::{ApiFeatures, Capabilities, Platform},
     error::{Error, Result},
-    indirect::IndirectCommandBuffer,
     shader::Compiler,
     vulkan::{
         backend::{Backend, Descriptor, Object, requirements},
         object::{Memory, Semaphore},
     },
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::vec::Vec;
 
 mod execution_sets;
 pub mod indirect;
@@ -114,7 +113,7 @@ pub struct Device<B: Backend, C: Compiler> {
     resources: resources::Resources,
     pipelines: pipelines::Pipelines,
     execution_sets: execution_sets::ExecutionSets,
-    indirect: Slab<Arc<IndirectCommandBuffer>>,
+    indirect: Slab<indirect::IndirectObject>,
     queue: queue::Queue,
 }
 

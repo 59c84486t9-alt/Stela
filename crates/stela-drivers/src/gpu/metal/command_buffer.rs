@@ -13,7 +13,7 @@ use super::{
     binding::{ArgumentTable, BufferBinding, PushConstants, ResourceId},
     error::{Error, Result, ensure},
     hazard::{FULL, Hazards, Use},
-    indirect::{IndirectCommandBuffer, IndirectCommandBufferId, IndirectPipeline},
+    indirect::{IndirectCommandBuffer, IndirectCommandBufferId, IndirectPipeline, RecordLayout},
     pipeline::{ComputePipelinePlan, RenderPipelinePlan},
     shader::{Interface, Specialization, Stage},
     sparse::Mapping,
@@ -121,6 +121,13 @@ pub trait Resolver: ChunkSource {
         &mut self,
         id: IndirectCommandBufferId,
     ) -> Result<Arc<IndirectCommandBuffer>>;
+
+    /// The layout and buffer of an indirect command buffer's records,
+    /// making it GPU-resident.
+    fn indirect_records(
+        &mut self,
+        id: IndirectCommandBufferId,
+    ) -> Result<(RecordLayout, BufferRef)>;
 
     /// Changes an indirect command buffer's contents, for blit resets and
     /// copies; a failed `update` leaves them unchanged.

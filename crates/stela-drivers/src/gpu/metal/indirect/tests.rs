@@ -120,7 +120,7 @@ fn render_commands_follow_the_descriptor() {
     command
         .draw_primitives(PrimitiveType::Triangle, 0, 3, 1, 0)
         .unwrap();
-    command.set_barrier();
+    command.set_barrier().unwrap();
     let encoded = &buffer.commands(1..2).unwrap()[0];
     assert_eq!(
         encoded.buffers.len(),
@@ -137,7 +137,7 @@ fn render_commands_follow_the_descriptor() {
         })
     ));
 
-    buffer.render_command(1).unwrap().reset();
+    buffer.render_command(1).unwrap().reset().unwrap();
     assert_eq!(
         buffer.commands(1..2).unwrap()[0],
         IndirectCommand::default()
@@ -220,4 +220,188 @@ fn copies_check_the_destination_and_resets_clear() {
     assert!(destination.commands(2..3).unwrap()[0].action.is_none());
     assert!(destination.commands(3..4).unwrap()[0].action.is_some());
     assert!(destination.reset(3..5).is_err());
+}
+
+fn word(bytes: &[u8], offset: u32) -> u32 {
+    let offset = offset as usize;
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn double(bytes: &[u8], offset: u32) -> u64 {
+    let offset = offset as usize;
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
+#[test]
+fn resident_images_hold_each_command_as_a_record() {
+    let descriptor = IndirectCommandBufferDescriptor {
+        support_dynamic_attribute_stride: true,
+        ..descriptor(IndirectCommandType::DRAW | IndirectCommandType::DRAW_INDEXED)
+    };
+    let mut buffer = IndirectCommandBuffer::new(&capabilities(), &descriptor, 3).unwrap();
+    let mut command = buffer.render_command(1).unwrap();
+    command
+        .set_vertex_buffer_with_stride(buffer_ref(1), 16, 12, 2)
+        .unwrap();
+    command
+        .set_buffer(Stage::Fragment, buffer_ref(2), 0, 1)
+        .unwrap();
+    command.set_barrier().unwrap();
+    command
+        .draw_indexed_primitives(
+            PrimitiveType::TriangleStrip,
+            6,
+            IndexType::UInt32,
+            buffer_ref(3),
+            8,
+            2,
+            -1,
+            4,
+        )
+        .unwrap();
+    let handle = IndirectPipeline { class: 0, index: 3 }.handle();
+    buffer.commands[1].pipeline = Some(CommandPipeline { id: 7, handle });
+
+    let (layout, image) = buffer.resident_image().unwrap();
+    assert_eq!(layout.tables, [80, 144]);
+    assert_eq!(layout.table_slots, [4, 2]);
+    assert_eq!(
+        (layout.words, layout.word_count, layout.stride),
+        (176, 4, 192)
+    );
+    assert_eq!(image.len() as u64, layout.bytes());
+    assert_eq!(&image[..64], &layout.header());
+    assert_eq!(word(&image, RecordLayout::HEADER_STRIDE), 192);
+    let start = layout.record(1) as usize;
+    assert!(image[64..start].iter().all(|&byte| byte == 0), "reset");
+    let record = &image[start..start + 192];
+    assert_eq!(
+        word(record, RecordLayout::ACTION),
+        RecordLayout::DRAW_INDEXED
+    );
+    assert_eq!(word(record, RecordLayout::BARRIER), 1);
+    assert_eq!(double(record, RecordLayout::PIPELINE), handle);
+    let arguments: Vec<u32> = (0..6)
+        .map(|index| word(record, RecordLayout::VERTICES + 4 * index))
+        .collect();
+    assert_eq!(arguments, [6, 2, 0, u32::MAX, 4, 4]);
+    assert_eq!(double(record, RecordLayout::INDEX_ADDRESS), (3 << 32) + 8);
+    assert_eq!(word(record, RecordLayout::INDEX_LENGTH), 248);
+    assert_eq!(word(record, RecordLayout::INDEX_TYPE), 1);
+    assert_eq!(double(record, 80 + 16), (1 << 32) + 16);
+    assert_eq!(double(record, 80 + 8 * 6), 240);
+    assert_eq!(word(record, 176 + 8), 12);
+    assert_eq!(double(record, 144 + 8), 2 << 32);
+    assert_eq!(double(record, 144 + 8 * 3), 256);
+}
+
+#[test]
+fn resident_buffers_write_what_cpu_encoding_changes() {
+    let types = IndirectCommandType::DRAW | IndirectCommandType::DRAW_INDEXED;
+    let mut buffer = IndirectCommandBuffer::new(&capabilities(), &descriptor(types), 2).unwrap();
+    let (layout, _) = buffer.resident_image().unwrap();
+    buffer.make_resident(layout);
+    assert!(buffer.commands(0..1).is_err(), "records are the contents");
+    let base = layout.record(1);
+    let mut command = buffer.render_command(1).unwrap();
+    command
+        .set_buffer(Stage::Vertex, buffer_ref(1), 0, 1)
+        .unwrap();
+    command
+        .draw_primitives(PrimitiveType::Line, 2, 3, 1, 0)
+        .unwrap();
+    assert!(
+        command
+            .draw_indexed_primitives(
+                PrimitiveType::Line,
+                3,
+                IndexType::UInt32,
+                buffer_ref(3),
+                2,
+                1,
+                0,
+                0,
+            )
+            .is_err(),
+        "misaligned index offset"
+    );
+    assert!(command.set_depth_bias(1.0, 0.0, 0.0).is_err());
+    let draw: Vec<u8> = [3u32, 1, 2, 0, 0, 1]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    assert!(buffer.has_writes());
+    assert_eq!(
+        buffer.take_writes(),
+        [
+            (base + 88, (1u64 << 32).to_le_bytes().to_vec()),
+            (base + 80 + 8 * 5, 256u64.to_le_bytes().to_vec()),
+            (base, RecordLayout::DRAW.to_le_bytes().to_vec()),
+            (base + 16, draw),
+        ]
+    );
+    assert!(matches!(
+        buffer.commands[1].action,
+        Some(IndirectAction::Draw { .. })
+    ));
+    assert!(!buffer.has_writes());
+
+    buffer.reset(0..2).unwrap();
+    assert_eq!(
+        buffer.take_writes(),
+        [(layout.record(0), alloc::vec![0; 2 * layout.stride as usize])]
+    );
+}
+
+#[test]
+fn records_hold_only_what_the_gpu_executes() {
+    let caps = capabilities();
+    let refused = |descriptor: &IndirectCommandBufferDescriptor| {
+        let buffer = IndirectCommandBuffer::new(&caps, descriptor, 1).unwrap();
+        matches!(buffer.resident_image(), Err(Error::Unsupported(_)))
+    };
+    assert!(refused(&descriptor(IndirectCommandType::DRAW_PATCHES)));
+    assert!(refused(&IndirectCommandBufferDescriptor {
+        inherit_cull_mode: false,
+        ..descriptor(IndirectCommandType::DRAW)
+    }));
+
+    let compute = descriptor(IndirectCommandType::CONCURRENT_DISPATCH);
+    let mut buffer = IndirectCommandBuffer::new(&caps, &compute, 1).unwrap();
+    let mut command = buffer.compute_command(0).unwrap();
+    command.set_threadgroup_memory_length(64, 0).unwrap();
+    command.set_stage_in_region([1, 2, 3], [4, 5, 6]).unwrap();
+    let threads = Size {
+        width: 8,
+        height: 4,
+        depth: 1,
+    };
+    command
+        .concurrent_dispatch_threadgroups([2, 3, 1], threads)
+        .unwrap();
+    let (layout, image) = buffer.resident_image().unwrap();
+    assert_eq!((layout.tables, layout.table_slots), ([80, 144], [4, 0]));
+    assert_eq!(
+        (layout.words, layout.word_count, layout.stride),
+        (144, 1, 160)
+    );
+    let record = &image[64..];
+    assert_eq!(word(record, RecordLayout::ACTION), RecordLayout::DISPATCH);
+    let words = |at: u32, count: u32| -> Vec<u32> {
+        (0..count)
+            .map(|index| word(record, at + 4 * index))
+            .collect()
+    };
+    assert_eq!(words(RecordLayout::GRID, 6), [2, 3, 1, 8, 4, 1]);
+    assert_eq!(
+        words(RecordLayout::STAGE_IN_ORIGIN, 7),
+        [1, 2, 3, 4, 5, 6, 1]
+    );
+    assert_eq!(word(record, 144), 64);
+
+    buffer.commands[0].pipeline = Some(CommandPipeline { id: 1, handle: 0 });
+    assert!(
+        matches!(buffer.resident_image(), Err(Error::Invalid(_))),
+        "the pipeline has no handle"
+    );
 }
