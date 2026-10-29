@@ -242,7 +242,6 @@ impl Device {
 
 // ACP70 uses the same independently modeled PS PDM PTE/ring engine, while
 // these checks assert its distinct power/ZSC/PME and retirement behavior.
-// Authored SOURCE ONLY; execution is assigned to the parent gate owner.
 fn fixture70(
     revision: u8,
 ) -> (

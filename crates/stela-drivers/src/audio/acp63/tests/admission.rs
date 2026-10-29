@@ -70,9 +70,10 @@ fn dedicated_source_child_wov_selector_soundwire_and_pin_admission_are_exact() {
     ] {
         let device = Arc::new(Mutex::new(Device::new(0x63)));
         let clock = device.lock().unwrap().clock.clone();
-        // SAFETY: isolated actual model owners; invalid platform evidence
-        // must refuse without publishing or touching any hardware register.
         assert!(
+            // SAFETY: Model and Domain retain the same mutex-serialized
+            // Device and its fixture register state. The model has no
+            // physical PCI or firmware actor, and no capture pages are mapped.
             unsafe {
                 Controller::claim(
                     Model(device.clone()),

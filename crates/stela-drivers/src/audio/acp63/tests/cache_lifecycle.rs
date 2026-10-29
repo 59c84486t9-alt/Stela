@@ -2,7 +2,7 @@
 //! Cache lifecycle cases.
 use super::*;
 
-// Source-only ATU regressions for each actual PS profile. All UNRUN.
+// ATU regression matrices shared by the ACP63 and ACP70 profiles.
 fn check_ps_cache_lifecycle<P: Profile>(
     (mut controller, device, source): (
         acp_pdm::Controller<Model, Time, P>,
