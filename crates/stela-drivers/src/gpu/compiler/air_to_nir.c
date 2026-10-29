@@ -56,7 +56,7 @@ struct value {
    const struct stela_air_sampler *sampler;
    nir_def *id;
    /* A two-member result: a texture call's {texel, residency} or cmpxchg's
-    * {old value, exchanged}. A NULL member is unsupported. */
+    * {old value, exchanged}. A member is NULL when nothing reads it. */
    nir_def *members[2];
 };
 
@@ -2435,9 +2435,9 @@ texture_call(struct translator *t, LLVMValueRef inst, const char *name, size_t n
       .operand = texture_operand, .texture = texture_argument, .sampler = sampler_argument,
       .load_word = texture_load_word, .store_word = texture_store_word,
    };
-   nir_def *result;
+   nir_def *result, *residency;
    bool pair;
-   switch (stela_air_texture_call(&context, inst, name, name_length, &result, &pair)) {
+   switch (stela_air_texture_call(&context, inst, name, name_length, &result, &pair, &residency)) {
    case STELA_AIR_TEXTURE_OTHER:
       *lowered = false;
       return true;
@@ -2451,8 +2451,7 @@ texture_call(struct translator *t, LLVMValueRef inst, const char *name, size_t n
       return true;
    if (!pair)
       return put_value(t, inst, result, 0);
-   /* Sparse residency feedback is unsupported. */
-   return put_pair(t, inst, result, NULL);
+   return put_pair(t, inst, result, residency);
 }
 
 /* extractvalue of a two-member result. */
@@ -2463,7 +2462,7 @@ pair_member(struct translator *t, LLVMValueRef inst, const struct value *pair)
       return fail(t, STELA_AIR_INSTRUCTION, "nested pair indexing");
    unsigned index = LLVMGetIndices(inst)[0];
    if (index > 1 || !pair->members[index])
-      return fail(t, STELA_AIR_INSTRUCTION, "sparse texture residency feedback is unsupported");
+      return fail(t, STELA_AIR_INSTRUCTION, "pair member %u is not lowered", index);
    return put_value(t, inst, pair->members[index], 0);
 }
 

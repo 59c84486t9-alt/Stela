@@ -52,6 +52,9 @@ option_set! {
         /// Kernels encode indirect commands (`command_buffer`,
         /// `render_command`, `compute_command`).
         const INDIRECT_COMMAND_ENCODING = 1 << 23;
+        /// Sparse samples, reads and gathers report whether their texels
+        /// are resident (`sparse_color`).
+        const SPARSE_FEEDBACK = 1 << 24;
     }
 }
 
@@ -732,14 +735,24 @@ impl Derivation<'_> {
             true,
             ShaderFeatures::VERTEX_AMPLIFICATION,
         ));
-        let sparse = self.check(api(
+        let sparse = self.check_all(
             "sparse textures",
-            features.sparse_binding
-                && features.sparse_residency_image_2d
-                && limits.sparse.residency_standard_2d_block_shape
-                && self.platform.sparse_page_bytes != 0,
-            ApiFeatures::SPARSE_TEXTURES,
-        ));
+            &[
+                api(
+                    "sparse textures",
+                    features.sparse_binding
+                        && features.sparse_residency_image_2d
+                        && limits.sparse.residency_standard_2d_block_shape
+                        && self.platform.sparse_page_bytes != 0,
+                    ApiFeatures::SPARSE_TEXTURES,
+                ),
+                shader(
+                    "sparse residency feedback",
+                    features.shader_resource_residency,
+                    ShaderFeatures::SPARSE_FEEDBACK,
+                ),
+            ],
+        );
         let sparse_volumes = sparse
             && self.check(driver(
                 "sparse 3D textures",

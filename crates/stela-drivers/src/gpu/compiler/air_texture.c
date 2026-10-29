@@ -22,8 +22,8 @@
  *   calculate_*_lod   texture, sampler, coord, i32 access
  *   fence             texture
  *
- * Sample, read and gather return {texel, i8 residency}. Atomics are described
- * where they are lowered. */
+ * Sample, read and gather return {texel, i8 residency}: sparse_color's
+ * resident() is bit 0 clear. Atomics are described where they are lowered. */
 #include "air_texture.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -83,6 +83,9 @@ struct call {
    const struct shape *shape;
    unsigned next, count;
    bool coherent;
+   /* Whether the call's residency is read, and then its value. */
+   bool sparse;
+   nir_def *residency;
 };
 
 static bool
@@ -377,6 +380,7 @@ emit(const struct call *call, const struct tex *t)
    tex->is_array = call->shape->array;
    tex->is_shadow = t->shadow;
    tex->is_new_style_shadow = t->shadow;
+   tex->is_sparse = call->sparse;
    tex->component = t->component;
    if (t->coord)
       tex->coord_components = t->coord->num_components;
@@ -396,6 +400,20 @@ emit(const struct call *call, const struct tex *t)
    nir_def_init(&tex->instr, &tex->def, nir_tex_instr_dest_size(tex), 32);
    nir_builder_instr_insert(call->b, &tex->instr);
    return &tex->def;
+}
+
+/* The texel of a sparse result, whose last component is its residency code,
+ * keeping the residency; any other result as it is. */
+static nir_def *
+resident(struct call *call, nir_def *value)
+{
+   if (!call->sparse)
+      return value;
+   nir_builder *b = call->b;
+   unsigned components = value->num_components - 1;
+   nir_def *code = nir_channel(b, value, components);
+   call->residency = nir_b2iN(b, nir_inot(b, nir_is_sparse_texels_resident(b, 1, code)), 8);
+   return nir_trim_vector(b, value, components);
 }
 
 /* A 32-bit texel as the shader's texel type: one float for depth, 16-bit
@@ -495,7 +513,7 @@ sample(struct call *call, enum operation op, nir_def **result)
    }
    if (!expect(call, 32, STELA_AIR_TEXTURE_SAMPLE, "access operand") || !finished(call))
       return false;
-   *result = texel(call, emit(call, &t), false);
+   *result = texel(call, resident(call, emit(call, &t)), false);
    return true;
 }
 
@@ -536,7 +554,7 @@ gather(struct call *call, enum operation op, nir_def **result)
    }
    if (!expect(call, 32, STELA_AIR_TEXTURE_SAMPLE, "access operand") || !finished(call))
       return false;
-   *result = texel(call, emit(call, &t), true);
+   *result = texel(call, resident(call, emit(call, &t)), true);
    return true;
 }
 
@@ -608,11 +626,16 @@ read_texel(struct call *call, nir_def **result)
       if (!image_level(call, &level) || !expect(call, 32, texture->access, "access operand") ||
           !finished(call) || !(deref = texture_deref(call, level)))
          return false;
-      value = nir_image_deref_load(b, 4, 32, &deref->def, image_coord(call, position, face, layer),
-                                   sample ? sample : nir_undef(b, 1, 32), nir_imm_int(b, 0),
-                                   .image_dim = shape->dim, .image_array = shape->array,
-                                   .access = image_access(call, level),
-                                   .dest_type = nir_get_nir_type_for_glsl_base_type(base_type(texture)));
+      nir_def *coord = image_coord(call, position, face, layer);
+      nir_def *index = sample ? sample : nir_undef(b, 1, 32);
+      nir_alu_type type = nir_get_nir_type_for_glsl_base_type(base_type(texture));
+      value = call->sparse ?
+         nir_image_deref_sparse_load(b, 5, 32, &deref->def, coord, index, nir_imm_int(b, 0),
+                                     .image_dim = shape->dim, .image_array = shape->array,
+                                     .access = image_access(call, level), .dest_type = type) :
+         nir_image_deref_load(b, 4, 32, &deref->def, coord, index, nir_imm_int(b, 0),
+                              .image_dim = shape->dim, .image_array = shape->array,
+                              .access = image_access(call, level), .dest_type = type);
    } else {
       struct tex t = {.op = sample ? nir_texop_txf_ms : nir_texop_txf, .texture = deref,
                       .coord = layered(call, position, layer, false), .ms_index = sample};
@@ -622,7 +645,7 @@ read_texel(struct call *call, nir_def **result)
          return false;
       value = emit(call, &t);
    }
-   *result = texel(call, value, false);
+   *result = texel(call, resident(call, value), false);
    return true;
 }
 
@@ -864,12 +887,27 @@ fence(struct call *call)
    return true;
 }
 
+/* Whether anything may read the call's residency: a use other than an
+ * extractvalue of its texel. */
+static bool
+reads_residency(LLVMValueRef inst)
+{
+   for (LLVMUseRef use = LLVMGetFirstUse(inst); use; use = LLVMGetNextUse(use)) {
+      LLVMValueRef user = LLVMGetUser(use);
+      if (!LLVMIsAExtractValueInst(user) || LLVMGetNumIndices(user) != 1 || LLVMGetIndices(user)[0])
+         return true;
+   }
+   return false;
+}
+
 enum stela_air_texture_status
 stela_air_texture_call(const struct stela_air_texture_context *context, LLVMValueRef inst,
-                       const char *name, size_t name_bytes, nir_def **result, bool *pair)
+                       const char *name, size_t name_bytes, nir_def **result, bool *pair,
+                       nir_def **residency)
 {
    *result = NULL;
    *pair = false;
+   *residency = NULL;
    if (!LLVMGetNumArgOperands(inst))
       return STELA_AIR_TEXTURE_OTHER;
    nir_def *texture_id;
@@ -908,21 +946,21 @@ stela_air_texture_call(const struct stela_air_texture_context *context, LLVMValu
       return STELA_AIR_TEXTURE_FAILED;
    }
    bool lowered;
+   *pair = op == SAMPLE || op == SAMPLE_COMPARE || op == SAMPLE_GRAD || op == READ || op == GATHER ||
+           op == GATHER_COMPARE;
+   call.sparse = *pair && reads_residency(inst);
    switch ((enum operation)op) {
    case SAMPLE:
    case SAMPLE_COMPARE:
    case SAMPLE_GRAD:
       lowered = sample(&call, (enum operation)op, result);
-      *pair = true;
       break;
    case READ:
       lowered = read_texel(&call, result);
-      *pair = true;
       break;
    case GATHER:
    case GATHER_COMPARE:
       lowered = gather(&call, (enum operation)op, result);
-      *pair = true;
       break;
    case WRITE:
       lowered = write_texel(&call);
@@ -938,5 +976,6 @@ stela_air_texture_call(const struct stela_air_texture_context *context, LLVMValu
       lowered = query(&call, (enum operation)op, result);
       break;
    }
+   *residency = call.residency;
    return lowered ? STELA_AIR_TEXTURE_LOWERED : STELA_AIR_TEXTURE_FAILED;
 }

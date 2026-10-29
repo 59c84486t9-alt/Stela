@@ -32,9 +32,10 @@ enum stela_air_texture_status {
 /* Lowers a call whose first operand is a texture argument. *result is the
  * call's value, NULL for void functions. Sample, read and gather functions
  * return AIR's {texel, residency} pair, of which *result is the texel and
- * *pair is set; the residency member is sparse texture feedback, which is
- * not lowered. */
+ * *pair is set. *residency is the i8 sparse texture feedback, whose bit 0 is
+ * set when a texel is not resident; NULL when only the texel is read. */
 enum stela_air_texture_status stela_air_texture_call(const struct stela_air_texture_context *context,
                                                      LLVMValueRef call, const char *name,
-                                                     size_t name_bytes, nir_def **result, bool *pair);
+                                                     size_t name_bytes, nir_def **result, bool *pair,
+                                                     nir_def **residency);
 #endif

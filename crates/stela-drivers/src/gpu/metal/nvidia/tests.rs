@@ -215,6 +215,29 @@ fn common3_needs_gpu_encoded_indirect_commands() {
 }
 
 #[test]
+fn sparse_textures_need_residency_feedback() {
+    let chip = Chip::find(0x1b3).unwrap();
+    let mut device = nvk(chip, 16 << 30);
+    device.features.shader_resource_residency = false;
+    let capabilities = Capabilities::derive(
+        &device,
+        &chip.platform(attachment()),
+        ShaderFeatures::KNOWN,
+        ApiFeatures::KNOWN,
+    );
+    assert_eq!(capabilities.sparse_tile_bytes(SparsePageSize::Size64), None);
+    let cause = |name: &str| {
+        capabilities
+            .gaps()
+            .iter()
+            .find(|gap| gap.capability == name)
+            .map(|gap| gap.cause)
+    };
+    assert_eq!(cause("sparse residency feedback"), Some(Cause::Driver));
+    assert_eq!(cause("sparse textures"), Some(Cause::Driver));
+}
+
+#[test]
 fn missing_families_name_the_layer_that_lacks_them() {
     let capabilities = complete(Chip::find(0x172).unwrap());
     let cause = |name: &str| {

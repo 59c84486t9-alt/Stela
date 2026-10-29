@@ -50,6 +50,23 @@ static const char *kernel_body =
    "store i32 %sum, ptr addrspace(1) %out, align 4\n"
    "ret void\n}\n";
 
+/* kernel_body storing whether its sample or read missed a resident texel. */
+static const char *sparse_body =
+   "define void @kernel(i32 %tid, ptr addrspace(1) %src, ptr addrspace(2) %smp,"
+   " ptr addrspace(1) %dst, ptr addrspace(1) %layers, ptr addrspace(1) %out) {\n"
+   "%s = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %src,"
+   " ptr addrspace(2) %smp, <2 x float> <float 0.5, float 0.25>, i1 true, <2 x i32> <i32 1, i32 -1>,"
+   " i1 true, float 2.0, float 0.0, i32 0)\n"
+   "%sampled = extractvalue { <4 x float>, i8 } %s, 1\n"
+   "%r = call { <4 x i32>, i8 } @air.read_texture_2d_array.u.v4i32(ptr addrspace(1) %layers,"
+   " <2 x i32> <i32 5, i32 6>, i32 2, i32 0, i32 3)\n"
+   "%read = extractvalue { <4 x i32>, i8 } %r, 1\n"
+   "%missed = or i8 %sampled, %read\n"
+   "%bit = and i8 %missed, 1\n"
+   "%wide = zext i8 %bit to i32\n"
+   "store i32 %wide, ptr addrspace(1) %out, align 4\n"
+   "ret void\n}\n";
+
 static const char *kernel_metadata =
    "!air.kernel = !{!2}\n"
    "!air.version = !{!20}\n!air.language_version = !{!21}\n"
@@ -194,6 +211,8 @@ kernels_sample_write_read_and_query(void)
    nir_tex_instr *sample = census.first[nir_texop_txl];
    assert(sample->sampler_dim == GLSL_SAMPLER_DIM_2D && !sample->is_array);
    assert(sample->dest_type == nir_type_float32 && sample->coord_components == 2);
+   /* Nothing reads its residency. */
+   assert(!sample->is_sparse && sample->def.num_components == 4);
    assert(nir_tex_instr_src_index(sample, nir_tex_src_offset) >= 0);
    assert(nir_tex_instr_src_index(sample, nir_tex_src_lod) >= 0);
    nir_variable *images = source_variable(sample, nir_tex_src_texture_deref);
@@ -320,14 +339,39 @@ storage_levels_select_their_descriptor(void)
    ralloc_free(shader);
 }
 
+/* Sparse samples and reads report whether their texels are resident. */
+static void
+sparse_texels_report_their_residency(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = kernel(sparse_body, kernel_metadata, &error);
+   if (!shader)
+      fprintf(stderr, "sparse: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "sparse texture kernel");
+   struct census census = count(shader);
+   nir_tex_instr *sample = census.first[nir_texop_txl];
+   assert(sample && sample->is_sparse && sample->def.num_components == 5);
+   unsigned loads = 0, residencies = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+         if (intrinsic->intrinsic == nir_intrinsic_image_deref_sparse_load) {
+            assert(intrinsic->def.num_components == 5);
+            loads++;
+         }
+         residencies += intrinsic->intrinsic == nir_intrinsic_is_sparse_texels_resident;
+      }
+   }
+   assert(loads == 1 && !census.load && residencies == 2);
+   ralloc_free(shader);
+}
+
 static void
 unsupported_texture_uses_are_refused(void)
 {
-   /* Residency feedback of a sparse texture. */
-   refuse(replace(kernel_body, "%t = extractvalue { <4 x float>, i8 } %s, 0",
-                  "%t = extractvalue { <4 x float>, i8 } %s, 0\n"
-                  "%resident = extractvalue { <4 x float>, i8 } %s, 1"),
-          kernel_metadata, STELA_AIR_INSTRUCTION, "residency");
    /* Sampling the write-only texture. */
    refuse(replace(kernel_body, "@air.sample_texture_2d.v4f32(ptr addrspace(1) %src",
                   "@air.sample_texture_2d.v4f32(ptr addrspace(1) %dst"),
@@ -452,6 +496,7 @@ main(void)
    kernels_sample_write_read_and_query();
    fragments_sample_with_derivatives_compare_and_gather();
    storage_levels_select_their_descriptor();
+   sparse_texels_report_their_residency();
    unsupported_texture_uses_are_refused();
    kernels_take_texture_atomics();
    glsl_type_singleton_decref();

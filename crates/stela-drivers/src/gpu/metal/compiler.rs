@@ -63,7 +63,8 @@ const FEATURES: ShaderFeatures = ShaderFeatures::COMPUTE
     .union(ShaderFeatures::VERTEX_AMPLIFICATION)
     .union(ShaderFeatures::TESSELLATION)
     .union(ShaderFeatures::BARYCENTRICS)
-    .union(ShaderFeatures::PULL_MODEL_INTERPOLATION);
+    .union(ShaderFeatures::PULL_MODEL_INTERPOLATION)
+    .union(ShaderFeatures::SPARSE_FEEDBACK);
 
 /// LLVM instructions one compilation may lower, legalization included. Far
 /// beyond the functions Metal compiles, it bounds the work of hostile input.
