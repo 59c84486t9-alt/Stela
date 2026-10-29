@@ -171,10 +171,9 @@ impl Pe {
                 report_diagnostics(&mut machine);
             }
             match stop {
-                Stop::Budget => {}
                 // A PE that waits for an interrupt serves the host meanwhile.
-                Stop::Waiting if machine.waits_for_interrupt() => super::service::serve(false),
-                Stop::Waiting => {}
+                stop if machine.yielded_for_interrupt(&stop) => super::service::serve(false),
+                Stop::Budget | Stop::Waiting => {}
                 stop => stopped(pe, stop),
             }
             hub.publish(pe, machine.counts());

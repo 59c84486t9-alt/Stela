@@ -2468,7 +2468,7 @@ fn run<H: Host>(
         let waiting = matches!(stop, Stop::Waiting);
         // The boot PE holds no lock another PE spins on while it waits for
         // an interrupt or runs at EL0 (`service`).
-        let quiet = waiting && machine.waits_for_interrupt() || machine.cpu.pstate.el == 0;
+        let quiet = machine.yielded_for_interrupt(&stop) || machine.cpu.pstate.el == 0;
         let requested = machine.devices.hub().service_unclaimed();
         if !machine.runs_parallel() || quiet || service::starved(tsc_hz, requested) {
             machine.exclude_host_time(|_| service::serve(true));

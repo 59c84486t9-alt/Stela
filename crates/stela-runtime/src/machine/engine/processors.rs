@@ -408,6 +408,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .is_some_and(|wait| wait.kind == WaitKind::Interrupt || wait.down)
     }
 
+    /// A scheduling yield that leaves this PE waiting for an interrupt,
+    /// including a host-time budget that expires during the wait.
+    pub fn yielded_for_interrupt(&self, stop: &Stop) -> bool {
+        matches!(stop, Stop::Budget | Stop::Waiting) && self.waits_for_interrupt()
+    }
+
     pub(super) fn take_starts(&mut self) -> Step {
         while let Some(start) = self.devices.take_start() {
             self.start(start)?;

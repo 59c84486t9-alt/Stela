@@ -91,18 +91,22 @@ fn idle_wait_arms_the_earlier_host_deadline_and_clears_it_on_yield() {
         .set(SystemRegister::CNTV_CTL_EL0, 0, 1);
     machine.derived_changed();
     machine.host.exits = vec![system(pc)];
-    assert_eq!(
-        machine.run_with_budget(RunBudget {
-            blocks: 10,
-            host_ticks: Some(50)
-        }),
-        Stop::Budget
-    );
+    let stop = machine.run_with_budget(RunBudget {
+        blocks: 10,
+        host_ticks: Some(50),
+    });
+    assert_eq!(stop, Stop::Budget);
     assert_eq!(machine.host.timers, [Some(50), None]);
     assert_eq!(machine.cpu.read(SystemRegister::CNTV_CVAL_EL0), 10_000);
     assert_eq!(machine.cpu.retired, 1);
     assert_eq!(machine.cpu.pc, pc);
     assert!(machine.waits_for_interrupt());
+    let reads = machine.host.counter_reads;
+    assert!(machine.yielded_for_interrupt(&stop));
+    assert!(machine.yielded_for_interrupt(&Stop::Waiting));
+    assert!(!machine.yielded_for_interrupt(&Stop::Breakpoint(pc)));
+    assert!(!machine.yielded_for_interrupt(&Stop::Idle));
+    assert_eq!(machine.host.counter_reads, reads);
     machine.host.now = 10_000;
     machine.breakpoints.push(pc + 4);
     assert_eq!(
@@ -114,6 +118,32 @@ fn idle_wait_arms_the_earlier_host_deadline_and_clears_it_on_yield() {
     );
     assert_eq!(machine.cpu.retired, 1);
     assert!(!machine.waits_for_interrupt());
+    assert!(!machine.yielded_for_interrupt(&Stop::Budget));
+}
+
+#[test]
+fn event_wait_budget_does_not_request_interrupt_wait_service() {
+    let mut machine = machine(&[0xd503_205f]); // wfe
+    let pc = machine.cpu.pc;
+    machine
+        .cpu
+        .registers
+        .set(SystemRegister::CNTV_CVAL_EL0, 0, 10_000);
+    machine
+        .cpu
+        .registers
+        .set(SystemRegister::CNTV_CTL_EL0, 0, 1);
+    machine.derived_changed();
+    machine.host.exits = vec![system(pc)];
+    let stop = machine.run_with_budget(RunBudget {
+        blocks: 10,
+        host_ticks: Some(50),
+    });
+    assert_eq!(stop, Stop::Budget);
+    assert!(machine.waiting.is_some());
+    assert!(!machine.yielded_for_interrupt(&stop));
+    assert!(!machine.yielded_for_interrupt(&Stop::Waiting));
+    assert_eq!(machine.cpu.pc, pc);
 }
 
 #[test]
