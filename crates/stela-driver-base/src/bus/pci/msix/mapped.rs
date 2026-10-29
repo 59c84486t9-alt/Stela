@@ -1,80 +1,64 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Uncached mappings of the MSI-X table and pending-bit array windows of one BAR.
+//! The MSI-X table and pending-bit array windows of one BAR, as views of the
+//! driver's own uncached mappings of that BAR.
 use super::*;
-use crate::bus::mmio::owned::{CacheAttribute, Mapping, Protection};
-use core::ptr::NonNull;
+use crate::bus::mmio::owned::{CacheAttribute, Mapping, MappingView, Protection};
 
-/// UC mappings of at most two disjoint windows of one whole BAR resource.
-/// The windows allow a small table/PBA without mapping a huge device aperture.
+/// Views of at most two disjoint UC mappings inside one whole BAR resource.
+/// A driver maps its BAR once for its registers and hands the same mapping
+/// here, since owned mappings of one resource may not overlap; two windows
+/// allow a small table/PBA without mapping a huge device aperture.
 pub struct MappedBar {
     bar: PhysicalSpan,
-    mappings: [Option<Mapping>; 2],
+    windows: [Option<(PhysicalSpan, MappingView)>; 2],
 }
 impl MappedBar {
     /// # Safety
     /// `bar` is this function's complete reserved memory BAR at the
-    /// reset/assignment epoch. Mappings are owned mappings of
-    /// its table/PBA registers with PCI DWORD access and UC ordering checked
-    /// for this device. Their resource owner must keep that full BAR grant.
+    /// reset/assignment epoch. `mappings` are owned mappings of its table/PBA
+    /// registers with PCI DWORD access and UC ordering checked for this device,
+    /// and their owner keeps them installed for as long as this value is used.
     /// No firmware/driver/CPU alias may mutate or revoke the table/resources.
-    /// Errors return the exact mappings; no device access is performed here.
-    pub unsafe fn new(
-        bar: PhysicalSpan,
-        mappings: [Option<Mapping>; 2],
-    ) -> Result<Self, (Error, [Option<Mapping>; 2])> {
-        let valid = (|| {
-            let mut seen = None;
-            for mapping in mappings.iter().flatten() {
-                let span = mapping.physical_span().map_err(|_| Error::Mapping)?;
-                if mapping.attribute().map_err(|_| Error::Mapping)? != CacheAttribute::Uncached
-                    || mapping.protection().map_err(|_| Error::Mapping)? != Protection::ReadWrite
-                    || span.start() < bar.start()
-                    || span.end() > bar.end()
-                    || seen.is_some_and(|old: PhysicalSpan| {
-                        old.start() < span.end() && span.start() < old.end()
-                    })
-                {
-                    return Err(Error::Mapping);
-                }
-                seen = Some(span);
-            }
-            if seen.is_none() {
+    pub unsafe fn new(bar: PhysicalSpan, mappings: [Option<&Mapping>; 2]) -> Result<Self, Error> {
+        let mut windows = [None, None];
+        for (window, mapping) in windows.iter_mut().zip(mappings) {
+            let Some(mapping) = mapping else { continue };
+            let span = mapping.physical_span().map_err(|_| Error::Mapping)?;
+            if mapping.attribute().map_err(|_| Error::Mapping)? != CacheAttribute::Uncached
+                || mapping.protection().map_err(|_| Error::Mapping)? != Protection::ReadWrite
+                || span.start() < bar.start()
+                || span.end() > bar.end()
+            {
                 return Err(Error::Mapping);
             }
-            Ok(())
-        })();
-        match valid {
-            Ok(()) => Ok(Self { bar, mappings }),
-            Err(error) => Err((error, mappings)),
+            let view = mapping.view(0..mapping.bytes().map_err(|_| Error::Mapping)?);
+            *window = Some((span, view.map_err(|_| Error::Mapping)?));
+        }
+        match &windows {
+            [None, None] => Err(Error::Mapping),
+            [Some((a, _)), Some((b, _))] if a.start() < b.end() && b.start() < a.end() => {
+                Err(Error::Mapping)
+            }
+            _ => Ok(Self { bar, windows }),
         }
     }
-    fn pointer(&self, offset: u64) -> Result<NonNull<u32>, IoError> {
+    /// The view and offset in it of the DWORD at BAR `offset`.
+    fn window(&self, offset: u64) -> Result<(&MappingView, usize), IoError> {
         if !offset.is_multiple_of(4) {
             return Err(IoError);
         }
         let physical = self.bar.start().checked_add(offset).ok_or(IoError)?;
         let end = physical.checked_add(4).ok_or(IoError)?;
-        for mapping in self.mappings.iter().flatten() {
-            let span = mapping.physical_span().map_err(|_| IoError)?;
-            if span.start() <= physical && end <= span.end() {
-                let local = usize::try_from(physical - span.start()).map_err(|_| IoError)?;
-                let pointer = mapping.address(local, 4).map_err(|_| IoError)?;
-                if !(pointer.as_ptr() as usize).is_multiple_of(4) {
-                    return Err(IoError);
-                }
-                return Ok(pointer.cast());
-            }
-        }
-        Err(IoError)
-    }
-    /// Returned mappings still require acknowledged retirement, after all
-    /// native source/callback/CPU users have drained; this does not retire them.
-    pub fn into_mappings(self) -> [Option<Mapping>; 2] {
-        self.mappings
+        self.windows
+            .iter()
+            .flatten()
+            .find(|(span, _)| span.start() <= physical && end <= span.end())
+            .map(|(span, view)| (view, (physical - span.start()) as usize))
+            .ok_or(IoError)
     }
 }
-// SAFETY: unsafe construction binds kept resources/UC mappings;
-// checked pointers and native volatile DWORDs implement the access contract.
+// SAFETY: unsafe construction binds kept resources/UC mappings; checked views
+// and native volatile DWORDs implement the access contract.
 unsafe impl BarAccess for MappedBar {
     fn physical_span(&self) -> PhysicalSpan {
         self.bar
@@ -86,20 +70,17 @@ unsafe impl BarAccess for MappedBar {
         let Some(end) = start.checked_add(bytes) else {
             return false;
         };
-        self.mappings.iter().flatten().any(|m| {
-            m.physical_span()
-                .is_ok_and(|span| span.start() <= start && end <= span.end())
-        })
+        self.windows
+            .iter()
+            .flatten()
+            .any(|(span, _)| span.start() <= start && end <= span.end())
     }
     fn read32(&self, offset: u64) -> Result<u32, IoError> {
-        let pointer = self.pointer(offset)?;
-        // SAFETY: pointer validates kept aligned UC register mapping.
-        Ok(unsafe { core::ptr::read_volatile(pointer.as_ptr()) })
+        let (view, local) = self.window(offset)?;
+        view.read32(local).map_err(|_| IoError)
     }
     fn write32(&mut self, offset: u64, value: u32) -> Result<(), IoError> {
-        let pointer = self.pointer(offset)?;
-        // SAFETY: same checked owned mapping, native DWORD store effect.
-        unsafe { core::ptr::write_volatile(pointer.as_ptr(), value) };
-        Ok(())
+        let (view, local) = self.window(offset)?;
+        view.write32(local, value).map_err(|_| IoError)
     }
 }

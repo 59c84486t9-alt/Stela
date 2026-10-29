@@ -96,7 +96,7 @@ fn owned_mapping_windows() {
     }
     .unwrap();
     let resource = Resource::new(Box::new(Backing));
-    let first = authority
+    let mut first = authority
         .map(
             resource.clone(),
             0,
@@ -105,7 +105,7 @@ fn owned_mapping_windows() {
             Protection::ReadWrite,
         )
         .unwrap();
-    let second = authority
+    let mut second = authority
         .map(
             resource.clone(),
             PBA as usize,
@@ -119,7 +119,7 @@ fn owned_mapping_windows() {
     let mut bar = match unsafe {
         MappedBar::new(
             PhysicalSpan::new(BASE, BYTES).unwrap(),
-            [Some(first), Some(second)],
+            [Some(&first), Some(&second)],
         )
     } {
         Ok(bar) => bar,
@@ -171,16 +171,15 @@ fn owned_mapping_windows() {
     }
     // SAFETY: All model deliveries finish synchronously while holding the peripheral
     // mutex. No hardware or background callback can race release of these owners.
-    let (_, _, mut actual_bars) = unsafe { owner.release() }.unwrap();
-    let bar = actual_bars[0].take().unwrap();
-    let mut windows = bar.into_mappings();
-    for mapping in windows.iter_mut().flatten() {
-        // SAFETY: The owner returned these mappings and no BAR access remains. The
+    let (_, _, actual_bars) = unsafe { owner.release() }.unwrap();
+    drop(actual_bars);
+    for mapping in [&mut first, &mut second] {
+        // SAFETY: The owner released its views and no BAR access remains. The
         // private platform keeps their Box buffers live until this retirement calls unmap.
         unsafe { mapping.retire() }.unwrap();
     }
     assert!(platform.0.lock().unwrap().is_empty());
-    let read_only = authority
+    let mut read_only = authority
         .map(
             resource,
             0,
@@ -189,20 +188,21 @@ fn owned_mapping_windows() {
             Protection::ReadOnly,
         )
         .unwrap();
-    // SAFETY: Supplied windows refer to this isolated Box-backed resource and keep
-    // their aligned buffers. Rejected read-only windows are returned without device access.
-    let mut returned = match unsafe {
+    // SAFETY: The window refers to this isolated Box-backed resource and keeps
+    // its aligned buffer. A rejected read-only window is never accessed.
+    let rejected = unsafe {
         MappedBar::new(
             PhysicalSpan::new(BASE, BYTES).unwrap(),
-            [Some(read_only), None],
+            [Some(&read_only), None],
         )
-    } {
-        Err((Error::Mapping, returned)) => returned,
-        _ => panic!("read-only MSI-X backing accepted"),
     };
-    // SAFETY: The owner returned these mappings and no BAR access remains. The
-    // private platform keeps their Box buffers live until this retirement calls unmap.
-    unsafe { returned[0].as_mut().unwrap().retire() }.unwrap();
+    assert!(
+        matches!(rejected, Err(Error::Mapping)),
+        "read-only MSI-X backing accepted"
+    );
+    // SAFETY: No BAR access remains. The private platform keeps the Box buffer
+    // live until this retirement calls unmap.
+    unsafe { read_only.retire() }.unwrap();
     assert!(platform.0.lock().unwrap().is_empty());
 }
 
