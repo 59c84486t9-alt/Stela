@@ -22,13 +22,13 @@ pub(super) fn link_local(mac: [u8; 6]) -> Ipv6Addr {
     Ipv6Addr::from(bytes)
 }
 impl<L: Link, C: Clock> Stack<L, C> {
-    pub(super) fn update_dns(&mut self) {
+    pub(super) fn update_dns(&mut self) -> Result<(), NetError> {
         let mut servers: Vec<IpAddress> = self
             .config
             .iter()
             .flat_map(|config| config.dns.iter().copied().map(IpAddress::Ipv4))
             .collect();
-        let now = self.now();
+        let now = self.now()?;
         for server in self.phy.rdnss.servers(now) {
             let address = IpAddress::Ipv6(server);
             if !servers.contains(&address) {
@@ -41,6 +41,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
                 .update_servers(&servers);
             self.dns_servers = servers;
         }
+        Ok(())
     }
     pub(super) fn ipv6_ready(&self) -> bool {
         self.iface.routes().get_default_ipv6_route().is_some()
@@ -73,7 +74,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
                 .iter()
                 .any(|cidr| matches!(cidr, IpCidr::Ipv6(cidr) if cidr.address() == *address))
         });
-        let now = self.now();
+        let now = self.now()?;
         let mut completed = Vec::new();
         self.phy.probes.retain(|probe| {
             if !self
@@ -134,12 +135,13 @@ impl<L: Link, C: Clock> Stack<L, C> {
                 .transmit(&dad::solicitation(self.phy.link.mac().0, address, nonce))?;
             // DAD is asynchronous: every normal poll still services DHCP,
             // DNS/TCP, router lifetimes and unrelated received frames.
+            let until = self.now()?.saturating_add(1_000_000);
             self.phy.probes.push(dad::Probe {
                 address,
                 nonce,
                 // Link admission/queue contention may have consumed time before
                 // publication. Keep the full DAD interval after transmit returns.
-                until: self.now().saturating_add(1_000_000),
+                until,
                 duplicate: false,
             });
         }
@@ -166,13 +168,13 @@ impl<L: Link, C: Clock> Stack<L, C> {
     /// and a router advertisement; DNS also accepts RFC8106 RDNSS lifetimes.
     /// Stateful DHCPv6 is not implemented.
     pub fn automatic(&mut self) -> Result<Automatic, NetError> {
-        let start = self.now();
+        let start = self.now()?;
         while !self.phy.link.carrier() {
-            if self.now().wrapping_sub(start) >= CARRIER_WAIT_US {
+            if self.now()?.wrapping_sub(start) >= CARRIER_WAIT_US {
                 return Err(NetError::NoCarrier);
             }
         }
-        let deadline = self.now().saturating_add(DHCP_WAIT_US);
+        let deadline = self.now()?.saturating_add(DHCP_WAIT_US);
         loop {
             self.poll()?;
             if self.config.is_some() || self.ipv6_ready() {
@@ -190,7 +192,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
                     dns: self.dns_servers.clone(),
                 });
             }
-            if self.now() >= deadline {
+            if self.now()? >= deadline {
                 if let Some(address) = self.conflicts.first() {
                     return Err(NetError::DuplicateAddress(*address));
                 }
@@ -198,7 +200,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
                     "no DHCPv4 lease or usable IPv6 router advertisement within 30 seconds; stateful DHCPv6 is unsupported",
                 ));
             }
-            self.wait_until(deadline);
+            self.wait_until(deadline)?;
         }
     }
 }
@@ -250,10 +252,10 @@ pub(super) mod tests {
     }
     struct ClockStep(core::cell::Cell<u64>);
     impl Clock for ClockStep {
-        fn now_us(&self) -> u64 {
+        fn now_us(&self) -> Result<u64, ClockError> {
             let now = self.0.get() + 10_000;
             self.0.set(now);
-            now
+            Ok(now)
         }
     }
     struct Router {
@@ -322,8 +324,8 @@ pub(super) mod tests {
         use core::cell::Cell;
         struct LogicalClock(Rc<Cell<u64>>);
         impl Clock for LogicalClock {
-            fn now_us(&self) -> u64 {
-                self.0.get()
+            fn now_us(&self) -> Result<u64, ClockError> {
+                Ok(self.0.get())
             }
         }
         struct DelayedLink {
@@ -354,7 +356,8 @@ pub(super) mod tests {
             },
             LogicalClock(now.clone()),
             7,
-        );
+        )
+        .unwrap();
         stack.probe_ipv6().unwrap();
         assert_eq!(now.get(), 2_000_000);
         stack.probe_ipv6().unwrap();
@@ -373,7 +376,7 @@ pub(super) mod tests {
             frames: VecDeque::new(),
             probes: 0,
         };
-        let mut stack = Stack::new(router, ClockStep(core::cell::Cell::new(0)), 7);
+        let mut stack = Stack::new(router, ClockStep(core::cell::Cell::new(0)), 7).unwrap();
         let configuration = stack.automatic().unwrap();
         assert!(stack.config().is_none());
         assert!(configuration.addresses.iter().any(|address|matches!(address,IpCidr::Ipv6(cidr) if !cidr.address().is_unicast_link_local())));

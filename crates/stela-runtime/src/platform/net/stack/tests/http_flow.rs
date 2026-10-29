@@ -74,7 +74,7 @@ impl Link for Peer {
 }
 fn stack(replies: Vec<Vec<u8>>) -> Stack<Peer, TestClock> {
     let clock = TestClock::default();
-    let mut stack = Stack::new(Peer::new(clock.clone(), replies), clock, 7);
+    let mut stack = Stack::new(Peer::new(clock.clone(), replies), clock, 7).unwrap();
     stack
         .set_config(Config {
             address: Ipv4Cidr::new(CLIENT_IP, 24),

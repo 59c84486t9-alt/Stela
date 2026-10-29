@@ -821,7 +821,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
     use stela_drivers::net::{Link, LinkError};
-    use stela_runtime::net::{Clock, NetError, Stack};
+    use stela_runtime::net::{Clock, ClockError, NetError, Stack};
 
     #[derive(Clone, Default)]
     struct Log(Arc<Mutex<Vec<u8>>>);
@@ -864,8 +864,8 @@ mod tests {
 
     struct Wall(Instant);
     impl Clock for Wall {
-        fn now_us(&self) -> u64 {
-            self.0.elapsed().as_micros() as u64
+        fn now_us(&self) -> Result<u64, ClockError> {
+            Ok(self.0.elapsed().as_micros() as u64)
         }
     }
 
@@ -881,6 +881,7 @@ mod tests {
             Wall(Instant::now()),
             7,
         )
+        .unwrap()
     }
 
     #[test]

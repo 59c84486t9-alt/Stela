@@ -267,7 +267,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         body: &[u8],
         security: Result<Arc<ClientConfig>, TlsUnavailable>,
     ) -> Result<Vec<u8>, NetError> {
-        let deadline = self.now().saturating_add(POST_WAIT_US);
+        let deadline = self.now()?.saturating_add(POST_WAIT_US);
         let mut transfer = self.open_http(
             url,
             HttpRequest::post(headers, content_type, body),
@@ -276,20 +276,22 @@ impl<L: Link, C: Clock> Stack<L, C> {
         )?;
         let mut reply = Zeroizing::new(Vec::new());
         let mut response = None;
-        let result = loop {
-            match self.read_http(&mut transfer, |bytes, closed| {
-                reply.extend_from_slice(bytes);
-                response = http::response(&reply, closed)?;
-                Ok(response.is_some())
-            }) {
-                Ok(true) => break Ok(()),
-                Ok(false) if self.now() >= deadline => {
-                    break Err(NetError::Timeout("HTTP request"));
+        let result = (|| {
+            loop {
+                match self.read_http(&mut transfer, |bytes, closed| {
+                    reply.extend_from_slice(bytes);
+                    response = http::response(&reply, closed)?;
+                    Ok(response.is_some())
+                }) {
+                    Ok(true) => break Ok(()),
+                    Ok(false) if self.now()? >= deadline => {
+                        break Err(NetError::Timeout("HTTP request"));
+                    }
+                    Ok(false) => self.wait_until(deadline)?,
+                    Err(error) => break Err(error),
                 }
-                Ok(false) => self.wait_until(deadline),
-                Err(error) => break Err(error),
             }
-        };
+        })();
         self.close_http(transfer);
         result?;
         Ok(response.expect("completed response").body)

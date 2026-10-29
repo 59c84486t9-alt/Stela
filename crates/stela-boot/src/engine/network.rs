@@ -78,17 +78,23 @@ impl Link for RootLink {
 struct Ticking(Clock);
 
 impl stela_runtime::net::Clock for Ticking {
-    fn now_us(&self) -> u64 {
+    fn now_us(&self) -> Result<u64, stela_runtime::net::ClockError> {
         crate::status::tick();
-        self.0.now_us()
+        self.0
+            .try_now_us()
+            .map_err(stela_runtime::net::ClockError::Calibration)
     }
     /// The adapter's completion signal wakes the boot processor, which runs
     /// the stack.
-    fn sleep(&self, until_us: u64) {
-        let now = self.0.now_us();
+    fn sleep(&self, until_us: u64) -> Result<(), stela_runtime::net::ClockError> {
+        let now = self
+            .0
+            .try_now_us()
+            .map_err(stela_runtime::net::ClockError::Calibration)?;
         if until_us > now {
             super::host::sleep_for(until_us - now);
         }
+        Ok(())
     }
 }
 
@@ -124,7 +130,8 @@ impl HostNetwork {
                 },
                 Ticking(clock),
                 u64::from_le_bytes(seed),
-            );
+            )
+            .map_err(|error| format!("{error}"))?;
             match stack.automatic() {
                 Ok(config) => {
                     output::arguments(format_args!(
@@ -227,8 +234,8 @@ impl HostNetwork {
     }
 
     /// Waits up to `micros` for the adapter's next frame (`Stack::wait`).
-    pub fn wait(&mut self, micros: u64) {
-        self.stack.wait(micros);
+    pub fn wait(&mut self, micros: u64) -> Result<(), NetError> {
+        self.stack.wait(micros)
     }
 
     /// Opens one opaque TCP stream for the restore reverse proxy.

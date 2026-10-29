@@ -152,7 +152,11 @@ impl Remote {
             } else if self.end() > before {
                 failures = 0;
             } else if self.range.is_some() {
-                self.network.0.borrow_mut().wait(WAIT_US);
+                let result = self.network.0.borrow_mut().wait(WAIT_US);
+                if let Err(error) = result {
+                    self.stop();
+                    return Err(error);
+                }
             }
         }
         Ok(())

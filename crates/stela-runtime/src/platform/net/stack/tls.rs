@@ -43,12 +43,19 @@ impl<L: Link, C: Clock> Stack<L, C> {
             .map_err(|_| NetError::Invalid("TLS server name"))?;
         let channel = Channel::new(config, peer).map_err(tls_error)?;
         let tcp = self.open_raw(destination.host, destination.port, buffer)?;
+        let idle_at = match self.now() {
+            Ok(now) => now.saturating_add(IDLE_US),
+            Err(error) => {
+                self.close(tcp);
+                return Err(error);
+            }
+        };
         Ok(SecureTransfer {
             tcp,
             channel,
             request,
             sent: 0,
-            idle_at: self.now().saturating_add(IDLE_US),
+            idle_at,
         })
     }
 
@@ -60,7 +67,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         transfer: &mut SecureTransfer,
         mut take: impl FnMut(&[u8], bool) -> Result<bool, NetError>,
     ) -> Result<bool, NetError> {
-        if self.now() >= transfer.idle_at {
+        if self.now()? >= transfer.idle_at {
             return Err(NetError::Timeout("TLS transfer"));
         }
         for turn in 0..2 {
@@ -71,7 +78,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
                     .map_err(tls_error)?
                 {
                     Progress::Received(bytes) => {
-                        transfer.idle_at = self.now().saturating_add(IDLE_US);
+                        transfer.idle_at = self.now()?.saturating_add(IDLE_US);
                         if take(&bytes, false)? {
                             return Ok(true);
                         }
@@ -93,7 +100,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
                     if count == 0 {
                         break;
                     }
-                    transfer.idle_at = self.now().saturating_add(IDLE_US);
+                    transfer.idle_at = self.now()?.saturating_add(IDLE_US);
                     if !transfer.channel.output().is_empty() {
                         break;
                     }
