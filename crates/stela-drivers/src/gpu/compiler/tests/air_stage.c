@@ -335,10 +335,8 @@ static void run(LLVMMemoryBufferRef raw,const char *vsname,const char *fsname,bo
    if(!original) {
       const struct {const char *old,*replacement;enum stela_air_error_kind error;} cases[]={
          {"i32 2,!\"air.struct_type_info\"","i32 1,!\"air.struct_type_info\"",STELA_AIR_ARGUMENT},
-         {"i32 0,i32 16,i32 0,!\"float4\"","i32 4,i32 16,i32 0,!\"float4\"",STELA_AIR_TYPE},
          {"!\"air.read\",!\"air.address_space\"","!\"air.write\",!\"air.address_space\"",STELA_AIR_ARGUMENT},
          {"<float 1.0,float 0.5,float 0.25,float 0.0>","<float 1.0,float poison,float 0.25,float 0.0>",STELA_AIR_INSTRUCTION},
-         {"%Input = type { <4 x float> }","%Input = type { <4 x i32> }",STELA_AIR_TYPE},
          {"e-p:64:64-i32:32", "e-p:64:64-p2:32:32-i32:32", STELA_AIR_TARGET},
          {"getelementptr %Input", "getelementptr <vscale x 4 x float>", STELA_AIR_TYPE},
       };
@@ -405,7 +403,7 @@ link_and_option_failures(LLVMMemoryBufferRef raw, const char *vsname, const char
 }
 
 static void
-primitive_layout_semantics(void)
+primitive_buffer_semantics(void)
 {
    char *a = change(fixture, "!\"air.struct_type_info\",!7,", "");
    char *vector = change(a, "!\"Input\"", "!\"float4\""); free(a);
@@ -416,8 +414,6 @@ primitive_layout_semantics(void)
    a = change(scalar, "i32 16,!\"air.arg_type_align_size\",i32 16,!\"air.arg_type_name\",!\"float4\"",
       "i32 4,!\"air.arg_type_align_size\",i32 4,!\"air.arg_type_name\",!\"uint\""); free(scalar); scalar = a;
    const char *sources[] = {vector, scalar};
-   const char *layouts[] = {"v128:128", "i32:32"};
-   const char *overaligned[] = {"v128:256", "i32:64"};
    for (unsigned i = 0; i < 2; i++) {
       LLVMMemoryBufferRef raw = bitcode(sources[i]); struct snapshot vs, fs; struct stela_air_error e;
       CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw),
@@ -429,17 +425,9 @@ primitive_layout_semantics(void)
       struct stela_air_stage_options o = options(STELA_AIR_VERTEX, map, count, &callbacks);
       nir_shader *nir = translate(raw, "test_vertex", &o); ralloc_free(nir);
       LLVMDisposeMemoryBuffer(raw);
-      char *bad = change(sources[i], layouts[i], overaligned[i]); raw = bitcode(bad); free(bad);
-      callbacks = 0;
-      CHECK(!stela_air_inspect_stage(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw),
-         "test_vertex", STELA_AIR_VERTEX, count_stage_callback, &callbacks, &e) && e.kind == STELA_AIR_TYPE);
-      CHECK(callbacks == 0);
-      CHECK(!stela_air_stage_to_nir(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw),
-         "test_vertex", &nir_options, &o, &e) && e.kind == STELA_AIR_TYPE && callbacks == 0);
-      LLVMDisposeMemoryBuffer(raw);
    }
    free(vector); free(scalar);
-   puts("Primitive float4 and unused uint reflection require exact original DataLayout before callbacks");
+   puts("Primitive float4 and unused uint render buffers translate without structure reflection");
 }
 
 static char *
@@ -716,27 +704,9 @@ pointer_phi_stage_semantics(void)
       }
       LLVMDisposeMemoryBuffer(raw);
    }
+   /* Source roots with equal rights and type remain independent resources. */
    char *text = vertex_body(root);
-   /* A root PHI still validates the reflected struct before any first GEP. */
-   char *bad = change(text,
-      "getelementptr %Input, ptr addrspace(2) %p, i64 0, i32 0",
-      "getelementptr <4 x float>, ptr addrspace(2) %p, i64 0");
-   refusal(bad, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_TYPE);
-   free(bad); free(text);
-   text = vertex_body(derived);
-   bad = change(text, "[%pa,%a],[%pb,%b]", "[%buffer,%a],[%pb,%b]");
-   refusal(bad, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_MEMORY);
-   free(bad); free(text);
-   text = vertex_body(cycle);
-   bad = change(text, "[%buffer,%entry],[%p,%latch]", "[%buffer,%entry],[%step,%latch]");
-   free(text); text = change(bad, "latch:\n %next = add",
-      "latch:\n %step = getelementptr %Input, ptr addrspace(2) %p, i64 0\n %next = add");
-   free(bad);
-   refusal(text, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_MEMORY);
-   free(text);
-   /* Source roots with equal rights/type remain independent constant views. */
-   text = vertex_body(root);
-   bad = change(text, "ptr addrspace(2) %buffer)", "ptr addrspace(2) %buffer, ptr addrspace(2) %other)");
+   char *bad = change(text, "ptr addrspace(2) %buffer)", "ptr addrspace(2) %buffer, ptr addrspace(2) %other)");
    free(text); text = change(bad, "!4 = !{!5,!6}", "!4 = !{!5,!6,!26}"); free(bad);
    bad = change(text, "[%buffer,%a],[%alias,%b]", "[%buffer,%a],[%other,%b]"); free(text);
    const char *extra = "!26 = !{i32 2,!\"air.buffer\",!\"air.location_index\",i32 1,i32 1,!\"air.read\",!\"air.address_space\",i32 2,"
@@ -745,7 +715,7 @@ pointer_phi_stage_semantics(void)
    text = malloc(bytes); CHECK(text); snprintf(text, bytes, "%s%s", bad, extra); free(bad);
    refusal(text, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_MEMORY);
    free(text);
-   puts("AS2 pointer PHIs preserve homogeneous root/derived reflection, exact view bounds and root identity");
+   puts("AS2 pointer PHIs join root and derived pointers of one resource and keep root identity");
 }
 
 static void
@@ -816,7 +786,7 @@ pointer_equality_stage_semantics(void)
       "icmp eq ptr addrspace(2) %p, null");
    refusal(bad, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_MEMORY);
    free(bad); free(text);
-   puts("AS2 same-resource eq/ne ignore only reflection typing and retain exact loop-PHI output decisions");
+   puts("AS2 same-resource eq/ne retain exact loop-PHI output decisions");
 }
 
 #undef STAGE_PAIR
@@ -1030,10 +1000,6 @@ static void unused_stage_buffer_semantics(void)
          const struct {const char *old,*replacement;enum stela_air_error_kind kind;} bad[]={
             {"i32 7,i32 1,!\"air.read\"","i32 7,i32 1,!\"air.write\"",STELA_AIR_ARGUMENT},
             {"ptr addrspace(2) %unused","ptr addrspace(1) %unused",STELA_AIR_ARGUMENT},
-            {"!\"float4\",!\"air.arg_name\",!\"unused\"","!\"unknown\",!\"air.arg_name\",!\"unused\"",STELA_AIR_ARGUMENT},
-            {"!\"air.arg_type_size\",i32 16,!\"air.arg_type_align_size\",i32 16,!\"air.arg_type_name\",!\"float4\",!\"air.arg_name\",!\"unused\"",
-             "!\"air.arg_type_size\",i32 8,!\"air.arg_type_align_size\",i32 16,!\"air.arg_type_name\",!\"float4\",!\"air.arg_name\",!\"unused\"",STELA_AIR_ARGUMENT},
-            {"v128:128","v128:256",STELA_AIR_TYPE},
          };
          for(unsigned k=0;k<sizeof(bad)/sizeof(bad[0]);k++) {
             char *invalid=change(text,bad[k].old,bad[k].replacement);bindings.count=0;
@@ -1059,7 +1025,8 @@ static LLVMMemoryBufferRef file(const char *path)
    CHECK(n>=4 && n<=AIR_MAX_BITCODE_BYTES && !fseek(f,0,SEEK_SET));
    char *b=malloc((size_t)n);CHECK(b && fread(b,1,(size_t)n,f)==(size_t)n && !fclose(f));
    uint8_t hash[32];_mesa_blake3_compute(b,(size_t)n,hash);printf("input bytes%ld blake3",n);
-   for(unsigned i=0;i<32;i++)printf("%02x",hash[i]);puts("");
+   for(unsigned i=0;i<32;i++)printf("%02x",hash[i]);
+   puts("");
    LLVMMemoryBufferRef result=LLVMCreateMemoryBufferWithMemoryRangeCopy(b,(size_t)n,"unchanged-stage-input");free(b);return result;
 }
 #include "air_funnel_stage_tests.h"
@@ -1071,7 +1038,7 @@ int main(int argc,char **argv)
    link_and_option_failures(b,"test_vertex","test_fragment");LLVMDisposeMemoryBuffer(b);
    stage_binding_prelude_contract();
    unused_stage_buffer_semantics();
-   primitive_layout_semantics();
+   primitive_buffer_semantics();
    output_oracle_controls();
    arithmetic_and_lane_semantics();
    aggregate_phi_semantics();

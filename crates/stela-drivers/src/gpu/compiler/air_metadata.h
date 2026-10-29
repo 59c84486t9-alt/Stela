@@ -520,8 +520,6 @@ bool stela_air_metadata_stage(struct stela_air_metadata *, LLVMValueRef,
                               enum stela_air_stage, struct stela_air_render *);
 bool stela_air_metadata_stage_map(struct stela_air_metadata *, const struct stela_air_render *,
                                  const struct stela_air_varying_slot *, unsigned count, unsigned max_slots);
-bool stela_air_metadata_stage_buffer_type(struct stela_air_metadata *,
-                                          const struct stela_air_stage_io *, LLVMTypeRef);
 /* Whether type is an output's reflected scalar or vector type. */
 bool stela_air_metadata_output_type(const struct stela_air_stage_io *io, LLVMTypeRef type);
 

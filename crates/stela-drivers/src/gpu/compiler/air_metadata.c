@@ -817,107 +817,10 @@ stage_type_matches(LLVMTypeRef type, enum stela_air_primitive p, unsigned n)
       LLVMGetIntTypeWidth(type) == primitive_bytes(p) * 8;
 }
 
-/* These types are fixed, sized builtin leaves selected from validated metadata.
- * Never ask DataLayout to size an unvalidated source/scalable/opaque type. */
-static bool
-stage_primitive_layout(struct stela_air_metadata *m, enum stela_air_primitive p,
-                       unsigned components, unsigned size, unsigned alignment)
-{
-   unsigned bytes = primitive_bytes(p);
-   if (!bytes || !components || components > 4)
-      return fail(m, STELA_AIR_TYPE, "unsupported reflected primitive storage");
-   LLVMContextRef context = LLVMGetModuleContext(m->module);
-   LLVMTypeRef type = p == STELA_AIR_FLOAT ? LLVMFloatTypeInContext(context) :
-      p == STELA_AIR_HALF ? LLVMHalfTypeInContext(context) : LLVMIntTypeInContext(context, bytes * 8);
-   if (components > 1) type = LLVMVectorType(type, components);
-   return (LLVMABISizeOfType(m->layout, type) == size &&
-           LLVMABIAlignmentOfType(m->layout, type) == alignment) ||
-      fail(m, STELA_AIR_TYPE, "reflected primitive storage differs from IR DataLayout");
-}
-
-static bool
-stage_struct(struct stela_air_metadata *m, struct stela_air_render *r,
-              struct stela_air_stage_io *io, LLVMValueRef node)
-{
-   if (!node) {
-      unsigned bytes = primitive_bytes(io->primitive) * (io->components == 3 ? 4 : io->components);
-      if (!bytes || bytes != io->buffer.type_size || bytes != io->buffer.type_alignment)
-         return fail(m, STELA_AIR_ARGUMENT, "constant buffer reflection requires exact primitive or understood structure");
-      return stage_primitive_layout(m, io->primitive, io->components,
-                                    io->buffer.type_size, io->buffer.type_alignment);
-   }
-   if (io->primitive != STELA_AIR_PRIMITIVE_UNKNOWN)
-      return fail(m, STELA_AIR_METADATA, "primitive buffer has structure metadata");
-   LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
-   unsigned count;
-   if (!stela_air_md_node(m, node, fields, &count) || !count || count % 5 ||
-       count / 5 > AIR_MAX_ARGUMENTS - r->member_count)
-      return fail(m, STELA_AIR_LIMIT, "structure reflection member budget/shape exceeded");
-   io->members = &r->members[r->member_count];
-   unsigned end = 0, align = 1;
-   for (unsigned i = 0; i < count; i += 5) {
-      struct stela_air_struct_member *member = &r->members[r->member_count++];
-      unsigned flags;
-      if (!stela_air_md_uint(fields[i], &member->offset) ||
-          !stela_air_md_uint(fields[i + 1], &member->size) ||
-          !stela_air_md_uint(fields[i + 2], &flags) || flags ||
-          !metadata_text(m, fields[i + 3], &member->type_name, &member->type_name_bytes) ||
-          !metadata_text(m, fields[i + 4], &member->name, &member->name_bytes))
-         return fail(m, STELA_AIR_METADATA, "unsupported structure reflection member");
-      member->primitive = primitive_type(fields[i + 3], &member->components);
-      unsigned bytes = primitive_bytes(member->primitive) * (member->components == 3 ? 4 : member->components);
-      if (!bytes || member->size != bytes || member->offset < end || member->offset % bytes ||
-          member->offset > io->buffer.type_size || bytes > io->buffer.type_size - member->offset)
-         return fail(m, STELA_AIR_TYPE, "structure reflection layout is inconsistent");
-      if (!stage_primitive_layout(m, member->primitive, member->components, bytes, bytes))
-         return false;
-      unsigned expected = (end + bytes - 1) & ~(bytes - 1);
-      if (expected != member->offset)
-         return fail(m, STELA_AIR_TYPE, "unsupported explicit structure padding");
-      end = member->offset + bytes;
-      if (bytes > align) align = bytes;
-      io->member_count++;
-   }
-   return (io->buffer.type_alignment == align &&
-           ((end + align - 1) & ~(align - 1)) == io->buffer.type_size) ||
-      fail(m, STELA_AIR_TYPE, "structure reflection extent/alignment mismatch");
-}
-
 bool
 stela_air_metadata_output_type(const struct stela_air_stage_io *io, LLVMTypeRef type)
 {
    return stage_type_matches(type, io->primitive, io->components);
-}
-
-bool
-stela_air_metadata_stage_buffer_type(struct stela_air_metadata *m,
-                                     const struct stela_air_stage_io *io, LLVMTypeRef type)
-{
-   if (!io->member_count) {
-      if (!stage_type_matches(type, io->primitive, io->components))
-         return fail(m, STELA_AIR_TYPE, "constant view source type differs from reflection");
-      return (LLVMABISizeOfType(m->layout, type) == io->buffer.type_size &&
-              LLVMABIAlignmentOfType(m->layout, type) == io->buffer.type_alignment) ||
-         fail(m, STELA_AIR_TYPE, "constant-view IR allocation differs from reflection");
-   }
-   /* Every leaf is checked before ANY fixed-size DataLayout query; opaque,
-    * scalable, target-extension, nested and unsized storage are refused. */
-   if (LLVMGetTypeKind(type) != LLVMStructTypeKind || LLVMIsOpaqueStruct(type) ||
-       LLVMIsPackedStruct(type) || LLVMCountStructElementTypes(type) != io->member_count)
-      return fail(m, STELA_AIR_TYPE, "unsupported constant-view structure type");
-   for (unsigned i = 0; i < io->member_count; i++) {
-      const struct stela_air_struct_member *a = &io->members[i];
-      if (!stage_type_matches(LLVMStructGetTypeAtIndex(type, i), a->primitive, a->components))
-         return fail(m, STELA_AIR_TYPE, "constant-view member type differs from reflection");
-   }
-   if (LLVMABISizeOfType(m->layout, type) != io->buffer.type_size ||
-       LLVMABIAlignmentOfType(m->layout, type) != io->buffer.type_alignment)
-      return fail(m, STELA_AIR_TYPE, "constant-view IR allocation differs from reflection");
-   for (unsigned i = 0; i < io->member_count; i++) {
-      if (LLVMOffsetOfElement(m->layout, type, i) != io->members[i].offset)
-         return fail(m, STELA_AIR_TYPE, "constant-view IR member offset differs from reflection");
-   }
-   return true;
 }
 
 /* The builtin input an argument descriptor's kind names, when the stage has
@@ -1595,12 +1498,15 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             }
             f++;
             *present = true;
-         } else if (indirect && stela_air_md_string(key, "air.buffer_size")) {
+         } else if (buffer && stela_air_md_string(key, "air.buffer_size")) {
+            /* A reference's referenced bytes. */
             if (has_buffer_size || f == fields_count || !stela_air_md_uint(fields[f++], &buffer_size))
-               return fail(t, STELA_AIR_METADATA, "invalid argument buffer size");
+               return fail(t, STELA_AIR_METADATA, "invalid buffer size");
             has_buffer_size = true;
-         } else if ((io || indirect) && stela_air_md_string(key, "air.struct_type_info")) {
-            if (!buffer || struct_info || f == fields_count)
+         } else if ((buffer || payload) && stela_air_md_string(key, "air.struct_type_info")) {
+            /* The layout of a structure; only an argument buffer's is
+             * interpreted, since its fields are bound resources. */
+            if (struct_info || f == fields_count)
                return fail(t, STELA_AIR_METADATA, "invalid structure reflection");
             struct_info = fields[f++];
          } else if (io && interpolated &&
@@ -1616,8 +1522,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             io->interpolation = stela_air_md_string(key, "air.perspective") ? STELA_AIR_PERSPECTIVE :
                                 stela_air_md_string(key, "air.no_perspective") ? STELA_AIR_NO_PERSPECTIVE :
                                 STELA_AIR_FLAT;
-         } else if (((io && interpolated) || vertex_input) &&
-                    stela_air_md_string(key, "air.arg_unused")) {
+         } else if (stela_air_md_string(key, "air.arg_unused")) {
             if (unused) return fail(t, STELA_AIR_METADATA, "duplicate unused qualifier");
             unused = true;
          } else if (varying && stela_air_md_string(key, "air.interpolation_function")) {
@@ -1684,15 +1589,13 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          if (indices[desc.index] || (limit && desc.index >= limit))
             return fail(t, STELA_AIR_METADATA, "duplicate buffer or location exceeds AIR module limit");
          indices[desc.index] = true;
-         if (indirect && (shared || !struct_info || !desc.type_size ||
-                          (has_buffer_size && buffer_size != desc.type_size)))
+         if (has_buffer_size && buffer_size != desc.type_size)
+            return fail(t, STELA_AIR_ARGUMENT, "buffer size differs from its type at %u", index);
+         if (indirect && (shared || !struct_info || !desc.type_size))
             return fail(t, STELA_AIR_ARGUMENT, "unsupported argument buffer %u", index);
          if (indirect && !argument_fields(t, kernel, struct_info, desc.type_size, index, 0,
                                           &argument_buffer))
             return false;
-         if (render && !indirect && desc.address_space == 2 &&
-             (!has_size || !has_align || !desc.type_size || !desc.type_alignment))
-            return fail(t, STELA_AIR_ARGUMENT, "render constant view must be reflected and readonly");
          if (shared && (!has_size || !has_align || !desc.type_size || !desc.type_alignment))
             return fail(t, STELA_AIR_ARGUMENT, "invalid/unbound threadgroup buffer %u", index);
       } else if (payload) {
@@ -1772,9 +1675,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          io->type_name = type_name; io->type_name_bytes = type_name_bytes;
          io->used = LLVMGetFirstUse(param) != NULL;
          if (unused && io->used)
-            return fail(t, STELA_AIR_METADATA, "used fragment input marked unused");
-         if (buffer && !indirect && desc.address_space == 2 && !stage_struct(t, render, io, struct_info))
-            return false;
+            return fail(t, STELA_AIR_METADATA, "used stage argument marked unused");
       }
       kernel->arguments[a] = (struct stela_air_argument) {
          .value = param, .buffer = desc, .is_buffer = buffer, .components = components,
