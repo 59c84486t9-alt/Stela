@@ -69,6 +69,7 @@ static struct {
 	size_t retired;
 	size_t live_pages;
     size_t stack_admissions;
+    bool kernel_roots;
     u64 next_stack_nonce;
 } catalog;
 static u64 last_generation;
@@ -506,13 +507,28 @@ void stela_linux_pages_finish(void)
 	}
 }
 
+/* Initial root caches and their metadata live for this whole kernel. This is
+ * separate from per-task refs: unregister must refuse even before the first
+ * slab payload allocation and after every per-task resource has retired. */
+int stela_linux_page_catalog_retain_kernel(u64 generation)
+{
+    require_quiescence();
+    if (!catalog.pages || catalog.generation != generation)
+        return -EINVAL;
+    if (catalog.kernel_roots)
+        return -EBUSY;
+    catalog.kernel_roots = true;
+    return 0;
+}
+
 int stela_linux_page_catalog_unregister(u64 generation)
 {
 	require_quiescence();
 	if (!catalog.pages || catalog.generation != generation)
 		return -EINVAL;
 	stela_linux_pages_finish();
-	if (catalog.live_pages || catalog.retired != NO_INDEX || catalog.stack_admissions)
+	if (catalog.live_pages || catalog.retired != NO_INDEX || catalog.stack_admissions ||
+        catalog.kernel_roots)
 		return -EBUSY;
 	size_t count = catalog.page_count;
     free_metadata(catalog.extents, catalog.extent_count * sizeof(*catalog.extents),

@@ -9,6 +9,8 @@ pub mod image;
 pub mod pages;
 pub mod random;
 #[cfg(target_arch = "x86_64")]
+pub mod resources;
+#[cfg(target_arch = "x86_64")]
 pub mod task;
 
 #[unsafe(no_mangle)]

@@ -70,3 +70,8 @@
 /mm/slab_common.c
 /mm/slab.h
 /mm/kvfree_rcu.c
+/kernel/user.c
+/kernel/exec_state.c
+/init/init_task.c
+/lib/refcount.c
+/lib/refcount_lock.c

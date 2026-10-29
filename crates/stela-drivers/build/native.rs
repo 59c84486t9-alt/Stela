@@ -185,6 +185,9 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/kobject.c")),
             PathBuf::from(format!("{LINUX}/lib/kobject_uevent.c")),
             PathBuf::from(format!("{LINUX}/lib/ctype.c")),
+            PathBuf::from(format!("{LINUX}/lib/refcount_lock.c")),
+            PathBuf::from(format!("{LINUX}/kernel/user.c")),
+            PathBuf::from(format!("{LINUX}/kernel/exec_state.c")),
             PathBuf::from(format!("{LINUX}/kernel/locking/mutex.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/wait_support.c")),
             PathBuf::from(format!("{LINUX}/kernel/rcuwait_wake.c")),
@@ -228,6 +231,7 @@ impl Linux {
                     format!("{COMPAT}/stela/task_test.c"),
                     format!("{COMPAT}/stela/atomic_callback_test.c"),
                     format!("{COMPAT}/stela/mutex_test.c"),
+                    format!("{COMPAT}/stela/resource_test.c"),
                 ])
                 .objects(helper_objects)
                 .compile("linux-task-fixture");
@@ -287,6 +291,7 @@ impl Linux {
             ("linux_acpi_client", "acpi_client_test.c"),
             ("linux_acpi_dsm", "acpi_dsm_test.c"),
             ("linux_random", "random_test.c"),
+            ("linux_resources", "resources_test.c"),
             ("linux_seq_output", "seq_output_test.c"),
             ("linux_drm_mm", "drm_mm_test.c"),
             ("linux_drm_vma", "drm_vma_test.c"),

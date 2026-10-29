@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 08:35:05 -0400
+Subject: [PATCH] refactor(kernel): expose initial resource cache setup
+
+---
+ init/init_task.c    | 6 ------
+ kernel/exec_state.c | 7 +++++++
+ kernel/user.c       | 2 +-
+ 3 files changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/init/init_task.c b/init/init_task.c
+index b67ef6040a655a6297a9d7e9893619f31ce2cd31..fd564bb2750e5331e3932f9be0bc50231fe6e46a 100644
+--- a/init/init_task.c
++++ b/init/init_task.c
+@@ -58,12 +58,6 @@ static struct sighand_struct init_sighand = {
+ 	.signalfd_wqh	= __WAIT_QUEUE_HEAD_INITIALIZER(init_sighand.signalfd_wqh),
+ };
+ 
+-/* init to 2 - one for init_task, one to ensure it is never freed */
+-struct task_exec_state init_task_exec_state = {
+-	.count		= REFCOUNT_INIT(2),
+-	.dumpable	= TASK_DUMPABLE_OWNER,
+-	.user_ns	= &init_user_ns,
+-};
+ 
+ #ifdef CONFIG_SHADOW_CALL_STACK
+ unsigned long init_shadow_call_stack[SCS_SIZE / sizeof(long)] = {
+diff --git a/kernel/exec_state.c b/kernel/exec_state.c
+index 6034f4b4808fead06c90abe15f0d3348622c9f64..3550e6c175dc6fda423f939453ca6bfb52a4b961 100644
+--- a/kernel/exec_state.c
++++ b/kernel/exec_state.c
+@@ -10,6 +10,13 @@
+ #include <linux/slab.h>
+ #include <linux/user_namespace.h>
+ 
++/* init to 2 - one for init_task, one to ensure it is never freed */
++struct task_exec_state init_task_exec_state = {
++	.count		= REFCOUNT_INIT(2),
++	.dumpable	= TASK_DUMPABLE_OWNER,
++	.user_ns	= &init_user_ns,
++};
++
+ static struct kmem_cache *task_exec_state_cachep;
+ 
+ static void __free_task_exec_state(struct rcu_head *rcu)
+diff --git a/kernel/user.c b/kernel/user.c
+index 7aef4e679a6a0cc65872cab1b190f4541455f6e1..b9d1ed50b1d08d79a3140c1b3f1466a748bf13a1 100644
+--- a/kernel/user.c
++++ b/kernel/user.c
+@@ -238,7 +238,7 @@ struct user_struct *alloc_uid(kuid_t uid)
+ 	return up;
+ }
+ 
+-static int __init uid_cache_init(void)
++int __init uid_cache_init(void)
+ {
+ 	int n;
+ 

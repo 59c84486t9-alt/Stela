@@ -263,9 +263,9 @@ unsafe extern "C" {
     fn stela_linux_page_request_blocking(gfp: u32) -> bool;
 }
 
-struct Entered;
+pub(super) struct Entered;
 impl Entered {
-    fn try_new() -> Result<Self, Error> {
+    pub(super) fn try_new() -> Result<Self, Error> {
         // SAFETY: only the address of the original C owner is used. A failed
         // try-enter touches no borrowed owner and never waits recursively.
         if unsafe { stela_linux_try_enter(ptr::addr_of!(stela_linux_bare).cast()) } {

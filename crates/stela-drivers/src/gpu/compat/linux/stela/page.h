@@ -68,6 +68,10 @@ struct stela_linux_page_ops_v2 {
 int stela_linux_page_catalog_register(const struct stela_linux_page_reservation *reservation,
 				     const struct stela_linux_page_ops *ops, void *context);
 int stela_linux_page_catalog_unregister(u64 generation);
+/* Irreversible whole-kernel retention for the original initial resource caches.
+ * Requires the same quiescent entered owner; no payload/current is granted.
+ * Ordinary task/object references still require their original final release. */
+int stela_linux_page_catalog_retain_kernel(u64 generation);
 /* Immutable multi-extent admission into the SAME canonical descriptor owner.
  * Every entry has the same generation and satisfies the actual retained WB
  * reservation contract above. Entries are sorted by physical_base, with no
