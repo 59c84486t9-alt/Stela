@@ -1,0 +1,3 @@
+# Preserve upstream/checksummed bytes on Windows as on Unix.
+third_party/mbedtls/** -text
+crates/stela-tls/tests/fixtures/** -text
