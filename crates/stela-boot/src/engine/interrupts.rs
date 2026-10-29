@@ -26,33 +26,8 @@ const IST_BYTES: usize = 64 * 1024;
 // handler. Runtime/disassembly stack-budget validation remains a required gate.
 const HANDLER_STACK_BYTES: usize = 32 * 1024;
 
-/// The registers an interrupt stub saves, then the CPU's frame.
-#[repr(C)]
-#[derive(Debug)]
-pub struct Frame {
-    pub r15: u64,
-    pub r14: u64,
-    pub r13: u64,
-    pub r12: u64,
-    pub r11: u64,
-    pub r10: u64,
-    pub r9: u64,
-    pub r8: u64,
-    pub rdi: u64,
-    pub rsi: u64,
-    pub rbp: u64,
-    pub rbx: u64,
-    pub rdx: u64,
-    pub rcx: u64,
-    pub rax: u64,
-    pub vector: u64,
-    pub error: u64,
-    pub rip: u64,
-    pub cs: u64,
-    pub rflags: u64,
-    pub rsp: u64,
-    pub ss: u64,
-}
+use stela_boot_core::interrupt_image::Backing;
+pub use stela_boot_core::interrupt_image::Frame;
 
 #[repr(C, packed)]
 struct TaskState {
@@ -65,8 +40,7 @@ struct TaskState {
     io_map: u16,
 }
 
-#[repr(C, align(64))]
-struct Stack([u8; IST_BYTES]);
+type Stack = Backing<IST_BYTES>;
 
 /// Private descriptors, interrupt stacks and GS-local record for one physical
 /// host processor. These addresses stay pinned even after its executor parks.
@@ -96,8 +70,8 @@ impl Tables {
             },
             gdt: [0, 0x00af_9a00_0000_ffff, 0x00cf_9200_0000_ffff, 0, 0],
             idt: [[0; 2]; 256],
-            fault_stack: Stack([0; IST_BYTES]),
-            fatal_stack: Stack([0; IST_BYTES]),
+            fault_stack: Stack::new(),
+            fatal_stack: Stack::new(),
         }
     }
 }
@@ -326,8 +300,8 @@ stela_interrupt_mxcsr:
 
 // Separate terminal IST resources are retained for NMI/DF/MCE. They cannot
 // return through an interrupted transition or overwrite a normal entry image.
-extern "sysv64" fn terminal_interrupt(frame: &Frame) -> ! {
-    fatal(frame)
+extern "sysv64" fn terminal_interrupt(frame: *mut Frame, image: *const u8) -> ! {
+    saved_state::terminal(frame, image)
 }
 
 // One stub per vector: push a zero error code when the CPU pushes none,
@@ -412,7 +386,7 @@ pub(crate) unsafe fn install_on(tables: &'static mut Tables, handler: Handler) {
         output::fatal("native IRQ state contract unavailable")
     });
     for stack in [&tables.fault_stack, &tables.fatal_stack] {
-        let bottom = &raw const stack.0 as usize;
+        let bottom = stack.as_mut_ptr().addr();
         let top = bottom + IST_BYTES;
         let frame = top - size_of::<Frame>();
         if owner
@@ -430,8 +404,8 @@ pub(crate) unsafe fn install_on(tables: &'static mut Tables, handler: Handler) {
     // SAFETY: all data here is private to this physical processor.
     unsafe {
         let tss = &raw mut tables.tss;
-        (*tss).ist[0] = (&raw mut tables.fault_stack as u64) + IST_BYTES as u64;
-        (*tss).ist[1] = (&raw mut tables.fatal_stack as u64) + IST_BYTES as u64;
+        (*tss).ist[0] = (tables.fault_stack.as_mut_ptr() as u64) + IST_BYTES as u64;
+        (*tss).ist[1] = (tables.fatal_stack.as_mut_ptr() as u64) + IST_BYTES as u64;
         let base = tss as u64;
         let limit = (size_of::<TaskState>() - 1) as u64;
         let gdt = &raw mut tables.gdt;

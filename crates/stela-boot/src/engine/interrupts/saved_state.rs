@@ -1,7 +1,7 @@
 //! A view of the image the actual assembly entry saved on its retained IST.
 //! Construction is private to that entry: a source pointer or stack interval
 //! supplied by a native producer cannot mint this resource borrow.
-use super::{Frame, HANDLER_STACK_BYTES, IST_BYTES, Tables, host};
+use super::{Frame, HANDLER_STACK_BYTES, Tables, host};
 use crate::engine::xstate;
 use core::marker::PhantomData;
 
@@ -43,71 +43,87 @@ impl SavedState<'_> {
     }
 }
 
-/// Assembly supplies both addresses after a complete save, before any native
-/// return or image restoration. No public caller can construct SavedState.
-pub(super) extern "sysv64" fn dispatch(frame: &mut Frame, image: *const u8) {
+/// Assembly supplies raw addresses after a complete save. Never borrow the
+/// original hardware Frame: a nested same-IST entry may overwrite it before
+/// observing the active slot and stopping. Rust handlers receive a local copy.
+pub(super) extern "sysv64" fn dispatch(frame: *mut Frame, image: *const u8) {
     let (tables, handler, active) = host::local::interrupt_owner();
-    let entry = ();
-    let saved = tables
-        .saved_state(frame, image, active, &entry)
+    let mut captured = tables
+        .capture_entry(frame, image, active)
         .unwrap_or_else(|| {
             crate::output::fatal("interrupt image does not belong to its active IST owner")
         });
-    handler(frame, &saved);
+    let saved = tables.saved_state(&captured).unwrap_or_else(|| {
+        crate::output::fatal("interrupt image has no valid saved state metadata")
+    });
+    handler(&mut captured.frame, &saved);
+    captured.writeback();
+}
+
+pub(super) fn terminal(frame: *mut Frame, image: *const u8) -> ! {
+    let (tables, _, active) = host::local::interrupt_owner();
+    let captured = tables
+        .capture_entry(frame, image, active)
+        .unwrap_or_else(|| {
+            crate::output::fatal("terminal image does not belong to its active IST owner")
+        });
+    // Same-IST terminal recursion stops in assembly before image reuse. Its
+    // raw original Frame can be overwritten, but this local copy lives below
+    // the retained image and is never written back or returned through IRETQ.
+    super::fatal(&captured.frame)
 }
 
 impl Tables {
-    fn saved_state<'entry>(
-        &'entry self,
-        frame: &Frame,
+    fn capture_entry(
+        &self,
+        frame: *mut Frame,
         image: *const u8,
         active: [u64; 2],
-        _entry: &'entry (),
-    ) -> Option<SavedState<'entry>> {
-        let terminal = matches!(frame.vector, 2 | 8 | 18);
-        let stack = if terminal {
-            &self.fatal_stack
+    ) -> Option<stela_boot_core::interrupt_image::Captured<'_>> {
+        let slot = if self.fault_stack.frame_address()? == frame.addr() {
+            0
+        } else if self.fatal_stack.frame_address()? == frame.addr() {
+            1
         } else {
-            &self.fault_stack
+            return None;
         };
-        if active[usize::from(terminal)] != 1 {
+        if active[slot] != 1 {
             return None;
         }
         let owner = self.xstate.as_ref()?;
-        let abi = owner.abi();
-        let bottom = core::ptr::from_ref(stack).addr();
-        let top = bottom.checked_add(IST_BYTES)?;
-        let frame_address = core::ptr::from_ref(frame).addr();
-        if frame_address != top.checked_sub(core::mem::size_of::<Frame>())? {
-            return None;
-        }
-        owner
-            .check_entry_extent(frame_address, bottom.checked_add(HANDLER_STACK_BYTES)?, top)
-            .ok()?;
-        let bytes = usize::try_from(abi.image_bytes).ok()?;
-        let expected = frame_address
-            .checked_sub(bytes)?
-            .checked_sub(xstate::ENTRY_METADATA_BYTES)?
-            & !(xstate::IMAGE_ALIGNMENT - 1);
-        if image.addr() != expected || expected < bottom.checked_add(HANDLER_STACK_BYTES)? {
-            return None;
-        }
-        // Derive provenance from the actual retained allocation, never from
-        // the numeric image address the assembly supplied for agreement.
-        let owned_image = core::ptr::from_ref(stack)
-            .cast::<u8>()
-            .wrapping_add(expected - bottom);
-        // SAFETY: the original pinned Stack allocation above owns exactly this
-        // image and metadata. The assembly owns its active, nonnested slot and
-        // completed the save before dispatch; no arbitrary interrupted RSP is
-        // dereferenced. This borrow ends before restoration reuses those bytes.
-        let (image_bytes, metadata) = unsafe {
-            (
-                core::slice::from_raw_parts(owned_image, bytes),
-                &*owned_image.add(bytes).cast::<xstate::EntryMetadata>(),
-            )
+        let stack = if slot == 0 {
+            &self.fault_stack
+        } else {
+            &self.fatal_stack
         };
-        let format = metadata.save_format()?;
+        // SAFETY: original permanently pinned descriptor/UnsafeCell backing,
+        // exact active slot and assembly-provided addresses. The same-slot
+        // active check halts BEFORE allocating/saving another image. IF0 alone
+        // is not the exclusion: NMI/DF/MCE use the separate terminal IST and
+        // never return; nested terminal entries also halt before image reuse.
+        // The image region is initialized by Stack::new and never overlaps
+        // Rust's downward-growing handler stack or the mutable hardware Frame.
+        let captured = unsafe {
+            stack.capture(stela_boot_core::interrupt_image::Location {
+                frame: frame.addr(),
+                image: image.addr(),
+                image_bytes: usize::try_from(owner.abi().image_bytes).ok()?,
+                handler_bytes: HANDLER_STACK_BYTES,
+            })
+        }?;
+        if usize::from(matches!(captured.frame.vector, 2 | 8 | 18)) != slot {
+            return None;
+        }
+        Some(captured)
+    }
+
+    fn saved_state<'entry>(
+        &'entry self,
+        captured: &stela_boot_core::interrupt_image::Captured<'entry>,
+    ) -> Option<SavedState<'entry>> {
+        let owner = self.xstate.as_ref()?;
+        let abi = owner.abi();
+        let format = captured.metadata.save_format()?;
         if (abi.extended != 0) != !matches!(format, xstate::SaveFormat::Fxsave) {
             return None;
         }
@@ -120,9 +136,10 @@ impl Tables {
         if mask & !abi.supported_mask != 0 || mask & !xstate::ADMITTED_MASK != 0 {
             return None;
         }
+        let frame = captured.frame;
         Some(SavedState {
             owner,
-            image: image_bytes,
+            image: captured.image,
             low: [
                 frame.rax, frame.rcx, frame.rdx, frame.rbx, frame.rsp, frame.rbp, frame.rsi,
                 frame.rdi, frame.r8, frame.r9, frame.r10, frame.r11, frame.r12, frame.r13,

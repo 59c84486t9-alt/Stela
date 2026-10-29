@@ -14,6 +14,7 @@ pub mod firmware_state;
 pub mod firmware_time;
 pub mod guarded_stacks;
 pub mod hpet;
+pub mod interrupt_image;
 pub mod madt;
 pub mod memory_budget;
 pub mod memory_types;
