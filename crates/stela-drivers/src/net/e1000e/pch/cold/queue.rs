@@ -256,7 +256,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
                 RDLEN,
                 RDH,
                 RDT,
-                self.receive.descriptors.physical(),
+                self.receive.descriptors.bus_address(),
             ),
             (
                 TDBAL,
@@ -264,7 +264,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
                 TDLEN,
                 TDH,
                 TDT,
-                self.transmit.descriptors.physical(),
+                self.transmit.descriptors.bus_address(),
             ),
         ] {
             self.controller.write(low, address as u32)?;
@@ -594,7 +594,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
         let base = index * DESCRIPTOR;
         self.transmit
             .descriptors
-            .write(base, self.transmit.descriptors.physical());
+            .write(base, self.transmit.descriptors.bus_address());
         self.transmit
             .descriptors
             .write(base + 8, spt::FLUSH_BYTES | (1 << 25));
@@ -1526,7 +1526,7 @@ pub(super) mod tests {
                 let base = tail * DESCRIPTOR;
                 assert_eq!(
                     net.transmit.descriptors.read::<u64>(base),
-                    net.transmit.descriptors.physical()
+                    net.transmit.descriptors.bus_address()
                 );
                 assert_eq!(
                     net.transmit.descriptors.read::<u32>(base + 8),
@@ -1749,7 +1749,7 @@ pub(super) mod tests {
                         0,
                         u32::from(
                             net.transmit.descriptors.read::<u64>(base)
-                                == net.transmit.descriptors.physical(),
+                                == net.transmit.descriptors.bus_address(),
                         ),
                     ],
                     [21, 8, net.transmit.descriptors.read::<u32>(base + 8)],

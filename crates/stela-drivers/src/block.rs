@@ -20,7 +20,10 @@ pub use profile::{ActiveCallback, CallbackActivity, CallbackCounts, CallbackStat
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlockError {
     /// The transfer is not a whole number of blocks.
-    Misaligned { bytes: usize, block_size: u32 },
+    Misaligned {
+        bytes: usize,
+        block_size: u32,
+    },
     /// The transfer reaches past the last block.
     OutOfRange {
         lba: u64,
@@ -30,7 +33,9 @@ pub enum BlockError {
     /// The device refuses writes.
     ReadOnly,
     /// The device reported a failure with this controller status.
-    Device { status: u32 },
+    Device {
+        status: u32,
+    },
     /// A SCSI command failed with this sense data.
     Sense(Sense),
     /// A SCSI command failed and no sense data said why.
@@ -41,6 +46,7 @@ pub enum BlockError {
     Timeout,
     /// The DMA pages are exhausted.
     NoDmaMemory,
+    Dma(crate::bus::dma::AllocationError),
     /// The device needs something these drivers do not implement.
     Unsupported(&'static str),
 }
@@ -180,6 +186,7 @@ impl fmt::Display for BlockError {
             Self::Protocol(what) => write!(f, "transport protocol violation: {what}"),
             Self::Timeout => f.write_str("device timeout"),
             Self::NoDmaMemory => f.write_str("DMA pages exhausted"),
+            Self::Dma(error) => write!(f, "DMA allocation: {error:?}"),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
         }
     }

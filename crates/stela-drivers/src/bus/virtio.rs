@@ -225,9 +225,9 @@ impl Modern {
             QUEUE_VECTOR,
             if signalled { self.vector } else { NO_VECTOR },
         );
-        common.write64(QUEUE_DESCRIPTORS, memory.physical());
-        common.write64(QUEUE_DRIVER, memory.physical() + AVAIL as u64);
-        common.write64(QUEUE_DEVICE, memory.physical() + USED as u64);
+        common.write64(QUEUE_DESCRIPTORS, memory.bus_address());
+        common.write64(QUEUE_DRIVER, memory.bus_address() + AVAIL as u64);
+        common.write64(QUEUE_DEVICE, memory.bus_address() + USED as u64);
         let (bar, start, length, multiplier) = self.notify;
         let offset = u64::from(common.read16(QUEUE_NOTIFY_OFF)) * u64::from(multiplier);
         if offset + 2 > length {

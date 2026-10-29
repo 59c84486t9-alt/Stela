@@ -87,7 +87,7 @@ impl Queue {
 
     fn describe(&mut self, id: u16, length: usize, flags: u16) {
         let base = 16 * usize::from(id);
-        let address = self.buffers.physical() + (usize::from(id) * BUFFER) as u64;
+        let address = self.buffers.bus_address() + (usize::from(id) * BUFFER) as u64;
         self.ring.write(base, address);
         self.ring.write(base + 8, length as u32);
         self.ring.write(base + 12, flags);

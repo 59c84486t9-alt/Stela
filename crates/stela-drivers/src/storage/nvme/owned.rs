@@ -223,7 +223,7 @@ impl Buffer {
     }
     pub(super) fn address(&self) -> Result<u64, BlockError> {
         match self {
-            Self::Legacy(b) => Ok(b.physical()),
+            Self::Legacy(b) => Ok(b.bus_address()),
             Self::Owned(b) => b.dma.address().map_err(map_dma_error),
             Self::Empty => Err(dma_error()),
         }

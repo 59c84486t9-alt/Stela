@@ -244,7 +244,7 @@ impl<R: Registers + 'static, T: Timer + 'static> Controller<R, T> {
             | u32::from(inline) << 31;
         self.command = Some(command);
         if length > INLINE {
-            let physical = self.owners.as_ref().unwrap().2.physical();
+            let physical = self.owners.as_ref().unwrap().2.bus_address();
             // Linux's writeq is explicitly low then high on this platform.
             self.write32(bus, PAYLOAD, physical as u32)?;
             self.write32(bus, PAYLOAD + 4, (physical >> 32) as u32)?;
@@ -924,7 +924,7 @@ mod tests {
                     assert_eq!(u64::from(command), hex(5));
                     if length > INLINE {
                         assert_eq!(hex(6), 0x123456789abcdef0);
-                        assert_eq!(d.address, host.owners.as_ref().unwrap().2.physical());
+                        assert_eq!(d.address, host.owners.as_ref().unwrap().2.bus_address());
                     } else if op == 1 {
                         let actual = output(length);
                         let mut first = [0; 8];
@@ -990,14 +990,14 @@ mod tests {
     fn invalid_claim_returns_the_actual_owned_resources_without_io() {
         let (host, m, _) = fixture();
         let (r, t, buffer) = host.release().ok().unwrap();
-        let physical = buffer.physical();
+        let physical = buffer.bus_address();
         // SAFETY: same real private stopped model and RAM ownership as fixture;
         // deliberately invalid scalar config must be rejected without publication.
         let (kind, (r, _t, buffer)) = unsafe { Controller::claim(r, t, buffer, [None, None], 100) }
             .err()
             .unwrap();
         assert_eq!(kind, ErrorKind::Configuration);
-        assert_eq!(buffer.physical(), physical);
+        assert_eq!(buffer.bus_address(), physical);
         assert!(Rc::ptr_eq(&r.0, &m.0));
         assert!(m.0.borrow().log.is_empty());
     }

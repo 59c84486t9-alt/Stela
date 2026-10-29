@@ -1331,12 +1331,12 @@ impl AhciDisk {
         if capabilities & CAP_64BIT == 0
             && [&commands, &table, &bounce]
                 .iter()
-                .any(|buffer| buffer.physical() + buffer.len() as u64 > 1 << 32)
+                .any(|buffer| buffer.bus_address() + buffer.len() as u64 > 1 << 32)
         {
             return Err(BlockError::Unsupported("32-bit AHCI with DMA above 4 GiB"));
         }
-        port.write64(PORT_LIST, commands.physical());
-        port.write64(PORT_FIS, commands.physical() + COMMAND_LIST_BYTES as u64);
+        port.write64(PORT_LIST, commands.bus_address());
+        port.write64(PORT_FIS, commands.bus_address() + COMMAND_LIST_BYTES as u64);
         port.write32(
             PORT_COMMAND,
             port.read32(PORT_COMMAND) | COMMAND_FIS_RECEIVE,
@@ -1407,7 +1407,7 @@ impl AhciDisk {
             looks: 0,
         };
         let port = disk.port;
-        let buffer = disk.bounce.physical();
+        let buffer = disk.bounce.bus_address();
         disk.internal(&port, ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, buffer)
             .map_err(|failure| failure.error)?;
         let found = identify(disk.bounce.bytes())?;
@@ -1465,7 +1465,7 @@ impl AhciDisk {
                 if capabilities & CAP_64BIT == 0
                     && [&slot.table, &slot.bounce]
                         .iter()
-                        .any(|buffer| buffer.physical() + buffer.len() as u64 > 1 << 32)
+                        .any(|buffer| buffer.bus_address() + buffer.len() as u64 > 1 << 32)
                 {
                     break;
                 }
@@ -1651,7 +1651,7 @@ impl AhciDisk {
             if plain || (!queued && launched > 0) {
                 break;
             }
-            let buffer = self.bounce(issue.slot).physical();
+            let buffer = self.bounce(issue.slot).bus_address();
             match self.launch(
                 port,
                 issue.slot,
@@ -1854,7 +1854,7 @@ impl AhciDisk {
         write: bool,
         buffer: u64,
     ) -> Result<Launched, Failure> {
-        let table = self.table(slot).physical();
+        let table = self.table(slot).bus_address();
         // A queued command's sector count moves to the features registers;
         // the count register carries its tag, its slot, in bits 7:3.
         let queued = matches!(command, ATA_READ_FPDMA_QUEUED | ATA_WRITE_FPDMA_QUEUED);
@@ -2474,7 +2474,7 @@ impl AhciDisk {
     /// Linux `ata_dev_revalidate`: IDENTIFY again and require the same model,
     /// serial and capacity (`ata_dev_same_device`).
     fn revalidate(&mut self, port: &impl CommandPort) -> Result<(), BlockError> {
-        let buffer = self.table.physical() + IDENTIFY_DATA as u64;
+        let buffer = self.table.bus_address() + IDENTIFY_DATA as u64;
         self.internal(port, ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, buffer)
             .map_err(|failure| failure.error)?;
         let data = &self.table.bytes()[IDENTIFY_DATA..IDENTIFY_DATA + ATA_SECTOR_BYTES as usize];
@@ -2506,7 +2506,7 @@ impl AhciDisk {
     /// logs a refusal). The kept IDENTIFY data says it is enabled only once
     /// a revalidation rereads it.
     fn configure(&mut self, port: &impl CommandPort, found: &Identified) -> Result<(), BlockError> {
-        let buffer = self.bounce.physical();
+        let buffer = self.bounce.bus_address();
         self.quirks |= found.quirks;
         // ata_do_link_spd_quirk.
         if self.quirks & quirks::LINK_1_5_GBPS != 0 && self.speed_limit > 0b1 {
@@ -2569,7 +2569,7 @@ impl AhciDisk {
     /// LOG EXT for good (`ATA_QUIRK_NO_DMA_LOG`), at once unless the port
     /// froze. Whether the page was read.
     fn read_log(&mut self, port: &impl CommandPort, log: u8, page: u8) -> Result<bool, BlockError> {
-        let buffer = self.table.physical() + LOG_DATA as u64;
+        let buffer = self.table.bus_address() + LOG_DATA as u64;
         let lba = u64::from(log) | u64::from(page) << 8;
         loop {
             let dma = self.log_dma && !self.no_dma_log;
@@ -2691,7 +2691,7 @@ impl AhciDisk {
 
     fn apply_lpm(&mut self, port: &impl CommandPort, policy: u8) -> Result<(), BlockError> {
         let lpm = self.lpm;
-        let buffer = self.bounce.physical();
+        let buffer = self.bounce.bus_address();
         let dipm = |disk: &mut Self, feature| match disk.internal(
             port,
             ATA_SET_FEATURES,
@@ -2835,7 +2835,7 @@ impl AhciDisk {
         let mut refused = false;
         let skip = self.quirks & quirks::NOSETXFER != 0 && self.transfer.sata;
         if !skip && (pio > MODE_PIO_2 || self.transfer.iordy) {
-            let buffer = self.bounce.physical();
+            let buffer = self.bounce.bus_address();
             match self.internal(
                 port,
                 ATA_SET_FEATURES,
@@ -2886,7 +2886,7 @@ impl AhciDisk {
     /// carries the sense key, ASC and ASCQ in LBA bits 23:0. Its own error is
     /// ignored, as ERR might be set; a timeout leaves no result.
     fn request_sense(&mut self, port: &impl CommandPort) -> Result<Option<Sense>, BlockError> {
-        let buffer = self.bounce.physical();
+        let buffer = self.bounce.bus_address();
         if let Err(failure) =
             self.attempt(port, ATA_REQUEST_SENSE_DATA_EXT, 0, 0, 0, 0, false, buffer)
         {
@@ -2965,7 +2965,7 @@ impl BlockDevice for AhciDisk {
         self.flush_cache()?;
         if power_off {
             let port = self.port;
-            let buffer = self.bounce.physical();
+            let buffer = self.bounce.bus_address();
             self.internal(&port, ATA_STANDBY_IMMEDIATE, 0, 0, 0, buffer)
                 .map_err(|failure| failure.error)?;
         }

@@ -274,7 +274,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             capabilities,
             codec_mask: 0,
             token: ControllerToken {
-                owner: corb.physical(),
+                // A domain-local IOVA can repeat for another controller.
+                // The retained live CPU allocation distinguishes this owner.
+                owner: corb.as_ptr() as u64,
                 generation: 1,
             },
             lifecycle_failed: false,
@@ -323,7 +325,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub(super) fn check_dma(buffer: &DmaBuffer, align: u64, address_bits: u8) -> Result<(), Error> {
-        check_dma_range(buffer.physical(), buffer.len(), align, address_bits)
+        check_dma_range(buffer.bus_address(), buffer.len(), align, address_bits)
     }
 
     pub(super) fn wait(
@@ -429,13 +431,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.corb.bytes_mut().fill(0);
         self.rirb.bytes_mut().fill(0);
         self.registers
-            .write32(CORBLBASE, self.corb.physical() as u32);
+            .write32(CORBLBASE, self.corb.bus_address() as u32);
         self.registers
-            .write32(CORBUBASE, (self.corb.physical() >> 32) as u32);
+            .write32(CORBUBASE, (self.corb.bus_address() >> 32) as u32);
         self.registers
-            .write32(RIRBLBASE, self.rirb.physical() as u32);
+            .write32(RIRBLBASE, self.rirb.bus_address() as u32);
         self.registers
-            .write32(RIRBUBASE, (self.rirb.physical() >> 32) as u32);
+            .write32(RIRBUBASE, (self.rirb.bus_address() >> 32) as u32);
         self.registers.write16(CORBWP, 0);
         self.registers.write16(CORBRP, POINTER_RESET);
         match self.config.corb_reset {

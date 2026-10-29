@@ -1,8 +1,10 @@
-//! Host-physical memory that devices read and write.
+//! Device-visible memory with distinct CPU mappings and bus addresses.
 use crate::block::BlockError;
 use core::ops::Range;
 
+mod allocator;
 pub mod amd;
+pub use allocator::{AllocationError, DomainAllocator};
 pub mod mapping;
 pub mod memory;
 pub mod pages;
@@ -27,17 +29,42 @@ dma_values!(
     u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize
 );
 
-/// Zeroed, physically contiguous memory a device may access, at the same
-/// address in Stela's identity tables. It lives for the rest of the boot.
-#[derive(Debug)]
+/// A zeroed DMA allocation. The CPU view and device address may differ, and
+/// physical pages need not be contiguous when a requester domain maps them.
 pub struct DmaBuffer {
-    physical: u64,
+    memory: BufferMemory,
     bytes: usize,
 }
 
+enum BufferMemory {
+    // Compatibility with RegionAllocator's explicitly unsafe identity contract.
+    Identity(u64),
+    Domain(triomphe::Arc<allocator::Allocation>),
+}
+
+impl core::fmt::Debug for DmaBuffer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DmaBuffer")
+            .field("bus_address", &self.bus_address())
+            .field("cpu_address", &self.as_ptr())
+            .field("bytes", &self.bytes)
+            .finish()
+    }
+}
+
 impl DmaBuffer {
+    /// The address programmed into this requester's device, never a CPU pointer.
+    pub fn bus_address(&self) -> u64 {
+        match &self.memory {
+            BufferMemory::Identity(address) => *address,
+            BufferMemory::Domain(allocation) => allocation.bus_address(),
+        }
+    }
+
+    /// Historical spelling of the device address. This need not be physical
+    /// RAM and must never be converted into a CPU pointer; use `as_ptr`.
     pub fn physical(&self) -> u64 {
-        self.physical
+        self.bus_address()
     }
 
     pub fn len(&self) -> usize {
@@ -49,11 +76,14 @@ impl DmaBuffer {
     }
 
     pub fn as_ptr(&self) -> *mut u8 {
-        self.physical as *mut u8
+        match &self.memory {
+            BufferMemory::Identity(address) => *address as *mut u8,
+            BufferMemory::Domain(allocation) => allocation.cpu_address(self.bytes),
+        }
     }
 
     pub fn bytes(&self) -> &[u8] {
-        // SAFETY: the allocator handed this range out once, identity-mapped.
+        // SAFETY: the allocator retains this exclusive CPU mapping for this buffer.
         unsafe { core::slice::from_raw_parts(self.as_ptr(), self.bytes) }
     }
 
@@ -139,7 +169,7 @@ impl DmaAllocator for RegionAllocator {
             .ok_or(BlockError::NoDmaMemory)?;
         self.next = end;
         let mut buffer = DmaBuffer {
-            physical: start,
+            memory: BufferMemory::Identity(start),
             bytes,
         };
         buffer.bytes_mut().fill(0);
@@ -178,7 +208,7 @@ mod tests {
     fn integer_words_preserve_device_bits_and_neighbor_bytes() {
         let mut backing = [0u64; 4];
         let mut buffer = DmaBuffer {
-            physical: backing.as_mut_ptr() as u64,
+            memory: BufferMemory::Identity(backing.as_mut_ptr() as u64),
             bytes: size_of_val(&backing),
         };
         buffer.bytes_mut().fill(0xa5);
@@ -198,11 +228,16 @@ mod tests {
         let mut backing = [0xa5a5_a5a5_a5a5_a5a5u64; 4];
         let original = backing;
         let mut buffer = DmaBuffer {
-            physical: backing.as_mut_ptr() as u64,
+            memory: BufferMemory::Identity(backing.as_mut_ptr() as u64),
             bytes: size_of_val(&backing),
         };
         for offset in [1, 29, 32, usize::MAX - 1, usize::MAX] {
-            assert!(std::panic::catch_unwind(|| buffer.read::<u32>(offset)).is_err());
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || buffer.read::<u32>(offset)
+                ))
+                .is_err()
+            );
             assert!(
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     buffer.write(offset, 0u32)
@@ -212,10 +247,13 @@ mod tests {
         }
         // Aligned offsets do not repair an allocator's unaligned base.
         let unaligned = DmaBuffer {
-            physical: buffer.physical() + 1,
+            memory: BufferMemory::Identity(buffer.physical() + 1),
             bytes: buffer.len() - 1,
         };
-        assert!(std::panic::catch_unwind(|| unaligned.read::<u32>(0)).is_err());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unaligned.read::<u32>(0)))
+                .is_err()
+        );
         assert_eq!(backing, original);
     }
 }

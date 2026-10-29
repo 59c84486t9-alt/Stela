@@ -19,7 +19,7 @@ impl Ring {
         let descriptors = dma.allocate(DESCRIPTORS * DESCRIPTOR, 256)?;
         let buffers = dma.allocate(DESCRIPTORS * BUFFER, 256)?;
         for allocation in [&descriptors, &buffers] {
-            if !wide && !fits32(allocation.physical(), allocation.len()) {
+            if !wide && !fits32(allocation.bus_address(), allocation.len()) {
                 return Err(BlockError::Unsupported(
                     "RTL8169/8168B requires DMA below 4 GiB",
                 ));
@@ -36,7 +36,7 @@ impl Ring {
             let offset = index * DESCRIPTOR;
             self.descriptors.write(
                 offset + 8,
-                self.buffers.physical() + (index * BUFFER) as u64,
+                self.buffers.bus_address() + (index * BUFFER) as u64,
             );
             self.descriptors.write(offset + 4, 0u32);
             self.descriptors.write(offset, end(index));
@@ -145,7 +145,7 @@ mod tests {
                     OWN | end(index) | FIRST | LAST | length.max(60) as u32
                 );
                 let address = tx.descriptors.read::<u64>(offset + 8);
-                assert_eq!(address, tx.buffers.physical() + (index * BUFFER) as u64);
+                assert_eq!(address, tx.buffers.bus_address() + (index * BUFFER) as u64);
                 let packet = &tx.buffers.bytes()[index * BUFFER..index * BUFFER + length.max(60)];
                 assert_eq!(&packet[..length], frame);
                 assert!(packet[length..].iter().all(|b| *b == 0));

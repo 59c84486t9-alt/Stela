@@ -309,7 +309,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let mut entry = 0;
         while offset < bytes {
             let chunk = (4096 - offset % 4096).min(period_bytes - offset % period_bytes);
-            bdl.write(entry * 16, (buffer.physical() + offset as u64).to_le());
+            bdl.write(entry * 16, (buffer.bus_address() + offset as u64).to_le());
             bdl.write(entry * 16 + 8, (chunk as u32).to_le());
             let period_end = (offset + chunk).is_multiple_of(period_bytes);
             bdl.write(entry * 16 + 12, u32::from(period_end).to_le());
@@ -323,9 +323,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.registers.write16(base + SD_FORMAT, encoded);
         self.registers.write16(base + SD_LVI, (count - 1) as u16);
         self.registers
-            .write32(base + SD_BDLPL, bdl.physical() as u32);
+            .write32(base + SD_BDLPL, bdl.bus_address() as u32);
         self.registers
-            .write32(base + SD_BDLPU, (bdl.physical() >> 32) as u32);
+            .write32(base + SD_BDLPU, (bdl.bus_address() >> 32) as u32);
         fence(Ordering::SeqCst);
         let id = StreamId {
             index,

@@ -39,7 +39,7 @@ fn queued_commands_keep_independent_slots() {
         );
         assert_eq!(
             disk.commands.read::<u64>(slot * COMMAND_HEADER_BYTES + 8),
-            disk.table(slot).physical()
+            disk.table(slot).bus_address()
         );
     }
 

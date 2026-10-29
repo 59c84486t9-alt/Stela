@@ -157,7 +157,7 @@ impl VirtioInput {
         };
         for id in 0..entries {
             let base = 16 * usize::from(id);
-            let address = input.events.physical() + (usize::from(id) * EVENT_BYTES) as u64;
+            let address = input.events.bus_address() + (usize::from(id) * EVENT_BYTES) as u64;
             input.queue.write(base, address);
             input.queue.write(base + 8, EVENT_BYTES as u32);
             input.queue.write(base + 12, DESCRIPTOR_WRITE);

@@ -236,7 +236,7 @@ impl VirtioBlk {
             .clock
             .try_deadline(TIMEOUT_US)
             .map_err(|_| BlockError::Timeout)?;
-        let request = self.request.physical();
+        let request = self.request.bus_address();
         self.request.write(REQUEST_TYPE, kind);
         self.request.write(REQUEST_RESERVED, 0u32);
         self.request.write(REQUEST_SECTOR, sector);
@@ -245,7 +245,7 @@ impl VirtioBlk {
         let mut length = 1;
         if bytes > 0 {
             let flags = if device_writes { DESCRIPTOR_WRITE } else { 0 };
-            chain[1] = (self.bounce.physical(), bytes as u32, flags);
+            chain[1] = (self.bounce.bus_address(), bytes as u32, flags);
             length = 2;
         }
         chain[length] = (request + u64::from(REQUEST_HEADER), 1, DESCRIPTOR_WRITE);

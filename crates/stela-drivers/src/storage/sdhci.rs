@@ -802,12 +802,12 @@ impl Engine {
             Some(true)
         } else if self
             .data
-            .physical()
+            .bus_address()
             .checked_add(self.data.len() as u64)
             .is_some_and(|end| end <= 1u64 << 32)
             && self
                 .descriptors
-                .physical()
+                .bus_address()
                 .checked_add(self.descriptors.len() as u64)
                 .is_some_and(|end| end <= 1u64 << 32)
         {

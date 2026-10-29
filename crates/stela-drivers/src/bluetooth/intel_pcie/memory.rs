@@ -56,8 +56,8 @@ impl Memory {
         ] {
             b.bytes_mut().fill(0);
         }
-        let base = m.pool.physical();
-        let fragment = m.fragment.physical();
+        let base = m.pool.bus_address();
+        let fragment = m.fragment.bus_address();
         let c = &mut m.pool.bytes_mut()[CI..CI + 152];
         put16(c, 0, 1);
         put16(c, 2, 152);
@@ -91,7 +91,7 @@ impl Memory {
         put32(b, 8, 196);
         put32(b, 12, DEBUG_COUNT as u32);
         for i in 0..DEBUG_COUNT {
-            let address = m.debug.physical() + (i * DEBUG_BYTES) as u64;
+            let address = m.debug.bus_address() + (i * DEBUG_BYTES) as u64;
             put32(b, 16 + i * 12, address as u32);
             put32(b, 20 + i * 12, (address >> 32) as u32);
             put32(b, 24 + i * 12, DEBUG_BYTES as u32);

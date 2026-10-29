@@ -304,10 +304,10 @@ fn dma_ceiling_precedes_ring_programming() {
         )
         .unwrap();
     controller.shutdown().unwrap();
-    // A valid allocator's CPU address can exceed a controller's identity
+    // The compatibility allocator's device address can exceed its DMA
     // width even when GCAP advertises 64-bit addressing. Never start DMA.
     let next = fixture.allocator.allocate(128, 128).unwrap();
-    if next.physical() >= 1u64 << 40 {
+    if next.bus_address() >= 1u64 << 40 {
         let mut fixture = Fixture::new();
         let model = Model::new(256);
         assert!(matches!(

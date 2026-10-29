@@ -52,8 +52,8 @@ impl Ring {
         let buffers = dma.allocate(count * BUFFER, PAGE)?;
         let fits = |buffer: &DmaBuffer, bytes: usize| {
             buffer.len() == bytes
-                && buffer.physical().is_multiple_of(PAGE as u64)
-                && buffer.physical().checked_add(bytes as u64).is_some()
+                && buffer.bus_address().is_multiple_of(PAGE as u64)
+                && buffer.bus_address().checked_add(bytes as u64).is_some()
         };
         if !fits(&descriptors, count * DESCRIPTOR) || !fits(&buffers, count * BUFFER) {
             return Err(BlockError::Unsupported(
@@ -74,7 +74,7 @@ impl Ring {
     /// The descriptors' bus address and length in bytes, for the
     /// controller's base and length registers.
     pub(crate) fn base(&self) -> u64 {
-        self.descriptors.physical()
+        self.descriptors.bus_address()
     }
 
     pub(crate) fn bytes(&self) -> u32 {
@@ -95,7 +95,7 @@ impl Ring {
     }
 
     pub(crate) fn address(&self, index: usize) -> u64 {
-        self.buffers.physical() + (index * BUFFER) as u64
+        self.buffers.bus_address() + (index * BUFFER) as u64
     }
 
     pub(crate) fn buffer(&mut self, index: usize) -> &mut [u8] {
