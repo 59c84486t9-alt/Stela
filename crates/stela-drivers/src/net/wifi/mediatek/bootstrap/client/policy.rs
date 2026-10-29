@@ -618,7 +618,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
     /// policy against its completed source programming before accepting work.
     // Preserve the original owner even for allocation failure: boxing this
     // error would itself require an allocation while reporting NoMemory.
-    #[allow(clippy::result_large_err)]
+    #[allow(
+        clippy::result_large_err,
+        reason = "Policy admission failure returns the original live client and diagnostics so uncertain radio/DMA ownership remains retained"
+    )]
     pub fn new(
         client: Client<I, Q, C>,
         country: Country,

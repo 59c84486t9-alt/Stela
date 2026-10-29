@@ -274,7 +274,10 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
     /// without native writes; later failures quarantine uncertain ownership.
     // Return the exact potentially unqualified owners without allocating or
     // dropping any native resource on rejection.
-    #[allow(clippy::result_large_err)]
+    #[allow(
+        clippy::result_large_err,
+        reason = "Failed BCM4377 claim returns the exact original PCI, MMIO, timer and DMA inputs needed for safe native retirement"
+    )]
     pub unsafe fn new(mut inputs: Inputs<C, R, T>) -> Result<Self, (Error, Inputs<C, R, T>)> {
         let checked = (|| {
             let f = &mut inputs.function;

@@ -259,7 +259,6 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
     /// service/stop; only the documented IRQ callback accesses shared registers.
     /// Clock/domain/native access contracts remain valid for every retained owner.
     /// Rejection returns exact original owners without any native write.
-    #[allow(clippy::result_large_err)]
     pub unsafe fn new(
         mut inputs: Inputs<C, R, T>,
     ) -> core::result::Result<Self, (Error, Inputs<C, R, T>)> {

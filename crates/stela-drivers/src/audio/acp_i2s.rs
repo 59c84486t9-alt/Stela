@@ -517,7 +517,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     /// Retain a nonretired controller intact; failed ownership return allocates
     /// nothing and cannot drop an active native/DMA owner.
-    #[allow(clippy::result_large_err)]
+    #[allow(
+        clippy::result_large_err,
+        reason = "A controller that has not acknowledged shutdown must return its original register and clock owners intact"
+    )]
     pub fn into_stopped(self) -> Result<(R, T), Self> {
         if self.state != State::Shutdown {
             Err(self)

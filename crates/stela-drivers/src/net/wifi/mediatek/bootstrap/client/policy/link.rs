@@ -121,7 +121,10 @@ pub struct ManagedLink<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static
 impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q, C, S> {
     // Returning the actual owner/provider also on allocation failure avoids a
     // second allocation solely to report failure while preserving ownership.
-    #[allow(clippy::result_large_err)]
+    #[allow(
+        clippy::result_large_err,
+        reason = "Link admission failure returns the managed client and its original page source without dropping uncertain live native owners"
+    )]
     pub fn new(
         client: ManagedClient<I, Q, C>,
         source: S,

@@ -1001,7 +1001,10 @@ impl<R: Registers, T: Timer, P: Profile> Controller<R, T, P> {
     /// Transfer the retained register provider only after acknowledged shutdown.
     /// A non-shutdown owner is returned intact, including every DMA lease.
     // Returning ownership must neither allocate nor drop a retained DMA lease.
-    #[allow(clippy::result_large_err)]
+    #[allow(
+        clippy::result_large_err,
+        reason = "A controller that has not acknowledged shutdown must return its original register and clock owners intact"
+    )]
     pub fn into_stopped(self) -> Result<(R, T), Self> {
         if self.state != State::Shutdown {
             return Err(self);

@@ -285,7 +285,10 @@ impl Aqtion {
     /// epoch and its ATS/NoSnoop policy. Calls occur in serialized process context.
     /// These are actual resource authorities, never copied PCI identities.
     // Return the exact uncertain native owners without allocating on failure.
-    #[allow(clippy::result_large_err)]
+    #[allow(
+        clippy::result_large_err,
+        reason = "Failed native attachment returns the original stopped PCI function, BAR mapping and DMA owners instead of dropping uncertain hardware resources"
+    )]
     pub unsafe fn attach(
         function: Function<OwnedConfig>,
         registers: MappedRegisters,
