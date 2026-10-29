@@ -1,8 +1,9 @@
 //! Typed actual Source-owned HPET counter consumer candidate.
-use super::hpet::{Descriptor, Geometry, coherent_counter};
+use super::hpet::Descriptor;
 use crate::native_mmio::{ExclusiveHpet, HpetMapping};
 use alloc::sync::Arc;
 use core::ptr::{read_volatile, write_volatile};
+use stela_boot_core::hpet::{Geometry, coherent_counter};
 use stela_drivers::{
     bus::mmio::owned::{CacheAttribute, Protection},
     platform::work::WorkError,
@@ -56,7 +57,7 @@ impl Counter {
             return Err(WorkError::Unavailable);
         }
         // SAFETY: process-qualified genuine Source UC mapping of exact span.
-        let geometry = unsafe { Geometry::qualify(descriptor, read32(base, 0), read32(base, 4))? };
+        let geometry = unsafe { descriptor.geometry(read32(base, 0), read32(base, 4))? };
         // SAFETY: same authentic retained exact register mapping.
         let original_config = unsafe { read32(base, 0x10) };
         let pending_mask = (1u32 << geometry.timers) - 1;
@@ -129,7 +130,7 @@ impl Counter {
         self.owned.context()
     }
     pub(crate) fn ns(&self, ticks: u64) -> Result<u64, WorkError> {
-        self.geometry.ns(ticks)
+        self.geometry.ns(ticks).map_err(|_| WorkError::Exhausted)
     }
     /// Qualify genuine same physical CPU/root before the cached register read;
     /// no process-only Mapping call is made inside an ISR.

@@ -12,6 +12,7 @@ pub mod early_fault;
 pub mod entropy;
 pub mod firmware_state;
 pub mod guarded_stacks;
+pub mod hpet;
 pub mod madt;
 pub mod memory_budget;
 pub mod memory_types;
