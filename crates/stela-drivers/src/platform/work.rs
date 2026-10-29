@@ -732,6 +732,8 @@ struct Task {
     binding: Option<Arc<dyn SwitchBinding>>,
     signal: Arc<WakeSignal>,
 }
+pub(crate) const MAX_CONTINUATIONS: usize = 32;
+
 /// CPU-affine pinned executor. Task zero is a real foreground continuation,
 /// task one is serial Notify; an optional Linux service reserves task two and
 /// firmware reserves task three. Remaining stacks run general work. The dispatcher
@@ -756,8 +758,15 @@ pub struct Runtime<const N: usize> {
 #[cfg(target_arch = "x86_64")]
 impl<const N: usize> Runtime<N> {
     fn validate_stacks(queue: &Queue<N>, stacks: &[Stack]) -> Result<(), WorkError> {
+        Self::validate_stack_limit(queue, stacks, 16)
+    }
+    fn validate_stack_limit(
+        queue: &Queue<N>,
+        stacks: &[Stack],
+        limit: usize,
+    ) -> Result<(), WorkError> {
         queue.process()?;
-        if stacks.len() < 4 || stacks.len() > 16 {
+        if stacks.len() < 4 || stacks.len() > limit {
             return Err(WorkError::Unavailable);
         }
         for (i, a) in stacks.iter().enumerate() {
@@ -853,7 +862,7 @@ impl<const N: usize> Runtime<N> {
             // Native worker permits require an empty pre-admission queue: a
             // legacy Notify job in an ordinary slot otherwise bypasses the two
             // real-worker limit. Legacy constructors keep their prior contract.
-            if (layout.native16() && state.jobs.iter().any(Option::is_some))
+            if (layout.firmware_roles() && state.jobs.iter().any(Option::is_some))
                 || state.jobs[N - layout.slots()..].iter().any(Option::is_some)
             {
                 return Err(WorkError::Busy);
@@ -1620,7 +1629,7 @@ impl<const N: usize> Runtime<N> {
         if self.retired.get() || self.queue.abandoned.load(Ordering::Acquire) {
             return Err(WorkError::Closed);
         }
-        if !self.layout.native16() {
+        if !self.layout.firmware_roles() {
             return Err(WorkError::Unavailable);
         }
         let current = self.current.get();
@@ -1944,7 +1953,7 @@ impl<const N: usize> Executor<N> {
             )?),
         })
     }
-    /// Apply the named sixteen-stack qualification policy. The layout reserves
+    /// Apply a named bounded qualification/prototype reservation policy. The layout reserves
     /// real workers and admission slots; it supplies no native IRQ/AML/provider
     /// capability. The queue must be empty (Busy otherwise), so every admitted
     /// Portal/Notify job first claims an actual idle-worker permit. Existing
@@ -1954,8 +1963,8 @@ impl<const N: usize> Executor<N> {
         stacks: Vec<Stack>,
         policy: ReservationPolicy,
     ) -> Result<Self, WorkError> {
-        Runtime::<N>::validate_stacks(&queue, &stacks)?;
         let layout = policy.layout();
+        Runtime::<N>::validate_stack_limit(&queue, &stacks, layout.stack_limit())?;
         layout.validate(stacks.len(), N)?;
         // SAFETY: same qualified native construction boundary as new().
         let controls = unsafe { context::controls()? };
@@ -1991,6 +2000,23 @@ impl<const N: usize> Executor<N> {
         Ok(Self {
             runtime: ManuallyDrop::new(Runtime::with_service_controls(
                 queue, stacks, controls, true,
+            )?),
+        })
+    }
+    #[cfg(all(test, unix))]
+    pub(crate) fn new_hosted_policy_for_test(
+        queue: Arc<Queue<N>>,
+        stacks: Vec<Stack>,
+        policy: ReservationPolicy,
+    ) -> Result<Self, WorkError> {
+        let layout = policy.layout();
+        Runtime::<N>::validate_stack_limit(&queue, &stacks, layout.stack_limit())?;
+        layout.validate(stacks.len(), N)?;
+        // SAFETY: unprivileged real control snapshot for owned guarded hosted stacks only.
+        let controls = unsafe { context::read_controls() };
+        Ok(Self {
+            runtime: ManuallyDrop::new(Runtime::with_layout_controls(
+                queue, stacks, controls, layout,
             )?),
         })
     }

@@ -92,7 +92,10 @@ impl Drop for Mapping {
     }
 }
 pub(crate) fn stacks(dropped: &Arc<AtomicUsize>) -> Vec<Stack> {
-    (0..16)
+    stacks_count(dropped, 16)
+}
+pub(crate) fn stacks_count(dropped: &Arc<AtomicUsize>, count: usize) -> Vec<Stack> {
+    (0..count)
         .map(|_| {
             #[cfg(target_os = "macos")]
             let anonymous = 0x1000;
@@ -135,17 +138,7 @@ pub(crate) fn executor_with_policy<const N: usize>(
     // all access/switches stay on the modeled constructing thread until join.
     let queue = unsafe { Queue::new(cpu.clone(), owner) }.unwrap();
     let dropped = Arc::new(AtomicUsize::new(0));
-    let stacks = stacks(&dropped);
-    Runtime::validate_stacks(&queue, &stacks).unwrap();
-    // SAFETY: unprivileged snapshot of this x86 hosted thread's real x87/SSE
-    // controls. No native CPL0/IRQ/provider admission is inferred from it.
-    let controls = unsafe { context::read_controls() };
-    let runtime = Runtime::with_layout_controls(queue, stacks, controls, policy.layout()).unwrap();
-    (
-        Executor {
-            runtime: ManuallyDrop::new(runtime),
-        },
-        cpu,
-        dropped,
-    )
+    let stacks = stacks_count(&dropped, policy.layout().stack_limit());
+    let executor = Executor::new_hosted_policy_for_test(queue, stacks, policy).unwrap();
+    (executor, cpu, dropped)
 }

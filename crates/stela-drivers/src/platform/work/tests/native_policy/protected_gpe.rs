@@ -65,9 +65,16 @@ fn protected_budget_and_construction_reject_invalid_geometry_without_taking_jobs
     failed_construction::<17>(true, WorkError::Busy);
 }
 fn full_admission<const N: usize>(budget: GpeQueueBudget, general_capacity: usize) {
+    full_admission_policy::<N>(policy(budget), budget, general_capacity);
+}
+fn full_admission_policy<const N: usize>(
+    reservation: ReservationPolicy,
+    budget: GpeQueueBudget,
+    general_capacity: usize,
+) {
     let count = Arc::new(core::sync::atomic::AtomicUsize::new(0));
     let (executor, cpu, dropped) =
-        test_support::executor_with_policy::<N>(count.clone(), policy(budget));
+        test_support::executor_with_policy::<N>(count.clone(), reservation);
     let r = executor.runtime();
     assert_eq!(r.protected_gpe_budget(), Ok(Some(budget)));
     let p = Arc::as_ptr(&count) as *mut c_void;
@@ -112,7 +119,10 @@ fn full_admission<const N: usize>(budget: GpeQueueBudget, general_capacity: usiz
         Err(WorkError::Closed)
     );
     drop(executor);
-    assert_eq!(dropped.load(Ordering::Relaxed), 16);
+    assert_eq!(
+        dropped.load(Ordering::Relaxed),
+        reservation.layout().stack_limit()
+    );
     assert_eq!(cpu.flags(), 0x202);
 }
 #[test]
@@ -193,3 +203,5 @@ fn a_pending_gpe_keeps_its_own_slot_under_full_general_admission_and_stack_satur
     assert_eq!(dropped.load(Ordering::Relaxed), 16);
     assert_eq!(cpu.flags(), 0x202);
 }
+
+mod capacity32;

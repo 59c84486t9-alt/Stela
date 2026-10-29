@@ -9,6 +9,11 @@ use core::ops::Range;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReservationPolicy {
     NativeFirmware16,
+    /// Bounded32-stack execution prototype: the same8 roles and24 General workers.
+    /// Requires actual mapped owners; no kernel thread or producer is admitted.
+    NativeFirmware32Protected {
+        gpe: GpeQueueBudget,
+    },
     /// Same sixteen stack roles, with independently reserved pending GPE jobs.
     NativeFirmware16Protected {
         gpe: GpeQueueBudget,
@@ -44,6 +49,7 @@ impl ReservationPolicy {
         match self {
             Self::NativeFirmware16 => Layout::NativeFirmware16,
             Self::NativeFirmware16Protected { gpe } => Layout::NativeFirmware16Protected(gpe),
+            Self::NativeFirmware32Protected { gpe } => Layout::NativeFirmware32Protected(gpe),
         }
     }
 }
@@ -84,17 +90,22 @@ pub(super) enum Layout {
     FirmwareControl,
     NativeFirmware16,
     NativeFirmware16Protected(GpeQueueBudget),
+    NativeFirmware32Protected(GpeQueueBudget),
 }
 impl Layout {
-    pub(super) fn native16(self) -> bool {
+    pub(super) fn firmware_roles(self) -> bool {
         matches!(
             self,
-            Self::NativeFirmware16 | Self::NativeFirmware16Protected(_)
+            Self::NativeFirmware16
+                | Self::NativeFirmware16Protected(_)
+                | Self::NativeFirmware32Protected(_)
         )
     }
     pub(super) fn protected_gpe(self) -> Option<GpeQueueBudget> {
         match self {
-            Self::NativeFirmware16Protected(gpe) => Some(gpe),
+            Self::NativeFirmware16Protected(gpe) | Self::NativeFirmware32Protected(gpe) => {
+                Some(gpe)
+            }
             _ => None,
         }
     }
@@ -107,7 +118,17 @@ impl Layout {
             Self::Ordinary | Self::LinuxService => 0,
             Self::FirmwareControl => 2,
             Self::NativeFirmware16 => 8,
-            Self::NativeFirmware16Protected(gpe) => 8 + gpe.protected_pending(),
+            Self::NativeFirmware16Protected(gpe) | Self::NativeFirmware32Protected(gpe) => {
+                8 + gpe.protected_pending()
+            }
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub(super) fn stack_limit(self) -> usize {
+        if matches!(self, Self::NativeFirmware32Protected(_)) {
+            super::MAX_CONTINUATIONS
+        } else {
+            16
         }
     }
     #[cfg(target_arch = "x86_64")]
@@ -119,6 +140,12 @@ impl Layout {
             Self::NativeFirmware16 => stacks == 16 && jobs >= 16,
             Self::NativeFirmware16Protected(gpe) => {
                 stacks == 16 && jobs >= 16 + gpe.protected_pending()
+            }
+            Self::NativeFirmware32Protected(gpe) => {
+                let minimum = 32usize
+                    .checked_add(gpe.protected_pending())
+                    .ok_or(WorkError::Exhausted)?;
+                stacks == 32 && jobs >= minimum
             }
         };
         if valid {
@@ -133,22 +160,22 @@ impl Layout {
             0 => Lane::Foreground,
             1 => Lane::Notify,
             2 if self != Self::Ordinary => Lane::Service,
-            3 if self == Self::FirmwareControl || self.native16() => Lane::Firmware,
-            4 if self.native16() => Lane::Gpe,
-            5 | 6 if self.native16() => Lane::Portal,
-            7 if self.native16() => Lane::Notify,
+            3 if self == Self::FirmwareControl || self.firmware_roles() => Lane::Firmware,
+            4 if self.firmware_roles() => Lane::Gpe,
+            5 | 6 if self.firmware_roles() => Lane::Portal,
+            7 if self.firmware_roles() => Lane::Notify,
             _ => Lane::General,
         }
     }
     #[cfg(target_arch = "x86_64")]
     pub(super) fn role(self, lane: Lane) -> Option<FirmwareRole> {
         match lane {
-            Lane::Firmware if self == Self::FirmwareControl || self.native16() => {
+            Lane::Firmware if self == Self::FirmwareControl || self.firmware_roles() => {
                 Some(FirmwareRole::Control)
             }
-            Lane::Portal if self.native16() => Some(FirmwareRole::PortalAml),
-            Lane::Gpe if self.native16() => Some(FirmwareRole::Gpe),
-            Lane::Notify if self.native16() => Some(FirmwareRole::Notify),
+            Lane::Portal if self.firmware_roles() => Some(FirmwareRole::PortalAml),
+            Lane::Gpe if self.firmware_roles() => Some(FirmwareRole::Gpe),
+            Lane::Notify if self.firmware_roles() => Some(FirmwareRole::Notify),
             _ => None,
         }
     }
@@ -161,7 +188,7 @@ impl Layout {
     /// slots; the protected policy uses only its named fixed GPE budget. Neither
     /// borrows an ordinary continuation or a portal/Notify job slot.
     pub(super) fn admission(self, lane: Lane, jobs: usize) -> Result<[Range<usize>; 2], WorkError> {
-        if matches!(lane, Lane::Portal | Lane::Gpe) && !self.native16() {
+        if matches!(lane, Lane::Portal | Lane::Gpe) && !self.firmware_roles() {
             return Err(WorkError::Unavailable);
         }
         let reserved = self.slots();
@@ -170,7 +197,9 @@ impl Layout {
         }
         let start = jobs - reserved;
         let primary = match self {
-            Self::NativeFirmware16 | Self::NativeFirmware16Protected(_) => match lane {
+            Self::NativeFirmware16
+            | Self::NativeFirmware16Protected(_)
+            | Self::NativeFirmware32Protected(_) => match lane {
                 Lane::Service => start..start + 1,
                 Lane::Firmware => start + 1..start + 2,
                 Lane::Gpe => start + 2..start + 3 + self.pending_gpe(),

@@ -57,12 +57,12 @@ struct Row {
     state: State,
     order: u64,
 }
-/// Fixed 16 actual continuation records, embedded in the retained Queue.
+/// At most32 actual continuation records, embedded in the retained Queue.
 /// Only its existing IRQ-save lock accesses this state; no task/C pointer,
 /// provider callback, allocation or ref release is stored or invoked here.
 pub(super) struct Board {
     pub(super) enabled: bool,
-    rows: [Option<Row>; 16],
+    rows: [Option<Row>; super::MAX_CONTINUATIONS],
     head: u64,
     tail: u64,
 }
@@ -70,7 +70,7 @@ impl Board {
     pub(super) fn new() -> Self {
         Self {
             enabled: false,
-            rows: [None; 16],
+            rows: [None; super::MAX_CONTINUATIONS],
             head: MIDDLE,
             tail: MIDDLE,
         }

@@ -34,6 +34,7 @@ struct CTask {
     _opaque: [u8; 0],
 }
 unsafe extern "C" {
+    fn stela_linux_task_catalog_capacity() -> u32;
     fn stela_linux_task_allocate() -> *mut CTask;
     fn stela_linux_task_attach(
         task: *mut CTask,
@@ -114,6 +115,12 @@ impl<const N: usize> TaskBinding<N> {
     /// by this allocation. C metadata failure is fallible; Arc allocation uses
     /// the image's existing global allocation-error policy.
     pub unsafe fn new() -> Result<Arc<Self>, WorkError> {
+        // SAFETY: immutable compiled C storage-ceiling observation, with no task/owner access.
+        if unsafe { stela_linux_task_catalog_capacity() } as usize
+            != crate::platform::work::MAX_CONTINUATIONS
+        {
+            return Err(WorkError::Unavailable);
+        }
         // SAFETY: caller supplies actual canonical heap/process authority.
         let task = NonNull::new(unsafe { stela_linux_task_allocate() }).ok_or(WorkError::Full)?;
         Ok(Arc::new(Self {
@@ -1395,8 +1402,8 @@ pub(crate) mod tests {
 
     struct CatalogFixture {
         cpu: Arc<CpuModel>,
-        runtime: AtomicPtr<Runtime<16>>,
-        bindings: Mutex<Vec<Arc<TaskBinding<16>>>>,
+        runtime: AtomicPtr<Runtime<64>>,
+        bindings: Mutex<Vec<Arc<TaskBinding<64>>>>,
         refused: AtomicBool,
     }
     impl CatalogFixture {
@@ -1408,19 +1415,19 @@ pub(crate) mod tests {
                 refused: AtomicBool::new(false),
             })
         }
-        unsafe fn runtime(&self) -> Pin<&Runtime<16>> {
+        unsafe fn runtime(&self) -> Pin<&Runtime<64>> {
             self.cpu.check_cpu().unwrap();
             // SAFETY: actual fixture owner retains this pinned runtime through
             // all admitted callbacks, detach and process-context metadata free.
             unsafe { Pin::new_unchecked(&*self.runtime.load(Ordering::Acquire)) }
         }
-        fn publish(&self, runtime: Pin<&Runtime<16>>) {
+        fn publish(&self, runtime: Pin<&Runtime<64>>) {
             self.runtime.store(
-                runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>,
+                runtime.get_ref() as *const Runtime<64> as *mut Runtime<64>,
                 Ordering::Release,
             );
         }
-        fn detach(&self, runtime: Pin<&Runtime<16>>) {
+        fn detach(&self, runtime: Pin<&Runtime<64>>) {
             let bindings = core::mem::take(&mut *self.bindings.lock().unwrap());
             for binding in bindings {
                 // SAFETY: all real jobs completed, no source/storage/foreign refs.
@@ -1434,7 +1441,7 @@ pub(crate) mod tests {
     unsafe extern "C" fn catalog_bind(context: *mut c_void) {
         // SAFETY: rooted fixture owns this pointer through actual completion.
         let f = unsafe { &*context.cast::<CatalogFixture>() };
-        let binding = unsafe { TaskBinding::<16>::new() }.unwrap();
+        let binding = unsafe { TaskBinding::<64>::new() }.unwrap();
         binding.bind_current(unsafe { f.runtime() }).unwrap();
         f.bindings.lock().unwrap().push(binding);
     }
@@ -1443,7 +1450,7 @@ pub(crate) mod tests {
         let f = unsafe { &*context.cast::<CatalogFixture>() };
         let runtime = unsafe { f.runtime() };
         let before = runtime.current_context().unwrap();
-        let binding = unsafe { TaskBinding::<16>::new() }.unwrap();
+        let binding = unsafe { TaskBinding::<64>::new() }.unwrap();
         assert_eq!(binding.bind_current(runtime), Err(WorkError::Full));
         assert_eq!(runtime.current_context(), Ok(before));
         // SAFETY: admission failed before original metadata/publication effects.
@@ -1454,14 +1461,32 @@ pub(crate) mod tests {
         let cpu = CpuModel::new();
         let dropped = Arc::new(AtomicU64::new(0));
         let first = CatalogFixture::new(cpu.clone());
-        let queue = unsafe { Queue::<16>::new(cpu.clone(), first.clone()) }.unwrap();
-        let executor =
-            Executor::new_hosted_for_test(queue, stacks_count(&dropped, 16 * 1024, 16)).unwrap();
+        let queue = unsafe { Queue::<64>::new(cpu.clone(), first.clone()) }.unwrap();
+        let executor = Executor::new_hosted_policy_for_test(
+            queue,
+            stacks_count(&dropped, 16 * 1024, 32),
+            crate::platform::work::ReservationPolicy::NativeFirmware32Protected {
+                gpe: crate::platform::work::GpeQueueBudget::QUALIFICATION,
+            },
+        )
+        .unwrap();
         let runtime = executor.runtime();
         first.publish(runtime);
         let context = Arc::as_ptr(&first) as *mut c_void;
-        unsafe { runtime.queue().execute(Kind::Notify, catalog_bind, context) }.unwrap();
-        for _ in 0..14 {
+        // SAFETY: each actual role/worker callback borrows first, retained by queue through detach.
+        unsafe { runtime.start_service(catalog_bind, context) }.unwrap();
+        // SAFETY: independent actual control worker, same retained immutable fixture owner.
+        unsafe { runtime.start_firmware(catalog_bind, context) }.unwrap();
+        // SAFETY: serial GPE has one actual mapped worker; its callback owner survives join.
+        unsafe { runtime.queue().execute_gpe(catalog_bind, context) }.unwrap();
+        for _ in 0..2 {
+            // SAFETY: each accepted Notify permit owns a distinct actual stack.
+            unsafe { runtime.queue().execute(Kind::Notify, catalog_bind, context) }.unwrap();
+            // SAFETY: each accepted Portal permit owns a distinct actual stack.
+            unsafe { runtime.queue().execute_portal(catalog_bind, context) }.unwrap();
+        }
+        for _ in 0..24 {
+            // SAFETY: each General callback retains first and binds one actual mapped continuation.
             unsafe {
                 runtime
                     .queue()
@@ -1469,6 +1494,7 @@ pub(crate) mod tests {
             }
             .unwrap();
         }
+        // SAFETY: Foreground's retained mapped stack is distinct from all31 peers above.
         unsafe { runtime.call_foreground(catalog_bind, context, 10000) }.unwrap();
         runtime.drain(10000).unwrap();
         let mut ids: Vec<_> = first
@@ -1480,9 +1506,9 @@ pub(crate) mod tests {
             .collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 16);
+        assert_eq!(ids.len(), 32);
         let second = CatalogFixture::new(cpu.clone());
-        let queue = unsafe { Queue::<16>::new(cpu.clone(), second.clone()) }.unwrap();
+        let queue = unsafe { Queue::<64>::new(cpu.clone(), second.clone()) }.unwrap();
         let refused = Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
         let rejected = refused.runtime();
         second.publish(rejected);
@@ -1498,10 +1524,10 @@ pub(crate) mod tests {
         first.detach(runtime);
         unsafe { runtime.retire() }.unwrap();
         drop(executor);
-        assert_eq!(dropped.load(Ordering::Relaxed), 20);
+        assert_eq!(dropped.load(Ordering::Relaxed), 36);
         // Every retired slot is available to actual fresh mappings again.
         let third = CatalogFixture::new(cpu.clone());
-        let queue = unsafe { Queue::<16>::new(cpu.clone(), third.clone()) }.unwrap();
+        let queue = unsafe { Queue::<64>::new(cpu.clone(), third.clone()) }.unwrap();
         let reused = Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
         let available = reused.runtime();
         third.publish(available);
@@ -1514,7 +1540,7 @@ pub(crate) mod tests {
         third.detach(available);
         unsafe { available.retire() }.unwrap();
         drop(reused);
-        assert_eq!(dropped.load(Ordering::Relaxed), 24);
+        assert_eq!(dropped.load(Ordering::Relaxed), 40);
         assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
         assert_eq!(quarantined(), 0);
     }

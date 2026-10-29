@@ -61,8 +61,14 @@ static struct stela_linux_task *active;
  * hooks on the single qualified CPU; no native ISR can read this catalog.
  * Rust's retained binding owns each metadata pointer through actual detach.
  * A closed job remains registered until detach but never owns live storage. */
-#define STACK_TASKS 16U
+#define STACK_TASKS 32U
 static struct stela_linux_task *stack_tasks[STACK_TASKS];
+
+unsigned int stela_linux_task_catalog_capacity(void)
+{
+	/* Ceiling only. stack_admit still requires actual attached stack leases. */
+	return STACK_TASKS;
+}
 
 static unsigned int stack_slot(const struct stela_linux_task *task)
 {

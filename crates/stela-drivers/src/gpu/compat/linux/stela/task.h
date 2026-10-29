@@ -54,6 +54,7 @@ bool stela_linux_lease_resume(const struct stela_linux_lease *lease);
 /* Allocation/release run in qualified process context, outside Linux entry.
  * Attach/leave/arrive/complete/detach are bounded IF=0 Runtime switch hooks.
  * Return failure before mutation; corruption after a committed switch traps. */
+unsigned int stela_linux_task_catalog_capacity(void);
 struct stela_linux_task *stela_linux_task_allocate(void);
 int stela_linux_task_attach(struct stela_linux_task *task,
 	const struct stela_linux_task_context *context,
