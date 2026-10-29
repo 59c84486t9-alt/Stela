@@ -56,6 +56,26 @@ static const char *kernel =
    "!42 = !{i32 2, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
    " !\"air.arg_name\", !\"tid\"}\n";
 
+/* Stores its stage-in value at its thread position; it never reads its
+ * index. */
+static const char *staged =
+   "define void @staged(<4 x float> %value, <2 x i32> %index, ptr addrspace(1) %out, i32 %tid) {\n"
+   "%i = zext i32 %tid to i64\n"
+   "%q = getelementptr <4 x float>, ptr addrspace(1) %out, i64 %i\n"
+   "store <4 x float> %value, ptr addrspace(1) %q, align 16\n"
+   "ret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @staged, !3, !4}\n!3 = !{}\n!4 = !{!40, !41, !42, !43}\n"
+   "!40 = !{i32 0, !\"air.stage_in\", !\"air.location_index\", i32 0, i32 1,"
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"value\"}\n"
+   "!41 = !{i32 1, !\"air.stage_in\", !\"air.location_index\", i32 1, i32 1,"
+   " !\"air.arg_type_name\", !\"uint2\", !\"air.arg_name\", !\"index\"}\n"
+   "!42 = !{i32 2, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 16, !\"air.arg_type_align_size\","
+   " i32 16, !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"out\"}\n"
+   "!43 = !{i32 3, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
+
 /* Stores the scale constant where it is defined and the required enabled
  * constant is set, in the form Metal.jl's library builder reads. */
 static const char *constants =
@@ -361,6 +381,36 @@ patch_functions_compile_behind_their_tessellation_stages(void)
 }
 
 static void
+kernels_compile_with_their_stage_in(void)
+{
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   assert(reflect(staged, "staged", &reflection, &error));
+   /* The attributes the kernel reads. */
+   assert(reflection.stage == STELA_METAL_KERNEL && reflection.attribute_count == 1 &&
+          reflection.attributes[0].index == 0 && reflection.attributes[0].components == 4);
+
+   struct stela_metal_stage_in stage_in = {0};
+   stage_in.attributes[0] = (struct stela_metal_stage_in_attribute){31, 0, 2};
+   stage_in.layouts[2] = (struct stela_metal_stage_in_layout){
+      16, STELA_METAL_STEP_THREAD_POSITION_IN_GRID_X, 1};
+   const struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .stage_in = &stage_in};
+   nir_shader *shader = compile(staged, "staged", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "staged: %u %s\n", error.kind, error.detail);
+   assert(shader && shader->info.stage == MESA_SHADER_COMPUTE);
+   stela_metal_release(shader);
+
+   /* The layout provides what the kernel reads, and only kernels and patch
+    * functions fetch theirs. */
+   const struct stela_metal_specialization plain = {.workgroup_size = {64, 1, 1}};
+   assert(!compile(staged, "staged", &plain, &error) && error.kind == STELA_AIR_ARGUMENT);
+   const struct stela_metal_specialization fetched = {.stage_in = &stage_in};
+   assert(!compile(vertex, "vertex", &fetched, &error) && error.kind == STELA_AIR_INPUT);
+}
+
+static void
 mesh_stages_compile_with_their_launch(void)
 {
    struct stela_metal_reflection reflection;
@@ -448,6 +498,7 @@ main(void)
    kernels_reflect_and_compile_their_threadgroup_memory();
    render_stages_compile_at_their_linked_locations();
    patch_functions_compile_behind_their_tessellation_stages();
+   kernels_compile_with_their_stage_in();
    mesh_stages_compile_with_their_launch();
    function_constants_reflect_and_specialize();
    glsl_type_singleton_decref();

@@ -143,6 +143,18 @@ add_sampler(struct reflecting *r, const struct stela_air_sampler *sampler)
 }
 
 static bool
+add_attribute(struct reflecting *r, unsigned location, enum stela_air_primitive primitive,
+              unsigned components)
+{
+   struct stela_metal_reflection *out = r->out;
+   if (out->attribute_count == STELA_METAL_ATTRIBUTES)
+      return fail(r->error, STELA_AIR_LIMIT, "attributes exceed the table");
+   out->attributes[out->attribute_count++] = (struct stela_metal_attribute_use){
+      location, primitive, components};
+   return true;
+}
+
+static bool
 reflect_kernel(const struct stela_air_inspection *info, const struct stela_air_entry *entry,
                void *data)
 {
@@ -156,7 +168,12 @@ reflect_kernel(const struct stela_air_inspection *info, const struct stela_air_e
       const struct stela_air_argument_info *argument = &entry->arguments[i];
       bool added = argument->kind == 1 ? add_buffer(r, &argument->buffer, argument->argument_buffer) :
                    argument->kind == 3 ? add_texture(r, &argument->texture) :
-                   argument->kind == 4 ? add_sampler(r, &argument->sampler) : true;
+                   argument->kind == 4 ? add_sampler(r, &argument->sampler) :
+                   /* The stage-in attributes the kernel reads. */
+                   argument->kind == 5 && argument->used ?
+                                         add_attribute(r, argument->location, argument->primitive,
+                                                       argument->type_components) :
+                                         true;
       if (!added)
          return false;
    }
@@ -174,18 +191,6 @@ add_varying(struct reflecting *r, const struct stela_air_stage_io *io)
       .identifier_bytes = (uint32_t)io->identifier_bytes, .primitive = io->primitive,
       .components = io->components, .per_primitive = io->per_primitive};
    return add_name(r, io->identifier, io->identifier_bytes, &varying->identifier);
-}
-
-static bool
-add_attribute(struct reflecting *r, unsigned location, enum stela_air_primitive primitive,
-              unsigned components)
-{
-   struct stela_metal_reflection *out = r->out;
-   if (out->attribute_count == STELA_METAL_ATTRIBUTES)
-      return fail(r->error, STELA_AIR_LIMIT, "attributes exceed the table");
-   out->attributes[out->attribute_count++] = (struct stela_metal_attribute_use){
-      location, primitive, components};
-   return true;
 }
 
 static bool
@@ -316,17 +321,22 @@ bind_threadgroup(const struct stela_air_buffer *buffer, struct stela_air_threadg
    return false;
 }
 
-/* stela_air_fetch_attribute over the pipeline's stage-in layout. */
+/* stela_air_fetch_attribute over the pipeline's stage-in layout: at a
+ * patch's IDs for post-tessellation vertex functions, else at a kernel's
+ * position in the grid. */
 static nir_def *
-fetch_attribute(nir_builder *b, unsigned location, nir_def *ids, nir_def *point, bool integer,
+fetch_attribute(nir_builder *b, unsigned location, nir_def *at, nir_def *point, bool integer,
                 void *data)
 {
    const struct stela_metal_specialization *specialization =
       ((const struct binding *)data)->specialization;
    if (!specialization->stage_in)
       return NULL;
-   return stela_metal_fetch_patch_attribute(b, specialization->stage_in, specialization->tessellation,
-                                            location, ids, point, integer);
+   if (specialization->tessellation)
+      return stela_metal_fetch_patch_attribute(b, specialization->stage_in,
+                                               specialization->tessellation, location, at, point,
+                                               integer);
+   return point ? NULL : stela_metal_fetch_stage_in(b, specialization->stage_in, location, at, integer);
 }
 
 static enum stela_metal_table
@@ -411,6 +421,12 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       fail(error, STELA_AIR_INPUT, "tessellation of another patch");
       goto done;
    }
+   /* Only kernels and patch functions fetch their stage-in. */
+   const struct stela_metal_stage_in *stage_in = specialization->stage_in;
+   if (stage_in && !patch && stage != STELA_METAL_KERNEL) {
+      fail(error, STELA_AIR_INPUT, "stage-in for a function that does not fetch it");
+      goto done;
+   }
    struct binding binding = {{stage_table(stage)}, specialization};
    struct stela_air_options resources = {
       .max_instructions = target->max_instructions,
@@ -427,7 +443,7 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       .bind_sampler_id = stela_metal_bind_sampler_id,
       .texture_levels = stela_metal_texture_levels,
       .load_device_value = stela_metal_load_device_value,
-      .fetch_attribute = patch ? fetch_attribute : NULL,
+      .fetch_attribute = patch || stage_in ? fetch_attribute : NULL,
       .constants = specialization->constants,
       .constant_count = specialization->constant_count,
    };

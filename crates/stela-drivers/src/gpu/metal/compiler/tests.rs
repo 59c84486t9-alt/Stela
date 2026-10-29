@@ -27,6 +27,8 @@ struct Compiled {
     /// Each attribute's index, format, offset and buffer, with that
     /// buffer's stride, step function and rate.
     stage_in: Vec<[u32; 7]>,
+    /// The stage-in's index bytes and buffer.
+    stage_in_indices: Option<(u32, u32)>,
 }
 
 /// A refusal's kind, instruction and detail.
@@ -134,6 +136,7 @@ unsafe extern "C" fn compile(
             specialization.stage_in.as_ref(),
         )
     };
+    let stage_in_indices = stage_in.map(|stage_in| (stage_in.index_bytes, stage_in.index_buffer));
     let stage_in = stage_in.map_or(Vec::new(), |stage_in| {
         (0..)
             .zip(&stage_in.attributes)
@@ -190,6 +193,7 @@ unsafe extern "C" fn compile(
             launched_by_grid: specialization.launched_by_grid != 0,
             tessellation,
             stage_in,
+            stage_in_indices,
         });
         ptr::without_provenance_mut(0x1000 * fake.compiled.len())
     })
@@ -553,21 +557,7 @@ fn refusals_name_their_kind_and_keep_their_detail() {
 
 #[test]
 fn what_the_service_cannot_take_is_refused_before_it_runs() {
-    reflecting(|r| r.stage = 3);
     let (mut compiler, library) = with_library();
-    let stage_in = Specialization {
-        stage_in: Some(StageInputDescriptor {
-            attributes: Vec::new(),
-            layouts: Vec::new(),
-            index_type: IndexType::UInt16,
-            index_buffer_index: 0,
-        }),
-        ..Specialization::default()
-    };
-    assert_eq!(
-        compiler.compile(library, "kernel", &stage_in),
-        Err(Error::Unsupported("kernel stage-in"))
-    );
     let specialization = Specialization::default();
     assert_eq!(
         compiler.reflect(library, "missing", &specialization),
@@ -598,6 +588,66 @@ fn what_the_service_cannot_take_is_refused_before_it_runs() {
     );
     FAKE.with_borrow(|fake| assert!(fake.compiled.is_empty()));
     assert_eq!(compiler.refusal(), None);
+}
+
+#[test]
+fn kernels_compile_with_their_stage_in() {
+    use crate::gpu::metal::vertex::{Attribute, StageInLayout, StageInStep, VertexFormat};
+    reflecting(|r| {
+        r.stage = 3;
+        r.attributes[0] = ffi::AttributeUse {
+            index: 2,
+            primitive: ffi::primitive::UINT,
+            components: 2,
+        };
+        r.attribute_count = 1;
+    });
+    let (mut compiler, library) = with_library();
+    let specialization = Specialization {
+        stage_in: Some(StageInputDescriptor {
+            attributes: vec![Attribute {
+                index: 2,
+                format: VertexFormat::UInt2,
+                offset: 4,
+                buffer_index: 6,
+            }],
+            layouts: vec![StageInLayout {
+                buffer_index: 6,
+                stride: 12,
+                step_function: StageInStep::ThreadPositionInGridYIndexed,
+                step_rate: 2,
+            }],
+            index_type: IndexType::UInt32,
+            index_buffer_index: 9,
+        }),
+        ..Specialization::default()
+    };
+    compiler
+        .compile(library, "kernel", &specialization)
+        .unwrap();
+    FAKE.with_borrow(|fake| {
+        let compiled = fake.compiled.last().unwrap();
+        assert_eq!(
+            compiled.stage_in,
+            [[
+                2,
+                VertexFormat::UInt2.raw() as u32,
+                4,
+                6,
+                12,
+                StageInStep::ThreadPositionInGridYIndexed.raw() as u32,
+                2
+            ]]
+        );
+        assert_eq!(compiled.stage_in_indices, Some((4, 9)));
+        assert_eq!(compiled.tessellation, None);
+    });
+
+    // Without a descriptor, the kernel fetches nothing.
+    compiler
+        .compile(library, "kernel", &Specialization::default())
+        .unwrap();
+    FAKE.with_borrow(|fake| assert_eq!(fake.compiled.last().unwrap().stage_in_indices, None));
 }
 
 #[test]
@@ -691,6 +741,22 @@ fn post_tessellation_vertex_functions_compile_with_their_stage_in() {
         .compile_tessellation(library, "kernel", &Specialization::default(), &bare)
         .unwrap();
     FAKE.with_borrow(|fake| assert!(fake.compiled.last().unwrap().stage_in.is_empty()));
+    // Their stage-in is their vertex descriptor's.
+    let kernel_stage_in = Specialization {
+        stage_in: Some(StageInputDescriptor {
+            attributes: Vec::new(),
+            layouts: Vec::new(),
+            index_type: IndexType::UInt16,
+            index_buffer_index: 0,
+        }),
+        ..Specialization::default()
+    };
+    assert_eq!(
+        compiler
+            .compile_tessellation(library, "kernel", &kernel_stage_in, &bare)
+            .map(drop),
+        Err(Error::Invalid("kernel stage-in of a vertex function"))
+    );
 }
 
 #[test]

@@ -108,9 +108,9 @@ struct stela_metal_linked_varying {
 
 #define STELA_METAL_CONSTANT_VALUE_BYTES 24u
 
-/* shader.rs Specialization, less kernels' stage-in, which the frontend
- * refuses, with a post-tessellation vertex function's pipeline
- * tessellation and the stage-in layout it fetches by, which may be NULL;
+/* shader.rs Specialization, with a post-tessellation vertex function's
+ * pipeline tessellation, and the stage-in layout a kernel or
+ * post-tessellation vertex function fetches by; either may be NULL, and
  * every other function has neither. */
 struct stela_metal_specialization {
    uint32_t workgroup_size[3];
@@ -125,7 +125,7 @@ struct stela_metal_specialization {
 #define STELA_METAL_SPECIALIZATION_BYTES 72u
 /* The metal_abi.h layouts it points to. */
 #define STELA_METAL_PIPELINE_TESSELLATION_BYTES 24u
-#define STELA_METAL_STAGE_IN_BYTES 744u
+#define STELA_METAL_STAGE_IN_BYTES 752u
 
 /* Reflects entry of the AIR module. False after reporting why in error. */
 bool stela_metal_reflect(const void *air, size_t size, const char *entry,

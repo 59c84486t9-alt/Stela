@@ -521,6 +521,46 @@ static void patch_attributes_fetch_their_step_functions_element(void)
    ralloc_free(b.shader);
 }
 
+/* Kernels read their region's elements through the index buffer for
+ * indexed steps; threads outside the region read nothing. */
+static void kernel_stage_in_reads_within_its_region(void)
+{
+   struct stela_metal_stage_in stage_in = {.index_bytes = 4, .index_buffer = 7};
+   /* UInt2 at 8 in 16-byte elements of buffer 3. */
+   stage_in.attributes[1] = (struct stela_metal_stage_in_attribute){37, 8, 3};
+   stage_in.layouts[3] = (struct stela_metal_stage_in_layout){
+      16, STELA_METAL_STEP_THREAD_POSITION_IN_GRID_Y_INDEXED, 1};
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL, "kernel");
+   nir_def *position = nir_load_global_invocation_id(&b, 32);
+   assert(stela_metal_fetch_stage_in(&b, &stage_in, 1, position, true));
+   nir_intrinsic_instr *fetch = last(&b, nir_intrinsic_load_global_constant_bounded);
+   assert(fetch->def.num_components == 2 && fetch->def.bit_size == 32);
+   /* The bound is zero outside the region. */
+   assert(nir_def_is_alu(fetch->src[2].ssa) && nir_def_as_alu(fetch->src[2].ssa)->op == nir_op_bcsel);
+   bool indices = false;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         indices |= instr->type == nir_instr_type_intrinsic &&
+                    nir_instr_as_intrinsic(instr)->intrinsic ==
+                       nir_intrinsic_load_global_constant_bounded &&
+                    nir_instr_as_intrinsic(instr)->def.num_components == 1;
+      }
+   }
+   assert(indices);
+   /* Rates are nonzero, indexed steps need indices, and the attribute's
+    * type and format agree. */
+   assert(!stela_metal_fetch_stage_in(&b, &stage_in, 1, position, false));
+   stage_in.index_bytes = 0;
+   assert(!stela_metal_fetch_stage_in(&b, &stage_in, 1, position, true));
+   stage_in.layouts[3] = (struct stela_metal_stage_in_layout){
+      16, STELA_METAL_STEP_THREAD_POSITION_IN_GRID_X, 0};
+   assert(!stela_metal_fetch_stage_in(&b, &stage_in, 1, position, true));
+   stage_in.layouts[3].step = STELA_METAL_STEP_PER_PATCH;
+   stage_in.layouts[3].rate = 1;
+   assert(!stela_metal_fetch_stage_in(&b, &stage_in, 1, position, true));
+   ralloc_free(b.shader);
+}
+
 int main(void)
 {
    glsl_type_singleton_init_or_ref();
@@ -534,6 +574,7 @@ int main(void)
    tessellation_vertex_passes_the_draw_indices();
    evaluation_stages_read_their_patch_ids();
    patch_attributes_fetch_their_step_functions_element();
+   kernel_stage_in_reads_within_its_region();
    tessellation_control_reads_factors_by_step();
    attributes_decode_metal_vertex_formats();
    glsl_type_singleton_decref();

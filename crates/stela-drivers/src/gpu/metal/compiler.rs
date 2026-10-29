@@ -19,9 +19,9 @@ pub mod ffi;
 mod tests;
 
 use super::{
-    abi::{DataType, TessellationControlPointIndexType, TextureType},
+    abi::{DataType, IndexType, TessellationControlPointIndexType, TextureType},
     capabilities::ShaderFeatures,
-    error::{Error, Result, require},
+    error::{Error, Result},
     library::{Air, Library},
     shader::{
         Access, AttributeUse, BufferUse, ColorOutput, CompiledShader, Compiler, FunctionConstant,
@@ -29,7 +29,7 @@ use super::{
         Specialization, Stage, Tessellation, TessellationStages, TextureUse, ThreadgroupUse,
         Varying,
     },
-    vertex::{STRIDE_DYNAMIC, VertexDescriptor},
+    vertex::{Attribute, STRIDE_DYNAMIC, StageInputDescriptor, VertexDescriptor},
     vulkan::{object::ShaderCode, physical::PhysicalDevice},
 };
 use alloc::{
@@ -186,13 +186,8 @@ impl Compiler for AirCompiler {
         FEATURES
     }
 
-    fn reflect(
-        &mut self,
-        library: u64,
-        entry: &str,
-        specialization: &Specialization,
-    ) -> Result<Interface> {
-        let selected = select(&self.libraries, library, entry, specialization)?;
+    fn reflect(&mut self, library: u64, entry: &str, _: &Specialization) -> Result<Interface> {
+        let selected = select(&self.libraries, library, entry)?;
         let (interface, _) = selected.reflect(&self.service, &mut self.refusal)?;
         Ok(interface)
     }
@@ -203,7 +198,12 @@ impl Compiler for AirCompiler {
         entry: &str,
         specialization: &Specialization,
     ) -> Result<CompiledShader> {
-        self.compile_function(library, entry, specialization, None)
+        let stage_in = specialization
+            .stage_in
+            .as_ref()
+            .map(ffi::StageIn::kernel)
+            .transpose()?;
+        self.compile_function(library, entry, specialization, None, stage_in.as_deref())
     }
 
     fn compile_tessellation(
@@ -213,17 +213,21 @@ impl Compiler for AirCompiler {
         specialization: &Specialization,
         tessellation: &Tessellation,
     ) -> Result<TessellationStages> {
+        if specialization.stage_in.is_some() {
+            return Err(Error::Invalid("kernel stage-in of a vertex function"));
+        }
         let properties = ffi::Tessellation::new(tessellation);
         let stage_in = tessellation
             .vertex_descriptor
             .as_ref()
-            .map(ffi::StageIn::new)
+            .map(ffi::StageIn::vertex)
             .transpose()?;
         let evaluation = self.compile_function(
             library,
             entry,
             specialization,
-            Some((&properties, stage_in.as_deref())),
+            Some(&properties),
+            stage_in.as_deref(),
         )?;
         let mut stages = [ptr::null_mut(); 2];
         // SAFETY: the target and tessellation outlive the call, which writes
@@ -247,16 +251,18 @@ impl Compiler for AirCompiler {
 }
 
 impl AirCompiler {
-    /// Compiles `entry` of `library`, a post-tessellation vertex function
-    /// with its pipeline's tessellation and stage-in layout.
+    /// Compiles `entry` of `library`: a post-tessellation vertex function
+    /// with its pipeline's tessellation, and a kernel or post-tessellation
+    /// vertex function with the stage-in layout it fetches by.
     fn compile_function(
         &mut self,
         library: u64,
         entry: &str,
         specialization: &Specialization,
-        tessellation: Option<(&ffi::Tessellation, Option<&ffi::StageIn>)>,
+        tessellation: Option<&ffi::Tessellation>,
+        stage_in: Option<&ffi::StageIn>,
     ) -> Result<CompiledShader> {
-        let selected = select(&self.libraries, library, entry, specialization)?;
+        let selected = select(&self.libraries, library, entry)?;
         let (interface, provenance) = selected.reflect(&self.service, &mut self.refusal)?;
         let lengths = specialization
             .threadgroup_lengths
@@ -296,10 +302,8 @@ impl AirCompiler {
             launched_by_grid: specialization.launched_by_grid.into(),
             constant_count: count(constants.len())?,
             constants: constants.as_ptr(),
-            tessellation: tessellation.map_or(ptr::null(), |(properties, _)| properties),
-            stage_in: tessellation
-                .and_then(|(_, stage_in)| stage_in)
-                .map_or(ptr::null(), |stage_in| stage_in),
+            tessellation: tessellation.map_or(ptr::null(), ptr::from_ref),
+            stage_in: stage_in.map_or(ptr::null(), ptr::from_ref),
         };
         let mut error = ffi::AirError::NONE;
         let air = selected.air.bitcode;
@@ -346,36 +350,68 @@ impl ffi::Tessellation {
 
 impl ffi::StageIn {
     /// The layout of a validated vertex descriptor.
-    fn new(descriptor: &VertexDescriptor) -> Result<Box<Self>> {
-        let invalid = |_| Error::Invalid("vertex descriptor");
+    fn vertex(descriptor: &VertexDescriptor) -> Result<Box<Self>> {
+        let layouts = descriptor.layouts.iter().map(|layout| {
+            let step = layout.step_function.raw();
+            (layout.buffer_index, layout.stride, step, layout.step_rate)
+        });
+        Self::new(&descriptor.attributes, layouts, 0, 0)
+    }
+
+    /// The layout of a validated stage-input descriptor.
+    fn kernel(descriptor: &StageInputDescriptor) -> Result<Box<Self>> {
+        let layouts = descriptor.layouts.iter().map(|layout| {
+            let step = layout.step_function.raw();
+            (layout.buffer_index, layout.stride, step, layout.step_rate)
+        });
+        let index_bytes = match descriptor.index_type {
+            IndexType::UInt16 => 2,
+            IndexType::UInt32 => 4,
+        };
+        Self::new(
+            &descriptor.attributes,
+            layouts,
+            index_bytes,
+            descriptor.index_buffer_index,
+        )
+    }
+
+    /// Attributes, and each layout's buffer, stride and raw step function
+    /// and rate.
+    fn new(
+        attributes: &[Attribute],
+        layouts: impl Iterator<Item = (u32, u64, u64, u64)>,
+        index_bytes: u32,
+        index_buffer: u32,
+    ) -> Result<Box<Self>> {
+        const INVALID: Error = Error::Invalid("stage-in descriptor");
         let mut stage_in = Box::new(Self {
             attributes: [ffi::StageInAttribute::default(); ffi::ATTRIBUTES],
             layouts: Default::default(),
+            index_bytes,
+            index_buffer,
         });
-        for attribute in &descriptor.attributes {
+        for attribute in attributes {
             *stage_in
                 .attributes
                 .get_mut(attribute.index as usize)
-                .ok_or(Error::Invalid("vertex descriptor"))? = ffi::StageInAttribute {
+                .ok_or(INVALID)? = ffi::StageInAttribute {
                 format: attribute.format.raw() as u32,
-                offset: u32::try_from(attribute.offset).map_err(invalid)?,
+                offset: u32::try_from(attribute.offset).map_err(|_| INVALID)?,
                 buffer: attribute.buffer_index,
             };
         }
-        for layout in &descriptor.layouts {
-            *stage_in
-                .layouts
-                .get_mut(layout.buffer_index as usize)
-                .ok_or(Error::Invalid("vertex descriptor"))? = ffi::StageInLayout {
-                stride: match layout.stride {
+        for (buffer, stride, step, rate) in layouts {
+            *stage_in.layouts.get_mut(buffer as usize).ok_or(INVALID)? = ffi::StageInLayout {
+                stride: match stride {
                     STRIDE_DYNAMIC => ffi::STRIDE_DYNAMIC,
                     stride => u32::try_from(stride)
                         .ok()
                         .filter(|stride| *stride != ffi::STRIDE_DYNAMIC)
-                        .ok_or(Error::Invalid("vertex descriptor"))?,
+                        .ok_or(INVALID)?,
                 },
-                step: layout.step_function.raw() as u32,
-                rate: u32::try_from(layout.step_rate).map_err(invalid)?,
+                step: u32::try_from(step).map_err(|_| INVALID)?,
+                rate: u32::try_from(rate).map_err(|_| INVALID)?,
             };
         }
         Ok(stage_in)
@@ -390,14 +426,12 @@ struct Selected<'a> {
     slice_hash: [u8; 32],
 }
 
-/// Selects `entry` of `library`, refusing what the service cannot specialize.
+/// Selects `entry` of `library`.
 fn select<'a>(
     libraries: &'a BTreeMap<u64, Vec<u8>>,
     library: u64,
     entry: &str,
-    specialization: &Specialization,
 ) -> Result<Selected<'a>> {
-    require(specialization.stage_in.is_none(), "kernel stage-in")?;
     let data = libraries
         .get(&library)
         .ok_or(Error::Invalid("unknown library"))?;

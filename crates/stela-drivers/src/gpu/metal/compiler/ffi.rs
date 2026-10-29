@@ -255,12 +255,15 @@ pub(super) struct StageInLayout {
 /// `STELA_METAL_STRIDE_DYNAMIC`.
 pub(super) const STRIDE_DYNAMIC: u32 = u32::MAX;
 
-/// `struct stela_metal_stage_in`.
+/// `struct stela_metal_stage_in`, with the bytes and buffer of a kernel's
+/// indices.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct StageIn {
     pub(super) attributes: [StageInAttribute; ATTRIBUTES],
     pub(super) layouts: [StageInLayout; MAX_BUFFER_BINDINGS as usize],
+    pub(super) index_bytes: u32,
+    pub(super) index_buffer: u32,
 }
 
 #[cfg(test)]

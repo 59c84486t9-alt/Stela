@@ -28,6 +28,11 @@
 #define STELA_METAL_TABLE_SAMPLERS 1520u
 #define STELA_METAL_TABLE_BYTES 1648u
 
+/* MTLStageInRegionIndirectArguments, which a kernel with stage-in reads at
+ * the push constants' arguments address: uint origin[3], then size[3]. */
+#define STELA_METAL_STAGE_IN_ORIGIN 0u
+#define STELA_METAL_STAGE_IN_SIZE 12u
+
 /* AccumulateArguments and SelectArguments, which the internal kernels read
  * at the push constants' arguments address. */
 #define STELA_METAL_ACCUMULATE_RESULTS 0u
@@ -225,11 +230,13 @@ struct stela_metal_stage_in_layout {
 };
 #define STELA_METAL_STRIDE_DYNAMIC UINT32_MAX
 /* A stage-in layout by attribute and buffer index: an MTLVertexDescriptor
- * or MTLStageInputOutputDescriptor. Offsets and strides are multiples of
- * four. */
+ * or MTLStageInputOutputDescriptor, whose indexed steps read the index
+ * buffer at index_buffer of index_bytes, 2 or 4, indices. Offsets and
+ * strides are multiples of four. */
 struct stela_metal_stage_in {
    struct stela_metal_stage_in_attribute attributes[AIR_MAX_VERTEX_ATTRIBUTES];
    struct stela_metal_stage_in_layout layouts[STELA_METAL_BUFFERS];
+   uint32_t index_bytes, index_buffer;
 };
 
 /* A post-tessellation vertex function's attribute at location, as
@@ -244,6 +251,17 @@ nir_def *stela_metal_fetch_patch_attribute(nir_builder *b, const struct stela_me
                                            const struct stela_metal_tessellation *tessellation,
                                            unsigned location, nir_def *ids, nir_def *point,
                                            bool integer);
+
+/* A kernel's attribute at location, as stela_air_fetch_attribute reads it
+ * at the thread's position in the grid, from the buffer of its layout in
+ * the primary argument table. The step function selects the element: the
+ * stage-in region's origin plus the position over the rate on the step's
+ * axis, through the index buffer for indexed steps, or the first. Threads
+ * outside the region read zero, as do elements past the bound buffer and
+ * indices past theirs. NULL when the layout does not provide the attribute
+ * so. */
+nir_def *stela_metal_fetch_stage_in(nir_builder *b, const struct stela_metal_stage_in *stage_in,
+                                    unsigned location, nir_def *position, bool integer);
 
 /* One 32-bit Metal factor as Vulkan's tessellator takes it: scaled, clamped
  * to the maximum factor (less one for fractional-odd partitions) and, for
