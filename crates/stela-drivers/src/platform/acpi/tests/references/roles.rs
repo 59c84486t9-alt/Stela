@@ -320,8 +320,7 @@ fn aml() -> Vec<u8> {
     checksum(&mut dsdt, 9);
     dsdt
 }
-#[test]
-fn actual_aml_wait_signal_keeps_portal_notify_and_gpe_progress_with_general_parked() {
+fn run_wait_signal(policy: work::ReservationPolicy) {
     let _serial = TEST_SERIAL.lock().unwrap();
     assert_eq!(CURRENT.load(Ordering::Acquire), 0);
     SEMAPHORES.store(0, Ordering::Release);
@@ -349,7 +348,8 @@ fn actual_aml_wait_signal_keeps_portal_notify_and_gpe_progress_with_general_park
             units: AtomicU32::new(0),
         }),
     });
-    let (executor, cpu, dropped) = work::test_support::executor::<32>(scene.clone());
+    let (executor, cpu, dropped) =
+        work::test_support::executor_with_policy::<32>(scene.clone(), policy);
     let r = executor.runtime();
     scene.runtime.store(
         r.get_ref() as *const work::Runtime<32> as u64,
@@ -424,4 +424,15 @@ fn actual_aml_wait_signal_keeps_portal_notify_and_gpe_progress_with_general_park
     assert!(counts.destroyed.load(Ordering::SeqCst));
     assert_eq!(counts.allocations.load(Ordering::SeqCst), 0);
     assert_eq!(counts.mappings.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn actual_aml_wait_signal_keeps_portal_notify_and_gpe_progress_with_general_parked() {
+    run_wait_signal(work::ReservationPolicy::NativeFirmware16);
+}
+#[test]
+fn protected_gpe_policy_keeps_actual_aml_wait_signal_progress_with_general_parked() {
+    run_wait_signal(work::ReservationPolicy::NativeFirmware16Protected {
+        gpe: work::GpeQueueBudget::QUALIFICATION,
+    });
 }

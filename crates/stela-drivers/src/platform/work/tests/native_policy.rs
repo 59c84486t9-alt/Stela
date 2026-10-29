@@ -715,3 +715,5 @@ fn minimum_sixteen_slot_queue_reserves_foreground_after_general_saturation() {
     assert_eq!(dropped.load(Ordering::Relaxed), 16);
     assert_eq!(cpu.flags(), 0x202);
 }
+
+mod protected_gpe;

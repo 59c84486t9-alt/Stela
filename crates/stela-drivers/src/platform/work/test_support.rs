@@ -124,6 +124,12 @@ pub(crate) fn stacks(dropped: &Arc<AtomicUsize>) -> Vec<Stack> {
 pub(crate) fn executor<const N: usize>(
     owner: RetainedOwner,
 ) -> (Executor<N>, Arc<CpuModel>, Arc<AtomicUsize>) {
+    executor_with_policy(owner, ReservationPolicy::NativeFirmware16)
+}
+pub(crate) fn executor_with_policy<const N: usize>(
+    owner: RetainedOwner,
+    policy: ReservationPolicy,
+) -> (Executor<N>, Arc<CpuModel>, Arc<AtomicUsize>) {
     let cpu = CpuModel::new();
     // SAFETY: caller retains the actual fixture state via this queue's owner;
     // all access/switches stay on the modeled constructing thread until join.
@@ -134,8 +140,7 @@ pub(crate) fn executor<const N: usize>(
     // SAFETY: unprivileged snapshot of this x86 hosted thread's real x87/SSE
     // controls. No native CPL0/IRQ/provider admission is inferred from it.
     let controls = unsafe { context::read_controls() };
-    let runtime =
-        Runtime::with_layout_controls(queue, stacks, controls, Layout::NativeFirmware16).unwrap();
+    let runtime = Runtime::with_layout_controls(queue, stacks, controls, policy.layout()).unwrap();
     (
         Executor {
             runtime: ManuallyDrop::new(runtime),

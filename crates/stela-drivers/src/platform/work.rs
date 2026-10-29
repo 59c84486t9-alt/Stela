@@ -40,7 +40,7 @@ mod reservation;
 #[cfg(all(test, unix, target_arch = "x86_64"))]
 pub(crate) mod test_support;
 use reservation::Layout;
-pub use reservation::{FirmwareQueue, FirmwareRole, ReservationPolicy};
+pub use reservation::{FirmwareQueue, FirmwareRole, GpeQueueBudget, ReservationPolicy};
 
 pub type Callback = unsafe extern "C" fn(*mut c_void);
 pub type RetainedOwner = Arc<dyn Any + Send + Sync>;
@@ -853,7 +853,7 @@ impl<const N: usize> Runtime<N> {
             // Native worker permits require an empty pre-admission queue: a
             // legacy Notify job in an ordinary slot otherwise bypasses the two
             // real-worker limit. Legacy constructors keep their prior contract.
-            if (layout == Layout::NativeFirmware16 && state.jobs.iter().any(Option::is_some))
+            if (layout.native16() && state.jobs.iter().any(Option::is_some))
                 || state.jobs[N - layout.slots()..].iter().any(Option::is_some)
             {
                 return Err(WorkError::Busy);
@@ -1601,6 +1601,16 @@ impl<const N: usize> Runtime<N> {
             })
         }
     }
+    /// Observe the actual constructor's protected GPE admission budget.
+    /// None means the legacy layout has no protected pending guarantee. This
+    /// copy neither synchronizes IRQs nor grants provider/progress authority.
+    pub fn protected_gpe_budget(&self) -> Result<Option<GpeQueueBudget>, WorkError> {
+        self.queue.process()?;
+        if self.retired.get() || self.queue.abandoned.load(Ordering::Acquire) {
+            return Err(WorkError::Closed);
+        }
+        Ok(self.layout.protected_gpe())
+    }
     /// Check actual CPU/policy/lifetime/current-role eligibility for a firmware
     /// queue join before a caller mutates C handler state. This does not capture
     /// a flush boundary, run/accept work, attest progress or synchronize an IRQ.
@@ -1610,7 +1620,7 @@ impl<const N: usize> Runtime<N> {
         if self.retired.get() || self.queue.abandoned.load(Ordering::Acquire) {
             return Err(WorkError::Closed);
         }
-        if self.layout != Layout::NativeFirmware16 {
+        if !self.layout.native16() {
             return Err(WorkError::Unavailable);
         }
         let current = self.current.get();
@@ -1945,9 +1955,7 @@ impl<const N: usize> Executor<N> {
         policy: ReservationPolicy,
     ) -> Result<Self, WorkError> {
         Runtime::<N>::validate_stacks(&queue, &stacks)?;
-        let layout = match policy {
-            ReservationPolicy::NativeFirmware16 => Layout::NativeFirmware16,
-        };
+        let layout = policy.layout();
         layout.validate(stacks.len(), N)?;
         // SAFETY: same qualified native construction boundary as new().
         let controls = unsafe { context::controls()? };
