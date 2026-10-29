@@ -61,7 +61,8 @@ impl Drop for Mapping {
     }
 }
 const TARGET: GuestAddress = GuestAddress(0x1234);
-const INTERRUPT_TEST_BUDGET: u64 = 100_000_000;
+const INTERRUPT_TEST_BUDGET: u64 = 4096;
+const RENDEZVOUS_AFTER: u64 = 1000;
 fn direct(mapping: &Mapping, control: u64, policy: Interruption) -> Vec<u8> {
     thunk_with_policy(
         ThunkPlan {
@@ -208,75 +209,222 @@ impl Shared {
     }
 }
 
-#[test]
-fn foreign_epoch_interrupts_the_actual_native_backedge_with_at_most_one_more_transfer() {
-    let mut interrupted = 0;
-    for attempt in 0..128 {
-        let control = Arc::new(Shared::new());
-        let native = Mapping::new();
-        native.install(&direct(
-            &native,
-            Arc::as_ptr(&control) as u64,
-            Interruption::Epoch,
-        ));
-        let entry = native.address() as usize;
-        let retained = Arc::clone(&control);
-        let worker = std::thread::spawn(move || {
-            // SAFETY: main retains the RX mapping until this join; retained
-            // storage keeps every embedded address live. Only this thread
-            // writes native local counters, and RDX/RCX/RAX are caller-volatile.
-            let result = unsafe {
-                let run: unsafe extern "sysv64" fn() -> u128 = core::mem::transmute(entry);
-                run()
-            };
-            (result, retained)
-        });
-        let began = Instant::now();
-        while control.linked.load(Ordering::Acquire) < 1000 {
-            if began.elapsed() >= Duration::from_secs(5) {
-                control.epoch.fetch_add(1, Ordering::Release);
-                let _ = worker.join();
-                panic!("native backedge did not reach the bounded observation point");
-            }
-            std::thread::yield_now();
-        }
-        // Source publication precedes this Release RMW in the runtime owner.
-        control.epoch.fetch_add(1, Ordering::Release);
-        let published = control.linked.load(Ordering::Acquire);
-        let (result, retained) = worker.join().unwrap();
-        let final_count = retained.linked.load(Ordering::Acquire);
-        if published >= INTERRUPT_TEST_BUDGET - 1 {
-            std::eprintln!(
-                "native interruption attempt {attempt} had no provable budget headroom at publication; retrying"
-            );
-            continue;
-        }
-        assert!(
-            final_count < INTERRUPT_TEST_BUDGET,
-            "notification must end the native run before natural exhaustion"
-        );
-        assert!(
-            retained.budget.load(Ordering::Acquire) > 0,
-            "interruption leaves a positive local budget"
-        );
-        assert!(
-            final_count <= published + 1,
-            "a notification can race only the already-checked boundary"
-        );
-        assert_eq!(exited(result), (TARGET.0, ExitKind::Direct as u64));
-        assert_eq!(retained.retired.load(Ordering::Acquire), final_count * 7);
-        assert_eq!(
-            retained.budget.load(Ordering::Acquire),
-            INTERRUPT_TEST_BUDGET - final_count
-        );
-        interrupted += 1;
-        if interrupted == 32 {
-            break;
-        }
+/// A test successor rendezvous orders the runner's prior plain accounting
+/// stores before publication. A notifier-side count load alone cannot do that:
+/// x86 permits a later epoch load to pass earlier stores to another address.
+#[repr(C, align(64))]
+struct Rendezvous {
+    ready: AtomicU64,
+    release: AtomicU64,
+}
+
+#[derive(Debug)]
+struct InterruptionOutcome {
+    published: u64,
+    linked: u64,
+    retired: u64,
+    budget: u64,
+    block: u64,
+    epoch: u64,
+    observed: u64,
+    result: (u64, u64),
+}
+impl InterruptionOutcome {
+    fn interrupted_at_rendezvous(&self) -> bool {
+        self.published == RENDEZVOUS_AFTER
+            && self.linked == self.published
+            && self.linked < INTERRUPT_TEST_BUDGET
+            && self.budget == INTERRUPT_TEST_BUDGET - self.linked
+            && self.retired == self.linked * 7
+            && self.block == 3
+            && self.epoch == 1
+            && self.observed == 0
+            && self.result == (TARGET.0, ExitKind::Direct as u64)
     }
+}
+
+/// Only the successor prefix is test synchronization; the thunk is emitted by
+/// the production constructor with its normal guard and accounting unchanged.
+fn rendezvous_backedge(native: &Mapping, control: u64, gate: u64, policy: Interruption) -> Vec<u8> {
+    let mut prefix = Code::new();
+    prefix.asm().mov_imm64(Rcx, control);
+    prefix.asm().alu_imm32(
+        Alu::Cmp,
+        Qword,
+        Mem::base(Rcx, LINKED),
+        RENDEZVOUS_AFTER as i32,
+    );
+    let ordinary = prefix.asm().jcc8(Cond::Ne);
+    prefix.asm().mov_imm64(Rax, gate);
+    {
+        let mut asm = prefix.asm();
+        // This worker-side locked publication orders all earlier native
+        // accounting stores; it is absent from the production thunk.
+        // Intel SDM Vol. 3: loads/stores are not reordered with locked instructions.
+        asm.lock();
+        asm.alu_imm8(
+            Alu::Add,
+            Qword,
+            Mem::base(Rax, core::mem::offset_of!(Rendezvous, ready) as i32),
+            1,
+        );
+    }
+    let waiting = prefix.len();
+    prefix.asm().pause();
+    prefix.asm().alu_imm8(
+        Alu::Cmp,
+        Qword,
+        Mem::base(Rax, core::mem::offset_of!(Rendezvous, release) as i32),
+        0,
+    );
+    let wait = prefix.asm().jcc8(Cond::E);
+    crate::x86_64::asm::resolve(&mut prefix, wait, waiting);
+    prefix.asm().bind(ordinary);
+    let thunk = thunk_with_policy(
+        ThunkPlan {
+            at: native.address() + prefix.len() as u64,
+            control,
+            retired: 7,
+            block: 3,
+            entry: native.address(),
+            target: TARGET,
+            kind: ExitKind::Direct,
+        },
+        policy,
+    )
+    .unwrap();
+    let mut bytes = prefix.into_bytes();
+    bytes.extend(thunk);
+    bytes
+}
+
+fn interrupt_at_rendezvous(policy: Interruption) -> InterruptionOutcome {
+    let control = Arc::new(Shared::new());
+    let gate = Arc::new(Rendezvous {
+        ready: AtomicU64::new(0),
+        release: AtomicU64::new(0),
+    });
+    let native = Mapping::new();
+    native.install(&rendezvous_backedge(
+        &native,
+        Arc::as_ptr(&control) as u64,
+        Arc::as_ptr(&gate) as u64,
+        policy,
+    ));
+    let entry = native.address() as usize;
+    let retained = Arc::clone(&control);
+    let retained_gate = Arc::clone(&gate);
+    let worker = std::thread::spawn(move || {
+        // SAFETY: main retains the RX mapping until join; both allocations
+        // remain owned, and the generated program writes only their declared
+        // native counters/test rendezvous using caller-volatile registers.
+        let result = unsafe {
+            let run: unsafe extern "sysv64" fn() -> u128 = core::mem::transmute(entry);
+            run()
+        };
+        (result, retained, retained_gate)
+    });
+    let began = Instant::now();
+    while gate.ready.load(Ordering::Acquire) == 0 {
+        if began.elapsed() >= Duration::from_secs(5) {
+            control.epoch.fetch_add(1, Ordering::Release);
+            gate.release.store(1, Ordering::Release);
+            let _ = worker.join();
+            panic!("native backedge did not reach the ordered rendezvous");
+        }
+        std::thread::yield_now();
+    }
+    // Ready synchronizes the native accounting prefix. Publish before opening
+    // the rendezvous; the next actual production guard must observe the epoch.
+    let published = control.linked.load(Ordering::Acquire);
+    control.epoch.fetch_add(1, Ordering::Release);
+    gate.release.store(1, Ordering::Release);
+    let (result, retained, _retained_gate) = worker.join().unwrap();
+    InterruptionOutcome {
+        published,
+        linked: retained.linked.load(Ordering::Acquire),
+        retired: retained.retired.load(Ordering::Acquire),
+        budget: retained.budget.load(Ordering::Acquire),
+        block: retained.block.load(Ordering::Acquire),
+        epoch: retained.epoch.load(Ordering::Acquire),
+        observed: retained.observed.load(Ordering::Acquire),
+        result: exited(result),
+    }
+}
+
+#[test]
+fn foreign_epoch_interrupts_the_native_backedge_after_an_ordered_rendezvous() {
+    for _ in 0..32 {
+        let outcome = interrupt_at_rendezvous(Interruption::Epoch);
+        assert!(outcome.interrupted_at_rendezvous(), "{outcome:?}");
+    }
+}
+
+#[test]
+fn rendezvous_oracle_rejects_an_ignored_epoch() {
+    let outcome = interrupt_at_rendezvous(Interruption::Legacy);
+    assert!(!outcome.interrupted_at_rendezvous(), "{outcome:?}");
     assert_eq!(
-        interrupted, 32,
-        "scheduler did not establish 32 interruption attempts with budget headroom"
+        (outcome.published, outcome.epoch, outcome.observed),
+        (RENDEZVOUS_AFTER, 1, 0)
+    );
+    assert_eq!(outcome.linked, INTERRUPT_TEST_BUDGET);
+    assert_eq!(outcome.budget, u64::MAX);
+    assert_eq!(outcome.retired, INTERRUPT_TEST_BUDGET * 7);
+    assert_eq!(outcome.result, (TARGET.0, ExitKind::Direct as u64));
+}
+
+#[test]
+fn an_already_checked_native_boundary_allows_one_transfer_then_stops() {
+    let mut control = Box::new(ChainControl {
+        budget: 17,
+        interrupt_epoch: 1,
+        ..ChainControl::default()
+    });
+    let native = Mapping::new();
+    let address = (&mut *control as *mut ChainControl) as u64;
+    let mut prefix = Code::new();
+    prefix.asm().mov_imm64(Rcx, address);
+    prefix.asm().mov_imm64(Rdx, 0);
+    let enter_tail = prefix.asm().jmp();
+    let at = native.address() + prefix.len() as u64;
+    let body = thunk(at, address, 7, 3, at, TARGET, ExitKind::Direct).unwrap();
+    // Golden legacy encodings identify the exact post-guard native window.
+    // The first entry has already admitted a transfer with the old epoch;
+    // its backedge re-enters the full, unchanged production thunk.
+    const AFTER_GUARD: usize = 20;
+    assert_eq!(
+        &body[10..18],
+        &[0x48, 0x8b, 0x51, 0x40, 0x48, 0x3b, 0x51, 0x48]
+    );
+    assert_eq!(body[18], 0x75);
+    assert_eq!(
+        AFTER_GUARD + usize::from(body[19]),
+        body.len() - DIRECT_EXIT_BYTES
+    );
+    assert_eq!(&body[AFTER_GUARD..AFTER_GUARD + 4], &[0x48, 0x83, 0x29, 1]);
+    let distance = relative(
+        native.address() + enter_tail.end() as u64,
+        at + AFTER_GUARD as u64,
+    )
+    .unwrap();
+    prefix.patch(enter_tail.offset(), distance.to_le_bytes());
+    let mut code = prefix.into_bytes();
+    code.extend(body);
+    native.install(&code);
+    assert_eq!(exited(native.run()), (TARGET.0, ExitKind::Direct as u64));
+    assert_eq!(
+        (
+            control.budget,
+            control.linked,
+            control.retired,
+            control.block
+        ),
+        (16, 1, 7, 3)
+    );
+    assert_eq!(
+        (control.interrupt_epoch, control.observed_interrupt_epoch),
+        (1, 0)
     );
 }
 
