@@ -125,10 +125,8 @@ impl<P: DataPolicy> MemoryThread<P> {
             flags: required_flags,
             pc: guestpc,
         };
-        // SAFETY: entry checked the mapping profile and policy, and this call
-        // builds valid ABI objects and private, disjoint staging. Diagnostics
-        // live outside `R` because finalization may discard the callback result
-        // after native reads filled the staging.
+        // Diagnostics stay outside R so callback fault details survive a
+        // finalization error that discards the callback result.
         let mut observed = MemoryFault {
             access: FaultAccess::Read,
             status: MemoryStatus::Domain,
@@ -136,6 +134,8 @@ impl<P: DataPolicy> MemoryThread<P> {
             pc: guestpc,
             completed_bytes: 0,
         };
+        // SAFETY: prepare checked this mapping profile and callback requirements.
+        // request borrows the live disjoint staging array, and neither pointer escapes.
         let finalized = unsafe {
             entry.with_checked_view(|view| {
                 let code = (view.callback)(view, &request);

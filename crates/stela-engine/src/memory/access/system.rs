@@ -70,6 +70,8 @@ impl Read {
         // only by zero; failure writes the observed old value. Host RW rights
         // are required even for a source read-only mapping. No retry or split
         // plain pair load is used, and neighboring bytes are unchanged.
+        // SAFETY: Recipe selection checked CX16 and aligned the full SCA footprint.
+        // read's caller pins it with read/write rights and holds its all-writer gate.
         let snapshot = unsafe {
             compare_exchange_part(self.footprint.0 as *mut u8, SCA_BYTES, 0, 0, self.target)
         }?;

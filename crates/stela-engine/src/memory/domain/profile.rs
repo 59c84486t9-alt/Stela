@@ -243,6 +243,8 @@ impl<'a, P: DataPolicy> CheckedMemoryEntry<'a, P> {
             // SAFETY: same checked requirements; the matching real session
             // loan is borrowed through invocation and finalization.
             Some(session) => unsafe { self.thread.with_checked_view_in(session, callback) },
+            // SAFETY: The caller retains the recorded callback requirements and staging
+            // borrows. Without a shared session, with_checked_view takes its own loan.
             None => unsafe { self.thread.with_checked_view(callback) },
         };
         if let Some(authority) = self.native_system {

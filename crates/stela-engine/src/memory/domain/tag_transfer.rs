@@ -210,10 +210,9 @@ impl<P: AllocationTagPolicy> tag_transfer::Memory for MemoryThread<P> {
                     TAG_GRANULE_BYTES,
                     flags::WRITE,
                 ))?;
-                // SAFETY: resolution pins all exact contiguous spans and their
-                // rights; the host quantity is aligned/readable/writable, the
-                // target was checked, and private staging cannot alias RAM.
                 mutation.attempting();
+                // SAFETY: Resolution pins this whole aligned writable host quantity and checks
+                // the target. The writer gate is held, and private staging is disjoint.
                 unsafe {
                     access::write_part(
                         pointer,

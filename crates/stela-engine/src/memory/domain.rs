@@ -856,6 +856,8 @@ impl<P: DataPolicy> MemoryThread<P> {
         let _loan = self
             .execution_loan()
             .expect("serialized legacy memory invocation");
+        // SAFETY: The execution loan stays live through callback finalization. The
+        // caller keeps staging/policy borrows valid and disjoint from guest RAM.
         let (result, _finalization) = unsafe { self.invoke_memory_view(callback) };
         result
     }
@@ -871,9 +873,10 @@ impl<P: DataPolicy> MemoryThread<P> {
         &mut self,
         callback: impl FnOnce(&mut MemoryContextView) -> R,
     ) -> Result<R, MemoryStatus> {
-        // SAFETY: the caller keeps the owner and the native invocation borrow.
         self.domain.check_data_execution()?;
         let _loan = self.execution_loan()?;
+        // SAFETY: The execution loan stays live through callback finalization; the
+        // caller retains the view callback and its disjoint staging/policy borrows.
         let (result, finalization) = unsafe { self.invoke_memory_view(callback) };
         finalization.map(|()| result)
     }
@@ -953,6 +956,8 @@ impl<P: DataPolicy> MemoryThread<P> {
             return unsafe { self.transfer_exclusive(view, request) };
         }
         // Preserve the source category through ordered payload adaptation.
+        // SAFETY: Earlier branches excluded shared/exclusive payloads. The caller's
+        // ordinary request and private staging stay valid for this invocation.
         unsafe { self.transfer_ordinary(view, request, DataOperation::Ordinary) }
     }
 
@@ -1050,10 +1055,9 @@ impl<P: DataPolicy> MemoryThread<P> {
                     .with_writer(&range, policy, || {
                         self.policy
                             .check(physical.data(raw, part.bytes, part.flags))?;
-                        // SAFETY: the resolved spans pin stable rights and
-                        // lifetime, staging never aliases guest bytes, and the
-                        // target is owned.
                         mutation.attempting();
+                        // SAFETY: Resolved spans pin the complete writable footprint and its target
+                        // requirements. Private staging is disjoint and the physical writer gate is held.
                         unsafe { access::write_part(pointer, part.bytes, value, target) }
                             .map_err(|_| MemoryStatus::Unsupported)?;
                         let _receipt = mutation.complete();

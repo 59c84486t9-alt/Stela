@@ -114,6 +114,8 @@ impl RegisteredSystemRam {
         let target = limit.map_or(authority.target(), |limit| {
             crate::memory::domain::native_target::restrict(authority.target(), limit)
         });
+        // SAFETY: validate checked range geometry. The caller retains initialized
+        // pinned mappings and all writers; bindings clones owner into each backing.
         let (regions, views, system) = unsafe { bindings(ranges, owner, erg_bytes, stripes) }?;
         let domain =
             MemoryDomain::new_native_system_ram(Arc::clone(&system), views, &authority, target)
@@ -477,6 +479,8 @@ pub unsafe fn fixture<O: Send + Sync + 'static>(
     owner: Arc<O>,
 ) -> RegisteredSystemRam {
     validate(ranges).unwrap();
+    // SAFETY: The fixture caller retains initialized pinned mappings and excludes
+    // external writers. Checked ranges and cloned owner pins outlive every backing.
     let (regions, views, system) = unsafe { bindings(ranges, owner, 64, 8) }.unwrap();
     let domain = MemoryDomain::new(Arc::clone(&system), views, TargetCpu::Baseline).unwrap();
     RegisteredSystemRam {

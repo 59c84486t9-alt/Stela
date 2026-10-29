@@ -215,9 +215,9 @@ impl<P: DataPolicy> MemoryThread<P> {
                     self.domain.check_execution()?;
                     // XCHG/CX16 supplies conservative full WB ordering for the
                     // release variant too; no dependency on ordinary MOV stores.
-                    // SAFETY: exact whole quantity, native rights and capabilities
-                    // are checked and every reached view remains pinned/current.
                     mutation.attempting();
+                    // SAFETY: physical.check_current and policy checked the whole pinned quantity,
+                    // its native rights and target; the reservation store holds the writer gate.
                     unsafe { access::write_part(pointer, bytes, value, target) }
                         .map_err(|_| MemoryStatus::Unsupported)?;
                     let _receipt = mutation.complete();

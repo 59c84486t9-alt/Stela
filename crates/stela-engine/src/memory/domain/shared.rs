@@ -208,6 +208,8 @@ impl<P: DataPolicy> MemoryThread<P> {
                 // Scalar arithmetic uses a gate-stable read followed by SCA
                 // XCHG; pair16 CASP uses its source comparison in one CX16.
                 let old =
+                    // SAFETY: The checked write retains current read/write spans and target
+                    // requirements. This physical writer gate serializes every registered alias.
                     unsafe { native_update(pointer, bytes, operation, operand, compare, target) }
                         .map_err(|_| MemoryStatus::Unsupported)?;
                 let _receipt = mutation.complete();
