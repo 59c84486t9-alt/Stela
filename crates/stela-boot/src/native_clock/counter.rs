@@ -187,6 +187,43 @@ impl Counter {
     pub(crate) fn identity(&self) -> &Arc<RootIdentity> {
         self.owned.identity()
     }
+    /// A short active-spin reference, never an HPET continuity/PC10 grant.
+    /// Require the genuine production owner and the exact retained CPU identity;
+    /// validate period/routing controls on both sides of the actual sample.
+    pub(crate) fn calibration_sample(
+        &self,
+        identity: &Arc<RootIdentity>,
+    ) -> Result<u64, WorkError> {
+        if !matches!(&self.owned, Owner::Native(_)) || !Arc::ptr_eq(self.identity(), identity) {
+            return Err(WorkError::Unavailable);
+        }
+        self.check_process()?;
+        let controls = || -> Result<(), WorkError> {
+            // SAFETY: exact retained native UC block; geometry bounds every
+            // comparator register and all checks precede raw reference use.
+            unsafe {
+                let geometry = self
+                    .descriptor()
+                    .geometry(read32(self.base, 0), read32(self.base, 4))?;
+                if geometry.period_fs != self.geometry.period_fs
+                    || geometry.timers != self.geometry.timers
+                    || read32(self.base, 0x10) & (ENABLED | LEGACY) != ENABLED
+                {
+                    return Err(WorkError::CorruptContext);
+                }
+                for timer in 0..geometry.timers {
+                    if read32(self.base, 0x100 + timer * 0x20) & TIMER_INTERRUPTS != 0 {
+                        return Err(WorkError::Busy);
+                    }
+                }
+            }
+            Ok(())
+        };
+        controls()?;
+        let sample = self.read_irq()?;
+        controls()?;
+        Ok(sample)
+    }
     pub(crate) fn ns(&self, ticks: u64) -> Result<u64, WorkError> {
         self.geometry.ns(ticks).map_err(|_| WorkError::Exhausted)
     }

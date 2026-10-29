@@ -95,6 +95,36 @@ unsafe fn check_native_hpet(handoff: &Handoff, owner: &mut HostOwner) -> Result<
     if after <= before {
         return Err(Error::InvalidPlatformReply.into());
     }
+    // SAFETY: the same genuine handoff/RootIdentity/native HPET owner is
+    // retained with IF0, active-spin only, before this source is retired.
+    match unsafe {
+        crate::native_clock::tsc::Candidate::observe(handoff, identity.clone(), &counter)
+    } {
+        Ok(mut candidate) => {
+            candidate
+                .recheck()
+                .map_err(|_| Error::InvalidPlatformReply)?;
+            crate::output::arguments(format_args!(
+                "CHECK native-tsc-candidate OBSERVED {:?}; no IRQ, Runtime or continuous-clock grant\n",
+                candidate.observation()
+            ));
+        }
+        Err(error) => {
+            crate::output::arguments(format_args!(
+                "CHECK native-tsc-candidate REFUSED {error:?}; no TSC admission\n"
+            ));
+            if !matches!(
+                error,
+                crate::native_clock::tsc::Error::Policy(
+                    stela_boot_core::tsc::Error::TscUnavailable
+                        | stela_boot_core::tsc::Error::InvariantUnavailable
+                        | stela_boot_core::tsc::Error::HypervisorContractRequired
+                )
+            ) {
+                return Err(Error::InvalidPlatformReply.into());
+            }
+        }
+    }
     let base = counter.descriptor().registers().start();
     // SAFETY: this stack frame is the only counter reader, no IRQ/publication
     // exists, and every actual Source/RootIdentity/controller owner remains live.

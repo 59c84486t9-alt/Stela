@@ -27,6 +27,7 @@ pub(crate) mod diagnostic;
 pub(crate) mod hpet;
 mod pm;
 mod source;
+pub(crate) mod tsc;
 pub(crate) use counter::Counter as HpetCounter;
 pub(crate) use source::Prepared;
 const IF: u64 = 1 << 9;

@@ -70,6 +70,15 @@ pub struct RateWindow {
     maximum_hz: u64,
 }
 impl RateWindow {
+    pub(super) fn from_bounds(minimum_hz: u64, maximum_hz: u64) -> Result<Self, Error> {
+        if minimum_hz == 0 || maximum_hz < minimum_hz {
+            return Err(Error::InvalidRate);
+        }
+        Ok(Self {
+            minimum_hz,
+            maximum_hz,
+        })
+    }
     pub fn minimum_hz(self) -> u64 {
         self.minimum_hz
     }

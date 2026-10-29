@@ -148,6 +148,12 @@ impl RootIdentity {
     pub(crate) fn root_pages(&self) -> &[u64] {
         self.roots.roots()
     }
+    /// Immutable processor observations only, under the actual captured root
+    /// catalog. This does not qualify a fixed-root memory access or epoch.
+    pub(crate) fn processor_snapshot(&self) -> Result<Snapshot, WorkError> {
+        self.check_dispatch()?;
+        Ok(self.snapshot)
+    }
     pub(crate) fn memory_snapshot(&self) -> Result<Snapshot, WorkError> {
         self.check_current()?;
         Ok(self.snapshot)

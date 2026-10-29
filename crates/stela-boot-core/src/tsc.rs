@@ -6,12 +6,14 @@
 //! must observe the real retained owner/controls, reliability and progress.
 mod calibration;
 mod features;
+mod measurement;
 mod sequence;
 pub use calibration::{RateWindow, RationalRate, ReferenceScale, Sample, wrapped_delta};
 pub use features::{
     CounterPolicy, Deadline, HpetPowerConstraint, RateRequirement, Reliability, Serialization,
     counter_policy, hpet_power_constraint,
 };
+pub use measurement::{Calibration, WindowEvidence, calibrate_hpet};
 pub use sequence::CounterSequence;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
