@@ -1253,6 +1253,15 @@ fn native_stack_observation(serial: &str) -> Option<&str> {
     (first != 0 && second != 0 && first != second).then_some(line)
 }
 
+fn native_mixed32_observation(serial: &str) -> Option<&str> {
+    let mut proofs = serial
+        .lines()
+        .filter(|line| line.starts_with("CHECK native-mixed32"));
+    let line = proofs.next()?;
+    (proofs.next().is_none() && line == "CHECK native-mixed32 PASS contexts=32 kernel=21 rust=11 raw_bytes=1798144 payload_bytes=1785856 alignment_padding=12288 guards=all-roots holes=absent cache=WB retire=32-views raw=whole-boot-owned refusals=wrong-inventory+allocation-capacity; no C-current, Clock or provider grant")
+        .then_some(line)
+}
+
 fn native_mmio_observation(serial: &str) -> Option<&str> {
     if serial
         .lines()
@@ -1270,6 +1279,10 @@ fn native_mmio_observation(serial: &str) -> Option<&str> {
     if !line.ends_with("; bounded authored diagnostic, Linux and physical hardware unqualified") {
         return None;
     }
+    let mixed32 = native_mixed32_observation(serial)?;
+    let stack = native_stack_observation(serial)?;
+    let position = |proof: &str| serial.lines().position(|candidate| candidate == proof);
+    let order = position(mixed32)? < position(stack)? && position(stack)? < position(line)?;
     let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
     let value = |key: &str| {
         let mut values = fields.iter().filter_map(|field| field.strip_prefix(key));
@@ -1313,8 +1326,8 @@ fn native_mmio_observation(serial: &str) -> Option<&str> {
         && hex("MCFG=").is_some()
         && hex("vendor=").is_some_and(|vendor| vendor > 0 && vendor < u64::from(u32::MAX))
         && buses
-        && native_stack_observation(serial).is_some())
-    .then_some(line)
+        && order)
+        .then_some(line)
 }
 
 /// Old single-requester output never qualifies the two-context fixture.
