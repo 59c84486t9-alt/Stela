@@ -26,6 +26,7 @@ pub struct PinnedColdStackPreparation<'runtime, const N: usize> {
 impl<const N: usize> PinnedColdStackPreparation<'_, N> {
     // Catalog transport stays crate-private: borrowed metadata is consumed
     // immediately while this owning value retains the pin and excluded frame.
+    #[cfg(feature = "linux-kernel")]
     pub(crate) fn inspect_pin<T>(
         &self,
         entered: &dyn EnteredProcess,
@@ -36,6 +37,7 @@ impl<const N: usize> PinnedColdStackPreparation<'_, N> {
             self.cold.pin.as_ref().ok_or(WorkError::CorruptContext)?,
         ))
     }
+    #[cfg(feature = "linux-kernel")]
     pub(crate) fn check_pin(&self, entered: &dyn EnteredProcess) -> Result<(), WorkError> {
         self.cold.pin_source(entered).map(|_| ())
     }
