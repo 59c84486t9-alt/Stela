@@ -3,7 +3,7 @@
 //! These data contracts carry no device execution, JIT, native mapping or
 //! controller-effect authority. Device models and bundle preparation consume
 //! the same validated descriptions.
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
 extern crate alloc;
 
 pub mod aes;
