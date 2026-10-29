@@ -1596,7 +1596,7 @@ fn provision_sep(f: &Fixture, nor: &str) {
     image[capacity..capacity + record.len()].copy_from_slice(&record);
     fs::write(&path, image).unwrap();
     assert_eq!(
-        stela_runtime::machine::apple::sep_state::blank(
+        stela_soc::machine::sep_state::blank(
             &partition_bytes(f, nor)
                 [capacity..capacity + stela_formats::machine_state::SEP_ROOTS_BYTES]
         ),

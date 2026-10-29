@@ -397,11 +397,11 @@ pub(super) struct Drained {
     pub(super) lines: Vec<String>,
     pub(super) unmodeled: Vec<String>,
     pub(super) sep: Vec<String>,
-    pub(super) usb: Vec<stela_runtime::machine::apple::UsbLog>,
+    pub(super) usb: Vec<stela_soc::machine::UsbLog>,
     pub(super) usb_host: Vec<(u32, String)>,
-    pub(super) smc: Vec<stela_runtime::machine::apple::SmcWriteLog>,
-    pub(super) display: Vec<stela_runtime::machine::apple::DisplayLog>,
-    pub(super) power: Vec<stela_runtime::machine::apple::PowerLog>,
+    pub(super) smc: Vec<stela_soc::machine::SmcWriteLog>,
+    pub(super) display: Vec<stela_soc::machine::DisplayLog>,
+    pub(super) power: Vec<stela_soc::machine::PowerLog>,
 }
 
 impl Drained {

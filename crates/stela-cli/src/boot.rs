@@ -159,9 +159,9 @@ fn mount(
     tree: &[u8],
     board: &mut stela_soc_data::board::Board,
 ) -> Result<serde_json::Value> {
-    use stela_runtime::machine::{
-        apple::{ConsoleBusy, ConsoleSink, Scanout, ScanoutFormat, ScanoutMode, UsbCables},
-        mount,
+    use stela_runtime::machine::mount;
+    use stela_soc::machine::{
+        ConsoleBusy, ConsoleSink, Scanout, ScanoutFormat, ScanoutMode, UsbCables,
     };
     struct Discard;
     /// An internal SSD of zeros that keeps what is written.

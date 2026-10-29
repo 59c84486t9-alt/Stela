@@ -775,7 +775,7 @@ fn original_mode1_keeps_discovery_order_with_nonzero_logical_boot_pe() {
     let boot = board.boot_processor.as_ref().unwrap();
     assert_ne!(boot.cpu, 0);
     assert!(
-        stela_runtime::machine::apple::AppleDevices::native_pmp_system_endpoint_refusal(&board,)
+        stela_soc::machine::AppleDevices::native_pmp_system_endpoint_refusal(&board,)
             .unwrap()
             .unwrap()
             .contains("T8112")

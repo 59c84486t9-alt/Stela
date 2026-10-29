@@ -23,7 +23,7 @@ pub(crate) use stela_engine::machine::engine::SourcePhase;
 use stela_engine::machine::engine::publication::WorkerBinding;
 pub(crate) use stela_engine::machine::engine::{Counts, RunBudget};
 use stela_engine::machine::exception::Pstate;
-use stela_runtime::machine::apple::AppleDevices;
+use stela_soc::machine::AppleDevices;
 
 /// Budget for kept block buffers and index/FIFO metadata shared by the PEs
 /// (`translations::share`).

@@ -212,7 +212,7 @@ pub(super) fn report_drained<H: Host>(
     }
     parallel::report_diagnostics(machine);
     for log in drained.usb {
-        use stela_runtime::machine::apple::UsbLog;
+        use stela_soc::machine::UsbLog;
         match log {
             UsbLog::Descriptor(descriptor) => output::arguments(format_args!(
                 "USB descriptor type={} index={} lang={:#x} bytes={:02x?}\n",
@@ -254,7 +254,7 @@ pub(super) fn report_drained<H: Host>(
     }
 
     for log in drained.power {
-        use stela_runtime::machine::apple::PowerLog;
+        use stela_soc::machine::PowerLog;
         match log {
             PowerLog::Sleep => output::arguments(format_args!(
                 "POWER SoC sleep: every PE is down after slpa\n"

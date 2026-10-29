@@ -1007,12 +1007,12 @@ mod original {
     }
     impl EntryBus {
         fn new(ram: std::rc::Rc<std::cell::RefCell<EntryRam>>, mount_sep: bool) -> Self {
-            use crate::platform::apple::asc;
-            use crate::platform::apple::sep;
-            use crate::platform::apple::sep::Sep;
             use stela_contracts::bus;
             use stela_contracts::interrupt::AicInput;
             use stela_contracts::interrupt::InterruptLatch;
+            use stela_soc::asc;
+            use stela_soc::sep;
+            use stela_soc::sep::Sep;
             let mut peripherals = bus::Bus::new();
             let entropy_calls = std::rc::Rc::new(std::cell::Cell::new(0));
             let sep = mount_sep.then(|| {
@@ -1174,8 +1174,8 @@ mod original {
             _: &mut dyn stela_contracts::dma::Memory,
             now: u64,
         ) -> Result<(), DeviceError> {
-            use crate::platform::apple::sep::Sep;
             use stela_contracts::bus::Access;
+            use stela_soc::sep::Sep;
             self.peripherals
                 .advance(&mut Access::new(cpu, now, &mut self.interrupts))
                 .map_err(|error| {
@@ -1429,7 +1429,7 @@ mod original {
             let sep = machine
                 .devices
                 .peripherals
-                .device::<crate::platform::apple::sep::Sep>(machine.devices.sep.unwrap())
+                .device::<stela_soc::sep::Sep>(machine.devices.sep.unwrap())
                 .unwrap();
             assert!(sep.evidence().is_none());
             assert!(!sep.booted());

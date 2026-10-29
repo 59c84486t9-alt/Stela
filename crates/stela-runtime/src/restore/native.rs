@@ -1,9 +1,9 @@
 //! Translate the native mux API's empty windows into Pending, not EOF. This
 //! adapter only borrows the USB service for the current scheduler poll.
 use super::{Error, Result, driver::Ports};
-use crate::machine::apple::{MuxState, MuxStream, MuxStreamState, UsbClient};
 use core::task::Poll;
 use stela_contracts::Refusal;
+use stela_soc::machine::{MuxState, MuxStream, MuxStreamState, UsbClient};
 fn transport(error: impl Into<Refusal>) -> Error {
     Error::Transport(error.into())
 }
@@ -78,8 +78,8 @@ impl Ports for UsbClient<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::usb::{
-        mux::{Mux, tests::connected},
+    use stela_soc::usb::{
+        mux::{Mux, test_support::connected},
         session::Session,
     };
     #[test]

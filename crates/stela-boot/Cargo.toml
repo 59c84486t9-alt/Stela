@@ -27,7 +27,7 @@ test = false
 [features]
 default = []
 diagnostics = []
-native-profile = ["stela-runtime/native-profile", "stela-engine/native-profile"]
+native-profile = ["stela-soc/native-profile", "stela-engine/native-profile"]
 
 [dependencies]
 stela-soc-data = { path = "../stela-soc-data", default-features = false }
@@ -39,6 +39,7 @@ stela-formats = { path = "../stela-formats", default-features = false }
 uefi = { version = "0.41", default-features = false, features = ["alloc"] }
 stela-boot-core = { path = "../stela-boot-core", features = ["native-acpi"] }
 stela-drivers = { path = "../stela-drivers", features = ["linux-kernel", "native-acpi"] }
+stela-soc = { path = "../stela-soc", default-features = false }
 stela-runtime = { path = "../stela-runtime", default-features = false }
 stela-loader = { path = "../stela-loader", default-features = false }
 stela-compiler = { path = "../stela-compiler", default-features = false }

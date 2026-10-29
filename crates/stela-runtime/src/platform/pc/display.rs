@@ -19,14 +19,14 @@
 //!
 //! The guest's display caps the choice ([`guest_takes`]): the modeled DCP
 //! advertises the screen's mode to macOS as an EDID detailed timing
-//! (`platform::apple::dcp::modes`), which holds at most 4095 pixels on each
+//! (`stela_soc::dcp::modes`), which holds at most 4095 pixels on each
 //! axis and a 655.35 MHz pixel clock at 60 Hz. 3840x2160 fits; a 5K or 6K
 //! panel runs the largest smaller mode its firmware offers.
-use super::super::apple::{
+use core::{cmp::Reverse, fmt};
+use stela_soc::{
     dcp::modes::Advertised,
     scanout::{Mode as ScanoutMode, PixelFormat},
 };
-use core::{cmp::Reverse, fmt};
 
 /// One of the firmware's graphics modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,7 +158,7 @@ mod tests {
     /// A base block whose preferred timing is `width` by `height`, built by
     /// the DCP model's own EDID encoder.
     fn edid(width: u32, height: u32) -> [u8; 128] {
-        crate::platform::apple::dcp::modes::edid(ScanoutMode {
+        stela_soc::dcp::modes::edid(ScanoutMode {
             width,
             height,
             format: PixelFormat::Bgra8888,

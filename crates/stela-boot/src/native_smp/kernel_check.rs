@@ -25,7 +25,7 @@ use stela_engine::machine::engine::publication::WorkerId;
 use stela_engine::machine::exception::Pstate;
 use stela_engine::memory::RegisteredSystemRam;
 use stela_engine::memory::ReservedSystemRamRange;
-use stela_runtime::machine;
+use stela_soc::machine;
 
 struct Reservation {
     pages: PinnedPages,
@@ -110,7 +110,7 @@ impl TestDevices {
         // Authored controller: both transactions commit while the
         // recovered cohort remains held, including the OTHER physical PE.
         let other = (pe + 1) % self.ready.len();
-        let active = machine::apple::memory_resources::LifecycleState {
+        let active = machine::memory_resources::LifecycleState {
             powered: true,
             clocked: true,
             quiesced: false,
@@ -121,7 +121,7 @@ impl TestDevices {
             .processors()?
             .apply(&[engine::ProcessorChange {
                 domain: 1 + other as u64,
-                state: machine::apple::memory_resources::LifecycleState {
+                state: machine::memory_resources::LifecycleState {
                     clocked: false,
                     ..active
                 },
@@ -323,7 +323,7 @@ pub(crate) unsafe fn check(
                 .map(|pe| engine::ProcessorBinding {
                     domain: 1 + pe as u64,
                     target: stela_contracts::processor::ProcessorTarget::Core { pe },
-                    initial: machine::apple::memory_resources::LifecycleState {
+                    initial: machine::memory_resources::LifecycleState {
                         powered: true,
                         clocked: true,
                         quiesced: false,

@@ -29,16 +29,15 @@ use stela_contracts::refuse;
 use stela_drivers::block::{Ahead, BlockDevice, ReadAhead};
 use {
     stela_formats::payload::PayloadManifest, stela_formats::payload::Purpose,
-    stela_formats::payload::ReadAt, stela_runtime::machine::apple::AppleDevices,
-    stela_runtime::machine::apple::MuxStream, stela_runtime::machine::apple::UsbClient,
-    stela_runtime::machine::apple::UsbId, stela_runtime::net::Transfer,
+    stela_formats::payload::ReadAt, stela_runtime::net::Transfer,
     stela_runtime::restore::answers::Answers, stela_runtime::restore::driver::Driver,
     stela_runtime::restore::driver::Ports, stela_runtime::restore::proxy::Control,
     stela_runtime::restore::proxy::Destination, stela_runtime::restore::proxy::Event as ProxyEvent,
     stela_runtime::restore::proxy::Peer, stela_runtime::restore::proxy::Version,
     stela_runtime::restore::route::Route, stela_runtime::restore::source::Extent,
     stela_runtime::restore::store::Store, stela_runtime::restore::store::Verify,
-    stela_runtime::restore::stream::ByteStream,
+    stela_runtime::restore::stream::ByteStream, stela_soc::machine::AppleDevices,
+    stela_soc::machine::MuxStream, stela_soc::machine::UsbClient, stela_soc::machine::UsbId,
 };
 
 /// The bundle's boot manifest (`stela_loader::boot_bundle`).

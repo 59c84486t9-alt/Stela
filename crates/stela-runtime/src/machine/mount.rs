@@ -3,23 +3,6 @@
 //! lifecycle. The host's inputs (console, disks, cables, scanout, entropy and
 //! board firmware files) come from the caller, so `stela.efi` and
 //! `stela-dev boot check` mount the same machine.
-use super::apple::AicInput;
-use super::apple::AppleDevices;
-use super::apple::AscLines;
-use super::apple::ConsoleSink;
-use super::apple::DcpextDma;
-use super::apple::DcpextNub;
-use super::apple::Range;
-use super::apple::RtcEpoch;
-use super::apple::Scanout;
-use super::apple::SepEntropy;
-use super::apple::SepProvisioning;
-use super::apple::UsbCables;
-use super::apple::UsbId;
-use super::apple::memory_resources::t6000_cold;
-use super::apple::memory_resources::t8112;
-use super::apple::sep_state;
-use super::apple::typec;
 use crate::Result;
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::fmt;
@@ -27,74 +10,24 @@ use stela_contracts::refusal::Within;
 use stela_contracts::refuse;
 use stela_drivers::block::BlockDevice;
 use stela_engine::machine::ctrr;
+use stela_soc::machine::AicInput;
+use stela_soc::machine::AppleDevices;
+use stela_soc::machine::AscLines;
+use stela_soc::machine::ConsoleSink;
+use stela_soc::machine::DcpextDma;
+use stela_soc::machine::DcpextNub;
+use stela_soc::machine::Range;
+use stela_soc::machine::RtcEpoch;
+use stela_soc::machine::Scanout;
+use stela_soc::machine::SepEntropy;
+use stela_soc::machine::SepProvisioning;
+use stela_soc::machine::UsbCables;
+use stela_soc::machine::UsbId;
+use stela_soc::machine::memory_resources::MemoryResources;
+use stela_soc::machine::sep_state;
+use stela_soc::machine::typec;
 use stela_soc_data::board::{Board, PmgrBankRefusal};
 use stela_soc_data::pmu::WallClock;
-
-/// Already constructed native owners, consumed by the board mount. Descriptor
-/// equality is checked before any host input or bus placement is consumed.
-/// This is placement, not canonical execution or native PMP admission.
-#[allow(
-    clippy::large_enum_variant,
-    reason = "cold placement resources are moved once and consumed together before guest entry"
-)]
-pub enum MemoryResources {
-    /// Source-checked cold resources whose lifecycle is sampled from the
-    /// placed PMGR before the native memory owners are constructed.
-    T8112Cold(super::apple::t8112_cold::Plan),
-    /// Direct MCC/AMCC/PTD frontend; keeps its full source graph and canonical
-    /// RAM separate from the T8112 cache/quota protocol.
-    T6000Cold(t6000_cold::Plan),
-    T8112 {
-        memory: t8112::Prepared,
-        cache: t8112::cache::EmptyResource,
-    },
-}
-
-impl MemoryResources {
-    fn validate(
-        &self,
-        controller: Option<&stela_soc_data::board::MemoryController>,
-        descriptor: Option<&stela_soc_data::board::MemoryCache>,
-        direct: Option<&stela_soc_data::board::DirectMemoryCache>,
-    ) -> Result<()> {
-        if direct.is_some() && !matches!(self, Self::T6000Cold(_)) {
-            return Err(refuse!(
-                "cache/quota native memory cannot adopt a direct MCC descriptor"
-            ));
-        }
-        match self {
-            Self::T8112Cold(plan) => plan.validate(controller, descriptor),
-            Self::T6000Cold(plan) => {
-                if descriptor.is_some() {
-                    return Err(refuse!(
-                        "direct native memory cannot adopt a cache/quota descriptor"
-                    ));
-                }
-                plan.validate(controller, direct)
-            }
-            Self::T8112 { memory, cache } => {
-                if descriptor != Some(memory.descriptor()) || controller != Some(cache.source()) {
-                    return Err(refuse!(
-                        "native memory resources differ from the live board descriptors"
-                    ));
-                }
-                if !alloc::sync::Arc::ptr_eq(memory.registered_ram(), cache.registered_ram()) {
-                    return Err(refuse!(
-                        "native memory resources require the same actual registered RAM"
-                    ));
-                }
-                if cache.binding().0.checked_add(cache.binding().1)
-                    != Some(memory.descriptor().channels.0)
-                {
-                    return Err(refuse!(
-                        "native cache and DCS physical ownership is not contiguous"
-                    ));
-                }
-                Ok(())
-            }
-        }
-    }
-}
 
 /// The regions iBoot leaves in the memory controller's lock groups:
 /// CTRR-A over the bundle's read-only run, and CTRR-C and CTRR-D over the
@@ -774,45 +707,6 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
 mod tests {
     use super::*;
     use stela_soc_data::board::PmgrBank;
-
-    #[test]
-    fn native_memory_preflight_matches_live_descriptors_and_ram() {
-        let (memory, cache) = t8112::cache::EmptyResource::service_test_components();
-        let descriptor = memory.descriptor().clone();
-        let controller = cache.source().clone();
-        let resources = MemoryResources::T8112 { memory, cache };
-        assert_eq!(
-            resources.validate(Some(&controller), Some(&descriptor), None),
-            Ok(())
-        );
-
-        let mut changed = descriptor.clone();
-        changed.ptd.interrupts[0] ^= 1;
-        assert!(
-            resources
-                .validate(Some(&controller), Some(&changed), None)
-                .is_err()
-        );
-        let mut changed = controller.clone();
-        changed.apertures[0] += 0x40000;
-        assert!(
-            resources
-                .validate(Some(&changed), Some(&descriptor), None)
-                .is_err()
-        );
-        assert!(resources.validate(None, Some(&descriptor), None).is_err());
-        assert!(resources.validate(Some(&controller), None, None).is_err());
-
-        let (memory, _) = t8112::cache::EmptyResource::service_test_components();
-        let (_, cache) = t8112::cache::EmptyResource::service_test_components();
-        assert!(
-            MemoryResources::T8112 { memory, cache }
-                .validate(Some(&controller), Some(&descriptor), None)
-                .unwrap_err()
-                .to_string()
-                .contains("same actual registered RAM")
-        );
-    }
 
     #[test]
     fn clpc_absence_reports_each_path_once() {

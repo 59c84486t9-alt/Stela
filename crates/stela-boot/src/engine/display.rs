@@ -15,7 +15,7 @@ use crate::output;
 use core::sync::atomic::{AtomicBool, Ordering};
 use stela_contracts::refuse;
 use stela_formats::boot_bundle;
-use stela_runtime::machine::apple::{DisplayLog, Scanout, ScanoutFormat, ScanoutMode};
+use stela_soc::machine::{DisplayLog, Scanout, ScanoutFormat, ScanoutMode};
 
 /// Whether the DCP model has presented a swap: the first one takes the
 /// screen from Stela's console.

@@ -20,7 +20,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 use font::Font;
-use stela_runtime::machine::apple::ScanoutMasks;
+use stela_soc::machine::ScanoutMasks;
 use uefi::{
     Handle,
     boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol},

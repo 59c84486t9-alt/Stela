@@ -871,6 +871,7 @@ dependencies = [
  "stela-formats",
  "stela-loader",
  "stela-runtime",
+ "stela-soc",
  "stela-soc-data",
  "stela-tls",
  "uefi",
@@ -889,6 +890,7 @@ dependencies = [
  "stela-formats",
  "stela-loader",
  "stela-runtime",
+ "stela-soc",
  "stela-soc-data",
  "uefi-raw",
 ]
@@ -1004,13 +1006,9 @@ dependencies = [
 name = "stela-runtime"
 version = "0.1.0"
 dependencies = [
- "crypto-bigint",
  "hex",
- "hmac",
  "httparse",
  "libc",
- "miniz_oxide",
- "p256",
  "serde",
  "serde_json",
  "sha2",
@@ -1021,9 +1019,27 @@ dependencies = [
  "stela-drivers",
  "stela-engine",
  "stela-formats",
+ "stela-soc",
  "stela-soc-data",
  "stela-tls",
- "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "stela-soc"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac",
+ "p256",
+ "sha2",
+ "stela-compiler",
+ "stela-contracts",
+ "stela-crypto",
+ "stela-drivers",
+ "stela-engine",
+ "stela-formats",
+ "stela-soc-data",
  "zeroize",
 ]
 

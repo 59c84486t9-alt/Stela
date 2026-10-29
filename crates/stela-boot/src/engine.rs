@@ -77,14 +77,15 @@ use stela_engine::machine::identification::Speculation;
 use stela_engine::machine::registers::encodings::DCZID_EL0;
 use stela_engine::machine::system::Register;
 use stela_loader::{apple_device_tree::DeviceTree, boot_bundle, installed};
-use stela_runtime::machine::apple::AicInput;
-use stela_runtime::machine::apple::AppleDevices;
-use stela_runtime::machine::apple::ConsoleBusy;
-use stela_runtime::machine::apple::ConsoleSink;
-use stela_runtime::machine::apple::Range;
 use stela_runtime::machine::mount;
 use stela_runtime::pc::{gpt::Guid, storage::Target};
 use stela_runtime::restore::store::Verify;
+use stela_soc::machine::AicInput;
+use stela_soc::machine::AppleDevices;
+use stela_soc::machine::ConsoleBusy;
+use stela_soc::machine::ConsoleSink;
+use stela_soc::machine::Range;
+use stela_soc::machine::memory_resources::MemoryResources;
 use stela_soc_data::aic::AicLayout;
 use stela_soc_data::board;
 use stela_soc_data::pmu::WallClock;
@@ -445,8 +446,8 @@ const J473_AIC_TIMESTAMPS: u8 = 16;
 fn devices(
     board: Option<&board::Board>,
     inputs: mount::Inputs<'_>,
-    memory: Option<mount::MemoryResources>,
-) -> Result<(AppleDevices, Option<stela_runtime::machine::apple::UsbId>)> {
+    memory: Option<MemoryResources>,
+) -> Result<(AppleDevices, Option<stela_soc::machine::UsbId>)> {
     if let Some(board) = board {
         return mount::devices_with_memory(
             board,

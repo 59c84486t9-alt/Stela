@@ -27,10 +27,10 @@
 use super::host;
 use crate::output;
 use core::arch::asm;
-use stela_runtime::machine::apple::AppleDevices;
 use stela_runtime::pc::power::{
     self, ALL_FIXED_STATUS, HostPower, POWER_BUTTON, ResetRegister, SCI_ENABLE, SLEEP_WAKE_STATUS,
 };
+use stela_soc::machine::AppleDevices;
 
 /// The stop codes `isa-debug-exit` reports.
 pub const RESTART_CODE: u32 = 0x15;

@@ -378,7 +378,7 @@ struct Storage {
     host_nor: Option<nor::HostNor>,
     nor_image: Option<stela_soc_data::nor::Image>,
     nvram: Option<stela_formats::boot_bundle::Nvram>,
-    sep_state: Option<stela_runtime::machine::apple::sep_state::Location>,
+    sep_state: Option<stela_soc::machine::sep_state::Location>,
 }
 
 /// Open the guest's storage, the restore source and the machine state from
@@ -1020,7 +1020,7 @@ struct Placement<'a> {
     now: u64,
     read_only_region: Option<(u64, u64)>,
     backing: Option<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
-    sep_state: Option<stela_runtime::machine::apple::sep_state::Location>,
+    sep_state: Option<stela_soc::machine::sep_state::Location>,
     usb_disks: Vec<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
     guest_mac: Option<stela_drivers::net::Mac>,
 }
@@ -1029,7 +1029,7 @@ struct Placement<'a> {
 /// memory is placed without the translation cache.
 struct Placed {
     devices: AppleDevices,
-    restore_usb: Option<stela_runtime::machine::apple::UsbId>,
+    restore_usb: Option<stela_soc::machine::UsbId>,
     cacheless_memory: bool,
 }
 
@@ -1070,7 +1070,7 @@ fn place_devices(
     let scanout = handoff.screen.map(|screen| {
         let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
         alloc::boxed::Box::new(display::GopScanout::new(screen))
-            as alloc::boxed::Box<dyn stela_runtime::machine::apple::Scanout>
+            as alloc::boxed::Box<dyn stela_soc::machine::Scanout>
     });
     let programmed = mount::memory_locks(placement.read_only_region, core_locks);
     let memory = board.and_then(|board| memory_resources(board, canonical_ram, programmed));
@@ -1092,7 +1092,7 @@ fn place_devices(
             entropy: alloc::boxed::Box::new(bundle::entropy),
             restore: options.restore || options.install.is_some(),
             input: options.input,
-            usb: stela_runtime::machine::apple::UsbCables {
+            usb: stela_soc::machine::UsbCables {
                 disks: placement.usb_disks,
                 network: placement.guest_mac,
             },
@@ -1419,9 +1419,9 @@ fn memory_resources(
     board: &board::Board,
     canonical_ram: &alloc::sync::Arc<stela_engine::memory::RegisteredSystemRam>,
     programmed: stela_soc_data::amcc::Programmed,
-) -> Option<mount::MemoryResources> {
+) -> Option<MemoryResources> {
     if let Some(direct) = board.direct_memory_cache.as_ref() {
-        use stela_runtime::machine::apple::memory_resources::t6000_cold;
+        use stela_soc::machine::memory_resources::t6000_cold;
         // Equal nonzero software quota weights; these are policy for a
         // new cacheless frontend, never a measured Apple reset image.
         let configuration =
@@ -1430,9 +1430,9 @@ fn memory_resources(
         let plan =
             t6000_cold::Plan::prepare_ap_frontend(board, canonical_ram, programmed, &configuration)
                 .unwrap_or_else(|error| output::fatal(&error));
-        Some(mount::MemoryResources::T6000Cold(plan))
+        Some(MemoryResources::T6000Cold(plan))
     } else if board.memory_cache.is_some() {
-        use stela_runtime::machine::apple::{
+        use stela_soc::machine::{
             memory_resources::t8112::cache::ZeroWayConfiguration, t8112_cold,
         };
         let configuration = t8112_cold::Configuration::clear_software_controls(
@@ -1442,7 +1442,7 @@ fn memory_resources(
         let plan =
             t8112_cold::Plan::prepare_ap_frontend(board, canonical_ram, programmed, &configuration)
                 .unwrap_or_else(|error| output::fatal(&error));
-        Some(mount::MemoryResources::T8112Cold(plan))
+        Some(MemoryResources::T8112Cold(plan))
     } else {
         None
     }
@@ -1463,9 +1463,7 @@ fn bind_native_pmp(
     if let Some(reason) = refusal {
         output::arguments(format_args!("UNMODELED {reason}\n"));
     } else {
-        use stela_runtime::machine::apple::{
-            ExplicitRuntimeConfiguration, NativePmpClock, SourceProvenance,
-        };
+        use stela_soc::machine::{ExplicitRuntimeConfiguration, NativePmpClock, SourceProvenance};
         let pmp = board
             .pmp
             .as_ref()
@@ -1509,7 +1507,7 @@ fn bind_native_pmp(
 fn prepare_restore(
     boot: Boot<'_>,
     source: restore::Source,
-    usb: stela_runtime::machine::apple::UsbId,
+    usb: stela_soc::machine::UsbId,
     tree: Option<&[u8]>,
     host_network: &Option<Result<network::Shared>>,
     fdr_storage: Option<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
@@ -1944,7 +1942,7 @@ fn start_devices(
             let owned_usb = options.usb_storage.clone();
             let owned_wifi = wifi_network(handoff, options);
             let external = options.external_disks.then(|| {
-                stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
+                stela_soc::machine::UsbCables::disk_ports(options.guest_network)
                     .saturating_sub(owned_usb.len())
             });
             let root = handoff.root;

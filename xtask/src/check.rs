@@ -53,6 +53,7 @@ pub fn run(fix: bool) -> Result<()> {
         uefi(["-p", "stela-driver-core", "--no-default-features"]),
         uefi(["-p", "stela-soc-data", "--no-default-features"]),
         uefi(["-p", "stela-engine", "--no-default-features"]),
+        uefi(["-p", "stela-soc", "--no-default-features"]),
         uefi(["-p", "stela-runtime", "--no-default-features"]),
         uefi(["-p", "stela-tls", "--no-default-features"]),
         uefi(["-p", "stela-boot-core", "--features", "native-acpi"]),

@@ -2110,6 +2110,7 @@ dependencies = [
  "stela-formats",
  "stela-loader",
  "stela-runtime",
+ "stela-soc",
  "stela-soc-data",
  "uefi-raw",
 ]
@@ -2147,6 +2148,7 @@ dependencies = [
  "stela-formats",
  "stela-loader",
  "stela-runtime",
+ "stela-soc",
  "stela-soc-data",
  "tempfile",
  "windows-sys 0.61.2",
@@ -2301,17 +2303,11 @@ dependencies = [
 name = "stela-runtime"
 version = "0.1.0"
 dependencies = [
- "aes 0.8.4",
  "anyhow",
- "crypto-bigint",
  "getrandom 0.2.17",
  "hex",
- "hmac",
  "httparse",
  "libc",
- "lzfse_rust",
- "miniz_oxide",
- "p256",
  "rustls",
  "serde",
  "serde_json",
@@ -2323,9 +2319,28 @@ dependencies = [
  "stela-drivers",
  "stela-engine",
  "stela-formats",
+ "stela-soc",
  "stela-soc-data",
  "stela-tls",
- "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "stela-soc"
+version = "0.1.0"
+dependencies = [
+ "aes 0.8.4",
+ "hex",
+ "hmac",
+ "p256",
+ "sha2",
+ "stela-compiler",
+ "stela-contracts",
+ "stela-crypto",
+ "stela-drivers",
+ "stela-engine",
+ "stela-formats",
+ "stela-soc-data",
  "zeroize",
 ]
 

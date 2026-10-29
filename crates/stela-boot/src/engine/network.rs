@@ -26,13 +26,10 @@ use stela_drivers::{
     net::{Link, LinkError, Mac},
     probe::Adapter,
 };
-use stela_runtime::{
-    machine::apple::AppleDevices,
-    net::{
-        HttpRequest, HttpTransfer, NetError, Stack, TlsUnavailable, Transfer,
-        stack::DOWNLOAD_BUFFER,
-    },
+use stela_runtime::net::{
+    HttpRequest, HttpTransfer, NetError, Stack, TlsUnavailable, Transfer, stack::DOWNLOAD_BUFFER,
 };
+use stela_soc::machine::AppleDevices;
 
 /// One restore-time opaque TCP relay window. TLS stays end to end between the
 /// original Apple guest process and its requested server.

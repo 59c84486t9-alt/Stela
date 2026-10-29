@@ -23,7 +23,7 @@ const BRANCH_SELF: u32 = 0x14000000;
 const VALUE: u64 = 0x1122334455667788;
 struct Device {
     ram: Arc<RegisteredSystemRam>,
-    memory: machine::apple::AppleDevices,
+    memory: machine::AppleDevices,
     drains: usize,
     reads: usize,
     observed_ram: Option<u64>,
