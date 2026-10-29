@@ -352,9 +352,9 @@ pub fn store() -> Option<&'static mut Shared> {
     with_boot(|boot| boot.is_some()).then(|| Box::leak(Box::new(Shared)))
 }
 
-/// Keep the blocks any PE compiles, up to `bound` bytes of native code, for
-/// the others, which run on host cores of their own: in the loader's store,
-/// or in one of this boot alone.
+/// Share compiled blocks between PEs, retaining up to `bound` bytes of buffers
+/// and cache metadata in the loader's store or a store for this boot. Allocator
+/// overhead and shared immutable preparation storage are outside this budget.
 pub fn share(bound: usize) {
     with_boot(|boot| {
         let boot = boot.get_or_insert_with(|| Boot {

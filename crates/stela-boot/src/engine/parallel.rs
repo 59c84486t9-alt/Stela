@@ -23,8 +23,8 @@ pub(crate) use stela_engine::machine::engine::{Counts, RunBudget};
 use stela_engine::machine::exception::Pstate;
 use stela_runtime::machine::apple::AppleDevices;
 
-/// The native code of the blocks the PEs share, compiled once by whichever
-/// runs them first (`translations::share`).
+/// Budget for retained block buffers and index/FIFO metadata shared by the PEs
+/// (`translations::share`).
 pub(crate) const SHARED_CODE_BYTES: usize = 64 << 20;
 
 /// The board's devices as every PE's machine reaches them.
