@@ -15,5 +15,6 @@ pub mod machine_state;
 pub mod payload;
 pub mod preboot;
 pub mod rsa;
+pub mod uri;
 
 pub use hash::sha256;
