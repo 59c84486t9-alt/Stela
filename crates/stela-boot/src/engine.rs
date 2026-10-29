@@ -215,7 +215,8 @@ fn development_restore_hardware_model(tree: &mut DeviceTree) -> Result<String, S
 impl Options {
     fn parse(text: &str) -> Result<Self, &'static str> {
         Ok(Self {
-            system: System::parse_resolved(text)?,
+            system: System::parse_resolved(text)
+                .map_err(stela_boot_core::options::Error::message)?,
             ram_bytes: 0,
             dram_bytes: 0,
         })

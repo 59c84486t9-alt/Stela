@@ -220,7 +220,7 @@ pub fn boot(options: Vec<u8>) -> ! {
 /// the rest needs from the firmware; then leave boot services.
 fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
-    let options = HostCheck::parse(text)?;
+    let options = HostCheck::parse(text).map_err(stela_boot_core::options::Error::message)?;
     let started = rdtsc();
     output::arguments(format_args!("HOST CHECK {}\n", text.trim()));
     for line in cpu::report() {

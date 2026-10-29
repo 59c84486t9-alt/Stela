@@ -309,7 +309,7 @@ pub const INSTALL_PIECES_FILE: &str = "install-pieces.bin";
 /// opens a host controller: disks, the NOR store, input and the networks.
 fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
-    let system = System::parse(text)?;
+    let system = System::parse(text).map_err(stela_boot_core::options::Error::message)?;
     #[cfg(not(feature = "diagnostics"))]
     if system.diagnostic_option().is_some() {
         return Err("diagnostic options require a diagnostics build");
@@ -645,7 +645,7 @@ fn load(
     crate::status::begin("Setting up Stela's memory");
     let image = memory::prepare_image()?;
     let text = core::str::from_utf8(&options).map_err(|_| "stela.cfg is not UTF-8")?;
-    let system = System::parse(text)?;
+    let system = System::parse(text).map_err(stela_boot_core::options::Error::message)?;
     let (native_processors, cores) =
         crate::native_smp::firmware::capture_assignment(system.native_cores)
             .map_err(crate::native_smp::firmware::Error::message)?;

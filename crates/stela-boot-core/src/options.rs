@@ -13,6 +13,12 @@ use stela_loader::{
 };
 use stela_runtime::pc::{gpt::Guid, storage::Target};
 
+mod error;
+mod parse;
+mod validate;
+
+pub use error::{Constraint, Error, GuidArgument, TargetArgument};
+
 /// Apple T8112 DRAM base (Asahi Linux T8112 notes; the DeviceTree `/memory`).
 pub const DRAM_BASE: u64 = 0x8_0000_0000;
 const LARGE: u64 = 2 * 1024 * 1024;
@@ -52,14 +58,12 @@ impl AudioCheck {
         ("transport-duplex", Self::TransportDuplex),
     ];
 
-    pub fn parse(value: &str) -> Result<Self, &'static str> {
+    pub fn parse(value: &str) -> Result<Self, Error> {
         Self::NAMES
             .iter()
             .find(|(name, _)| *name == value)
             .map(|(_, mode)| *mode)
-            .ok_or(
-                "audio check mode must be playback, duplex, transport-playback or transport-duplex",
-            )
+            .ok_or(Error::AudioMode)
     }
 
     pub fn name(self) -> &'static str {
@@ -89,7 +93,7 @@ pub enum Base {
 
 impl Base {
     /// Parse and check one option line.
-    pub fn parse(text: &str) -> Result<Self, &'static str> {
+    pub fn parse(text: &str) -> Result<Self, Error> {
         let Some(register) = text.strip_prefix('x') else {
             return Ok(Self::Address(number(text)?));
         };
@@ -107,7 +111,7 @@ impl Base {
         };
         match index.parse() {
             Ok(index) if index < 31 => Ok(Self::Register(index, offset)),
-            _ => Err("a dump register is x0 to x30"),
+            _ => Err(Error::DumpRegister),
         }
     }
 
@@ -134,23 +138,25 @@ impl fmt::Display for Base {
 
 /// A number in `stela.cfg`: decimal, or hexadecimal after `0x` with optional
 /// `_` separators.
-pub fn number(value: &str) -> Result<u64, &'static str> {
+pub fn number(value: &str) -> Result<u64, Error> {
     match value.strip_prefix("0x") {
         Some(hex) => u64::from_str_radix(&hex.replace('_', ""), 16),
         None => value.parse(),
     }
-    .map_err(|_| "invalid number in system options")
+    .map_err(|_| Error::Number)
 }
 
 /// Check an `http://HOST/PATH` URL and split it into host and path.
 pub fn split_url(url: &str) -> Result<(&str, &str), &'static str> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or("only http:// URLs are supported")?;
-    let at = rest.find('/').ok_or("URL without a path")?;
+    parse_url(url).map_err(Error::message)
+}
+
+fn parse_url(url: &str) -> Result<(&str, &str), Error> {
+    let rest = url.strip_prefix("http://").ok_or(Error::UrlScheme)?;
+    let at = rest.find('/').ok_or(Error::UrlPath)?;
     let (host, path) = rest.split_at(at);
     if host.is_empty() {
-        return Err("URL without a host");
+        return Err(Error::UrlHost);
     }
     Ok((host, path))
 }
@@ -357,8 +363,8 @@ impl Default for System {
 }
 
 /// A `--wifi` word: `%XX` escapes decoded, 1 to 32 bytes of UTF-8.
-fn ssid(word: &str) -> Result<String, &'static str> {
-    const MALFORMED: &str = "--wifi needs a 1 to 32 byte network name, with %XX escapes";
+fn ssid(word: &str) -> Result<String, Error> {
+    const MALFORMED: Error = Error::WifiNetwork;
     let mut bytes = Vec::with_capacity(word.len());
     let mut rest = word.as_bytes();
     while let Some((&byte, tail)) = rest.split_first() {
@@ -398,8 +404,8 @@ impl fmt::Display for Ssid<'_> {
     }
 }
 
-fn flag(set: &mut bool, duplicate: &'static str) -> Result<(), &'static str> {
-    if core::mem::replace(set, true) && !duplicate.is_empty() {
+fn flag(set: &mut bool, duplicate: Error) -> Result<(), Error> {
+    if core::mem::replace(set, true) {
         return Err(duplicate);
     }
     Ok(())
@@ -412,14 +418,14 @@ impl System {
     }
 
     /// Parse a line the mount runs: `parse`, refusing an unreplaced `@disk`.
-    pub fn parse_resolved(text: &str) -> Result<Self, &'static str> {
+    pub fn parse_resolved(text: &str) -> Result<Self, Error> {
         let options = Self::parse(text)?;
         if [&options.storage, &options.nor, &options.preboot]
             .into_iter()
             .flatten()
             .any(is_chosen)
         {
-            return Err("@disk names a disk Install macOS has not chosen");
+            return Err(Error::Constraint(Constraint::UnresolvedDisk));
         }
         Ok(options)
     }
@@ -441,348 +447,14 @@ impl System {
         .find_map(|(enabled, flag)| enabled.then_some(flag))
     }
 
-    pub fn parse(text: &str) -> Result<Self, &'static str> {
-        let mut options = Self::default();
-        let mut words = text.split_ascii_whitespace();
-        if words.next() != Some(SYSTEM) {
-            return Err("system options must start with --system");
-        }
-        let mut native_cores = false;
-        while let Some(name) = words.next() {
-            let mut value = || words.next();
-            match name {
-                "--native-artifacts" => options.native_artifacts = true,
-                "--native-rounds" => options.native_rounds = true,
-                "--parallel" => options.parallel = true,
-                "--serialized" => options.parallel = false,
-                "--profile" => options.profile = true,
-                "--monitor-trace" => options.monitor_trace = true,
-                "--native-shared-check" => flag(
-                    &mut options.native_shared_check,
-                    "duplicate native shared check",
-                )?,
-                "--native-bootstrap-check" => flag(
-                    &mut options.native_bootstrap_check,
-                    "duplicate native bootstrap check",
-                )?,
-                NATIVE_CORES => {
-                    if core::mem::replace(&mut native_cores, true) {
-                        return Err("--native-cores must occur once");
-                    }
-                    let count = value()
-                        .ok_or("--native-cores needs a processor count")?
-                        .parse::<usize>()
-                        .map_err(|_| "--native-cores needs a processor count")?;
-                    if !(1..=MAX_NATIVE_CORES).contains(&count) {
-                        return Err(
-                            "--native-cores is outside the supported physical-core capacity",
-                        );
-                    }
-                    options.native_cores = Some(count);
-                }
-                "--native-memory-check" => options.native_memory_check = true,
-                "--native-clock-check" => flag(
-                    &mut options.native_clock_check,
-                    "duplicate native clock check",
-                )?,
-                "--native-mmio-check" => flag(
-                    &mut options.native_mmio_check,
-                    "duplicate native MMIO check",
-                )?,
-                "--restore-study" => options.restore = true,
-                "--restore-source" => {
-                    let target = value().ok_or("missing restore source partition")?.parse()?;
-                    if options.restore_source.replace(target).is_some() {
-                        return Err("duplicate restore source");
-                    }
-                }
-                "--restore-manifest" => {
-                    let path = value().ok_or("missing restore manifest path")?;
-                    if options.restore_manifest {
-                        return Err("duplicate restore manifest");
-                    }
-                    options.restore_manifest = true;
-                    options.restore_manifest_path = Some(String::from(path));
-                }
-                INSTALL => {
-                    let path = value().ok_or("missing install medium manifest")?;
-                    if options.install.replace(String::from(path)).is_some() {
-                        return Err("duplicate install medium");
-                    }
-                }
-                INSTALL_SOURCE => {
-                    let guid = value().ok_or("missing install medium partition")?.parse()?;
-                    if options.install_source.replace(guid).is_some() {
-                        return Err("duplicate install medium partition");
-                    }
-                }
-                "--restore-identity" => {
-                    let index = number(value().ok_or("missing restore identity index")?)?;
-                    let index = usize::try_from(index).map_err(|_| "restore identity too large")?;
-                    if options.restore_identity.replace(index).is_some() {
-                        return Err("duplicate restore identity");
-                    }
-                }
-                "--bundle" => {
-                    let directory = value().ok_or("missing bundle directory")?;
-                    options.bundle = true;
-                    options.bundle_directory = Some(String::from(directory));
-                }
-                "--survey" => options.survey = true,
-                VERIFY_ON_READ => options.verify_on_read = true,
-                UPDATE_RESTORE => options.update_restore = true,
-                "--development-restore" => options.development_restore = true,
-                "--idle-skip" => options.idle_skip = true,
-                "--input" => options.input = true,
-                "--tss" => options.tss = true,
-                "--usb-storage" => {
-                    let serial = value().ok_or("missing USB storage disk serial")?;
-                    if options.usb_storage.iter().any(|other| other == serial) {
-                        return Err("duplicate USB storage disk");
-                    }
-                    options.usb_storage.push(String::from(serial));
-                }
-                "--guest-network" => options.guest_network = true,
-                WIFI => {
-                    let ssid = ssid(value().ok_or("--wifi needs a network name")?)?;
-                    if options.ssid.replace(ssid).is_some() {
-                        return Err("duplicate --wifi");
-                    }
-                }
-                WIFI_KEY => {
-                    let path = value().ok_or("--wifi-key needs an ESP path")?;
-                    if options.wifi_key.replace(String::from(path)).is_some() {
-                        return Err("duplicate --wifi-key");
-                    }
-                }
-                WIFI_COUNTRY => {
-                    let code = value().ok_or("--wifi-country needs a two-letter country")?;
-                    if code.len() != 2 || !code.bytes().all(|byte| byte.is_ascii_alphabetic()) {
-                        return Err("--wifi-country needs a two-letter country");
-                    }
-                    if options
-                        .wifi_country
-                        .replace(code.to_ascii_uppercase())
-                        .is_some()
-                    {
-                        return Err("duplicate --wifi-country");
-                    }
-                }
-                EXTERNAL_DISKS => options.external_disks = true,
-                "--audio-check" => {
-                    if options.audio_check.is_some() {
-                        return Err("duplicate audio check");
-                    }
-                    let mode = AudioCheck::parse(value().ok_or("missing audio check mode")?)?;
-                    options.audio_check = Some(mode);
-                }
-                "--network-check" => {
-                    let url = value().ok_or("missing network check URL")?;
-                    split_url(url)?;
-                    if options.network_check.replace(String::from(url)).is_some() {
-                        return Err("duplicate network check");
-                    }
-                }
-                "--ecid" => {
-                    let ecid = number(value().ok_or("missing ECID")?)?;
-                    if ecid == 0 || options.ecid.replace(ecid).is_some() {
-                        return Err("--ecid takes one nonzero ECID");
-                    }
-                }
-                "--sep-observe" => options.sep_observe = true,
-                "--storage" => {
-                    let target = partition(value().ok_or("missing ANS storage partition")?)?;
-                    if options.storage_ram.is_some() || options.storage.replace(target).is_some() {
-                        return Err("system mode accepts exactly one ANS backing");
-                    }
-                }
-                "--storage-ram" => {
-                    let bytes = number(value().ok_or("missing RAM storage size")?)?;
-                    if options.storage.is_some() || options.storage_ram.replace(bytes).is_some() {
-                        return Err("system mode accepts exactly one ANS backing");
-                    }
-                }
-                "--nor" => {
-                    let target = partition(value().ok_or("missing NOR partition")?)?;
-                    if options.nor.replace(target).is_some() {
-                        return Err("duplicate NOR partition");
-                    }
-                }
-                "--preboot" => {
-                    let target = value().ok_or("missing Preboot disk")?;
-                    options.preboot = Some(partition(target)?);
-                    options.bundle = true;
-                }
-                "--watch" => {
-                    let range = value().ok_or("missing watch range")?;
-                    let (base, bytes) = range.split_once(',').ok_or("a watch is BASE,BYTES")?;
-                    options.watches.push((number(base)?, number(bytes)?));
-                }
-                boot_selection::BOOT_VOLUME_OPTION => {
-                    let volume =
-                        BootVolume::parse(value().ok_or("missing boot volume")?.as_bytes())
-                            .map_err(|_| "--boot-volume is not TYPE:PARTITION:GROUP")?;
-                    if options.boot_volume.replace(volume).is_some() {
-                        return Err("duplicate boot volume");
-                    }
-                }
-                boot_selection::SAFE_BOOT_OPTION => options.safe_boot = true,
-                boot_selection::BOOT_COMMAND_OPTION => {
-                    let value = number(value().ok_or("missing boot command")?)?;
-                    let value = u8::try_from(value).map_err(|_| "boot command is not a byte")?;
-                    let command = BootCommand::try_from(value)?;
-                    if options.boot_command.replace(command).is_some() {
-                        return Err("duplicate boot command");
-                    }
-                }
-                boot_selection::UPGRADE_OPTION => options.upgrade = true,
-                boot_selection::PAIRED_RECOVERY_OPTION | boot_selection::SYSTEM_RECOVERY_OPTION => {
-                    let kind = if name == boot_selection::PAIRED_RECOVERY_OPTION {
-                        recovery::Kind::Paired
-                    } else {
-                        recovery::Kind::System
-                    };
-                    if options.recovery.replace(kind).is_some() {
-                        return Err("--paired-recovery and --system-recovery name one recoveryOS");
-                    }
-                }
-                "--dump" => {
-                    let range = value().ok_or("missing dump range")?;
-                    let (base, bytes) = range.split_once(',').ok_or("a dump is BASE,BYTES")?;
-                    options.dumps.push((Base::parse(base)?, number(bytes)?));
-                }
-                _ => {
-                    let value = number(value().ok_or("missing system option value")?)?;
-                    match name {
-                        "--break" => options.breakpoints.push(value),
-                        "--trace" => options.traces.push(value),
-                        "--dram-base" => {
-                            options.dram_base = value;
-                            options.dram_explicit = true;
-                        }
-                        "--load" => options.load = value,
-                        "--entry" => options.entry = value,
-                        "--x0" => options.x0 = value,
-                        "--budget" => options.budget = value,
-                        _ => return Err("unknown system option"),
-                    }
-                }
-            }
-        }
-        if options.native_rounds || options.native_shared_check || options.native_bootstrap_check {
-            options.parallel = false;
-        }
-        if options.ssid.is_some() && options.wifi_key.is_none() {
-            options.wifi_key = Some(String::from(DEFAULT_WIFI_KEY));
-        }
-        options.check()?;
-        Ok(options)
+    pub fn parse(text: &str) -> Result<Self, Error> {
+        parse::system(text)
     }
 
-    /// The combinations the engine refuses.
-    pub fn check(&self) -> Result<(), &'static str> {
-        let restore_inputs = self.restore_source.is_some()
-            || self.restore_manifest
-            || self.restore_identity.is_some();
-        if self.restore
-            && (!self.bundle
-                || self.preboot.is_some()
-                || self.storage.is_none()
-                || self.restore_source.is_none()
-                || !self.restore_manifest
-                || self.restore_identity.is_none()
-                || self.survey)
-        {
-            return Err(
-                "--restore-study requires --bundle, --storage, --restore-source, --restore-manifest and --restore-identity; refuses --preboot/--survey",
-            );
-        }
-        if !self.restore && restore_inputs {
-            return Err("restore inputs require explicit --restore-study");
-        }
-        if self.ssid.is_none() && (self.wifi_key.is_some() || self.wifi_country.is_some()) {
-            return Err("--wifi-key and --wifi-country configure a --wifi network");
-        }
-        if self.install_source.is_some() && self.install.is_none() {
-            return Err("--install-source names the partition of an --install medium");
-        }
-        if self.install.is_some()
-            && (!self.bundle
-                || self.preboot.is_some()
-                || self.storage.is_none()
-                || self.nor.is_none()
-                || self.restore
-                || self.survey)
-        {
-            return Err(
-                "--install requires --bundle, --storage and --nor; refuses --restore-study, --preboot and --survey",
-            );
-        }
-        if self.update_restore && self.install.is_none() {
-            return Err("--update-restore applies to --install");
-        }
-        if self.development_restore && (self.install.is_none() || self.update_restore) {
-            return Err(
-                "--development-restore requires an erase --install and refuses --update-restore",
-            );
-        }
-        if self.verify_on_read && self.install.is_none() && !self.restore {
-            return Err("--verify-on-read applies to --install and --restore-study");
-        }
-        if self.install.is_some() && !self.tss {
-            return Err(
-                "--install needs --tss: required boot firmware is not covered by the IPSW's global ticket",
-            );
-        }
-        if self.preboot.is_none()
-            && (self.boot_volume.is_some()
-                || self.boot_command.is_some()
-                || self.safe_boot
-                || self.upgrade
-                || self.recovery.is_some())
-        {
-            return Err(
-                "--boot-volume, --boot-command, --safe-boot, --upgrade, --paired-recovery and --system-recovery \
-                 choose a --preboot boot",
-            );
-        }
-        if self.upgrade && (self.recovery.is_some() || self.safe_boot) {
-            return Err("--upgrade is neither a safe-mode boot nor a recoveryOS");
-        }
-        if self.recovery.is_some() && self.safe_boot {
-            return Err("a recoveryOS boot is not a safe-mode boot");
-        }
-        if !self.dram_base.is_multiple_of(LARGE) {
-            return Err("guest DRAM base must be 2 MiB aligned");
-        }
-        if self.native_clock_check {
-            if self.native_cores != Some(1) {
-                return Err("native clock check requires --native-cores 1");
-            }
-            if self.native_mmio_check
-                || self.native_memory_check
-                || self.native_bootstrap_check
-                || self.native_shared_check
-                || self.native_rounds
-                || self.audio_check.is_some()
-                || self.network_check.is_some()
-                || self.storage.is_some()
-                || self.storage_ram.is_some()
-                || self.preboot.is_some()
-                || self.nor.is_some()
-                || self.input
-                || self.guest_network
-                || self.ssid.is_some()
-                || self.external_disks
-                || !self.usb_storage.is_empty()
-                || self.tss
-                || self.install.is_some()
-                || self.restore
-            {
-                return Err("native clock check requires an exclusive diagnostic mode");
-            }
-        }
-        Ok(())
+    /// Check complete-record constraints in their established diagnostic order.
+    /// This does not apply parsing defaults or mutate the record.
+    pub fn check(&self) -> Result<(), Error> {
+        validate::system(self)
     }
 }
 
@@ -834,11 +506,13 @@ pub fn is_chosen(target: &Target) -> bool {
     target.serial == mount_interface::CHOSEN_DISK && target.partition.is_zero()
 }
 
-fn partition(value: &str) -> Result<Target, &'static str> {
+fn partition(value: &str, argument: TargetArgument) -> Result<Target, Error> {
     if value == mount_interface::CHOSEN_DISK {
         return Ok(chosen_disk());
     }
-    value.parse()
+    value
+        .parse()
+        .map_err(|source| Error::Target { argument, source })
 }
 
 struct Hex(u64);
@@ -998,18 +672,18 @@ impl Default for HostCheck {
     }
 }
 
-fn seconds(value: Option<&str>) -> Result<u64, &'static str> {
+fn seconds(value: Option<&str>) -> Result<u64, Error> {
     value
         .and_then(|value| value.parse().ok())
         .filter(|&seconds| seconds > 0)
-        .ok_or("host check: a time option takes a positive number of seconds")
+        .ok_or(Error::HostSeconds)
 }
 
 impl HostCheck {
-    pub fn parse(text: &str) -> Result<Self, &'static str> {
+    pub fn parse(text: &str) -> Result<Self, Error> {
         let mut words = text.split_ascii_whitespace();
         if words.next() != Some(HOST_CHECK) {
-            return Err("host check: stela.cfg must start with --host-check");
+            return Err(Error::HostPrefix);
         }
         let mut options = Self::default();
         while let Some(word) = words.next() {
@@ -1022,12 +696,18 @@ impl HostCheck {
                     let (guid, path) = words
                         .next()
                         .and_then(|value| value.split_once(':'))
-                        .ok_or("host check: --nor-file takes GUID:/PATH")?;
-                    options.nor_file = Some((guid.parse()?, String::from(path)));
+                        .ok_or(Error::HostNorSpecification)?;
+                    options.nor_file = Some((
+                        guid.parse().map_err(|source| Error::Guid {
+                            argument: GuidArgument::HostNorFile,
+                            source,
+                        })?,
+                        String::from(path),
+                    ));
                 }
                 "--deadline" => options.deadline = Some(seconds(words.next())?),
                 "--key-seconds" => options.key_seconds = seconds(words.next())?,
-                _ => return Err("host check: unknown option"),
+                _ => return Err(Error::UnknownHostOption),
             }
         }
         if u8::from(options.native_dma_check)
@@ -1036,7 +716,7 @@ impl HostCheck {
             + u8::from(options.native_irq_work_check)
             > 1
         {
-            return Err("host check: native diagnostic fixture modes are exclusive");
+            return Err(Error::Constraint(Constraint::HostDiagnosticExclusive));
         }
         Ok(options)
     }
@@ -1065,190 +745,4 @@ impl fmt::Display for HostCheck {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use alloc::{format, string::ToString, vec};
-
-    #[test]
-    fn diagnostic_options_are_typed() {
-        for text in ["--system", "--system --wifi --native-memory-check"] {
-            assert_eq!(System::parse(text).unwrap().diagnostic_option(), None);
-        }
-        for (text, flag) in [
-            ("--system --native-memory-check", "--native-memory-check"),
-            (
-                "--system --native-cores 1 --native-clock-check",
-                "--native-clock-check",
-            ),
-            ("--system --native-mmio-check", "--native-mmio-check"),
-            (
-                "--system --native-cores 2 --native-bootstrap-check",
-                "--native-bootstrap-check",
-            ),
-            (
-                "--system --native-cores 2 --native-shared-check",
-                "--native-shared-check",
-            ),
-        ] {
-            assert_eq!(System::parse(text).unwrap().diagnostic_option(), Some(flag));
-        }
-    }
-
-    #[test]
-    fn host_check_lines_round_trip_and_refuse_combined_fixtures() {
-        let line = "--host-check --native-dma-check \
-                    --nor-file 11111111-2222-3333-4444-555555555555:/stela/nor.bin --deadline 30 \
-                    --key-seconds 5";
-        let options = HostCheck::parse(line).unwrap();
-        assert_eq!(options.deadline, Some(30));
-        assert_eq!(HostCheck::parse(&options.to_string()), Ok(options));
-        assert_eq!(HostCheck::parse("--host-check"), Ok(HostCheck::default()));
-        for text in [
-            "--system",
-            "--host-check --native-dma-check --native-work-check",
-            "--host-check --deadline 0",
-            "--host-check --nor-file x",
-            "--host-check --unknown",
-        ] {
-            assert!(HostCheck::parse(text).is_err(), "{text}");
-        }
-    }
-
-    const DISK: &str = "74EXN0LI:11111111-2222-3333-4444-555555555555";
-
-    fn round_trip(text: &str) -> System {
-        let options = System::parse(text).unwrap();
-        let line = options.to_string();
-        assert_eq!(System::parse(&line), Ok(options.clone()), "{line}");
-        options
-    }
-
-    #[test]
-    fn setup_lines_parse_and_serialize_identically() {
-        let preboot = format!(
-            "--system --storage {DISK} --nor {DISK} --preboot {DISK} --ecid 0x0000000000001234 \
-             --external-disks --guest-network --tss"
-        );
-        let options = round_trip(&preboot);
-        assert!(options.bundle && options.external_disks && options.tss);
-        assert_eq!(options.ecid, Some(0x1234));
-        assert_eq!(options.to_string(), preboot);
-        let bundle = format!("--system --storage {DISK} --nor {DISK} --bundle \\EFI\\stela\\r");
-        assert_eq!(round_trip(&bundle).to_string(), bundle);
-    }
-
-    #[test]
-    fn chosen_disk_round_trips_and_the_mount_refuses_it_unreplaced() {
-        let line = "--system --storage @disk --nor @disk --preboot @disk";
-        let options = round_trip(line);
-        assert!(options.storage.as_ref().is_some_and(is_chosen));
-        assert_eq!(options.to_string(), line);
-        assert!(System::parse_resolved(line).is_err());
-        let resolved = line.replace("@disk", DISK);
-        assert!(System::parse_resolved(&resolved).is_ok());
-    }
-
-    #[test]
-    fn every_option_survives_a_round_trip() {
-        let options = round_trip(&format!(
-            "--system --storage {DISK} --nor {DISK} --bundle b --install p.json \
-             --install-source 11111111-2222-3333-4444-555555555555 --tss --verify-on-read \
-             --usb-storage A --usb-storage B --input --idle-skip --sep-observe --native-cores 3 \
-             --native-artifacts --serialized --profile --monitor-trace \
-             --network-check http://h/p --audio-check transport-duplex --dram-base 0x10000000000 \
-             --load 0x10000004000 --entry 0x10000008000 --x0 7 --budget 99 --break 0x10 \
-             --trace 0x20 --watch 0x30,0x40 --dump x21-0x8,0x10 --dump 0x50,0x60"
-        ));
-        assert_eq!(options.usb_storage, ["A", "B"]);
-        assert_eq!(options.audio_check, Some(AudioCheck::TransportDuplex));
-        assert!(!options.parallel);
-        assert_eq!(options.dumps[0], (Base::Register(21, -8), 0x10));
-        let restore = round_trip(&format!(
-            "--system --bundle b --storage {DISK} --restore-study --restore-source {DISK} \
-             --restore-manifest m.plist --restore-identity 2"
-        ));
-        assert_eq!(restore.restore_manifest_path.as_deref(), Some("m.plist"));
-    }
-
-    #[test]
-    fn wifi_names_escape_spaces_and_the_key_path_defaults() {
-        let options = round_trip("--system --wifi Home%20Net%25 --wifi-country gb");
-        assert_eq!(options.ssid.as_deref(), Some("Home Net%"));
-        assert_eq!(options.wifi_key.as_deref(), Some(DEFAULT_WIFI_KEY));
-        assert_eq!(options.wifi_country.as_deref(), Some("GB"));
-        assert_eq!(
-            options.to_string(),
-            "--system --wifi Home%20Net%25 --wifi-country GB"
-        );
-        let keyed = round_trip("--system --wifi caf\u{e9} --wifi-key \\EFI\\k");
-        assert_eq!(keyed.ssid.as_deref(), Some("caf\u{e9}"));
-        assert_eq!(keyed.wifi_key.as_deref(), Some("\\EFI\\k"));
-        for text in [
-            "--system --wifi-key \\k",
-            "--system --wifi-country GB",
-            "--system --wifi %",
-            "--system --wifi %4",
-            "--system --wifi %FF",
-            "--system --wifi 0123456789abcdef0123456789abcdef0",
-            "--system --wifi a --wifi b",
-            "--system --wifi a --wifi-country GBR",
-            "--system --wifi a --wifi-country 12",
-        ] {
-            assert!(System::parse(text).is_err(), "{text}");
-        }
-    }
-
-    #[test]
-    fn native_checks_imply_serialized_execution_without_writing_it() {
-        let options = round_trip("--system --native-cores 2 --native-rounds");
-        assert!(!options.parallel);
-        assert!(!options.to_string().contains("--serialized"));
-        assert!(System::parse("--system").unwrap().parallel);
-    }
-
-    #[test]
-    fn native_core_counts_refuse_duplicates_zero_and_over_capacity() {
-        for text in [
-            "--system --native-cores 1 --native-cores 1",
-            "--system --native-cores 0",
-            "--system --native-cores 65",
-            "--system --native-cores x",
-            "--system --native-cores",
-        ] {
-            assert!(System::parse(text).is_err(), "{text}");
-        }
-        assert_eq!(
-            System::parse("--system --native-cores 64")
-                .unwrap()
-                .native_cores,
-            Some(64)
-        );
-    }
-
-    #[test]
-    fn invalid_lines_refuse() {
-        for text in [
-            "--storage x",
-            "--system --unknown 1",
-            "--system --install p.json",
-            "--system --ecid 0",
-            "--system --safe-boot",
-            "--system --network-check https://h/p",
-            "--system --dram-base 0x1000",
-            "--system --storage-ram 1 --storage-ram 2",
-        ] {
-            assert!(System::parse(text).is_err(), "{text}");
-        }
-    }
-
-    #[test]
-    fn numbers_take_decimal_and_separated_hex() {
-        assert_eq!(number("0x1_0000"), Ok(0x10000));
-        assert_eq!(number("42"), Ok(42));
-        assert!(number("0xg").is_err());
-        assert_eq!(
-            vec![Base::parse("x3+0x10").unwrap()],
-            [Base::Register(3, 16)]
-        );
-    }
-}
+mod tests;
