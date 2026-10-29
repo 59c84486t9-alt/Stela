@@ -492,6 +492,17 @@ struct Slot {
     bounce: DmaBuffer,
 }
 
+/// Task-file registers and the DMA region encoded for one command issue.
+struct AtaRequest {
+    command: u8,
+    feature: u16,
+    lba: u64,
+    count: u16,
+    bytes: usize,
+    write: bool,
+    buffer: u64,
+}
+
 /// A command issued in its slot, awaiting its ending FIS or an error.
 struct Launched {
     slot: usize,
@@ -1656,13 +1667,15 @@ impl AhciDisk {
                 port,
                 issue.slot,
                 launched == 0,
-                command,
-                issue.feature,
-                issue.lba,
-                issue.count,
-                issue.bytes,
-                issue.write,
-                buffer,
+                AtaRequest {
+                    command,
+                    feature: issue.feature,
+                    lba: issue.lba,
+                    count: issue.count,
+                    bytes: issue.bytes,
+                    write: issue.write,
+                    buffer,
+                },
             ) {
                 Ok(started) => {
                     issue.launched = Some(started);
@@ -1797,13 +1810,15 @@ impl AhciDisk {
         self.ready().map_err(Failure::new)?;
         let Err(failure) = self.attempt(
             port,
-            command,
-            u16::from(feature),
-            0,
-            count,
-            bytes,
-            false,
-            buffer,
+            AtaRequest {
+                command,
+                feature: u16::from(feature),
+                lba: 0,
+                count,
+                bytes,
+                write: false,
+                buffer,
+            },
         ) else {
             return Ok(());
         };
@@ -1814,21 +1829,8 @@ impl AhciDisk {
 
     /// Issue the command once in slot 0, the port running nothing else, and
     /// wait for its completion or error.
-    #[allow(clippy::too_many_arguments)]
-    fn attempt(
-        &mut self,
-        port: &impl CommandPort,
-        command: u8,
-        feature: u16,
-        lba: u64,
-        count: u16,
-        bytes: usize,
-        write: bool,
-        buffer: u64,
-    ) -> Result<(), Failure> {
-        let launched = self.launch(
-            port, 0, true, command, feature, lba, count, bytes, write, buffer,
-        )?;
+    fn attempt(&mut self, port: &impl CommandPort, request: AtaRequest) -> Result<(), Failure> {
+        let launched = self.launch(port, 0, true, request)?;
         loop {
             if let Some(seen) = self.look(port, &[&launched]) {
                 return seen.failure.map_or(Ok(()), Err);
@@ -1840,20 +1842,22 @@ impl AhciDisk {
 
     /// Issue the command once in `slot`; `alone` when the port runs no
     /// other command, whose interrupts and ending FIS marks it may clear.
-    #[allow(clippy::too_many_arguments)]
     fn launch(
         &mut self,
         port: &impl CommandPort,
         slot: usize,
         alone: bool,
-        command: u8,
-        feature: u16,
-        lba: u64,
-        count: u16,
-        bytes: usize,
-        write: bool,
-        buffer: u64,
+        request: AtaRequest,
     ) -> Result<Launched, Failure> {
+        let AtaRequest {
+            command,
+            feature,
+            lba,
+            count,
+            bytes,
+            write,
+            buffer,
+        } = request;
         let table = self.table(slot).bus_address();
         // A queued command's sector count moves to the features registers;
         // the count register carries its tag, its slot, in bits 7:3.
@@ -2579,7 +2583,18 @@ impl AhciDisk {
                 ATA_READ_LOG_EXT
             };
             let bytes = ATA_SECTOR_BYTES as usize;
-            let Err(failure) = self.attempt(port, command, 0, lba, 1, bytes, false, buffer) else {
+            let Err(failure) = self.attempt(
+                port,
+                AtaRequest {
+                    command,
+                    feature: 0,
+                    lba,
+                    count: 1,
+                    bytes,
+                    write: false,
+                    buffer,
+                },
+            ) else {
                 return Ok(true);
             };
             stop_engine(port, self.clock)?;
@@ -2887,9 +2902,18 @@ impl AhciDisk {
     /// ignored, as ERR might be set; a timeout leaves no result.
     fn request_sense(&mut self, port: &impl CommandPort) -> Result<Option<Sense>, BlockError> {
         let buffer = self.bounce.bus_address();
-        if let Err(failure) =
-            self.attempt(port, ATA_REQUEST_SENSE_DATA_EXT, 0, 0, 0, 0, false, buffer)
-        {
+        if let Err(failure) = self.attempt(
+            port,
+            AtaRequest {
+                command: ATA_REQUEST_SENSE_DATA_EXT,
+                feature: 0,
+                lba: 0,
+                count: 0,
+                bytes: 0,
+                write: false,
+                buffer,
+            },
+        ) {
             stop_engine(port, self.clock)?;
             start_engine(port);
             if failure.frozen {
