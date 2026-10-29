@@ -1,9 +1,10 @@
 //! Original kernel cacheless configuration. This does not authorize a mount;
 //! the caller must keep its Prepared MCC owner and canonical memory
 //! completion admission. The bundle's default arguments are unchanged here.
+use crate::Result;
 use crate::boot_args::BOOT_LINE_LENGTH;
 use alloc::string::String;
-use anyhow::{Result, ensure};
+use stela_contracts::require;
 
 pub const DISABLE_MCC: &str = "-disable_mcc";
 
@@ -11,12 +12,12 @@ pub const DISABLE_MCC: &str = "-disable_mcc";
 /// arguments byte-for-byte. Reject NULs/truncation and ambiguous spellings;
 /// no cached bundle is changed until the parent adopts its full resource plan.
 pub fn cacheless_arguments(arguments: &str) -> Result<String> {
-    ensure!(
+    require!(
         !arguments.as_bytes().contains(&0),
         "boot arguments contain a NUL"
     );
     for word in arguments.split_ascii_whitespace() {
-        ensure!(
+        require!(
             !word.starts_with("-disable_mcc="),
             "cacheless MCC requires the original standalone boolean argument"
         );
@@ -29,7 +30,7 @@ pub fn cacheless_arguments(arguments: &str) -> Result<String> {
     } else {
         DISABLE_MCC.len() + usize::from(!arguments.is_empty())
     };
-    ensure!(
+    require!(
         arguments
             .len()
             .checked_add(extra)

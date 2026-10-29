@@ -3,6 +3,7 @@ use crate::coprocessor::{
     configuration::tests::{config_policy, provenance},
     tests::{fixture, prepare, w32, w64},
 };
+use anyhow::Result;
 
 fn original(width: Width) -> Vec<u8> {
     let mut b = fixture();

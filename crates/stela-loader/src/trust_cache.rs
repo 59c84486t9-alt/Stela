@@ -6,9 +6,10 @@
 //! `bsd/kern/kern_trustcache.c` `load_static_trust_cache` loads module 0 as
 //! the static trust cache. A module is the plaintext payload of a `trst`
 //! IM4P: `u32 version`, a 16-byte UUID, `u32 count` and fixed-size entries.
+use crate::Result;
 use alloc::{string::String, vec, vec::Vec};
-use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
+use stela_contracts::{refuse, require};
 
 const HEADER_BYTES: usize = 4 + 16 + 4;
 /// Module placement inside the composed region.
@@ -29,26 +30,29 @@ fn entry_bytes(version: u32) -> Result<usize> {
     Ok(match version {
         1 => 22,
         2 => 24,
-        other => bail!("unsupported trust cache module version {other}"),
+        other => {
+            return Err(refuse!("unsupported trust cache module version {other}", other).into());
+        }
     })
 }
 
 /// Validate one module and describe it; its extent must be exact.
 pub fn inspect_module(module: &[u8]) -> Result<ModuleSummary> {
-    ensure!(
+    require!(
         module.len() >= HEADER_BYTES,
         "trust cache module is truncated"
     );
-    let version = u32::from_le_bytes(module[0..4].try_into()?);
-    let entries = u32::from_le_bytes(module[20..24].try_into()?);
+    let version = u32::from_le_bytes(module[0..4].try_into().unwrap());
+    let entries = u32::from_le_bytes(module[20..24].try_into().unwrap());
     let expected = (entries as usize)
         .checked_mul(entry_bytes(version)?)
         .and_then(|n| n.checked_add(HEADER_BYTES))
-        .context("trust cache module size overflows")?;
-    ensure!(
+        .ok_or(refuse!("trust cache module size overflows"))?;
+    require!(
         module.len() == expected,
-        "trust cache module is {} bytes; its header describes {expected}",
-        module.len()
+        "trust cache module is {module_len} bytes; its header describes {expected}",
+        module_len = module.len(),
+        expected
     );
     Ok(ModuleSummary {
         version,
@@ -60,7 +64,7 @@ pub fn inspect_module(module: &[u8]) -> Result<ModuleSummary> {
 
 /// Compose the boot trust cache region; the first module is the static one.
 pub fn compose(modules: &[&[u8]]) -> Result<Vec<u8>> {
-    ensure!(
+    require!(
         !modules.is_empty(),
         "the boot trust cache region needs a module"
     );
@@ -72,7 +76,8 @@ pub fn compose(modules: &[&[u8]]) -> Result<Vec<u8>> {
     out.resize(4 + 4 * modules.len(), 0);
     for (index, module) in modules.iter().enumerate() {
         out.resize(out.len().next_multiple_of(MODULE_ALIGNMENT), 0);
-        let offset = u32::try_from(out.len()).context("trust cache region is too large")?;
+        let offset =
+            u32::try_from(out.len()).map_err(|_| refuse!("trust cache region is too large"))?;
         out[4 + 4 * index..8 + 4 * index].copy_from_slice(&offset.to_le_bytes());
         out.extend_from_slice(module);
     }
@@ -82,6 +87,7 @@ pub fn compose(modules: &[&[u8]]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     fn module(version: u32, entries: u32) -> Vec<u8> {
         let mut out = version.to_le_bytes().to_vec();
@@ -99,10 +105,10 @@ mod tests {
         let first = module(2, 3);
         let second = module(1, 1);
         let region = compose(&[&first, &second])?;
-        assert_eq!(u32::from_le_bytes(region[0..4].try_into()?), 2);
+        assert_eq!(u32::from_le_bytes(region[0..4].try_into().unwrap()), 2);
         let offsets = [
-            u32::from_le_bytes(region[4..8].try_into()?) as usize,
-            u32::from_le_bytes(region[8..12].try_into()?) as usize,
+            u32::from_le_bytes(region[4..8].try_into().unwrap()) as usize,
+            u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize,
         ];
         assert_eq!(offsets[0], 16);
         assert_eq!(

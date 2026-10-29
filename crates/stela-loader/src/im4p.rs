@@ -5,9 +5,10 @@
 //! that restore images use for kernels, DeviceTrees, trust caches and
 //! firmware ([blacktop/ipsw img4 payload](https://github.com/blacktop/ipsw/blob/master/pkg/img4/payload.go)).
 //! This is not an IMG4 signature validator and never decrypts keybag payloads.
+use crate::Result;
 use alloc::{string::String, vec, vec::Vec};
-use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
+use stela_contracts::{refuse, require};
 
 /// IM4P compression algorithm 1 is LZFSE, with a `bvx*` block stream.
 const COMPRESSION_LZFSE: u64 = 1;
@@ -29,58 +30,63 @@ impl<'a> Der<'a> {
     }
 
     fn next(&mut self) -> Result<(u8, &'a [u8])> {
-        let tag = *self.bytes.get(self.position).context("truncated DER tag")?;
-        ensure!(tag & 31 != 31, "high-number DER tags are unsupported");
+        let tag = *self
+            .bytes
+            .get(self.position)
+            .ok_or(refuse!("truncated DER tag"))?;
+        require!(tag & 31 != 31, "high-number DER tags are unsupported");
         let first = *self
             .bytes
             .get(self.position + 1)
-            .context("truncated DER length")?;
+            .ok_or(refuse!("truncated DER length"))?;
         self.position += 2;
         let length = if first < 128 {
             usize::from(first)
         } else {
             let width = usize::from(first & 127);
-            ensure!(
+            require!(
                 width > 0 && width <= size_of::<usize>(),
                 "indefinite or oversized DER length"
             );
             let end = self
                 .position
                 .checked_add(width)
-                .context("DER length overflow")?;
+                .ok_or(refuse!("DER length overflow"))?;
             let encoded = self
                 .bytes
                 .get(self.position..end)
-                .context("truncated DER long length")?;
-            ensure!(encoded[0] != 0, "non-minimal DER length");
+                .ok_or(refuse!("truncated DER long length"))?;
+            require!(encoded[0] != 0, "non-minimal DER length");
             self.position = end;
             let mut length = 0usize;
             for byte in encoded {
                 length = length
                     .checked_mul(256)
                     .and_then(|n| n.checked_add(usize::from(*byte)))
-                    .context("DER length overflow")?;
+                    .ok_or(refuse!("DER length overflow"))?;
             }
-            ensure!(length >= 128, "non-minimal DER long length");
+            require!(length >= 128, "non-minimal DER long length");
             length
         };
         let end = self
             .position
             .checked_add(length)
-            .context("DER range overflow")?;
+            .ok_or(refuse!("DER range overflow"))?;
         let value = self
             .bytes
             .get(self.position..end)
-            .context("DER value is out of bounds")?;
+            .ok_or(refuse!("DER value is out of bounds"))?;
         self.position = end;
         Ok((tag, value))
     }
 
     fn value(&mut self, tag: u8) -> Result<&'a [u8]> {
         let (actual, value) = self.next()?;
-        ensure!(
+        require!(
             actual == tag,
-            "unexpected DER tag: {actual:#x}, expected {tag:#x}"
+            "unexpected DER tag: {actual:#x}, expected {tag:#x}",
+            actual,
+            tag
         );
         Ok(value)
     }
@@ -91,16 +97,16 @@ impl<'a> Der<'a> {
 }
 
 fn text(bytes: &[u8]) -> Result<String> {
-    ensure!(bytes.is_ascii(), "IM4P IA5 string is not ASCII");
-    Ok(core::str::from_utf8(bytes)?.into())
+    require!(bytes.is_ascii(), "IM4P IA5 string is not ASCII");
+    Ok(bytes.iter().map(|&b| char::from(b)).collect())
 }
 
 fn integer(bytes: &[u8]) -> Result<u64> {
-    ensure!(
+    require!(
         !bytes.is_empty() && bytes[0] & 128 == 0,
         "negative or empty DER integer"
     );
-    ensure!(
+    require!(
         bytes.len() <= 1 || bytes[0] != 0 || bytes[1] & 128 != 0,
         "non-minimal DER integer"
     );
@@ -109,7 +115,7 @@ fn integer(bytes: &[u8]) -> Result<u64> {
         value = value
             .checked_mul(256)
             .and_then(|n| n.checked_add(u64::from(*byte)))
-            .context("DER integer overflow")?;
+            .ok_or(refuse!("DER integer overflow"))?;
     }
     Ok(value)
 }
@@ -136,13 +142,13 @@ pub struct Im4p<'a> {
 pub fn parse(bytes: &[u8]) -> Result<Im4p<'_>> {
     let mut outer = Der::new(bytes);
     let mut sequence = Der::new(outer.value(DER_SEQUENCE)?);
-    ensure!(outer.done(), "trailing bytes after IM4P container");
-    ensure!(
+    require!(outer.done(), "trailing bytes after IM4P container");
+    require!(
         sequence.value(DER_IA5_STRING)? == b"IM4P",
         "expected a bare IM4P container"
     );
     let payload_type = text(sequence.value(DER_IA5_STRING)?)?;
-    ensure!(
+    require!(
         payload_type.len() == 4,
         "payload type must have four characters"
     );
@@ -155,23 +161,18 @@ pub fn parse(bytes: &[u8]) -> Result<Im4p<'_>> {
         let (tag, value) = sequence.next()?;
         match tag {
             DER_SEQUENCE => {
-                ensure!(
-                    compression_algorithm.is_none(),
-                    "duplicate compression metadata"
-                );
+                require!(compression_algorithm.is_none(), "duplicate compression metadata");
                 let mut compression = Der::new(value);
                 compression_algorithm = Some(integer(compression.value(DER_INTEGER)?)?);
                 declared_uncompressed_bytes = Some(integer(compression.value(DER_INTEGER)?)?);
-                ensure!(compression.done(), "unexpected compression metadata fields");
+                require!(compression.done(), "unexpected compression metadata fields");
             }
-            DER_OCTET_STRING => bail!(
-                "IM4P keybags or trailing hashes are unsupported; encrypted payloads are not decrypted"
-            ),
+            DER_OCTET_STRING => return Err(refuse!("IM4P keybags or trailing hashes are unsupported; encrypted payloads are not decrypted").into()),
             DER_CONTEXT_0 => opaque_extensions.push(Extension {
                 tag,
                 bytes: value.len(),
             }),
-            _ => bail!("unsupported IM4P extension tag {tag:#x}"),
+            _ => return Err(refuse!("unsupported IM4P extension tag {tag:#x}", tag).into()),
         }
     }
     Ok(Im4p {
@@ -208,36 +209,35 @@ pub struct DecodeReceipt {
 /// payloads are copied unchanged and must not carry compression metadata.
 pub fn decode(bytes: &[u8], maximum: u64) -> Result<(Vec<u8>, DecodeReceipt)> {
     let im4p = parse(bytes)?;
-    ensure!(
+    require!(
         im4p.declared_uncompressed_bytes
             .is_none_or(|n| n <= maximum),
         "declared output exceeds configured limit"
     );
     let mut decoded = vec![];
     let compression = if stela_formats::lzfse::is_lzfse(im4p.payload) {
-        ensure!(
+        require!(
             im4p.compression_algorithm
                 .is_none_or(|n| n == COMPRESSION_LZFSE),
             "compression record disagrees with LZFSE marker"
         );
         let limit = usize::try_from(maximum).unwrap_or(usize::MAX);
-        decoded = stela_formats::lzfse::decode(im4p.payload, limit)
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        decoded = stela_formats::lzfse::decode(im4p.payload, limit)?;
         "lzfse"
     } else {
-        ensure!(
+        require!(
             im4p.compression_algorithm.is_none(),
             "unrecognized compressed payload format"
         );
-        ensure!(
+        require!(
             im4p.payload.len() as u64 <= maximum,
             "payload exceeds configured limit"
         );
         decoded.extend_from_slice(im4p.payload);
         "none"
     };
-    ensure!(!decoded.is_empty(), "decoded payload is empty");
-    ensure!(
+    require!(!decoded.is_empty(), "decoded payload is empty");
+    require!(
         im4p.declared_uncompressed_bytes
             .is_none_or(|n| n == decoded.len() as u64),
         "decoded size disagrees with IM4P metadata"
@@ -263,6 +263,7 @@ pub fn decode(bytes: &[u8], maximum: u64) -> Result<(Vec<u8>, DecodeReceipt)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     fn field(tag: u8, data: &[u8]) -> Vec<u8> {
         assert!(data.len() < 128);

@@ -7,6 +7,11 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
 
+mod error;
+pub use error::{Error, Result, Within};
+#[cfg(feature = "std")]
+use stela_contracts::{refuse, require};
+
 pub mod aic;
 pub mod apple_device_tree;
 pub mod boot_args;
@@ -48,8 +53,6 @@ mod thread_state;
 pub mod trust_cache;
 pub mod upgrade;
 #[cfg(feature = "std")]
-use anyhow::{Context, Result, ensure};
-#[cfg(feature = "std")]
 use object::{Object, ObjectSection};
 #[cfg(feature = "std")]
 use stela_formats::sha256;
@@ -69,17 +72,19 @@ pub struct Artifact {
 
 #[cfg(feature = "std")]
 fn slice(data: &[u8], offset: u64, size: u64) -> Result<&[u8]> {
-    let start = usize::try_from(offset)?;
-    let end = usize::try_from(offset.checked_add(size).context("slice range overflow")?)?;
+    let start = offset as usize;
+    let end = offset
+        .checked_add(size)
+        .ok_or(refuse!("slice range overflow"))? as usize;
     data.get(start..end)
-        .context("Mach-O slice is out of bounds")
+        .ok_or(refuse!("Mach-O slice is out of bounds").into())
 }
 
 #[cfg(feature = "std")]
 fn integer(data: &[u8], start: usize, width: usize, little: bool) -> Result<u64> {
     let bytes = data
         .get(start..start + width)
-        .context("truncated fat header")?;
+        .ok_or(refuse!("truncated fat header"))?;
     let mut padded = [0u8; 8];
     if little {
         padded[..width].copy_from_slice(bytes);
@@ -93,7 +98,7 @@ fn integer(data: &[u8], start: usize, width: usize, little: bool) -> Result<u64>
 #[cfg(feature = "std")]
 fn artifact(data: &[u8], path: &str, offset: u64) -> Result<Artifact> {
     let file = object::File::parse(data)?;
-    ensure!(
+    require!(
         file.format() == object::BinaryFormat::MachO,
         "not a Mach-O slice"
     );
@@ -134,7 +139,7 @@ fn artifact(data: &[u8], path: &str, offset: u64) -> Result<Artifact> {
 pub fn split_slices(data: &[u8]) -> Result<Vec<(u64, &[u8])>> {
     let magic = data
         .get(..4)
-        .context("file is shorter than a Mach-O magic")?;
+        .ok_or(refuse!("file is shorter than a Mach-O magic"))?;
     let fat = match magic {
         [0xca, 0xfe, 0xba, 0xbe] => Some((false, false)),
         [0xbe, 0xba, 0xfe, 0xca] => Some((true, false)),
@@ -147,8 +152,8 @@ pub fn split_slices(data: &[u8]) -> Result<Vec<(u64, &[u8])>> {
     };
     let count = integer(data, 4, 4, little)? as usize;
     let stride = if wide { 32 } else { 20 };
-    ensure!(count > 0 && count <= 128, "invalid fat slice count");
-    ensure!(8 + count * stride <= data.len(), "truncated fat table");
+    require!(count > 0 && count <= 128, "invalid fat slice count");
+    require!(8 + count * stride <= data.len(), "truncated fat table");
     let mut ranges = vec![];
     let mut slices = vec![];
     for i in 0..count {
@@ -160,12 +165,14 @@ pub fn split_slices(data: &[u8]) -> Result<Vec<(u64, &[u8])>> {
             if wide { 8 } else { 4 },
             little,
         )?;
-        let end = offset.checked_add(size).context("fat range overflow")?;
-        ensure!(
+        let end = offset
+            .checked_add(size)
+            .ok_or(refuse!("fat range overflow"))?;
+        require!(
             offset >= (8 + count * stride) as u64 && size > 0,
             "fat slice overlaps header or is empty"
         );
-        ensure!(
+        require!(
             ranges.iter().all(|&(a, b)| end <= a || offset >= b),
             "fat slices overlap"
         );
@@ -200,10 +207,10 @@ pub fn select_slice<'a>(
                 && architecture.is_none_or(|wanted| wanted == artifact.architecture)
         })
         .collect();
-    ensure!(
+    require!(
         selected.len() == 1,
-        "expected exactly one matching Apple executable slice, found {}; select --architecture arm64 or arm64e",
-        selected.len()
+        "expected exactly one matching Apple executable slice, found {selected_len}; select --architecture arm64 or arm64e",
+        selected_len = selected.len()
     );
     Ok(selected[0].1)
 }
@@ -211,6 +218,7 @@ pub fn select_slice<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     fn thin(cpu: u32, subtype: u32) -> Vec<u8> {
         let mut data = vec![];
         for value in [0xfeedfacf, cpu, subtype, 2, 0, 0, 0, 0] {

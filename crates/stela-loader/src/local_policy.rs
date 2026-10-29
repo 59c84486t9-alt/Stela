@@ -17,9 +17,10 @@
 //! [`PolicyAuthority`] its `nsih` only narrows which directory the
 //! evidence of `stela_loader::installed` must check.
 use crate::im4m::{self, Property, Value};
-use alloc::{format, string::String, vec::Vec};
-use anyhow::{Context, Result, ensure};
+use crate::{Result, Within};
+use alloc::{string::String, vec::Vec};
 use serde::Serialize;
+use stela_contracts::{refuse, require};
 
 const POLICY_OBJECT: &str = "lpol";
 const SHA384_BYTES: usize = 48;
@@ -76,14 +77,21 @@ pub struct LocalPolicy {
 fn data<'a>(properties: &'a [Property], name: &str, bytes: usize) -> Result<Option<&'a [u8]>> {
     match properties.iter().find(|p| p.name == name).map(|p| &p.value) {
         Some(Value::Data(value)) => {
-            ensure!(
+            require!(
                 value.len() == bytes,
-                "LocalPolicy {name} is {} bytes, not {bytes}",
-                value.len()
+                "LocalPolicy {name} is {value_len} bytes, not {bytes}",
+                name,
+                value_len = value.len(),
+                bytes
             );
             Ok(Some(value))
         }
-        Some(other) => anyhow::bail!("LocalPolicy {name} is {other:?}, not data"),
+        Some(other) => Err(refuse!(
+            "LocalPolicy {name} is {other}, not data",
+            name,
+            other = alloc::format!("{other:?}")
+        )
+        .into()),
         None => Ok(None),
     }
 }
@@ -94,11 +102,11 @@ impl LocalPolicy {
         let manifest = match stela_formats::img4::parse(file) {
             Ok(parts) => parts
                 .manifest
-                .with_context(|| format!("{path} is an IMG4 without a manifest"))?
+                .ok_or_else(|| refuse!("{path} is an IMG4 without a manifest", path))?
                 .to_vec(),
             Err(_) => file.to_vec(),
         };
-        let parsed = im4m::parse(&manifest).with_context(|| String::from(path))?;
+        let parsed = im4m::parse(&manifest).within(|| refuse!("LocalPolicy {path}", path))?;
         let properties = parsed
             .object(POLICY_OBJECT)
             .map(|o| o.properties.clone())
@@ -119,9 +127,13 @@ impl LocalPolicy {
 
     /// Ask `authority` to verify the signature.
     pub fn verify(&mut self, authority: &dyn PolicyAuthority) -> Result<()> {
-        authority
-            .verify(&self.manifest)
-            .map_err(|e| anyhow::anyhow!("{}: {e}", self.path))?;
+        authority.verify(&self.manifest).map_err(|reason| {
+            refuse!(
+                "LocalPolicy {path} does not verify: {reason}",
+                path = self.path,
+                reason
+            )
+        })?;
         self.verified = true;
         Ok(())
     }

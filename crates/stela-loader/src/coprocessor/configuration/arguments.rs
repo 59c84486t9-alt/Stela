@@ -4,8 +4,9 @@
 //! keeps the embedded record. This helper checks that original record and its
 //! consumer bounds; it does not infer override absence from empty bytes/hashes.
 use super::{Action, Field, Provenance, source_record};
+use crate::Result;
 use crate::coprocessor::Staged;
-use anyhow::{Result, ensure};
+use stela_contracts::require;
 
 const ARGUMENTS: u32 = u32::from_be_bytes(*b"bArg");
 const NATIVE_ARGUMENT_BYTES: usize = 1024;
@@ -26,7 +27,7 @@ impl Staged {
     pub fn embedded_arguments(&self, selected_provider: Provenance) -> Result<Embedded> {
         selected_provider.validate()?;
         let (_, bytes) = source_record(self, ARGUMENTS)?;
-        ensure!(
+        require!(
             bytes.len() == NATIVE_ARGUMENT_BYTES,
             "embedded native argument record width is not qualified"
         );
@@ -53,6 +54,7 @@ mod tests {
         tests::{fixture, prepare, w32, w64},
     };
     use alloc::vec::Vec;
+    use anyhow::Result;
 
     fn original() -> Vec<u8> {
         let mut b = fixture();

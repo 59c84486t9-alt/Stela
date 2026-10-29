@@ -1,16 +1,17 @@
 //! MH_PRELOAD validation using the shared object reader and ARM thread ABI.
 use super::{Limits, SegmentMap};
+use crate::Result;
 use crate::{
     kernel_collection::Segment as ImageSegment,
     thread_state::{Arm64UnixThread, unix_thread},
 };
 use alloc::{collections::BTreeSet, string::String, vec, vec::Vec};
-use anyhow::{Context, Result, bail, ensure};
 use object::{
     LittleEndian, macho,
     read::macho::{LoadCommandVariant, MachHeader, Segment},
 };
 use serde::Serialize;
+use stela_contracts::{refuse, require};
 use stela_formats::sha256;
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,45 +40,47 @@ pub(super) struct Layout {
 pub(super) fn end(start: u64, bytes: u64) -> Result<u64> {
     start
         .checked_add(bytes)
-        .context("coprocessor image range overflows")
+        .ok_or(refuse!("coprocessor image range overflows").into())
 }
 pub(super) fn file_bytes(data: &[u8], offset: u64, bytes: u64) -> Result<&[u8]> {
-    data.get(usize::try_from(offset)?..usize::try_from(end(offset, bytes)?)?)
-        .context("coprocessor file range exceeds input")
+    data.get(offset as usize..end(offset, bytes)? as usize)
+        .ok_or(refuse!("coprocessor file range exceeds input").into())
 }
 fn name(data: &[u8]) -> Result<String> {
     let n = data.iter().position(|&b| b == 0).unwrap_or(data.len());
-    ensure!(
+    require!(
         data[n..].iter().all(|&b| b == 0),
         "nonzero bytes after Mach-O name terminator"
     );
-    Ok(core::str::from_utf8(&data[..n])?.into())
+    Ok(core::str::from_utf8(&data[..n])
+        .map_err(|_| refuse!("Mach-O name is not UTF-8"))?
+        .into())
 }
 fn overlaps(a: u64, bytes: u64, b: u64, size: u64) -> bool {
     bytes != 0 && size != 0 && a < b + size && b < a + bytes
 }
 
 pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
-    ensure!(
+    require!(
         data.get(..4) == Some(&[0xcf, 0xfa, 0xed, 0xfe]),
         "coprocessor requires thin little-endian Mach-O64"
     );
     let e = LittleEndian;
     let header = macho::MachHeader64::<LittleEndian>::parse(data, 0)?;
-    ensure!(
+    require!(
         header.cputype(e) == macho::CPU_TYPE_ARM64
             && matches!(header.cpusubtype(e) & !macho::CPU_SUBTYPE_MASK, 0 | 2),
         "unsupported coprocessor CPU type/subtype"
     );
-    ensure!(
+    require!(
         header.filetype(e) == macho::MH_PRELOAD,
         "coprocessor requires MH_PRELOAD"
     );
-    ensure!(
+    require!(
         header.sizeofcmds(e) <= limits.command_bytes && header.ncmds(e) <= header.sizeofcmds(e) / 8,
         "coprocessor load-command bounds exceed limits"
     );
-    ensure!(
+    require!(
         header.flags(e) & !(macho::MH_NOUNDEFS | macho::MH_PIE) == 0 && header.reserved.get(e) == 0,
         "unsupported coprocessor Mach-O header flags/reserved word"
     );
@@ -92,20 +95,21 @@ pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
     let mut alignment = 4;
     while let Some(command) = commands.next()? {
         let id = command.cmd();
-        ensure!(
+        require!(
             command.cmdsize().is_multiple_of(8),
             "unaligned coprocessor load command"
         );
         consumed += u64::from(command.cmdsize());
         if id != macho::LC_SEGMENT_64 {
-            ensure!(
+            require!(
                 singletons.insert(id),
-                "duplicate coprocessor load command {id:#x}"
+                "duplicate coprocessor load command {id:#x}",
+                id
             );
         }
         match command.variant()? {
             LoadCommandVariant::Segment64(s, section_data) => {
-                ensure!(
+                require!(
                     segments.len() < limits.segments,
                     "coprocessor segment limit exceeded"
                 );
@@ -118,20 +122,20 @@ pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
                     max_protection: s.maxprot.get(e),
                     initial_protection: s.initprot.get(e),
                 };
-                ensure!(
+                require!(
                     names.insert(segment.name.clone()),
                     "duplicate coprocessor segment name"
                 );
-                ensure!(
+                require!(
                     s.flags.get(e) & !(macho::SG_NORELOC | macho::SG_READ_ONLY) == 0,
                     "unsupported coprocessor segment flags"
                 );
-                ensure!(
+                require!(
                     segment.max_protection & !7 == 0
                         && segment.initial_protection & !segment.max_protection == 0,
                     "invalid coprocessor segment protection"
                 );
-                ensure!(
+                require!(
                     segment.file_size <= segment.vm_size,
                     "coprocessor file extent exceeds segment VM"
                 );
@@ -140,11 +144,11 @@ pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
                 let file = file_bytes(data, segment.file_offset, segment.file_size)?;
                 for previous in &segments {
                     let p = &previous.segment;
-                    ensure!(
+                    require!(
                         !overlaps(segment.vm_address, segment.vm_size, p.vm_address, p.vm_size),
                         "overlapping coprocessor segments"
                     );
-                    ensure!(
+                    require!(
                         !overlaps(
                             segment.file_offset,
                             segment.file_size,
@@ -155,13 +159,13 @@ pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
                     );
                 }
                 let ss = s.sections(e, section_data)?;
-                ensure!(
+                require!(
                     section_data.len() == ss.len() * 80,
                     "coprocessor segment/section size mismatch"
                 );
                 let mut section_names = BTreeSet::new();
                 for section in ss {
-                    ensure!(
+                    require!(
                         sections.len() < limits.sections,
                         "coprocessor section limit exceeded"
                     );
@@ -179,22 +183,22 @@ pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
                             section.reserved3.get(e),
                         ],
                     };
-                    ensure!(
+                    require!(
                         section.segname == s.segname && section_names.insert(sec.name.clone()),
                         "coprocessor section ownership/name mismatch"
                     );
-                    ensure!(
+                    require!(
                         sec.alignment < 63
                             && sec.virtual_address.is_multiple_of(1u64 << sec.alignment),
                         "coprocessor section alignment is invalid"
                     );
                     alignment = alignment.max(1u64 << sec.alignment);
-                    ensure!(
+                    require!(
                         sec.virtual_address >= segment.vm_address
                             && end(sec.virtual_address, sec.bytes)? <= vm_end,
                         "coprocessor section exceeds segment"
                     );
-                    ensure!(
+                    require!(
                         section.nreloc.get(e) == 0
                             && section.reloff.get(e) == 0
                             && sec.flags & (macho::S_ATTR_EXT_RELOC | macho::S_ATTR_LOC_RELOC) == 0,
@@ -204,7 +208,7 @@ pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
                         .iter()
                         .filter(|p| p.segment_index == segments.len())
                     {
-                        ensure!(
+                        require!(
                             !overlaps(
                                 sec.virtual_address,
                                 sec.bytes,
@@ -218,7 +222,7 @@ pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
                         sec.flags & macho::SECTION_TYPE,
                         macho::S_ZEROFILL | macho::S_GB_ZEROFILL
                     );
-                    ensure!(
+                    require!(
                         matches!(
                             sec.flags & macho::SECTION_TYPE,
                             macho::S_REGULAR
@@ -234,14 +238,14 @@ pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
                         "unsupported coprocessor section type"
                     );
                     if zero && sec.bytes != 0 {
-                        ensure!(
+                        require!(
                             sec.file_offset == 0
                                 && sec.virtual_address >= segment.vm_address + segment.file_size,
                             "coprocessor zero-fill section overlaps file-backed bytes"
                         );
                     }
                     if sec.bytes != 0 && !zero {
-                        ensure!(
+                        require!(
                             sec.file_offset >= segment.file_offset
                                 && end(sec.file_offset, sec.bytes)? <= file_end
                                 && sec.virtual_address - segment.vm_address
@@ -249,7 +253,7 @@ pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
                             "coprocessor section file/VM coordinates disagree"
                         );
                     }
-                    ensure!(
+                    require!(
                         !matches!(
                             sec.flags & macho::SECTION_TYPE,
                             macho::S_THREAD_LOCAL_ZEROFILL
@@ -260,7 +264,7 @@ pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
                         ),
                         "coprocessor thread-local section loading is not qualified"
                     );
-                    ensure!(
+                    require!(
                         sec.name == "__chain_starts" || sec.reserved == [0; 3],
                         "unsupported coprocessor section reserved fields"
                     );
@@ -273,14 +277,14 @@ pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
                 });
             }
             LoadCommandVariant::Thread(_, _) => {
-                ensure!(
+                require!(
                     id == macho::LC_UNIXTHREAD,
                     "coprocessor requires LC_UNIXTHREAD rather than LC_THREAD"
                 );
                 thread = Some(unix_thread(command.raw_data())?);
             }
             LoadCommandVariant::Uuid(u) => {
-                ensure!(
+                require!(
                     command.cmdsize() == 24,
                     "invalid coprocessor LC_UUID extent"
                 );
@@ -288,37 +292,37 @@ pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
             }
             LoadCommandVariant::Symtab(_) | LoadCommandVariant::Dysymtab(_) => {
                 let expected = if id == macho::LC_SYMTAB { 24 } else { 80 };
-                ensure!(
+                require!(
                     command.cmdsize() == expected
                         && command.raw_data()[8..].iter().all(|&b| b == 0),
                     "coprocessor nonempty symbol/legacy relocation tables are not qualified"
                 );
             }
-            _ => bail!("unsupported coprocessor load command {id:#x}"),
+            _ => return Err(refuse!("unsupported coprocessor load command {id:#x}", id).into()),
         }
     }
-    ensure!(
+    require!(
         consumed == u64::from(header.sizeofcmds(e)),
         "coprocessor commands do not fill sizeofcmds"
     );
-    let thread = thread.context("coprocessor has no LC_UNIXTHREAD")?;
+    let thread = thread.ok_or(refuse!("coprocessor has no LC_UNIXTHREAD"))?;
     let vm_base = segments
         .iter()
         .filter(|s| s.segment.vm_size != 0)
         .map(|s| s.segment.vm_address)
         .min()
-        .context("coprocessor has no mapped segment")?;
+        .ok_or(refuse!("coprocessor has no mapped segment"))?;
     let vm_end = segments
         .iter()
         .filter(|s| s.segment.vm_size != 0)
         .map(|s| s.segment.vm_end())
         .max()
         .unwrap();
-    ensure!(
+    require!(
         vm_end - vm_base <= limits.image_bytes && vm_end > vm_base,
         "coprocessor VM footprint exceeds limit"
     );
-    ensure!(
+    require!(
         segments
             .iter()
             .any(|s| s.segment.initial_protection & 4 != 0
@@ -327,7 +331,7 @@ pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
                     .is_ok_and(|end| end <= s.segment.vm_address + s.segment.file_size)),
         "coprocessor entry is not a file-backed executable instruction"
     );
-    ensure!(thread.pc.is_multiple_of(4), "unaligned coprocessor entry");
+    require!(thread.pc.is_multiple_of(4), "unaligned coprocessor entry");
     Ok(Layout {
         cpu_subtype: header.cpusubtype(e),
         header_flags: header.flags(e),

@@ -2,6 +2,7 @@ use super::*;
 use crate::apple_device_tree::Node;
 use crate::im4m;
 use crate::im4m::tests::{der, entry, manifest};
+use anyhow::Result;
 
 fn tree() -> DeviceTree {
     let mut tree = DeviceTree {

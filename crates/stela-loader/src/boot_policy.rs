@@ -18,8 +18,9 @@
 //! not have; Reduced Security admits Apple's global manifests in the IPSW.
 use crate::apple_device_tree::DeviceTree;
 use crate::im4m::{Manifest, Value};
+use crate::{Result, Within};
 use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
-use anyhow::{Context, Result, ensure};
+use stela_contracts::{refuse, require};
 pub use {
     stela_formats::boot_bundle::schema::Decision,
     stela_formats::boot_bundle::schema::OsEnvironment,
@@ -72,13 +73,16 @@ impl Writer<'_> {
         let width = self
             .tree
             .property(path, property)
-            .with_context(|| format!("DeviceTree has no {path} {property}"))?
+            .ok_or_else(|| refuse!("DeviceTree has no {path} {property}", path, property))?
             .value
             .len();
-        ensure!(
+        require!(
             width == value.len(),
-            "{path} {property} is {width} bytes; the value is {}",
-            value.len()
+            "{path} {property} is {width} bytes; the value is {value_len}",
+            path,
+            property,
+            width,
+            value_len = value.len()
         );
         self.set(path, property, value, source)
     }
@@ -102,7 +106,7 @@ impl Writer<'_> {
         let value = self
             .tree
             .property(path, property)
-            .with_context(|| format!("DeviceTree has no {path} {property}"))?
+            .ok_or_else(|| refuse!("DeviceTree has no {path} {property}", path, property))?
             .value
             .clone();
         self.decisions.push(Decision {
@@ -118,14 +122,24 @@ impl Writer<'_> {
 fn manifest_flag(manifest: &Manifest, name: &str) -> Result<bool> {
     match manifest.property(name) {
         Some(Value::Boolean(value)) => Ok(*value),
-        other => anyhow::bail!("boot manifest {name} is {other:?}, expected a boolean"),
+        other => Err(refuse!(
+            "boot manifest {name} is {other}, expected a boolean",
+            name,
+            other = alloc::format!("{other:?}")
+        )
+        .into()),
     }
 }
 
 fn manifest_integer(manifest: &Manifest, name: &str) -> Result<u64> {
     match manifest.property(name) {
         Some(Value::Integer(value)) => Ok(*value),
-        other => anyhow::bail!("boot manifest {name} is {other:?}, expected an integer"),
+        other => Err(refuse!(
+            "boot manifest {name} is {other}, expected an integer",
+            name,
+            other = alloc::format!("{other:?}")
+        )
+        .into()),
     }
 }
 
@@ -136,10 +150,11 @@ fn manifest_properties(writer: &mut Writer, manifest: &Manifest) -> Result<()> {
             Value::Integer(value) => (INTEGER_SLOT, integer(*value)),
             Value::Boolean(value) => (BOOLEAN_SLOT, boolean(*value)),
             Value::Data(bytes) => {
-                ensure!(
+                require!(
                     bytes.len() <= STRING_SLOT_BYTES,
-                    "manifest property {} exceeds a {STRING_SLOT_BYTES}-byte slot",
-                    property.name
+                    "manifest property {name} exceeds a {STRING_SLOT_BYTES}-byte slot",
+                    name = property.name,
+                    STRING_SLOT_BYTES
                 );
                 (STRING_SLOT, bytes.clone())
             }
@@ -147,13 +162,13 @@ fn manifest_properties(writer: &mut Writer, manifest: &Manifest) -> Result<()> {
         let node = writer
             .tree
             .node_mut(MANIFEST_PROPERTIES)
-            .context("DeviceTree has no /chosen/manifest-properties")?;
+            .ok_or(refuse!("DeviceTree has no /chosen/manifest-properties"))?;
         let free = node
             .properties
             .iter()
             .find(|p| p.name().starts_with(slot))
             .map(|p| p.name().to_owned())
-            .with_context(|| format!("no free {slot} slot for {}", property.name))?;
+            .ok_or_else(|| refuse!("no free {slot} slot for {name}", slot, name = property.name))?;
         writer.decisions.push(Decision {
             path: MANIFEST_PROPERTIES.into(),
             property: property.name.clone(),
@@ -295,7 +310,10 @@ pub fn apply(
                 Some(Value::Integer(epoch)) => writer.set(
                     CHOSEN,
                     "chip-epoch",
-                    u32::try_from(*epoch)?.to_le_bytes().to_vec(),
+                    u32::try_from(*epoch)
+                        .map_err(|_| refuse!("boot manifest CEPO {epoch:#x} exceeds u32", epoch = *epoch))?
+                        .to_le_bytes()
+                        .to_vec(),
                     "the emulated chip's epoch: boot manifest CEPO",
                 )?,
                 _ => unresolved.push("/chosen chip-epoch: the boot manifest has no CEPO".into()),
@@ -315,7 +333,9 @@ pub fn apply(
                     UNIT_FLAGS.join(", ")
                 ));
             }
-            let domain = u32::try_from(manifest_integer(manifest, "SDOM")?)?;
+            let domain = manifest_integer(manifest, "SDOM")?;
+            let domain = u32::try_from(domain)
+                .map_err(|_| refuse!("boot manifest SDOM {domain:#x} exceeds u32", domain))?;
             writer.set(
                 CHOSEN,
                 "security-domain",
@@ -375,11 +395,11 @@ pub const IMAGE_BOOT_ARGS: [&str; 5] = ["rp0", "arp0", "rp", "root-dmg", "auth-r
 /// volume is not allowed", `apfs_vfsops.c:2952`). Without an image-boot
 /// argument, refuse rather than boot into that panic.
 pub fn require_image_boot(boot_args: &str) -> Result<()> {
-    ensure!(
+    require!(
         image_boot_named(boot_args),
-        "a BaseSystem root needs an image-boot argument ({}=file://...): APFS cannot root a \
-         sealed volume without a snapshot from a memory device",
-        IMAGE_BOOT_ARGS[0]
+        "a BaseSystem root needs an image-boot argument ({argument}=file://...): APFS \
+         cannot root a sealed volume without a snapshot from a memory device",
+        argument = IMAGE_BOOT_ARGS[0]
     );
     refuse_ramdisk_image_root(boot_args)
 }
@@ -420,11 +440,13 @@ pub fn ramdisk_root_device(boot_args: &str) -> Option<&str> {
 /// pivots to an image is named by `/chosen` instead.
 pub fn refuse_ramdisk_image_root(boot_args: &str) -> Result<()> {
     if let Some(device) = ramdisk_root_device(boot_args).filter(|_| image_boot_named(boot_args)) {
-        anyhow::bail!(
+        return Err(refuse!(
             "boot-args root from memory device {device} and pivot to a disk image: APFS's \
              container_rootmount would take {device} again for the image root (EBUSY, \
-             imageboot.c:468); name the first root in /chosen instead of rd=/rootdev="
-        );
+             imageboot.c:468); name the first root in /chosen instead of rd=/rootdev=",
+            device
+        )
+        .into());
     }
     Ok(())
 }
@@ -485,28 +507,32 @@ pub fn apply_root_hash(
         }
     };
     let tag = volume.payload_type();
-    let kind = stela_formats::img4::payload_type(im4p)
-        .map_err(|e| anyhow::anyhow!("the {tag} root hash: {e}"))?;
-    ensure!(
+    let kind =
+        stela_formats::img4::payload_type(im4p).within(|| refuse!("the {tag} root hash", tag))?;
+    require!(
         kind == tag.as_bytes(),
-        "the {tag} root hash is IM4P type {}",
-        String::from_utf8_lossy(&kind)
+        "the {tag} root hash is IM4P type {kind}",
+        tag,
+        kind = String::from_utf8_lossy(&kind).into_owned()
     );
     let signed = manifest
         .object(tag)
         .and_then(|object| object.properties.iter().find(|p| p.name == "DGST"))
         .map(|p| &p.value);
-    ensure!(
+    require!(
         matches!(signed, Some(Value::Data(digest)) if digest.as_slice() == crate::im4m::sha384(im4p).as_slice()),
-        "the boot manifest does not sign this {tag} root hash"
+        "the boot manifest does not sign this {tag} root hash",
+        tag
     );
     let (record, _) = crate::im4p::decode(im4p, ROOT_HASH_RECORD_BYTES as u64)
-        .map_err(|e| anyhow::anyhow!("the {tag} root hash payload: {e}"))?;
-    ensure!(
+        .within(|| refuse!("the {tag} root hash payload", tag))?;
+    require!(
         record.len() == ROOT_HASH_RECORD_BYTES,
-        "the {tag} root hash payload is {} bytes, not the {ROOT_HASH_RECORD_BYTES}-byte record \
+        "the {tag} root hash payload is {record_len} bytes, not the {ROOT_HASH_RECORD_BYTES}-byte record \
          APFS's validate_root_hash takes",
-        record.len()
+        tag,
+        record_len = record.len(),
+        ROOT_HASH_RECORD_BYTES
     );
     tree.ensure_child(CHOSEN, "secure-boot-hashes")?;
     let mut writer = Writer {
@@ -527,17 +553,22 @@ const OSENVIRONMENT: &str = "osenvironment";
 
 /// The OS environment named `name`.
 pub fn os_environment(name: &str) -> Result<OsEnvironment> {
-    OsEnvironment::from_name(name).with_context(|| {
-        format!(
-            "{name:?} is not an OS environment ({})",
-            OsEnvironment::ALL.map(OsEnvironment::name).join(", ")
+    OsEnvironment::from_name(name).ok_or_else(|| {
+        let known = OsEnvironment::ALL.map(OsEnvironment::name).join(", ");
+        refuse!(
+            "{name} is not an OS environment ({known})",
+            name = format!("{name:?}"),
+            known
         )
+        .into()
     })
 }
 
 fn text_value(bytes: &[u8]) -> Result<String> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    Ok(core::str::from_utf8(&bytes[..end])?.to_owned())
+    Ok(core::str::from_utf8(&bytes[..end])
+        .map_err(|_| refuse!("DeviceTree text value is not UTF-8"))?
+        .to_owned())
 }
 
 /// Enter an OS environment as iBoot does: `/chosen osenvironment` becomes
@@ -554,7 +585,7 @@ pub fn apply_environment(
     let path = format!("{ENVIRONMENTS}/{name}");
     let environment = tree
         .node(&path)
-        .with_context(|| format!("DeviceTree has no {path}"))?
+        .ok_or_else(|| refuse!("DeviceTree has no {path}", path))?
         .clone();
     let mut value = os_environment.name().as_bytes().to_vec();
     value.push(0);
@@ -620,7 +651,12 @@ pub fn apply_environment(
                 source: format!("osenvironment {name}: {label} replaced by {replacement}"),
             });
         } else {
-            anyhow::bail!("{path} {label} is neither a property nor a node replacement");
+            return Err(refuse!(
+                "{path} {label} is neither a property nor a node replacement",
+                path,
+                label
+            )
+            .into());
         }
     }
     Ok((decisions, unresolved))

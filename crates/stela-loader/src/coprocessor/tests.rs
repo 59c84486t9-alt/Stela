@@ -1,5 +1,6 @@
 use super::*;
 use alloc::{vec, vec::Vec};
+use anyhow::{Context, Result};
 use configuration::native::tests::slide_input;
 use configuration::tests::{config_policy, provenance};
 
@@ -129,7 +130,13 @@ pub(in crate::coprocessor) fn input(decoded: &[u8]) -> (Vec<u8>, Source) {
 
 pub(in crate::coprocessor) fn prepare(decoded: &[u8]) -> Result<Prepared> {
     let (c, s) = input(decoded);
-    prepare_im4p(&c, s, "fixture-build".into(), hardware(), Limits::default())
+    Ok(prepare_im4p(
+        &c,
+        s,
+        "fixture-build".into(),
+        hardware(),
+        Limits::default(),
+    )?)
 }
 
 pub(in crate::coprocessor) fn hardware() -> HardwareIdentity {
@@ -355,11 +362,11 @@ fn original_t6000_restore_firmware() -> Result<()> {
         4 // RHS1 already requests this exact allocated size.
     );
     assert_eq!(
-        u64::from_le_bytes(configured.bytes()[0x962908..0x962910].try_into()?),
+        u64::from_le_bytes(configured.bytes()[0x962908..0x962910].try_into().unwrap()),
         0x10000000
     );
     assert_eq!(
-        u32::from_le_bytes(configured.bytes()[0x962918..0x96291c].try_into()?),
+        u32::from_le_bytes(configured.bytes()[0x962918..0x96291c].try_into().unwrap()),
         0x1000000
     );
     assert_ne!(
@@ -367,11 +374,11 @@ fn original_t6000_restore_firmware() -> Result<()> {
         configured.placement().staged_sha256
     );
     assert_eq!(
-        u64::from_le_bytes(configured.bytes()[0x1224..0x122c].try_into()?),
+        u64::from_le_bytes(configured.bytes()[0x1224..0x122c].try_into().unwrap()),
         0x123000
     );
     assert_eq!(
-        u64::from_le_bytes(configured.bytes()[0x962924..0x96292c].try_into()?),
+        u64::from_le_bytes(configured.bytes()[0x962924..0x96292c].try_into().unwrap()),
         0x10123
     );
     assert_eq!(

@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::Result;
 const BASE: u64 = 0x1_0000_0000;
 const TRIE_OFFSET: usize = 0x800;
 
@@ -120,7 +121,7 @@ fn fixture(trie: &[u8], legacy: bool) -> (Vec<u8>, LoadPlan) {
 
 fn parse_trie(bytes: &[u8]) -> Result<Vec<Export>> {
     let (data, image) = fixture(bytes, false);
-    parse(&data, &image, BASE)
+    Ok(parse(&data, &image, BASE)?)
 }
 
 #[test]

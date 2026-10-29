@@ -3,9 +3,10 @@
 //! Layouts follow `mach-o/fixup-chains.h`; validation follows dyld's
 //! `MachOAnalyzer.cpp`, `ChainedFixups.cpp` and `MachOLoaded.cpp`.
 use super::load_plan::{LoadPlan, SegmentPlan};
-use anyhow::{Context, Result, bail, ensure};
+use crate::{Error, Result, Within};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use stela_contracts::{refuse, require};
 
 const COMMAND: u32 = 0x80000034;
 const MAX_FIXUPS: usize = 1_048_576;
@@ -116,9 +117,9 @@ impl DecodedFixups {
         context: &S,
     ) -> Result<SignedFixupPlan>
     where
-        S::Error: Into<anyhow::Error>,
+        S::Error: core::error::Error + Send + Sync + 'static,
     {
-        ensure!(
+        require!(
             self.binds.is_empty() && self.authenticated_binds.is_empty(),
             "authenticated rebase planning requires explicit bind resolution first"
         );
@@ -126,7 +127,7 @@ impl DecodedFixups {
             .authenticated_rebases
             .iter()
             .map(|fixup| {
-                ensure!(
+                require!(
                     fixup.target < (1 << 47),
                     "authenticated rebase target exceeds lower-user VA47 profile"
                 );
@@ -138,7 +139,7 @@ impl DecodedFixups {
                 } else {
                     context
                         .sign(fixup.authentication.key, fixup.target, modifier)
-                        .map_err(Into::into)?
+                        .map_err(Error::signing)?
                 };
                 Ok(SignedRebaseFixup {
                     fixup: fixup.clone(),
@@ -191,22 +192,28 @@ pub struct RebaseFixup {
 fn bytes(data: &[u8], offset: usize, length: usize) -> Result<&[u8]> {
     let end = offset
         .checked_add(length)
-        .context("chained-fixup extent overflow")?;
+        .ok_or(refuse!("chained-fixup extent overflow"))?;
     data.get(offset..end)
-        .context("truncated chained-fixup extent")
+        .ok_or(refuse!("truncated chained-fixup extent").into())
 }
 fn u16_at(data: &[u8], offset: usize) -> Result<u16> {
-    Ok(u16::from_le_bytes(bytes(data, offset, 2)?.try_into()?))
+    Ok(u16::from_le_bytes(
+        bytes(data, offset, 2)?.try_into().unwrap(),
+    ))
 }
 fn u32_at(data: &[u8], offset: usize) -> Result<u32> {
-    Ok(u32::from_le_bytes(bytes(data, offset, 4)?.try_into()?))
+    Ok(u32::from_le_bytes(
+        bytes(data, offset, 4)?.try_into().unwrap(),
+    ))
 }
 fn u64_at(data: &[u8], offset: usize) -> Result<u64> {
-    Ok(u64::from_le_bytes(bytes(data, offset, 8)?.try_into()?))
+    Ok(u64::from_le_bytes(
+        bytes(data, offset, 8)?.try_into().unwrap(),
+    ))
 }
 fn moved(address: u64, slide: i128, role: &str) -> Result<u64> {
     u64::try_from(i128::from(address) + slide)
-        .with_context(|| format!("chained-fixup {role} slide overflows address range"))
+        .map_err(|_| refuse!("chained-fixup {role} slide overflows address range", role).into())
 }
 fn insert_range(
     ranges: &mut BTreeMap<u64, u64>,
@@ -216,12 +223,12 @@ fn insert_range(
 ) -> Result<()> {
     let end = start
         .checked_add(length)
-        .with_context(|| format!("{role} extent overflow"))?;
+        .ok_or_else(|| refuse!("{role} extent overflow", role))?;
     if let Some((_, previous_end)) = ranges.range(..=start).next_back() {
-        ensure!(*previous_end <= start, "overlapping/duplicate {role}");
+        require!(*previous_end <= start, "overlapping/duplicate {role}", role);
     }
     if let Some((next_start, _)) = ranges.range(start..).next() {
-        ensure!(end <= *next_start, "overlapping/duplicate {role}");
+        require!(end <= *next_start, "overlapping/duplicate {role}", role);
     }
     ranges.insert(start, end);
     Ok(())
@@ -239,19 +246,23 @@ fn decode_imports(
         1 => 4,
         2 => 8,
         3 => 16,
-        _ => bail!("unsupported chained-fixup imports format {format}"),
+        _ => {
+            return Err(
+                refuse!("unsupported chained-fixup imports format {format}", format).into(),
+            );
+        }
     };
-    ensure!(
+    require!(
         count as usize <= MAX_FIXUPS,
         "chained-fixup import count exceeds planner limit"
     );
     let extent = (count as usize)
         .checked_mul(size)
-        .context("chained-fixup imports size overflow")?;
+        .ok_or(refuse!("chained-fixup imports size overflow"))?;
     let end = imports
         .checked_add(extent)
-        .context("chained-fixup imports extent overflow")?;
-    ensure!(
+        .ok_or(refuse!("chained-fixup imports extent overflow"))?;
+    require!(
         imports >= 28 && end <= symbols && symbols <= payload.len(),
         "chained-fixup imports/symbol extents overlap or exceed payload"
     );
@@ -262,9 +273,10 @@ fn decode_imports(
         let at = imports + index * size;
         let (ordinal, weak, name, addend) = if format == 3 {
             let bits = u64_at(payload, at)?;
-            ensure!(
+            require!(
                 (bits >> 17) & 0x7fff == 0,
-                "chained-fixup import {index} has nonzero reserved bits"
+                "chained-fixup import {index} has nonzero reserved bits",
+                index
             );
             let ordinal = (bits & 0xffff) as i32;
             (
@@ -295,13 +307,16 @@ fn decode_imports(
                 },
             )
         };
-        ensure!(
+        require!(
             ordinal >= -3 && (ordinal <= 0 || ordinal as usize <= libraries),
-            "chained-fixup import {index} has invalid library ordinal {ordinal}"
+            "chained-fixup import {index} has invalid library ordinal {ordinal}",
+            index,
+            ordinal
         );
-        ensure!(
+        require!(
             name < strings.len(),
-            "chained-fixup import {index} symbol offset exceeds pool"
+            "chained-fixup import {index} symbol offset exceeds pool",
+            index
         );
         names.insert(name);
         records.push((ordinal, weak, name, addend));
@@ -317,10 +332,10 @@ fn decode_imports(
                 name + strings[name..]
                     .iter()
                     .position(|byte| *byte == 0)
-                    .context("unterminated chained-fixup import symbol")?
+                    .ok_or(refuse!("unterminated chained-fixup import symbol"))?
             }
         };
-        ensure!(end > name, "empty chained-fixup import symbol");
+        require!(end > name, "empty chained-fixup import symbol");
         nul = Some(end);
         ends.insert(name, end);
     }
@@ -330,13 +345,13 @@ fn decode_imports(
         let end = ends[&name];
         name_bytes = name_bytes
             .checked_add(end - name)
-            .context("chained-fixup decoded symbol bytes overflow")?;
-        ensure!(
+            .ok_or(refuse!("chained-fixup decoded symbol bytes overflow"))?;
+        require!(
             name_bytes <= MAX_PAYLOAD,
             "chained-fixup decoded symbol names exceed planner limit"
         );
         let name = std::str::from_utf8(&strings[name..end])
-            .context("unsupported non-UTF-8 chained-fixup import symbol")?
+            .map_err(|_| refuse!("unsupported non-UTF-8 chained-fixup import symbol"))?
             .to_owned();
         result.push(Import {
             library_ordinal,
@@ -364,19 +379,22 @@ fn decode_pointer(
             let ordinal_bits = if format == 12 { 24 } else { 16 };
             let ordinal = raw & ((1u64 << ordinal_bits) - 1);
             let zero_mask = ((1u64 << 32) - 1) & !((1u64 << ordinal_bits) - 1);
-            ensure!(
+            require!(
                 raw & zero_mask == 0,
                 "chained-fixup ARM64E bind has nonzero reserved bits"
             );
-            ensure!(
+            require!(
                 ordinal < u64::from(imports),
-                "chained-fixup ARM64E bind ordinal {ordinal} exceeds imports count {imports}"
+                "chained-fixup ARM64E bind ordinal {ordinal} exceeds imports count {imports}",
+                ordinal,
+                imports
             );
         }
         if auth {
-            ensure!(
+            require!(
                 allow_authentication,
-                "unsupported authenticated chained-fixup pointer (format {format}); explicit PAC decoding/signing is required"
+                "unsupported authenticated chained-fixup pointer (format {format}); explicit PAC decoding/signing is required",
+                format
             );
             let authentication = Authentication {
                 key: match (raw >> 49) & 3 {
@@ -395,9 +413,9 @@ fn decode_pointer(
                 }
             } else {
                 Pointer::AuthenticatedRebase {
-                    target: loaded
-                        .checked_add(raw & 0xffff_ffff)
-                        .context("authenticated rebase target overflows address range")?,
+                    target: loaded.checked_add(raw & 0xffff_ffff).ok_or(refuse!(
+                        "authenticated rebase target overflows address range"
+                    ))?,
                     authentication,
                 }
             };
@@ -428,13 +446,15 @@ fn decode_pointer(
         let bind = raw & (1 << 63) != 0;
         if bind {
             let ordinal = raw & 0xffffff;
-            ensure!(
+            require!(
                 (raw >> 32) & 0x7ffff == 0,
                 "chained-fixup 64-bit bind has nonzero reserved bits"
             );
-            ensure!(
+            require!(
                 ordinal < u64::from(imports),
-                "chained-fixup bind ordinal {ordinal} exceeds imports count {imports}"
+                "chained-fixup bind ordinal {ordinal} exceeds imports count {imports}",
+                ordinal,
+                imports
             );
             return Ok((
                 Pointer::Bind {
@@ -444,7 +464,7 @@ fn decode_pointer(
                 ((raw >> 51) & 0xfff) * 4,
             ));
         }
-        ensure!(
+        require!(
             (raw >> 44) & 0x7f == 0,
             "chained-fixup rebase has nonzero reserved bits"
         );
@@ -462,9 +482,9 @@ fn decode_pointer(
             "target",
         )?
     } else {
-        unpacked
-            .checked_add(loaded)
-            .context("chained-fixup offset target overflows address range")?
+        unpacked.checked_add(loaded).ok_or(refuse!(
+            "chained-fixup offset target overflows address range"
+        ))?
     };
     Ok((Pointer::Rebase(value), next))
 }
@@ -473,11 +493,7 @@ fn decode_pointer(
 pub fn plan(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<FixupPlan> {
     let decoded = decode(data, image, load_base)?;
     if let Some(bind) = decoded.binds.first() {
-        bail!(
-            "unsupported chained-fixup bind (format {}) at slot {:#x}; dependency/symbol resolution is required",
-            bind.pointer_format,
-            bind.guest_address
-        );
+        return Err(refuse!("unsupported chained-fixup bind (format {pointer_format}) at slot {guest_address:#x}; dependency/symbol resolution is required", pointer_format = bind.pointer_format, guest_address = bind.guest_address).into());
     }
     Ok(FixupPlan {
         preferred_base: decoded.preferred_base,
@@ -514,7 +530,7 @@ fn decode_impl(
     load_base: u64,
     allow_authentication: bool,
 ) -> Result<DecodedFixups> {
-    ensure!(
+    require!(
         image.slice_bytes == data.len() as u64 && image.slice_sha256 == stela_formats::sha256(data),
         "chained-fixup image identity differs from load plan"
     );
@@ -523,7 +539,7 @@ fn decode_impl(
         .iter()
         .filter(|segment| segment.name == "__TEXT")
         .collect();
-    ensure!(
+    require!(
         text.len() == 1,
         "chained-fixup planning requires one preferred __TEXT base"
     );
@@ -562,19 +578,19 @@ fn decode_impl(
         image.dependencies.len(),
     )?;
     let segment_count = u32_at(payload, header.starts)? as usize;
-    ensure!(
+    require!(
         segment_count == image.segments.len(),
         "unsupported chained-fixup segment count mismatch"
     );
     let table_size = segment_count
         .checked_mul(4)
         .and_then(|value| value.checked_add(4))
-        .context("chained-fixup segment table overflow")?;
+        .ok_or(refuse!("chained-fixup segment table overflow"))?;
     let table_end = header
         .starts
         .checked_add(table_size)
-        .context("chained-fixup starts extent overflow")?;
-    ensure!(
+        .ok_or(refuse!("chained-fixup starts extent overflow"))?;
+    require!(
         table_end <= header.imports,
         "chained-fixup segment table overlaps imports"
     );
@@ -598,11 +614,11 @@ fn decode_impl(
             if start == 0xffff {
                 continue;
             }
-            ensure!(
+            require!(
                 start & 0x8000 == 0,
                 "unsupported multi-start chain in 64-bit image"
             );
-            ensure!(
+            require!(
                 u64::from(start).is_multiple_of(record.stride()),
                 "misaligned chained-fixup page start"
             );
@@ -621,24 +637,24 @@ fn payload<'a>(data: &'a [u8], image: &LoadPlan) -> Result<Option<&'a [u8]>> {
         .iter()
         .filter(|payload| payload.command == COMMAND || payload.role == "chained_fixups")
         .collect();
-    ensure!(payloads.len() <= 1, "duplicate chained-fixup payloads");
+    require!(payloads.len() <= 1, "duplicate chained-fixup payloads");
     let Some(source) = payloads.first() else {
         return Ok(None);
     };
-    ensure!(
+    require!(
         source.command == COMMAND && source.role == "chained_fixups",
         "chained-fixup payload identity mismatch"
     );
     let payload = bytes(
         data,
-        usize::try_from(source.file.offset)?,
-        usize::try_from(source.file.bytes)?,
+        source.file.offset as usize,
+        source.file.bytes as usize,
     )?;
-    ensure!(
+    require!(
         payload.len() <= MAX_PAYLOAD,
         "chained-fixup payload exceeds planner limit"
     );
-    ensure!(
+    require!(
         source.sha256 == stela_formats::sha256(payload),
         "chained-fixup payload differs from load plan"
     );
@@ -656,7 +672,7 @@ struct Header {
 
 impl Header {
     fn read(payload: &[u8]) -> Result<Self> {
-        ensure!(
+        require!(
             u32_at(payload, 0)? == 0,
             "unsupported chained-fixup header version"
         );
@@ -667,11 +683,11 @@ impl Header {
             imports_count: u32_at(payload, 16)?,
             imports_format: u32_at(payload, 20)?,
         };
-        ensure!(
+        require!(
             u32_at(payload, 24)? == 0,
             "unsupported chained-fixup compressed/unknown symbols format"
         );
-        ensure!(
+        require!(
             header.starts >= 28
                 && header.starts < header.imports
                 && header.imports <= header.symbols
@@ -688,14 +704,14 @@ fn check_segments(data: &[u8], image: &LoadPlan) -> Result<()> {
     let mut segment_files = BTreeMap::new();
     let mut segment_memory = BTreeMap::new();
     for segment in &image.segments {
-        ensure!(
+        require!(
             segment.file.bytes <= segment.guest.bytes,
             "chained-fixup segment file extent exceeds memory"
         );
         bytes(
             data,
-            usize::try_from(segment.file.offset)?,
-            usize::try_from(segment.file.bytes)?,
+            segment.file.offset as usize,
+            segment.file.bytes as usize,
         )?;
         if segment.file.bytes != 0 {
             insert_range(
@@ -760,20 +776,20 @@ impl<'a> Records<'a> {
         let record = self
             .starts
             .checked_add(relative)
-            .context("chained-fixup segment record overflow")?;
-        ensure!(
+            .ok_or(refuse!("chained-fixup segment record overflow"))?;
+        require!(
             record >= self.table_end && record < self.imports,
             "chained-fixup segment record overlaps table or imports"
         );
         let size = u32_at(payload, record)? as usize;
-        ensure!(
+        require!(
             size >= 22 && size.is_multiple_of(2),
             "invalid chained-fixup segment record size"
         );
         let record_end = record
             .checked_add(size)
-            .context("chained-fixup record extent overflow")?;
-        ensure!(
+            .ok_or(refuse!("chained-fixup record extent overflow"))?;
+        require!(
             record_end <= self.imports,
             "chained-fixup segment record exceeds starts region"
         );
@@ -785,35 +801,37 @@ impl<'a> Records<'a> {
         )?;
         let data = bytes(payload, record, size)?;
         let page_size = u64::from(u16_at(data, 4)?);
-        ensure!(
+        require!(
             matches!(page_size, 4096 | 16384),
-            "unsupported chained-fixup page size {page_size}"
+            "unsupported chained-fixup page size {page_size}",
+            page_size
         );
         let format = u16_at(data, 6)?;
-        ensure!(
+        require!(
             matches!(format, 1 | 2 | 6 | 9 | 12),
-            "unsupported chained-fixup pointer format {format}"
+            "unsupported chained-fixup pointer format {format}",
+            format
         );
         self.formats.insert(format);
-        ensure!(
+        require!(
             self.formats.len() == 1,
             "chained-fixup pointer formats differ across segments"
         );
         let offset = u64_at(data, 8)?;
-        ensure!(
+        require!(
             segment.guest.address.checked_sub(self.preferred_base) == Some(offset),
             "chained-fixup segment offset disagrees with load command"
         );
-        ensure!(
+        require!(
             u32_at(data, 16)? == 0,
             "unsupported nonzero max_valid_pointer in 64-bit chained fixups"
         );
         let pages = usize::from(u16_at(data, 20)?);
-        ensure!(
+        require!(
             22 + pages * 2 <= size,
             "chained-fixup page-start table exceeds record"
         );
-        ensure!(
+        require!(
             pages as u64 <= segment.guest.bytes.div_ceil(page_size),
             "chained-fixup page count exceeds segment memory"
         );
@@ -822,7 +840,7 @@ impl<'a> Records<'a> {
         } else {
             0xffffff
         };
-        ensure!(
+        require!(
             self.imports_count == 0 || self.imports_count < ordinal_limit,
             "chained-fixup imports count exceeds pointer format limit"
         );
@@ -866,18 +884,18 @@ impl Walk<'_> {
         let mut steps = 0usize;
         loop {
             steps += 1;
-            ensure!(
+            require!(
                 steps <= (page_size / 8) as usize,
                 "chained-fixup page walk exceeds disjoint-slot bound"
             );
-            ensure!(
+            require!(
                 position.checked_add(8).is_some_and(|end| end <= page_size),
                 "chained-fixup slot escapes page"
             );
             let within = page_offset
                 .checked_add(position)
-                .context("chained-fixup segment position overflow")?;
-            ensure!(
+                .ok_or(refuse!("chained-fixup segment position overflow"))?;
+            require!(
                 within
                     .checked_add(8)
                     .is_some_and(|end| end <= segment.file.bytes && end <= segment.guest.bytes),
@@ -887,13 +905,13 @@ impl Walk<'_> {
                 .file
                 .offset
                 .checked_add(within)
-                .context("chained-fixup file offset overflow")?;
+                .ok_or(refuse!("chained-fixup file offset overflow"))?;
             let guest_address = moved(
                 segment
                     .guest
                     .address
                     .checked_add(within)
-                    .context("chained-fixup guest slot overflow")?,
+                    .ok_or(refuse!("chained-fixup guest slot overflow"))?,
                 self.slide,
                 "slot",
             )?;
@@ -905,7 +923,7 @@ impl Walk<'_> {
                 "chained-fixup guest slots",
             )?;
             let result = &self.result;
-            ensure!(
+            require!(
                 result.rebases.len()
                     + result.binds.len()
                     + result.authenticated_rebases.len()
@@ -913,7 +931,7 @@ impl Walk<'_> {
                     < MAX_FIXUPS,
                 "chained-fixup pointer count exceeds planner limit"
             );
-            let raw = u64_at(self.data, usize::try_from(file_offset)?)?;
+            let raw = u64_at(self.data, file_offset as usize)?;
             let (pointer, next) = decode_pointer(
                 raw,
                 format,
@@ -922,11 +940,12 @@ impl Walk<'_> {
                 self.load_base,
                 self.allow_authentication,
             )
-            .with_context(|| {
-                format!(
-                    "chained-fixup segment {segment_index} page {page_index} slot {guest_address:#x}"
-                )
-            })?;
+            .within(|| refuse!(
+                "chained-fixup segment {segment_index} page {page_index} slot {guest_address:#x}",
+                segment_index,
+                page_index,
+                guest_address
+            ))?;
             self.push(
                 pointer,
                 segment_index,
@@ -940,7 +959,7 @@ impl Walk<'_> {
             }
             position = position
                 .checked_add(next)
-                .context("chained-fixup next offset overflow")?;
+                .ok_or(refuse!("chained-fixup next offset overflow"))?;
         }
     }
 
@@ -995,9 +1014,10 @@ impl Walk<'_> {
                 let addend = result.imports[import_index as usize]
                     .addend
                     .checked_add(inline_addend)
-                    .with_context(|| {
-                        format!(
-                            "chained-fixup bind addend overflows i64 at slot {guest_address:#x}"
+                    .ok_or_else(|| {
+                        refuse!(
+                            "chained-fixup bind addend overflows i64 at slot {guest_address:#x}",
+                            guest_address
                         )
                     })?;
                 result.binds.push(BindFixup {

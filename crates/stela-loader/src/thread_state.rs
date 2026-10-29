@@ -1,8 +1,9 @@
 //! Mach-O ARM thread-state load commands.
+use crate::Result;
 use alloc::string::String;
-use anyhow::{Result, ensure};
 use object::macho;
 use serde::Serialize;
+use stela_contracts::require;
 use stela_formats::sha256;
 
 const WORD_BYTES: usize = core::mem::size_of::<u32>();
@@ -39,25 +40,28 @@ pub struct Arm64UnixThread {
 }
 
 pub(super) fn unix_thread(raw: &[u8]) -> Result<Arm64UnixThread> {
-    ensure!(
+    require!(
         raw.len() == UNIX_THREAD_COMMAND_BYTES,
-        "LC_UNIXTHREAD requires exactly {UNIX_THREAD_COMMAND_BYTES} bytes"
+        "LC_UNIXTHREAD requires exactly {UNIX_THREAD_COMMAND_BYTES} bytes",
+        UNIX_THREAD_COMMAND_BYTES
     );
     // The exact command extent above covers every fixed ABI offset below.
     let word = |offset| u32::from_le_bytes(raw[offset..offset + WORD_BYTES].try_into().unwrap());
-    ensure!(
+    require!(
         word(COMMAND_ID_OFFSET) == macho::LC_UNIXTHREAD,
         "expected LC_UNIXTHREAD"
     );
-    ensure!(
+    require!(
         word(COMMAND_SIZE_OFFSET) as usize == UNIX_THREAD_COMMAND_BYTES,
         "LC_UNIXTHREAD command size disagrees with its byte extent"
     );
     let flavor = word(FLAVOR_OFFSET);
     let count = word(COUNT_OFFSET);
-    ensure!(
+    require!(
         flavor == ARM_THREAD_STATE64_FLAVOR && count == ARM_THREAD_STATE64_WORDS,
-        "LC_UNIXTHREAD requires ARM_THREAD_STATE64 flavor {ARM_THREAD_STATE64_FLAVOR}/count {ARM_THREAD_STATE64_WORDS}"
+        "LC_UNIXTHREAD requires ARM_THREAD_STATE64 flavor {ARM_THREAD_STATE64_FLAVOR}/count {ARM_THREAD_STATE64_WORDS}",
+        ARM_THREAD_STATE64_FLAVOR,
+        ARM_THREAD_STATE64_WORDS
     );
     let register =
         |offset| u64::from_le_bytes(raw[offset..offset + REGISTER_BYTES].try_into().unwrap());
@@ -77,6 +81,7 @@ pub(super) fn unix_thread(raw: &[u8]) -> Result<Arm64UnixThread> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     fn command() -> Vec<u8> {
         let mut raw = vec![0; UNIX_THREAD_COMMAND_BYTES];

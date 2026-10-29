@@ -1,5 +1,6 @@
 use super::*;
 use crate::apple_device_tree::Node;
+use anyhow::Result;
 
 const AMCC_GROUPS: [&str; 4] = ["amcc-ctrr-a", "amcc-ctrr-b", "amcc-ctrr-c", "amcc-ctrr-d"];
 

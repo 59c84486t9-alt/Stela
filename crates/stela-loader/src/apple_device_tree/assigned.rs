@@ -21,9 +21,10 @@
 //! This module does not admit the supplied source/resource bindings or create
 //! additional hardware slots, native workers or initial lifecycle permission.
 use super::{DeviceTree, Node};
+use crate::Result;
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
-use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
+use stela_contracts::{refuse, require};
 use stela_soc_data::board::assigned::{
     CacheId, GuestSlotId, InterruptId, Plan, PlanIdentity, StartId,
 };
@@ -120,22 +121,22 @@ fn canonical_path(path: &str) -> bool {
                 .all(|part| !part.is_empty() && part != "." && part != ".."))
 }
 fn validate_tree(node: &Node, depth: usize) -> Result<()> {
-    ensure!(
+    require!(
         depth <= super::MAX_DEPTH,
         "DeviceTree topology nesting is too deep"
     );
     let mut properties = BTreeSet::new();
     for p in &node.properties {
-        ensure!(
+        require!(
             properties.insert(p.name()),
-            "duplicate DeviceTree property {}",
-            p.name()
+            "duplicate DeviceTree property {name}",
+            name = p.name()
         );
     }
     let mut children = BTreeSet::new();
     for child in &node.children {
-        let name = child.name().context("unnamed DeviceTree child")?;
-        ensure!(
+        let name = child.name().ok_or(refuse!("unnamed DeviceTree child"))?;
+        require!(
             !name.is_empty() && !name.contains('/') && children.insert(name),
             "ambiguous DeviceTree child name"
         );
@@ -149,24 +150,33 @@ fn digest(tree: &DeviceTree) -> [u8; 32] {
 fn word(node: &Node, name: &str) -> Result<u32> {
     let p = node
         .property(name)
-        .with_context(|| format!("CPU missing {name}"))?;
-    ensure!(!p.placeholder, "CPU {name} is an unresolved template value");
+        .ok_or_else(|| refuse!("CPU missing {name}", name))?;
+    require!(
+        !p.placeholder,
+        "CPU {name} is an unresolved template value",
+        name
+    );
     p.as_u32()
-        .with_context(|| format!("CPU {name} is not a u32"))
+        .ok_or_else(|| refuse!("CPU {name} is not a u32", name).into())
 }
 fn bytes<'a>(node: &'a Node, name: &str) -> Result<&'a [u8]> {
     let p = node
         .property(name)
-        .with_context(|| format!("CPU missing {name}"))?;
-    ensure!(!p.placeholder, "CPU {name} is an unresolved template value");
+        .ok_or_else(|| refuse!("CPU missing {name}", name))?;
+    require!(
+        !p.placeholder,
+        "CPU {name} is an unresolved template value",
+        name
+    );
     Ok(&p.value)
 }
 fn check_range(node: &Node, name: &str, base: u64, size: u64) -> Result<()> {
     let v = bytes(node, name)?;
-    ensure!(v.len() == 16, "CPU {name} is not a base/size pair");
-    ensure!(
+    require!(v.len() == 16, "CPU {name} is not a base/size pair", name);
+    require!(
         v[..8] == base.to_le_bytes() && v[8..] == size.to_le_bytes(),
-        "CPU {name} differs from the plan's retained resource"
+        "CPU {name} differs from the plan's retained resource",
+        name
     );
     Ok(())
 }
@@ -178,7 +188,7 @@ fn t8112_coordinates(node: &Node, soc: u32) -> Result<Option<[u32; 3]>> {
         return Ok(None);
     }
     let reg = word(node, "reg")?;
-    ensure!(
+    require!(
         reg & !0x103 == 0 && word(node, "cluster-id")? == reg >> 8,
         "unqualified T8112 CPU affinity/cluster coordinates"
     );
@@ -188,53 +198,54 @@ fn t8112_coordinates(node: &Node, soc: u32) -> Result<Option<[u32; 3]>> {
         .zip(coordinates)
     {
         if node.property(field).is_some() {
-            ensure!(
+            require!(
                 word(node, field)? == expected,
-                "T8112 {field} differs from source affinity"
+                "T8112 {field} differs from source affinity",
+                field
             );
         }
     }
     Ok(Some(coordinates))
 }
 fn shape(node: &Node, soc: u32) -> Result<()> {
-    ensure!(
+    require!(
         node.children.is_empty(),
         "nested CPU topology needs a qualified schema"
     );
     let mut names = BTreeSet::new();
     for p in &node.properties {
-        ensure!(
+        require!(
             names.insert(p.name()),
-            "duplicate CPU property {}",
-            p.name()
+            "duplicate CPU property {name}",
+            name = p.name()
         );
     }
-    ensure!(
+    require!(
         bytes(node, "device_type")? == b"cpu\0",
         "non-CPU child under /cpus"
     );
-    ensure!(
+    require!(
         [WAITING, RUNNING].contains(&bytes(node, "state")?),
         "unqualified CPU state"
     );
-    ensure!(
+    require!(
         !bytes(node, "compatible")?.is_empty(),
         "missing CPU ISA compatible"
     );
-    ensure!(
+    require!(
         node.property("status").is_none(),
         "CPU status needs a qualified enumeration schema"
     );
     for field in ["l3-cache-size", "l3-cache-id"] {
         if node.property(field).is_some() {
-            ensure!(
+            require!(
                 word(node, field)? == 0,
                 "CPU L3 resources are not represented by this plan"
             );
         }
     }
     word(node, "cpu-id")?;
-    ensure!(
+    require!(
         word(node, "AAPL,phandle")? != 0,
         "zero original CPU phandle"
     );
@@ -247,18 +258,23 @@ fn shape(node: &Node, soc: u32) -> Result<()> {
         }
     }
     let kind = bytes(node, "cluster-type")?;
-    ensure!(
+    require!(
         !kind.is_empty() && kind[0] != 0 && kind[1..].iter().all(|v| *v == 0),
         "invalid original CPU cluster-type"
     );
     for field in ["cpu-impl-reg", "acc-impl-reg", "cpm-impl-reg"] {
         let raw = bytes(node, field)?;
-        ensure!(raw.len() == 16, "CPU {field} is not a base/size pair");
+        require!(
+            raw.len() == 16,
+            "CPU {field} is not a base/size pair",
+            field
+        );
         let base = u64::from_le_bytes(raw[..8].try_into().unwrap());
         let size = u64::from_le_bytes(raw[8..].try_into().unwrap());
-        ensure!(
+        require!(
             base != 0 && size != 0 && base.checked_add(size).is_some(),
-            "invalid original CPU {field} extent"
+            "invalid original CPU {field} extent",
+            field
         );
     }
     Ok(())
@@ -272,14 +288,13 @@ impl<'p, 's> Projection<'p, 's> {
         tree: &DeviceTree,
         source: &SourceBindings<'_>,
     ) -> Result<Self> {
-        plan.revalidate()
-            .map_err(|e| anyhow::anyhow!("topology plan changed: {e:?}"))?;
+        plan.revalidate()?;
         validate_tree(&tree.root, 0)?;
-        ensure!(
+        require!(
             source.source_set_sha256 == plan.profile().input_set_sha256,
             "topology source set differs from plan"
         );
-        ensure!(
+        require!(
             source.tree_sha256 != [0; 32] && digest(tree) == source.tree_sha256,
             "original DeviceTree identity mismatch"
         );
@@ -291,7 +306,7 @@ impl<'p, 's> Projection<'p, 's> {
         let mut last = None;
         for pe in plan.pes() {
             if last != Some(pe.cluster) {
-                ensure!(
+                require!(
                     !completed.contains(&pe.cluster),
                     "noncontiguous cluster enumeration requires a qualified cache consumer"
                 );
@@ -301,8 +316,8 @@ impl<'p, 's> Projection<'p, 's> {
                 last = Some(pe.cluster);
             }
         }
-        let cpus = tree.node(CPUS).context("DeviceTree has no /cpus")?;
-        ensure!(
+        let cpus = tree.node(CPUS).ok_or(refuse!("DeviceTree has no /cpus"))?;
+        require!(
             word(cpus, "#address-cells")? == 1 && word(cpus, "#size-cells")? == 0,
             "unqualified /cpus address/size encoding"
         );
@@ -315,11 +330,11 @@ impl<'p, 's> Projection<'p, 's> {
         for node in &cpus.children {
             shape(node, plan.profile().soc)?;
             let reg = word(node, "reg")?;
-            ensure!(
+            require!(
                 reg <= 0xffff && affinities.insert(reg),
                 "invalid or duplicate original CPU affinity"
             );
-            ensure!(
+            require!(
                 phandles.insert(word(node, "AAPL,phandle")?)
                     && firmware_ids.insert(word(node, "cpu-id")?),
                 "duplicate original CPU phandle/firmware ID"
@@ -328,16 +343,16 @@ impl<'p, 's> Projection<'p, 's> {
         let mut names = BTreeSet::new();
         let mut slots = BTreeSet::new();
         for binding in source.nodes {
-            ensure!(
+            require!(
                 !binding.name.contains('/') && !binding.name.is_empty(),
                 "invalid CPU source name"
             );
-            ensure!(
+            require!(
                 names.insert(binding.name) && slots.insert(binding.slot),
                 "duplicate CPU source binding"
             );
             cpus.child(binding.name)
-                .context("CPU binding has no original node")?;
+                .ok_or(refuse!("CPU binding has no original node"))?;
         }
         let mut projected = tree.clone();
         let mut selected = Vec::with_capacity(plan.pes().len());
@@ -349,16 +364,21 @@ impl<'p, 's> Projection<'p, 's> {
                 .nodes
                 .iter()
                 .find(|b| b.slot == pe.slot)
-                .with_context(|| format!("missing declared source CPU slot {:?}", pe.slot))?;
-            ensure!(
+                .ok_or_else(|| {
+                    refuse!(
+                        "missing declared source CPU slot {slot}",
+                        slot = alloc::format!("{:?}", pe.slot)
+                    )
+                })?;
+            require!(
                 binding.midr == pe.identity.midr
                     && binding.cache == pe.cache
                     && binding.interrupt == pe.interrupt
                     && binding.start == pe.start
                     && binding.core_power == pe.core_power
                     && binding.cluster_power == pe.cluster_power,
-                "CPU source ISA/resource binding differs from plan slot {:?}",
-                pe.slot
+                "CPU source ISA/resource binding differs from plan slot {slot}",
+                slot = alloc::format!("{:?}", pe.slot)
             );
             let node = cpus.child(binding.name).unwrap();
             let cluster = plan
@@ -371,10 +391,11 @@ impl<'p, 's> Projection<'p, 's> {
                 ("cluster-id", cluster.resource.firmware_id),
                 ("l2-cache-size", cluster.cache.geometry.bytes),
             ] {
-                ensure!(
+                require!(
                     word(node, key)? == expected,
-                    "CPU {key} differs from plan slot {:?}",
-                    pe.slot
+                    "CPU {key} differs from plan slot {slot}",
+                    key,
+                    slot = alloc::format!("{:?}", pe.slot)
                 );
             }
             let implicit = t8112_coordinates(node, plan.profile().soc)?;
@@ -389,16 +410,17 @@ impl<'p, 's> Projection<'p, 's> {
                 let actual = if node.property(key).is_some() {
                     word(node, key)?
                 } else {
-                    implicit.context("CPU coordinate has no qualified source schema")?[index]
+                    implicit.ok_or(refuse!("CPU coordinate has no qualified source schema"))?[index]
                 };
-                ensure!(
+                require!(
                     actual == expected,
-                    "CPU {key} differs from plan slot {:?}",
-                    pe.slot
+                    "CPU {key} differs from plan slot {slot}",
+                    key,
+                    slot = alloc::format!("{:?}", pe.slot)
                 );
             }
             let kind = bytes(node, "cluster-type")?;
-            ensure!(
+            require!(
                 kind.first() == Some(&pe.cluster_type) && kind[1..].iter().all(|v| *v == 0),
                 "CPU cluster-type differs from plan"
             );
@@ -420,19 +442,19 @@ impl<'p, 's> Projection<'p, 's> {
         // evidence of a CPU reference.
         let mut locations = BTreeSet::new();
         for field in source.references {
-            ensure!(canonical_path(field.path), "noncanonical CPU consumer path");
-            ensure!(
+            require!(canonical_path(field.path), "noncanonical CPU consumer path");
+            require!(
                 locations.insert((field.path, field.property)),
                 "duplicate CPU consumer location"
             );
-            ensure!(
+            require!(
                 !field.path.starts_with("/cpus/"),
                 "external reference points inside CPU node"
             );
             let p = tree
                 .property(field.path, field.property)
-                .context("missing CPU reference property")?;
-            ensure!(
+                .ok_or(refuse!("missing CPU reference property"))?;
+            require!(
                 !p.placeholder && p.value.len().is_multiple_of(4),
                 "invalid CPU reference encoding"
             );
@@ -442,14 +464,15 @@ impl<'p, 's> Projection<'p, 's> {
             };
             for cell in p.value.as_chunks::<4>().0 {
                 let id = u32::from_le_bytes(*cell);
-                ensure!(
+                require!(
                     retained.contains(&id),
-                    "CPU consumer {}/{} references removed or unknown CPU {id}",
-                    field.path,
-                    field.property
+                    "CPU consumer {path}/{property} references removed or unknown CPU {id}",
+                    path = field.path,
+                    property = field.property,
+                    id
                 );
                 if matches!(field.encoding, ReferenceEncoding::FirmwareCpuIds) {
-                    ensure!(
+                    require!(
                         cpu_ids.preserves_reference(id),
                         "CPU ID consumer needs a coordinated projection recipe"
                     );
@@ -458,17 +481,17 @@ impl<'p, 's> Projection<'p, 's> {
         }
         projected.node_mut(CPUS).unwrap().children = selected;
         for field in source.counts {
-            ensure!(canonical_path(field.path), "noncanonical CPU count path");
-            ensure!(
+            require!(canonical_path(field.path), "noncanonical CPU count path");
+            require!(
                 locations.insert((field.path, field.property)),
                 "duplicate CPU consumer location"
             );
-            ensure!(
+            require!(
                 !field.path.starts_with("/cpus/"),
                 "count property overwrites a CPU field"
             );
             if let Some(p) = tree.property(field.path, field.property) {
-                ensure!(
+                require!(
                     !p.placeholder && p.as_u32().is_some(),
                     "unqualified CPU count encoding"
                 );
@@ -485,7 +508,7 @@ impl<'p, 's> Projection<'p, 's> {
             projected.set_property(
                 field.path,
                 field.property,
-                u32::try_from(count)?.to_le_bytes().to_vec(),
+                (count as u32).to_le_bytes().to_vec(),
             )?;
         }
         // Known topology fields cannot silently keep stale counts/masks or
@@ -507,16 +530,17 @@ impl<'p, 's> Projection<'p, 's> {
                             | "cpumask"
                             | "#main-cpus"
                     ) {
-                        ensure!(
+                        require!(
                             locations.contains(&(path, p.name())),
-                            "unqualified CPU consumer {path}/{}",
-                            p.name()
+                            "unqualified CPU consumer {path}/{name}",
+                            path,
+                            name = p.name()
                         );
                     }
                 }
             }
             for child in &node.children {
-                let name = child.name().context("unnamed DeviceTree node")?;
+                let name = child.name().ok_or(refuse!("unnamed DeviceTree node"))?;
                 let next = format!("{}/{name}", path.trim_end_matches('/'));
                 consumers(child, &next, locations)?;
             }
@@ -546,8 +570,7 @@ impl<'p, 's> Projection<'p, 's> {
             cpu_ids,
             watchdog,
         };
-        plan.revalidate()
-            .map_err(|e| anyhow::anyhow!("topology plan changed: {e:?}"))?;
+        plan.revalidate()?;
         Ok(Self {
             plan,
             original: tree.clone(),
@@ -561,10 +584,8 @@ impl<'p, 's> Projection<'p, 's> {
     /// Complete validation precedes this single replacement. No fallible
     /// operation follows mutation; stale source/plan leaves the tree intact.
     pub fn apply(self, tree: &mut DeviceTree) -> Result<Receipt> {
-        self.plan
-            .revalidate()
-            .map_err(|e| anyhow::anyhow!("topology plan changed: {e:?}"))?;
-        ensure!(
+        self.plan.revalidate()?;
+        require!(
             *tree == self.original,
             "DeviceTree changed after topology preflight"
         );

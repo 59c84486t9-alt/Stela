@@ -43,9 +43,10 @@
 //! count it writes. T602x likewise: the 26A434 `AGXG14X` `AGXAccelerator::
 //! start` aligns with G14G's over the same reads (object offsets, string
 //! addresses and register allocation differ).
+use crate::Result;
 use crate::apple_device_tree::DeviceTree;
 use alloc::vec::Vec;
-use anyhow::{Result, bail};
+use stela_contracts::refuse;
 
 const SGX: &str = "/arm-io/sgx";
 
@@ -135,12 +136,22 @@ pub fn publish(tree: &mut DeviceTree, chip_id: u32) -> Result<Option<Tables>> {
         return Ok(None);
     }
     let Some(points) = operating_points(chip_id) else {
-        bail!("ApChipID {chip_id:#x} has no public GPU operating points for {SGX} perf-states");
+        return Err(refuse!(
+            "ApChipID {chip_id:#x} has no public GPU operating points for {SGX} perf-states",
+            chip_id,
+            SGX
+        )
+        .into());
     };
-    let states = u32::try_from(points.len())?;
+    let states = points.len();
     if !(2..=16).contains(&states) {
-        bail!("{states} GPU operating points are outside AGXAccelerator's 2..=16");
+        return Err(refuse!(
+            "{states} GPU operating points are outside AGXAccelerator's 2..=16",
+            states
+        )
+        .into());
     }
+    let states = states as u32;
     let mut table = Vec::with_capacity(points.len() * 8);
     for &hz in points {
         table.extend_from_slice(&hz.to_le_bytes());

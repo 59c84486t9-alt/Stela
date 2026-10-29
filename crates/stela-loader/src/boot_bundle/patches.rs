@@ -2,6 +2,7 @@
 //! and boot arguments.
 
 use super::*;
+use stela_contracts::{refuse, require};
 
 pub(super) fn cpu_frequency_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>> {
     let bytes = tree.serialize();
@@ -83,7 +84,12 @@ pub(super) fn device_tree_patches(tree: &DeviceTree, region: &Region) -> Result<
     let bytes = tree.serialize();
     for &(path, property, source, required, encoding, rule) in slots {
         let Ok(at) = tree.locate(path, property) else {
-            bail!("DeviceTree has no patch slot {path} {property}");
+            return Err(refuse!(
+                "DeviceTree has no patch slot {path} {property}",
+                path,
+                property
+            )
+            .into());
         };
         patches.push(Patch {
             source,
@@ -154,9 +160,11 @@ pub(super) fn device_tree_patches(tree: &DeviceTree, region: &Region) -> Result<
         }
         for property in geometry {
             let at = tree.locate(&path, property)?;
-            ensure!(
+            require!(
                 at.value_bytes == 4,
-                "{path} {property} is not one native u32"
+                "{path} {property} is not one native u32",
+                path,
+                property
             );
             patches.push(Patch {
                 source: PatchSource::Framebuffer,

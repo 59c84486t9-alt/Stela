@@ -75,8 +75,9 @@
 //!
 //! Refused explicitly: `field-diags-paired` (a diagnostics image Stela does
 //! not read).
+use crate::Result;
 use alloc::{format, string::String, vec::Vec};
-use anyhow::{Result, bail, ensure};
+use stela_contracts::{Refusal, refuse, require};
 use {stela_soc_data::nor::nvram::Partition, stela_soc_data::nor::nvram::Variables};
 
 pub const BOOT_VOLUME: &[u8] = b"boot-volume";
@@ -189,16 +190,18 @@ impl BootVolume {
         let value = value.strip_suffix(b"\0").unwrap_or(value);
         let fields: Vec<&[u8]> = value.split(|&b| b == b':').collect();
         let [kind, partition, group] = fields[..] else {
-            bail!(
-                "a boot volume is TYPE:PARTITION:GROUP, not {:?}",
-                String::from_utf8_lossy(value)
-            );
+            return Err(refuse!(
+                "a boot volume is TYPE:PARTITION:GROUP, not {value}",
+                value = format!("{:?}", String::from_utf8_lossy(value))
+            )
+            .into());
         };
         let uuid = |field: &[u8], what: &str| {
             parse_uuid(field).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "boot volume {what} {:?} is not a UUID",
-                    String::from_utf8_lossy(field)
+                refuse!(
+                    "boot volume {what} {field} is not a UUID",
+                    what,
+                    field = format!("{:?}", String::from_utf8_lossy(field))
                 )
             })
         };
@@ -207,10 +210,11 @@ impl BootVolume {
             .into_iter()
             .find(|t| t.guid_bytes() == kind_bytes)
         else {
-            bail!(
-                "boot volume type {} is none of APFS, the iBoot System Container or recoveryOS",
-                uuid_text(&kind_bytes)
-            );
+            return Err(refuse!(
+                "boot volume type {kind} is none of APFS, the iBoot System Container or recoveryOS",
+                kind = uuid_text(&kind_bytes)
+            )
+            .into());
         };
         Ok(Self {
             kind,
@@ -281,10 +285,11 @@ impl Command {
             .into_iter()
             .find(|c| c.name().as_bytes() == value)
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{:?} is not an LLB boot command",
-                    String::from_utf8_lossy(value)
+                refuse!(
+                    "{command} is not an LLB boot command",
+                    command = format!("{:?}", String::from_utf8_lossy(value))
                 )
+                .into()
             })
     }
 }
@@ -368,11 +373,12 @@ fn flag(name: &[u8], value: &[u8]) -> Result<bool> {
     match strip(value) {
         TRUE => Ok(true),
         FALSE => Ok(false),
-        other => bail!(
-            "{} is {:?}, neither true nor false",
-            String::from_utf8_lossy(name),
-            String::from_utf8_lossy(other)
-        ),
+        other => Err(refuse!(
+            "{name} is {value}, neither true nor false",
+            name = String::from_utf8_lossy(name).into_owned(),
+            value = format!("{:?}", String::from_utf8_lossy(other))
+        )
+        .into()),
     }
 }
 
@@ -470,37 +476,42 @@ pub fn select(variables: &Variables) -> Result<Selection> {
     };
     let recovery_mode = lookup(variables, RECOVERY_BOOT_MODE);
     selection.command = command;
-    selection.target = match command {
-        Some(Command::Recover | Command::RecoverOnce) => Target::PairedRecovery,
-        Some(Command::RecoverSystem | Command::RecoverFallback) => Target::SystemRecovery,
-        Some(Command::DeviceRecovery) => Target::RecoveryMode,
-        Some(Command::FieldDiagsPaired) => bail!(
-            "boot-command field-diags-paired boots the paired diagnostics, which Stela does \
+    selection.target =
+        match command {
+            Some(Command::Recover | Command::RecoverOnce) => Target::PairedRecovery,
+            Some(Command::RecoverSystem | Command::RecoverFallback) => Target::SystemRecovery,
+            Some(Command::DeviceRecovery) => Target::RecoveryMode,
+            Some(Command::FieldDiagsPaired) => return Err(refuse!(
+                "boot-command field-diags-paired boots the paired diagnostics, which Stela does \
              not read"
-        ),
-        // A one-time `upgrade`; LLB checks only `boot-command` for it.
-        Some(Command::Upgrade) => {
-            bail!("one-time-boot-command upgrade: LLB enters an upgrade only from boot-command")
-        }
-        _ if recovery_mode.is_some() => {
-            let value = recovery_mode.expect("checked");
-            selection.reasons.push(shown(RECOVERY_BOOT_MODE, value));
-            Target::PairedRecovery
-        }
-        Some(Command::FsbootSafe) => Target::MacOs { safe: true },
-        Some(Command::Fsboot | Command::PostUpgrade) | None => Target::MacOs { safe: false },
-    };
+            )
+            .into()),
+            // A one-time `upgrade`; LLB checks only `boot-command` for it.
+            Some(Command::Upgrade) => {
+                return Err(refuse!(
+                    "one-time-boot-command upgrade: LLB enters an upgrade only from boot-command"
+                )
+                .into());
+            }
+            _ if recovery_mode.is_some() => {
+                let value = recovery_mode.expect("checked");
+                selection.reasons.push(shown(RECOVERY_BOOT_MODE, value));
+                Target::PairedRecovery
+            }
+            Some(Command::FsbootSafe) => Target::MacOs { safe: true },
+            Some(Command::Fsboot | Command::PostUpgrade) | None => Target::MacOs { safe: false },
+        };
     check_volume(&selection)?;
     Ok(selection)
 }
 
 fn check_volume(selection: &Selection) -> Result<()> {
     if let Some(volume) = &selection.volume {
-        ensure!(
+        require!(
             volume.kind == VolumeType::Apfs
                 || !matches!(selection.target, Target::MacOs { .. } | Target::Upgrade),
-            "boot volume {} is not an APFS container, so it holds no macOS",
-            uuid_text(&volume.partition)
+            "boot volume {partition} is not an APFS container, so it holds no macOS",
+            partition = uuid_text(&volume.partition)
         );
     }
     Ok(())
@@ -515,7 +526,7 @@ pub fn record_upgrade_failure(variables: &mut Variables, step: &str) -> Result<(
     ] {
         variables
             .set(Partition::System, name, value)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .map_err(Refusal::from)?;
     }
     Ok(())
 }
@@ -533,7 +544,7 @@ pub fn consume(variables: &mut Variables, selection: &Selection) -> Result<bool>
     for (name, value) in &selection.assigned {
         variables
             .set(Partition::System, name, value)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .map_err(Refusal::from)?;
         changed = true;
     }
     Ok(changed)
@@ -546,7 +557,7 @@ pub fn choose(variables: &mut Variables, volume: &BootVolume, once: bool) -> Res
     let name = if once { ALT_BOOT_VOLUME } else { BOOT_VOLUME };
     variables
         .set(Partition::System, name, &volume.encode())
-        .map_err(|e| anyhow::anyhow!("{e}"))
+        .map_err(|what| Refusal::from(what).into())
 }
 
 /// `stela.cfg`'s installed-system option: the disk the bundle is built from.
@@ -595,9 +606,10 @@ const NVRAM_OPTIONS: [&str; 6] = [
 pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, String)> {
     let words: Vec<&str> = options.split_ascii_whitespace().collect();
     for option in NVRAM_OPTIONS {
-        ensure!(
+        require!(
             !words.contains(&option),
-            "{option} is chosen from NVRAM, not stela.cfg"
+            "{option} is chosen from NVRAM, not stela.cfg",
+            option
         );
     }
     let Some(selection) = selection else {
@@ -611,9 +623,11 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
     let mut extra: Vec<String> = Vec::new();
     let on_disk =
         |extra: &mut Vec<String>, what: &str, command: crate::handoff::BootCommand| -> Result<()> {
-            ensure!(
+            require!(
                 words.contains(&PREBOOT_OPTION),
-                "NVRAM boots {what}, which needs {PREBOOT_OPTION}"
+                "NVRAM boots {what}, which needs {PREBOOT_OPTION}",
+                what,
+                PREBOOT_OPTION
             );
             if let Some(volume) = &selection.volume {
                 extra.push(BOOT_VOLUME_OPTION.into());
@@ -650,10 +664,15 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
             extra.push(UPGRADE_OPTION.into());
             format!("macOS update from the Update volume ({reasons})")
         }
-        Target::RecoveryMode => bail!(
-            "{RECOVERY_MODE_REFUSAL} ({reasons}): it waits for a restore host, as an \
-             interrupted restore leaves it; choose Install macOS to restore again"
-        ),
+        Target::RecoveryMode => {
+            return Err(refuse!(
+                "{RECOVERY_MODE_REFUSAL} ({reasons}): it waits for a restore host, as an \
+             interrupted restore leaves it; choose Install macOS to restore again",
+                RECOVERY_MODE_REFUSAL,
+                reasons
+            )
+            .into());
+        }
         Target::PairedRecovery if selection.paired_on_disk => {
             on_disk(
                 &mut extra,
@@ -678,10 +697,15 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
                 _ => format!("System Recovery from the RecoveryOSContainer ({reasons})"),
             }
         }
-        Target::PairedRecovery | Target::SystemRecovery => bail!(
-            "{NO_RECOVERY_REFUSAL} ({reasons}): the boot disk holds neither a paired \
-             recoveryOS nor System Recovery; choose Install macOS to restore it"
-        ),
+        Target::PairedRecovery | Target::SystemRecovery => {
+            return Err(refuse!(
+                "{NO_RECOVERY_REFUSAL} ({reasons}): the boot disk holds neither a paired \
+             recoveryOS nor System Recovery; choose Install macOS to restore it",
+                NO_RECOVERY_REFUSAL,
+                reasons
+            )
+            .into());
+        }
     };
     let mut text: Vec<String> = words.into_iter().map(String::from).collect();
     text.extend(extra);

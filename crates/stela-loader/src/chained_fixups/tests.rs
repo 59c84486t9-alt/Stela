@@ -1,5 +1,6 @@
 use super::*;
 use crate::load_plan::{Dependency, EntryPoint, FileRange, GuestRange, Payload, SegmentPlan};
+use anyhow::{Result, bail};
 
 fn pointer(raw: u64, format: u16, imports: u32, preferred: u64, loaded: u64) -> Result<(u64, u64)> {
     let (decoded, next) = decode_pointer(raw, format, imports, preferred, loaded, false)?;

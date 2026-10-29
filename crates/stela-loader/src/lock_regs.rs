@@ -68,10 +68,11 @@
 //! Without a CL4 image iBoot allocates a 16 KiB page, fills it with `wfi`
 //! and publishes it as `CL4-dummypage` (`iBoot.j813` `0x29600..0x29668`),
 //! which SPTM then requires as CTXR-B's region.
+use crate::Result;
 use crate::apple_device_tree::DeviceTree;
 use alloc::{format, string::String, vec::Vec};
-use anyhow::{Context, Result, ensure};
 use core::ops::Range;
+use stela_contracts::{refuse, require};
 use stela_formats::boot_bundle::schema::CoreLocks;
 use stela_formats::boot_bundle::schema::LockRegion;
 use stela_formats::boot_bundle::schema::Locked;
@@ -557,7 +558,7 @@ fn set_register(tree: &mut DeviceTree, path: &str, name: &str, register: Registe
         tree.set_property(path, &format!("{name}-reg-value"), u32_value(value))?;
     } else {
         tree.node_mut(path)
-            .context("lock-register node disappeared")?
+            .ok_or(refuse!("lock-register node disappeared"))?
             .remove_property(&format!("{name}-reg-value"));
     }
     Ok(())
@@ -574,7 +575,7 @@ fn set_optional_register(
     }
     let node = tree
         .node_mut(path)
-        .context("lock-register node disappeared")?;
+        .ok_or(refuse!("lock-register node disappeared"))?;
     for suffix in ["offset", "mask", "value"] {
         node.remove_property(&format!("{name}-reg-{suffix}"));
     }
@@ -606,7 +607,7 @@ fn publish_controller(
     if tree.node(path).is_none() {
         return Ok(false);
     }
-    let count = u32::try_from(controller.apertures.len())?;
+    let count = controller.apertures.len() as u32;
     tree.set_property(path, "aperture-count", u32_value(count))?;
     tree.set_property(path, "aperture-size", u32_value(controller.aperture_size))?;
     let addresses = controller
@@ -655,15 +656,19 @@ pub fn ctrr_a(
         .groups
         .iter()
         .find(|group| group.name == "amcc-ctrr-a")
-        .context("the AMCC map has no amcc-ctrr-a")?;
+        .ok_or(refuse!("the AMCC map has no amcc-ctrr-a"))?;
     let page = 1u64 << group.page_size_shift;
-    ensure!(
+    require!(
         dram_base <= start
             && start < end
             && start.is_multiple_of(page)
             && end.is_multiple_of(page)
             && (end - dram_base) >> group.page_size_shift <= u64::from(group.upper_limit.mask),
-        "CTRR-A region {start:#x}..{end:#x} is not whole {page:#x}-byte pages above {dram_base:#x}"
+        "CTRR-A region {start:#x}..{end:#x} is not whole {page:#x}-byte pages above {dram_base:#x}",
+        start,
+        end,
+        page,
+        dram_base
     );
     Ok(Programmed {
         group: group.name.into(),
@@ -704,12 +709,12 @@ pub fn core_handoff(
     };
     let span = |first: &str, last: &str| -> Result<(u64, u64)> {
         let start = region(first)
-            .with_context(|| format!("no region {first}"))?
+            .ok_or_else(|| refuse!("no region {first}", first))?
             .start;
         let end = region(last)
-            .with_context(|| format!("no region {last}"))?
+            .ok_or_else(|| refuse!("no region {last}", last))?
             .end;
-        ensure!(start < end, "{first}..{last} is empty");
+        require!(start < end, "{first}..{last} is empty", first, last);
         Ok((start, end - 1))
     };
     let secure_kernel = either("CL4-rx", CL4_DUMMY_PAGE);

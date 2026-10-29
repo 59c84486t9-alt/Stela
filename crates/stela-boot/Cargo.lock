@@ -1001,7 +1001,6 @@ dependencies = [
 name = "stela-loader"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "hex",
  "object",
  "serde",

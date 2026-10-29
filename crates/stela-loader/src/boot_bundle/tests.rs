@@ -2,6 +2,7 @@ use super::*;
 use crate::boot_policy::SecurityPolicy;
 use crate::kernel_collection::tests::{BASE, Builder};
 use alloc::collections::BTreeMap;
+use anyhow::Result;
 use object::macho;
 
 const PAGE: u64 = PAGE_BYTES;
@@ -666,9 +667,9 @@ fn unsupported_build_is_refused_before_image_parsing() {
     .err()
     .unwrap();
     for error in [borrowed, owned] {
-        let error = error
-            .downcast_ref::<stela_formats::builds::Unsupported>()
-            .unwrap();
+        let crate::Error::UnsupportedBuild(error) = error else {
+            panic!("expected an unsupported build, got {error}");
+        };
         assert_eq!(error.build, "unsupported-build");
         assert!(
             error

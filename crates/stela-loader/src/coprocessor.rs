@@ -4,10 +4,11 @@
 //! Staging preserves encoded pointers. Relocation requires the coprocessor's
 //! PAC context; neither step authenticates an Apple image, executes it,
 //! establishes an IORVBAR lock, or supplies an implementation of its hardware.
+use crate::Result;
 use crate::{boot_bundle::Source, im4p, kernel_collection::Segment, thread_state::Arm64UnixThread};
 use alloc::{string::String, vec, vec::Vec};
-use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+use stela_contracts::{refuse, require};
 #[cfg(test)]
 use stela_engine::pauth;
 use stela_formats::sha256;
@@ -100,7 +101,7 @@ pub fn prepare_im4p(
     hardware: HardwareIdentity,
     limits: Limits,
 ) -> Result<Prepared> {
-    ensure!(
+    require!(
         [
             &source.component,
             &source.member,
@@ -112,20 +113,20 @@ pub fn prepare_im4p(
         .all(|s| label(s)),
         "invalid coprocessor source/build/hardware identity"
     );
-    ensure!(
+    require!(
         digest(&source.container_sha256) && digest(&source.decoded_sha256),
         "invalid coprocessor SHA-256 identity"
     );
-    ensure!(
+    require!(
         sha256(container) == source.container_sha256,
         "coprocessor container SHA-256 mismatch"
     );
     let (decoded, decode) = im4p::decode(container, limits.decoded_bytes)?;
-    ensure!(
+    require!(
         decode.payload_type == source.payload_type && decode.description == source.description,
         "coprocessor IM4P type/description disagree with selected source"
     );
-    ensure!(
+    require!(
         decode.decoded_bytes as u64 == source.decoded_bytes
             && decode.decoded_sha256 == source.decoded_sha256,
         "coprocessor decoded identity disagrees with selected source"
@@ -199,18 +200,18 @@ impl Prepared {
     /// unchanged. This does not install a mapping in the IOP's MMU or DART.
     pub fn stage(self, physical_base: u64, backing_bytes: u64) -> Result<Staged> {
         let plan = &self.plan;
-        ensure!(
+        require!(
             physical_base != 0 && physical_base.is_multiple_of(plan.minimum_alignment),
             "coprocessor backing base is zero or misaligned"
         );
-        ensure!(
+        require!(
             backing_bytes >= plan.image_bytes,
             "coprocessor backing is smaller than its image"
         );
         physical_base
             .checked_add(backing_bytes)
-            .context("coprocessor backing range overflows")?;
-        let mut bytes = vec![0; usize::try_from(plan.image_bytes)?];
+            .ok_or(refuse!("coprocessor backing range overflows"))?;
+        let mut bytes = vec![0; plan.image_bytes as usize];
         let mut copies = vec![];
         let mut zeroes = vec![];
         let mut ordered: Vec<_> = plan
@@ -304,18 +305,18 @@ impl Staged {
         tcr_el1: u64,
     ) -> Result<Relocated>
     where
-        S::Error: Into<anyhow::Error>,
+        S::Error: core::error::Error + Send + Sync + 'static,
     {
-        ensure!(
+        require!(
             iop_virtual_base == self.plan().vm_base,
             "MH_PRELOAD virtual sliding is not qualified"
         );
         let lower_bits = 64 - (tcr_el1 & 63);
-        ensure!(
+        require!(
             (16..=39).contains(&(tcr_el1 & 63)),
             "unqualified coprocessor lower translation size"
         );
-        ensure!(
+        require!(
             self.plan().vm_base + self.plan().image_bytes <= 1u64 << lower_bits,
             "coprocessor virtual image exceeds supplied lower translation regime"
         );

@@ -2,6 +2,7 @@
 //! counts.
 
 use super::*;
+use stela_contracts::{refuse, require};
 
 pub(super) fn apply_overlay(tree: &mut DeviceTree, overlay: &[OverlayProperty]) -> Result<()> {
     for entry in overlay {
@@ -47,12 +48,14 @@ pub(super) struct CpuIdentity {
 /// and state as running/waiting plus NUL. See the pinned source matrix in
 /// iboot-handoff.md. These are source identities, not inferred CPU ordinals.
 pub(super) fn cpu_identities(tree: &DeviceTree) -> Result<Vec<CpuIdentity>> {
-    let cpus = tree.node("/cpus").context("DeviceTree has no /cpus")?;
-    ensure!(!cpus.children.is_empty(), "DeviceTree has no CPU nodes");
+    let cpus = tree
+        .node("/cpus")
+        .ok_or(refuse!("DeviceTree has no /cpus"))?;
+    require!(!cpus.children.is_empty(), "DeviceTree has no CPU nodes");
     let mut identities: Vec<CpuIdentity> = Vec::new();
     for cpu in &cpus.children {
-        let name = cpu.name().context("DeviceTree CPU has no name")?;
-        ensure!(
+        let name = cpu.name().ok_or(refuse!("DeviceTree CPU has no name"))?;
+        require!(
             !name.is_empty() && !name.contains('/') && !matches!(name, "." | ".."),
             "DeviceTree CPU name is not one child component"
         );
@@ -64,33 +67,47 @@ pub(super) fn cpu_identities(tree: &DeviceTree) -> Result<Vec<CpuIdentity>> {
                 .filter(|property| property.name() == name);
             let property = matching
                 .next()
-                .with_context(|| format!("{path} has no {name}"))?;
-            ensure!(
+                .ok_or_else(|| refuse!("{path} has no {name}", path, name))?;
+            require!(
                 matching.next().is_none(),
-                "{path} has ambiguous {name} properties"
+                "{path} has ambiguous {name} properties",
+                path,
+                name
             );
-            ensure!(!property.placeholder, "{path} has no resolved {name}");
+            require!(
+                !property.placeholder,
+                "{path} has no resolved {name}",
+                path,
+                name
+            );
             Ok(property)
         };
         property("name")?;
         let cluster_type = match property("cluster-type")?.value.as_slice() {
             [kind @ (b'E' | b'P' | b'M'), 0] => *kind,
-            _ => bail!("{path} cluster-type is not an original E/P/M string"),
+            _ => {
+                return Err(
+                    refuse!("{path} cluster-type is not an original E/P/M string", path).into(),
+                );
+            }
         };
         let affinity = property("reg")?
             .as_u32()
-            .with_context(|| format!("{path} reg is not one original u32 affinity"))?;
-        ensure!(
+            .ok_or_else(|| refuse!("{path} reg is not one original u32 affinity", path))?;
+        require!(
             [CPU_RUNNING, CPU_WAITING].contains(&property("state")?.value.as_slice()),
-            "{path} state is not running or waiting"
+            "{path} state is not running or waiting",
+            path
         );
-        ensure!(
+        require!(
             !identities.iter().any(|cpu| cpu.path == path),
-            "duplicate original CPU path {path}"
+            "duplicate original CPU path {path}",
+            path
         );
-        ensure!(
+        require!(
             !identities.iter().any(|cpu| cpu.affinity == affinity),
-            "duplicate original CPU affinity {affinity:#x}"
+            "duplicate original CPU affinity {affinity:#x}",
+            affinity
         );
         identities.push(CpuIdentity {
             path,
@@ -110,7 +127,7 @@ pub(super) fn select_boot_cpu(
     let source = cpu_identities(original)?;
     let (selected, selection) = match requested {
         Some(name) => {
-            ensure!(
+            require!(
                 !name.is_empty() && !name.contains('/') && !matches!(name, "." | ".."),
                 "boot CPU override must name one original /cpus child"
             );
@@ -118,21 +135,24 @@ pub(super) fn select_boot_cpu(
             (
                 cpus.iter()
                     .find(|cpu| cpu.path == path)
-                    .with_context(|| format!("DeviceTree has no boot CPU {path}"))?,
+                    .ok_or_else(|| refuse!("DeviceTree has no boot CPU {path}", path))?,
                 BootCpuSelection::Explicit,
             )
         }
         None => (
-            cpus.first()
-                .context("DeviceTree has no CPU for automatic boot selection")?,
+            cpus.first().ok_or(refuse!(
+                "DeviceTree has no CPU for automatic boot selection"
+            ))?,
             BootCpuSelection::First,
         ),
     };
     let original_index = source
         .iter()
         .position(|cpu| cpu.path == selected.path)
-        .context("selected boot CPU is absent from the original DeviceTree")?;
-    ensure!(
+        .ok_or(refuse!(
+            "selected boot CPU is absent from the original DeviceTree"
+        ))?;
+    require!(
         source[original_index] == *selected,
         "selected boot CPU identity differs from the original DeviceTree"
     );
@@ -152,7 +172,7 @@ pub(super) fn select_boot_cpu(
 /// panics for an E-core once a P-core boots first (docs/research/cpu-topology.md).
 pub(super) fn mark_boot_cpu(tree: &mut DeviceTree, selected: &BootCpu) -> Result<()> {
     let cpus = cpu_identities(tree)?;
-    ensure!(
+    require!(
         cpus.iter().any(|cpu| cpu.path == selected.path
             && cpu.affinity == selected.affinity
             && cpu.cluster_type == selected.cluster_type),
@@ -179,10 +199,10 @@ pub(super) fn verify_boot_cpu(
 ) -> Result<()> {
     let cpus = cpu_identities(tree)?;
     let source = cpu_identities(original)?;
-    let original_cpu = source
-        .get(selected.original_index)
-        .context("boot CPU source index is outside the original DeviceTree")?;
-    ensure!(
+    let original_cpu = source.get(selected.original_index).ok_or(refuse!(
+        "boot CPU source index is outside the original DeviceTree"
+    ))?;
+    require!(
         original_cpu.path == selected.path
             && original_cpu.affinity == selected.affinity
             && original_cpu.cluster_type == selected.cluster_type,
@@ -194,10 +214,13 @@ pub(super) fn verify_boot_cpu(
         let index = source
             .iter()
             .position(|original| original == cpu)
-            .with_context(|| {
-                format!("{} identity differs from the original DeviceTree", cpu.path)
+            .ok_or_else(|| {
+                refuse!(
+                    "{path} identity differs from the original DeviceTree",
+                    path = cpu.path
+                )
             })?;
-        ensure!(
+        require!(
             previous.is_none_or(|previous| index > previous),
             "CPU order differs from the original DeviceTree"
         );
@@ -209,12 +232,12 @@ pub(super) fn verify_boot_cpu(
             running.push(cpu);
         }
     }
-    ensure!(
+    require!(
         running.len() == 1 && running[0].path == selected.path,
         "prepared DeviceTree must have exactly the selected boot CPU running"
     );
     if selected.selection == BootCpuSelection::First {
-        ensure!(
+        require!(
             cpus.first().is_some_and(|cpu| cpu.path == selected.path),
             "automatic boot CPU is not the first original CPU"
         );
@@ -319,13 +342,16 @@ pub(super) fn set_die_count(tree: &mut DeviceTree, chip_id: Option<u32>) -> Resu
         dies
     } else {
         let count = if ULTRAS.contains(&chip) { 2 } else { 1 };
-        ensure!(
+        require!(
             dies == count,
-            "ApChipID {chip:#x}'s iBoot writes die-count {count}, but its CPUs are on {dies} dies"
+            "ApChipID {chip:#x}'s iBoot writes die-count {count}, but its CPUs are on {dies} dies",
+            chip,
+            count,
+            dies
         );
         count
     };
-    ensure!(tree.node("/arm-io").is_some(), "DeviceTree has no /arm-io");
+    require!(tree.node("/arm-io").is_some(), "DeviceTree has no /arm-io");
     tree.set_property("/arm-io", "die-count", count.to_le_bytes().to_vec())?;
     Ok(None)
 }
@@ -338,18 +364,20 @@ pub(super) fn cpu_dies(tree: &DeviceTree) -> Result<u32> {
             let word = die
                 .value
                 .first_chunk::<4>()
-                .with_context(|| format!("{cpu} die-id is not a u32"))?;
+                .ok_or_else(|| refuse!("{cpu} die-id is not a u32", cpu))?;
             highest = highest.max(u32::from_le_bytes(*word));
         }
     }
     highest
         .checked_add(1)
-        .context("CPU die-id exceeds the die count")
+        .ok_or(refuse!("CPU die-id exceeds the die count").into())
 }
 
 /// Paths of the `/cpus` children that describe processors.
 pub(super) fn cpu_nodes(tree: &DeviceTree) -> Result<Vec<String>> {
-    let cpus = tree.node("/cpus").context("DeviceTree has no /cpus")?;
+    let cpus = tree
+        .node("/cpus")
+        .ok_or(refuse!("DeviceTree has no /cpus"))?;
     Ok(cpus
         .children
         .iter()

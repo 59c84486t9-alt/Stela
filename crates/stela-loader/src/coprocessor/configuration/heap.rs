@@ -4,8 +4,9 @@
 //! check source policy and geometry; coordinates/provenance are not ownership
 //! or execution permission. The owners must survive firmware heap use.
 use super::{Action, Field, Provenance, source_record};
+use crate::Result;
 use crate::coprocessor::Staged;
-use anyhow::{Result, ensure};
+use stela_contracts::{refuse, require};
 
 const BASE: u32 = u32::from_be_bytes(*b"RHB1");
 const SIZE: u32 = u32::from_be_bytes(*b"RHS1");
@@ -63,22 +64,22 @@ impl Staged {
     /// alignment (ee5e0, d020c). Real allocator bounds/security remain required.
     pub fn heap_request(&self, policy: &Policy) -> Result<Request> {
         policy.provenance.validate()?;
-        ensure!(
+        require!(
             policy.bank != 0 && policy.bank <= 0x27d,
             "invalid native heap bank"
         );
-        ensure!(
+        require!(
             policy.alignment.is_power_of_two(),
             "invalid native heap alignment"
         );
         let (base, _) = source_record(self, BASE)?;
         let (size, raw) = source_record(self, SIZE)?;
-        ensure!(
+        require!(
             base.bytes == 8 && size.bytes == 4,
             "unqualified native heap record widths"
         );
-        let requested = u64::from(u32::from_le_bytes(raw.try_into()?));
-        ensure!(
+        let requested = u64::from(u32::from_le_bytes(raw.try_into().unwrap()));
+        require!(
             requested != 0,
             "zero native heap request requires separate bank policy"
         );
@@ -86,10 +87,10 @@ impl Staged {
             BankState::Allocate => requested
                 .checked_add(policy.alignment - 1)
                 .map(|n| n & !(policy.alignment - 1))
-                .ok_or_else(|| anyhow::anyhow!("native heap allocation size overflows"))?,
+                .ok_or_else(|| refuse!("native heap allocation size overflows"))?,
             BankState::Reserved { bytes } => requested.min(bytes),
         };
-        ensure!(
+        require!(
             bytes >= MINIMUM && bytes <= u64::from(u32::MAX),
             "native heap size cannot initialize firmware"
         );
@@ -107,28 +108,28 @@ impl Staged {
     pub fn heap_fields(&self, policy: &Policy, mapping: Mapping) -> Result<Fields> {
         let request = self.heap_request(policy)?;
         mapping.provenance.validate()?;
-        ensure!(
+        require!(
             mapping.bank == request.bank,
             "native heap allocation uses a different bank"
         );
-        ensure!(
+        require!(
             mapping.bytes == request.bytes,
             "native heap mapping length disagrees with bank policy"
         );
-        ensure!(
+        require!(
             mapping.iop != 0,
             "native firmware cannot initialize a zero-address heap"
         );
         let physical_end = mapping
             .physical
             .checked_add(mapping.bytes)
-            .ok_or_else(|| anyhow::anyhow!("native heap physical range overflows"))?;
+            .ok_or_else(|| refuse!("native heap physical range overflows"))?;
         mapping
             .iop
             .checked_add(mapping.bytes)
-            .ok_or_else(|| anyhow::anyhow!("native heap IOP range overflows"))?;
+            .ok_or_else(|| refuse!("native heap IOP range overflows"))?;
         if matches!(policy.state, BankState::Allocate) {
-            ensure!(
+            require!(
                 mapping.physical & (request.alignment - 1) == 0,
                 "native allocated heap is misaligned"
             );
@@ -137,8 +138,8 @@ impl Staged {
         let image_end = image
             .physical_base
             .checked_add(image.backing_bytes)
-            .ok_or_else(|| anyhow::anyhow!("staged image allocation overflows"))?;
-        ensure!(
+            .ok_or_else(|| refuse!("staged image allocation overflows"))?;
+        require!(
             physical_end <= image.physical_base || mapping.physical >= image_end,
             "native external heap overlaps staged firmware allocation"
         );
@@ -164,6 +165,7 @@ mod tests {
         configuration::tests::{config_policy, provenance},
         tests::{fixture, prepare, w32, w64},
     };
+    use anyhow::Result;
 
     fn image(requested: u32) -> alloc::vec::Vec<u8> {
         let mut b = fixture();
@@ -257,11 +259,11 @@ mod tests {
         }
         let configured = staged.configure(complete)?;
         assert_eq!(
-            u64::from_le_bytes(configured.bytes()[0x208..0x210].try_into()?),
+            u64::from_le_bytes(configured.bytes()[0x208..0x210].try_into().unwrap()),
             0x2000000
         );
         assert_eq!(
-            u32::from_le_bytes(configured.bytes()[0x218..0x21c].try_into()?),
+            u32::from_le_bytes(configured.bytes()[0x218..0x21c].try_into().unwrap()),
             0x8000
         );
         for f in &configured.plan().chains.pointers {

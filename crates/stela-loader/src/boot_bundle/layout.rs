@@ -2,6 +2,7 @@
 //! files and their hashes.
 
 use super::*;
+use stela_contracts::{refuse, require};
 
 /// The options with the physical base raised past iBoot's carveouts, which
 /// sit below the managed range, and the carveouts placed.
@@ -22,19 +23,21 @@ impl Placement {
         let dram_end = options
             .dram_base
             .checked_add(options.dram_size)
-            .context("DRAM end overflows")?;
+            .ok_or(refuse!("DRAM end overflows"))?;
         let options = Options {
             phys_base: options.phys_base.max(reservation.managed_floor()),
             ..options.clone()
         };
         if let (Some(chip_id), Some(base)) = (inputs.target.chip_id, inputs.dram_base()?) {
-            ensure!(
+            require!(
                 options.dram_base == base,
-                "guest DRAM base {:#x} is not ApChipID {chip_id:#x}'s {base:#x}",
-                options.dram_base
+                "guest DRAM base {dram_base:#x} is not ApChipID {chip_id:#x}'s {base:#x}",
+                dram_base = options.dram_base,
+                chip_id,
+                base
             );
         }
-        ensure!(
+        require!(
             options.phys_base >= options.dram_base
                 && options.phys_base < dram_end
                 && options.phys_base.is_multiple_of(PAGE_BYTES)
@@ -93,11 +96,11 @@ impl Images {
                     .pieces
                     .iter()
                     .find(|(_, r)| r.contains(&offset))
-                    .context("entry lies outside every region")?;
+                    .ok_or(refuse!("entry lies outside every region"))?;
                 let region = regions
                     .iter()
                     .find(|r| r.name == *name)
-                    .with_context(|| format!("no region {name}"))?;
+                    .ok_or_else(|| refuse!("no region {name}", name))?;
                 Ok(Image {
                     name: image.name.into(),
                     file: image.file.into(),
@@ -443,13 +446,15 @@ pub(super) fn contents(
                 let image = [&images.kernel, &images.sptm, &images.txm]
                     .into_iter()
                     .find(|image| piece.starts_with(image.name))
-                    .with_context(|| format!("no image provides {piece}"))?;
+                    .ok_or_else(|| refuse!("no image provides {piece}", piece))?;
                 let range = image
                     .pieces
                     .iter()
                     .find(|(n, _)| n == piece)
                     .map(|(_, r)| r.clone())
-                    .with_context(|| format!("{} has no split {piece}", image.name))?;
+                    .ok_or_else(|| {
+                        refuse!("{name} has no split {piece}", name = image.name, piece)
+                    })?;
                 Content {
                     name: piece.into(),
                     file: image.file.into(),
@@ -475,7 +480,7 @@ pub(super) fn contents(
 pub(super) fn reserve_memory_map(tree: &mut DeviceTree, contents: &mut [Content]) -> Result<u64> {
     let memory_map = tree
         .node_mut(MEMORY_MAP)
-        .context("DeviceTree has no /chosen/memory-map")?;
+        .ok_or(refuse!("DeviceTree has no /chosen/memory-map"))?;
     memory_map
         .properties
         .retain(|p| !p.name().starts_with(RESERVED_ENTRY_PREFIX));
@@ -524,7 +529,7 @@ pub(super) fn place(contents: Vec<Content>, load_base: u64) -> Result<(Vec<Regio
         });
         cursor = cursor
             .checked_add(page_round(content.memory_bytes))
-            .context("loaded region end overflows")?;
+            .ok_or(refuse!("loaded region end overflows"))?;
     }
     Ok((regions, cursor))
 }
@@ -537,7 +542,7 @@ pub(super) fn fill_memory_map(
     options: &Options,
     load_base: u64,
 ) -> Result<()> {
-    let memory_map = tree.node_mut(MEMORY_MAP).context("memory-map")?;
+    let memory_map = tree.node_mut(MEMORY_MAP).ok_or(refuse!("memory-map"))?;
     for region in regions {
         memory_map.set_property(
             &region.name,
@@ -591,7 +596,12 @@ pub(super) fn boot_args_for(
         video: Video::default(),
         machine_type: 0,
         device_tree: device_tree_region.guest_pa - options.phys_base + virt_base,
-        device_tree_length: u32::try_from(device_tree_length)?,
+        device_tree_length: u32::try_from(device_tree_length).map_err(|_| {
+            refuse!(
+                "a {device_tree_length:#x}-byte DeviceTree exceeds boot_args' u32 length",
+                device_tree_length
+            )
+        })?,
         command_line: options.boot_args.clone(),
         boot_flags: 0,
         mem_size_actual: options.dram_size,
@@ -645,9 +655,10 @@ pub(super) fn files(
     for (name, image) in &inputs.board_firmware {
         // The manifest admits only simple names; these checks keep the name
         // within the engine handoff and distinct from the bundle's own files.
-        ensure!(
+        require!(
             name.len() <= MAX_FILE_NAME && !files.iter().any(|(file, _)| file == name),
-            "board firmware name {name:?} is too long or already a bundle file"
+            "board firmware name {name} is too long or already a bundle file",
+            name = alloc::format!("{name:?}")
         );
         files.push((name.clone(), image.bytes.to_vec()));
     }
@@ -660,13 +671,13 @@ pub(super) fn hash_regions(regions: &mut [Region], files: &[(String, Vec<u8>)]) 
         let (_, bytes) = files
             .iter()
             .find(|(name, _)| *name == region.file)
-            .with_context(|| format!("no file {}", region.file))?;
-        let start = usize::try_from(region.file_offset)?;
-        let end = start + usize::try_from(region.bytes)?;
-        ensure!(
+            .ok_or_else(|| refuse!("no file {file}", file = region.file))?;
+        let start = region.file_offset as usize;
+        let end = start + region.bytes as usize;
+        require!(
             end <= bytes.len(),
-            "region {} exceeds its file",
-            region.name
+            "region {name} exceeds its file",
+            name = region.name
         );
         region.sha256 = sha256(&bytes[start..end]);
     }
@@ -721,11 +732,15 @@ pub(super) fn tag_offset(
         dram_end - options.phys_base,
         options.dram_size,
     )
-    .context("the tag storage's base does not fit TAG_OFFSET_EL2")?;
-    ensure!(
-        tag_storage::base(value) >= top_of_kernel_data,
-        "the tag storage at {:#x} overlaps the regions ending at {top_of_kernel_data:#x}",
-        tag_storage::base(value)
+    .ok_or(refuse!(
+        "the tag storage's base does not fit TAG_OFFSET_EL2"
+    ))?;
+    let base = tag_storage::base(value);
+    require!(
+        base >= top_of_kernel_data,
+        "the tag storage at {base:#x} overlaps the regions ending at {top_of_kernel_data:#x}",
+        base,
+        top_of_kernel_data
     );
     Ok(value)
 }

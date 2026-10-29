@@ -30,9 +30,10 @@
 //! 0x24530), so a ramdisk boot keeps the template's 38 zero bytes. Stela
 //! removes them instead, which TXM's darwin expert reads as the null volume
 //! UUID rather than an invalid length (docs/research/iboot-handoff.md).
+use crate::Result;
 use crate::{apple_device_tree::DeviceTree, boot_policy::Decision};
 use alloc::{format, string::String, vec::Vec};
-use anyhow::{Result, ensure};
+use stela_contracts::require;
 pub use stela_formats::boot_bundle::schema::Root;
 
 const CHOSEN: &str = "/chosen";
@@ -46,10 +47,11 @@ const UUID_PROPERTY_BYTES: usize = 37;
 const BOOT_OBJECTS_PATH_LIMIT: usize = 0x400;
 
 fn uuid_property(text: &str) -> Result<Vec<u8>> {
-    ensure!(
+    require!(
         text.len() + 1 == UUID_PROPERTY_BYTES
             && crate::boot_selection::parse_uuid(text.as_bytes()).is_some(),
-        "{text:?} is not a UUID"
+        "{text} is not a UUID",
+        text = alloc::format!("{text:?}")
     );
     let mut value = text.to_ascii_uppercase().into_bytes();
     value.push(0);
@@ -59,16 +61,21 @@ fn uuid_property(text: &str) -> Result<Vec<u8>> {
 fn boot_objects_path(volume_group: &str, boot_hash: &str) -> Result<Vec<u8>> {
     let mut value = format!("/{volume_group}/boot/{boot_hash}").into_bytes();
     value.push(0);
-    ensure!(
+    require!(
         value.len() <= BOOT_OBJECTS_PATH_LIMIT,
-        "boot-objects-path is longer than {BOOT_OBJECTS_PATH_LIMIT} bytes"
+        "boot-objects-path is longer than {BOOT_OBJECTS_PATH_LIMIT} bytes",
+        BOOT_OBJECTS_PATH_LIMIT
     );
     Ok(value)
 }
 
 /// Write `root` into `/chosen`; returns what was decided.
 pub fn apply(tree: &mut DeviceTree, root: &Root) -> Result<Vec<Decision>> {
-    ensure!(tree.node(CHOSEN).is_some(), "DeviceTree has no {CHOSEN}");
+    require!(
+        tree.node(CHOSEN).is_some(),
+        "DeviceTree has no {CHOSEN}",
+        CHOSEN
+    );
     let mut decisions = Vec::new();
     let mut set = |tree: &mut DeviceTree, property: &str, value: Vec<u8>, source: String| {
         decisions.push(Decision {

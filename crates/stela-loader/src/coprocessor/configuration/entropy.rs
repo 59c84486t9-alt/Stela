@@ -3,9 +3,10 @@
 //! Entropy generation/initialization remains the boot-policy owner's
 //! responsibility. The supplied provenances are claims, not trust receipts.
 use super::{Action, Field, Provenance, source_record};
+use crate::Result;
 use crate::coprocessor::Staged;
 use alloc::vec::Vec;
-use anyhow::{Result, ensure};
+use stela_contracts::require;
 
 const PACE: u32 = u32::from_be_bytes(*b"PACE");
 const STACK_GUARD: u32 = u32::from_be_bytes(*b"STKG");
@@ -39,13 +40,13 @@ impl Staged {
         input.pace_provenance.validate()?;
         input.stack_guard_provenance.validate()?;
         let (pace, _) = source_record(self, PACE)?;
-        ensure!(pace.bytes == 8, "native PACE record is not eight bytes");
+        require!(pace.bytes == 8, "native PACE record is not eight bytes");
         let (_, original_guard) = source_record(self, STACK_GUARD)?;
-        ensure!(
+        require!(
             !original_guard.is_empty(),
             "native STKG mutation requires a nonempty record"
         );
-        ensure!(
+        require!(
             input.stack_guard.len() == original_guard.len(),
             "native STKG entropy width disagrees with record"
         );
@@ -74,6 +75,7 @@ mod tests {
         configuration::tests::{config_policy, provenance},
         tests::{fixture, prepare, w32, w64},
     };
+    use anyhow::Result;
     use stela_formats::sha256;
 
     fn input(choice: u8) -> Input {

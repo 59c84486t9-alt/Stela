@@ -3,10 +3,11 @@
 //! These are original image metadata effects. Proposed mappings and provenance
 //! remain claims until the parent keeps allocation/mapping/fetch owners.
 use super::{Configured, Provenance};
+use crate::Result;
 use crate::coprocessor::publication;
 use alloc::{collections::BTreeSet, string::String, vec::Vec};
-use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+use stela_contracts::{refuse, require};
 use stela_formats::sha256;
 
 const DSEG: u32 = u32::from_le_bytes(*b"dseg");
@@ -43,8 +44,9 @@ fn u32_at(bytes: &[u8], at: usize) -> Result<u32> {
         bytes
             .get(at..)
             .and_then(|b| b.get(..4))
-            .context("truncated native finalization u32")?
-            .try_into()?,
+            .ok_or(refuse!("truncated native finalization u32"))?
+            .try_into()
+            .unwrap(),
     ))
 }
 fn u64_at(bytes: &[u8], at: usize) -> Result<u64> {
@@ -52,8 +54,9 @@ fn u64_at(bytes: &[u8], at: usize) -> Result<u64> {
         bytes
             .get(at..)
             .and_then(|b| b.get(..8))
-            .context("truncated native finalization u64")?
-            .try_into()?,
+            .ok_or(refuse!("truncated native finalization u64"))?
+            .try_into()
+            .unwrap(),
     ))
 }
 fn snapshot(proposal: &publication::Proposal) -> Result<String> {
@@ -88,10 +91,10 @@ impl Configured {
             .plan()
             .vm_base
             .checked_add(at)
-            .context("native metadata linked address overflows")?;
+            .ok_or(refuse!("native metadata linked address overflows"))?;
         let end = linked
             .checked_add(bytes as u64)
-            .context("native metadata extent overflows")?;
+            .ok_or(refuse!("native metadata extent overflows"))?;
         let segment = self
             .plan()
             .segments
@@ -99,23 +102,23 @@ impl Configured {
             .find(|s| {
                 linked >= s.segment.vm_address && end <= s.segment.vm_address + s.segment.file_size
             })
-            .context("native metadata is not wholly file-backed")?;
+            .ok_or(refuse!("native metadata is not wholly file-backed"))?;
         Ok(segment.segment.file_offset + linked - segment.segment.vm_address)
     }
     fn native_bytes(&self, at: u64, bytes: usize) -> Result<&[u8]> {
         self.file_backed(at, bytes)?;
         self.bytes()
-            .get(usize::try_from(at)?..)
+            .get(at as usize..)
             .and_then(|b| b.get(..bytes))
-            .context("native metadata exceeds owned bytes")
+            .ok_or(refuse!("native metadata exceeds owned bytes").into())
     }
     fn final_write(&self, writes: &mut Vec<Write>, at: u64, value: u64) -> Result<()> {
         let old = u64_at(self.native_bytes(at, 8)?, 0)?;
-        ensure!(
+        require!(
             old == 0 || old == value,
             "native metadata write conflicts with an existing value"
         );
-        ensure!(
+        require!(
             !self
                 .plan()
                 .chains
@@ -125,7 +128,7 @@ impl Configured {
             "native metadata write overlaps an encoded cold chain"
         );
         if let Some(bay) = &self.plan().patchbay {
-            ensure!(
+            require!(
                 bay.records
                     .iter()
                     .all(|r| at + 8 <= r.image_offset.saturating_sub(8)
@@ -134,7 +137,7 @@ impl Configured {
             );
         }
         if let Some(tuning) = &self.receipt.tuning {
-            ensure!(
+            require!(
                 at + 8 <= tuning.target_image_offset
                     || at >= tuning.target_image_offset + u64::from(tuning.target_bytes),
                 "native metadata write overlaps tuning target"
@@ -144,7 +147,7 @@ impl Configured {
             .iter()
             .find(|w| w.image_offset < at + 8 && at < w.image_offset + 8)
         {
-            ensure!(
+            require!(
                 prior.image_offset == at && prior.after == value,
                 "native metadata writes overlap or disagree"
             );
@@ -171,7 +174,7 @@ impl Configured {
         input: Input,
     ) -> Result<(Self, publication::Policy)> {
         input.provenance.validate()?;
-        ensure!(
+        require!(
             self.receipt.finalization.is_none(),
             "native metadata was already finalized"
         );
@@ -179,7 +182,9 @@ impl Configured {
             .receipt
             .cold_slide
             .as_ref()
-            .context("native finalization requires qualified cold bootstrap header")?
+            .ok_or(refuse!(
+                "native finalization requires qualified cold bootstrap header"
+            ))?
             .header_image_offset();
         let proposal = self.publication_preview(policy.clone())?;
         let mapping_snapshot_sha256 = snapshot(&proposal)?;
@@ -196,13 +201,13 @@ impl Configured {
             let mut next = first;
             let mut seen = BTreeSet::new();
             while next != 0 {
-                ensure!(
+                require!(
                     seen.len() < 4096 && seen.insert(next),
                     "native metadata list cycles or exceeds its bound"
                 );
                 let at = header
                     .checked_add(u64::from(next))
-                    .context("native metadata relative offset overflows")?;
+                    .ok_or(refuse!("native metadata relative offset overflows"))?;
                 let record = self.native_bytes(at, RECORD_BYTES)?;
                 metadata_records.push(at);
                 if u32_at(record, 0)? == DSEG && u32_at(record, 4)? == 1 {
@@ -210,14 +215,14 @@ impl Configured {
                     let extent = count
                         .checked_mul(ENTRY_BYTES)
                         .and_then(|n| n.checked_add(RECORD_BYTES))
-                        .context("native dseg extent overflows")?;
+                        .ok_or(refuse!("native dseg extent overflows"))?;
                     let entries = self.native_bytes(at, extent)?;
                     let ro = find("__DATA_SHARED_RO");
                     let rw = find("__DATA_SHARED_RW");
                     let ro_moved = moved(ro, text);
                     let rw_moved = moved(rw, text);
                     let required = usize::from(ro_moved != 0) + usize::from(rw_moved != 0);
-                    ensure!(
+                    require!(
                         count >= required,
                         "native dseg has fewer entries than moved shared segments"
                     );
@@ -225,7 +230,8 @@ impl Configured {
                         if value == 0 {
                             continue;
                         }
-                        let segment = segment.context("native moved shared segment is absent")?;
+                        let segment =
+                            segment.ok_or(refuse!("native moved shared segment is absent"))?;
                         for index in 0..count {
                             let offset = RECORD_BYTES + index * ENTRY_BYTES;
                             if u64_at(entries, offset + 8)? == segment.linked_virtual
@@ -243,7 +249,7 @@ impl Configured {
         }
         let before = self.receipt.configured_sha256.clone();
         for write in &writes {
-            let at = usize::try_from(write.image_offset)?;
+            let at = write.image_offset as usize;
             self.staged.bytes[at..at + 8].copy_from_slice(&write.after.to_le_bytes());
         }
         let after = sha256(self.bytes());
@@ -268,16 +274,14 @@ impl Configured {
         if self.receipt.cold_slide.is_none() {
             return Ok(());
         }
-        let receipt = self
-            .receipt
-            .finalization
-            .as_ref()
-            .context("cold native metadata must be finalized before publication")?;
-        ensure!(
+        let receipt = self.receipt.finalization.as_ref().ok_or(refuse!(
+            "cold native metadata must be finalized before publication"
+        ))?;
+        require!(
             snapshot(proposal)? == receipt.mapping_snapshot_sha256,
             "publication maps differ from finalized native metadata"
         );
-        ensure!(
+        require!(
             sha256(self.bytes()) == receipt.configured_sha256,
             "cold native bytes changed after metadata finalization"
         );
@@ -295,6 +299,7 @@ mod tests {
         },
         tests::{name, prepare, w32, w64},
     };
+    use anyhow::Result;
 
     fn configured(mut raw: Vec<u8>, shared: bool) -> Result<Configured> {
         if shared {
@@ -324,7 +329,7 @@ mod tests {
             .iter_mut()
             .find(|f| f.tag == u32::from_be_bytes(*b"SLID"))
             .unwrap() = slide.field(provenance())?;
-        s.configure_cold(policy, slide)
+        Ok(s.configure_cold(policy, slide)?)
     }
     fn policy(c: &Configured, data_remap: u64) -> publication::Policy {
         publication::Policy {

@@ -5,9 +5,10 @@
 //! carveout 55 at `0xf83a4`. A record holds a counter, native callsite,
 //! four-character tag and argument. The header's last word is the counter
 //! frequency. See `docs/research/installer-warnings.md#boot-stage-trace`.
+use crate::Result;
 use crate::{apple_device_tree::DeviceTree, carveouts::MEMORY_MAP};
 use alloc::{vec, vec::Vec};
-use anyhow::{Result, ensure};
+use stela_contracts::{refuse, require};
 
 pub const REGION_ID: u16 = 55;
 pub const BUFFER_BYTES: usize = 16 << 10;
@@ -32,21 +33,19 @@ impl Region {
         let Some(data) = tree.property(MEMORY_MAP, "region-id-55") else {
             return Ok(None);
         };
-        ensure!(
-            data.value.len() == 16,
-            "boot trace region needs an address/length pair"
-        );
-        let base = u64::from_le_bytes(data.value[..8].try_into()?);
-        let bytes = u64::from_le_bytes(data.value[8..].try_into()?);
-        ensure!(
+        let ([base, bytes], []) = data.value.as_chunks::<8>() else {
+            return Err(refuse!("boot trace region needs an address/length pair").into());
+        };
+        let (base, bytes) = (u64::from_le_bytes(*base), u64::from_le_bytes(*bytes));
+        require!(
             base != 0 && base.is_multiple_of(8),
             "boot trace region has an invalid base"
         );
-        ensure!(
+        require!(
             bytes >= BUFFER_BYTES as u64,
             "boot trace region is smaller than 16 KiB"
         );
-        ensure!(base.checked_add(bytes).is_some(), "boot trace region wraps");
+        require!(base.checked_add(bytes).is_some(), "boot trace region wraps");
         Ok(Some(Self { base, bytes }))
     }
 
@@ -58,11 +57,11 @@ impl Region {
         managed_base: u64,
         occupied: impl IntoIterator<Item = (u64, u64)>,
     ) -> Result<()> {
-        ensure!(
+        require!(
             self.base != 0 && self.base.is_multiple_of(8) && self.bytes >= BUFFER_BYTES as u64,
             "boot trace region has an invalid base or length"
         );
-        ensure!(
+        require!(
             self.base >= dram_base
                 && self
                     .base
@@ -74,8 +73,8 @@ impl Region {
         for (base, bytes) in occupied {
             let end = base
                 .checked_add(bytes)
-                .ok_or_else(|| anyhow::anyhow!("loaded region wraps"))?;
-            ensure!(
+                .ok_or_else(|| refuse!("loaded region wraps"))?;
+            require!(
                 bytes == 0 || base >= trace_end || end <= self.base,
                 "boot trace aliases a loaded region"
             );
@@ -94,7 +93,7 @@ pub struct Trace {
 
 impl Trace {
     pub fn new(frequency_hz: u32) -> Result<Self> {
-        ensure!(frequency_hz != 0, "boot trace counter frequency is zero");
+        require!(frequency_hz != 0, "boot trace counter frequency is zero");
         let mut bytes = vec![0; BUFFER_BYTES];
         bytes[..4].copy_from_slice(&MAGIC.to_le_bytes());
         bytes[8..12].copy_from_slice(&8u32.to_le_bytes());
@@ -111,8 +110,8 @@ impl Trace {
     /// event. Counts share the architectural counter's origin and frequency.
     /// Capacity exhaustion and a regressing clock leave the trace unchanged.
     pub fn record(&mut self, counter: u64, pc: u64, tag: [u8; 4], argument: u32) -> Result<()> {
-        ensure!(self.count < MAX_RECORDS, "boot trace is full");
-        ensure!(
+        require!(self.count < MAX_RECORDS, "boot trace is full");
+        require!(
             self.last.is_none_or(|last| counter >= last),
             "boot trace counter regressed"
         );

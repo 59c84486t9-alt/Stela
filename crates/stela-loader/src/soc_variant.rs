@@ -53,12 +53,13 @@
 //! `c` board an M5 Max, a `d` board an M5 Ultra. Each takes its full part:
 //! the Max's binned `h17cr1` and `h17cr2` and partial core counts are fused
 //! states no profile selects.
+use crate::Result;
 use crate::{
     apple_device_tree::{DeviceTree, Node},
     boot_policy::Decision,
 };
 use alloc::{format, string::String, vec, vec::Vec};
-use anyhow::{Context, Result, bail, ensure};
+use stela_contracts::{refuse, require};
 
 /// The ApChipID whose iBoot reads these fuses.
 pub const CHIP_ID: u32 = 0x6050;
@@ -136,18 +137,31 @@ pub fn decode(fuses: Fuses) -> Result<Variant> {
             0 => "h17c",
             0xff00_0000 => "h17cr1",
             0xff00 => "h17cr2",
-            other => bail!("disabled-MCC fuse {other:#x} names no Max variant"),
+            other => {
+                return Err(
+                    refuse!("disabled-MCC fuse {other:#x} names no Max variant", other).into(),
+                );
+            }
         },
         [OTHER_DIE, MAX_DIE] => "h17s",
         [MAX_DIE, OTHER_DIE] => "h17d",
-        [low, high] => bail!("die-configuration fuses {low:#x}, {high:#x} name no variant"),
+        [low, high] => {
+            return Err(refuse!(
+                "die-configuration fuses {low:#x}, {high:#x} name no variant",
+                low,
+                high
+            )
+            .into());
+        }
     };
     let mccs = match fuses.disabled_mccs {
         0 => 0xff,
         0xff00_0000 => 0x3f,
         0xffff_0000 => 0x0f,
         0xff00 => 0xf3,
-        other => bail!("disabled-MCC fuse {other:#x} names no MCC set"),
+        other => {
+            return Err(refuse!("disabled-MCC fuse {other:#x} names no MCC set", other).into());
+        }
     };
     Ok(Variant {
         name,
@@ -179,24 +193,32 @@ pub fn apply(
     }
     let fuses = board_id
         .and_then(|board| fuses(CHIP_ID, board))
-        .with_context(|| format!("ApBoardID {board_id:x?} has no ApChipID {CHIP_ID:#x} fuses"))?;
+        .ok_or_else(|| {
+            refuse!(
+                "ApBoardID {board_id} has no ApChipID {CHIP_ID:#x} fuses",
+                board_id = alloc::format!("{board_id:x?}"),
+                CHIP_ID
+            )
+        })?;
     let variant = decode(fuses)?;
-    ensure!(
+    require!(
         tree.property(&format!("/{VERSION}"), "version")
             .and_then(|version| version.as_u32())
             == Some(1),
-        "/{VERSION} version is not 1"
+        "/{VERSION} version is not 1",
+        VERSION
     );
     let options = tree
         .property(&format!("/{GROUP}"), "option")
-        .context("/:sotra has no option")?;
-    ensure!(
+        .ok_or(refuse!("/:sotra has no option"))?;
+    require!(
         options
             .value
             .split(|&byte| byte == 0)
             .any(|option| option == variant.name.as_bytes()),
-        "/{GROUP} option does not list {}",
-        variant.name
+        "/{GROUP} option does not list {name}",
+        GROUP,
+        name = variant.name
     );
     let merged = merge(&mut tree.root, &format!("{OVERLAY}{}_", variant.name))?;
     tree.root
@@ -246,9 +268,10 @@ fn merge(node: &mut Node, prefix: &str) -> Result<usize> {
         }
         for child in overlay.children {
             let name = child.name().unwrap_or_default();
-            ensure!(
+            require!(
                 node.child(name).is_none(),
-                "overlay child {name} is already a node"
+                "overlay child {name} is already a node",
+                name
             );
             node.children.push(child);
         }
@@ -263,9 +286,9 @@ fn u32_value(value: u32) -> Vec<u8> {
 
 /// Deletes the CPUs of absent dies and counts the rest (`0x40a0c..`).
 fn prune_cpus(tree: &mut DeviceTree, dies: u32) -> Result<Vec<Decision>> {
-    let cpus = tree.node_mut(CPUS).context("no /cpus")?;
+    let cpus = tree.node_mut(CPUS).ok_or(refuse!("no /cpus"))?;
     let die = |cpu: &Node| cpu.property("die-id").and_then(|die| die.as_u32());
-    ensure!(
+    require!(
         cpus.children.iter().all(|cpu| die(cpu).is_some()),
         "a /cpus node has no die-id"
     );
@@ -284,15 +307,21 @@ fn prune_cpus(tree: &mut DeviceTree, dies: u32) -> Result<Vec<Decision>> {
         match cpu.property("cluster-type").map(|kind| kind.value.first()) {
             Some(Some(b'M')) => m += 1,
             Some(Some(b'P')) => p += 1,
-            _ => bail!("{} is neither an M nor a P core", cpu.name().unwrap_or("?")),
+            _ => {
+                return Err(refuse!(
+                    "{cpu} is neither an M nor a P core",
+                    cpu = cpu.name().unwrap_or("?")
+                )
+                .into());
+            }
         }
     }
-    let total = u32::try_from(cpus.children.len())?;
+    let total = cpus.children.len() as u32;
     let source = format!("the fused cores of {dies} die(s)");
     let mut decisions = vec![];
     for (property, count) in [
         ("max_cpus", total),
-        ("cpu-cluster-count", u32::try_from(clusters.len())?),
+        ("cpu-cluster-count", clusters.len() as u32),
         ("m-core-count", m),
         ("p-core-count", p),
     ] {
@@ -305,7 +334,7 @@ fn prune_cpus(tree: &mut DeviceTree, dies: u32) -> Result<Vec<Decision>> {
 
 /// The MCC rows of `0x40b78..0x40c38`.
 fn mcc_rows(tree: &mut DeviceTree, variant: &Variant) -> Result<Vec<Decision>> {
-    ensure!(tree.node(MCC).is_some(), "no {MCC}");
+    require!(tree.node(MCC).is_some(), "no {MCC}", MCC);
     let mut rows = vec![
         (
             "dcs-channel-enable-mask",

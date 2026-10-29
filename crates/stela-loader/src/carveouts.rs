@@ -47,10 +47,11 @@
 //! AGX firmware's loaded data segments (`gfx-data*`), `gptbat-ready`,
 //! `ttbat-phys-addr-base` and `rtkit-private-vm-region-*`, which need the
 //! firmware loaded and the GPU's MMU programmed, so they stay absent.
+use crate::Result;
 use crate::apple_device_tree::DeviceTree;
 use crate::kernel_collection::PAGE_BYTES;
 use alloc::{format, string::String, vec::Vec};
-use anyhow::{Context, Result, ensure};
+use stela_contracts::{refuse, require};
 pub use stela_formats::boot_bundle::schema::Placed;
 use stela_soc_data::board;
 
@@ -353,39 +354,39 @@ impl Reservation {
 /// Place required protocol-sized ranges back to back inside guest DRAM.
 /// The alignment padding is reserved too; at least one managed page must remain.
 pub fn reserve(table: &[Carveout], dram_base: u64, dram_bytes: u64) -> Result<Reservation> {
-    ensure!(
+    require!(
         dram_base.is_multiple_of(PAGE_BYTES),
         "carveout DRAM base is unaligned"
     );
-    ensure!(
+    require!(
         dram_bytes > 0 && dram_bytes.is_multiple_of(PAGE_BYTES),
         "carveout DRAM size is empty or unaligned"
     );
     let dram_end = dram_base
         .checked_add(dram_bytes)
-        .context("carveout DRAM end overflows")?;
+        .ok_or(refuse!("carveout DRAM end overflows"))?;
     let mut cursor = dram_base;
     let mut regions: Vec<Placed> = Vec::with_capacity(table.len());
     for carveout in table {
-        ensure!(
+        require!(
             carveout.bytes > 0
                 && carveout.bytes.is_multiple_of(PAGE_BYTES)
                 && carveout.bytes / PAGE_BYTES < 0x10000,
-            "carveout {} violates SPTM page bounds",
-            carveout.id
+            "carveout {id} violates SPTM page bounds",
+            id = carveout.id
         );
-        ensure!(
+        require!(
             !regions.iter().any(|region| region.id == carveout.id),
-            "duplicate carveout {}",
-            carveout.id
+            "duplicate carveout {id}",
+            id = carveout.id
         );
         let end = cursor
             .checked_add(carveout.bytes)
-            .context("carveout end overflows")?;
-        ensure!(
+            .ok_or(refuse!("carveout end overflows"))?;
+        require!(
             end <= dram_end,
-            "carveout {} exceeds guest DRAM",
-            carveout.id
+            "carveout {id} exceeds guest DRAM",
+            id = carveout.id
         );
         regions.push(Placed {
             id: carveout.id,
@@ -396,8 +397,8 @@ pub fn reserve(table: &[Carveout], dram_base: u64, dram_bytes: u64) -> Result<Re
     }
     let managed_floor = cursor
         .checked_next_multiple_of(MANAGED_ALIGNMENT)
-        .context("managed DRAM alignment overflows")?;
-    ensure!(
+        .ok_or(refuse!("managed DRAM alignment overflows"))?;
+    require!(
         managed_floor < dram_end,
         "carveouts and alignment padding exhaust guest DRAM"
     );
@@ -426,11 +427,22 @@ pub fn publish(tree: &mut DeviceTree, placed: &[Placed]) -> Result<()> {
         tree.set_property(
             "/chosen",
             PANIC_LOG_SIZE,
-            u32::try_from(panic.bytes)?.to_le_bytes().to_vec(),
+            u32::try_from(panic.bytes)
+                .map_err(|_| {
+                    refuse!(
+                        "panic log of {bytes:#x} bytes exceeds the u32 {PANIC_LOG_SIZE}",
+                        bytes = panic.bytes,
+                        PANIC_LOG_SIZE
+                    )
+                })?
+                .to_le_bytes()
+                .to_vec(),
         )?;
     }
     tree.ensure_child("/chosen", "carveout-memory-map")?;
-    let map = tree.node_mut(MEMORY_MAP).context("carveout-memory-map")?;
+    let map = tree
+        .node_mut(MEMORY_MAP)
+        .ok_or(refuse!("carveout-memory-map"))?;
     for carveout in placed {
         map.set_property(
             &format!("region-id-{}", carveout.id),
@@ -444,7 +456,7 @@ pub fn publish(tree: &mut DeviceTree, placed: &[Placed]) -> Result<()> {
         let carveout = placed
             .iter()
             .find(|carveout| carveout.id == id)
-            .with_context(|| format!("{SGX} needs carveout region {id:#x}"))?;
+            .ok_or_else(|| refuse!("{SGX} needs carveout region {id:#x}", SGX, id))?;
         tree.set_property(
             SGX,
             &format!("{prefix}-base"),

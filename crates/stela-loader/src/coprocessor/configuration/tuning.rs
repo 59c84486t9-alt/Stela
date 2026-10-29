@@ -3,10 +3,11 @@
 //! Selected original source tables remain input data. Preparation neither
 //! executes their register writes nor establishes backing, mappings or entry.
 use super::{Configured, Provenance, source_record};
+use crate::Result;
 use crate::coprocessor::Staged;
 use alloc::vec::Vec;
-use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+use stela_contracts::{refuse, require};
 use stela_formats::sha256;
 
 pub mod source;
@@ -106,42 +107,42 @@ impl Staged {
     pub fn tuning_proposal(&self, input: Input) -> Result<Proposal> {
         let (address_record, address) = source_record(self, ADDRESS)?;
         let (length_record, length) = source_record(self, LENGTH)?;
-        ensure!(
+        require!(
             address.len() == 8 && length.len() == 4,
             "native tuning scalar widths disagree"
         );
-        let linked = u64::from_le_bytes(address.try_into()?);
-        let length = u32::from_le_bytes(length.try_into()?);
-        ensure!(
+        let linked = u64::from_le_bytes(address.try_into().unwrap());
+        let length = u32::from_le_bytes(length.try_into().unwrap());
+        require!(
             linked != 0 && length != 0,
             "absent/empty native tuning family is not qualified"
         );
         let offset = linked
             .checked_sub(self.plan().vm_base)
-            .context("native tuning precedes image")?;
+            .ok_or(refuse!("native tuning precedes image"))?;
         let end = offset
             .checked_add(u64::from(length))
-            .context("native tuning range overflows")?;
-        let at = usize::try_from(offset)?;
+            .ok_or(refuse!("native tuning range overflows"))?;
+        let at = offset as usize;
         let raw = self
             .bytes()
             .get(at..)
             .and_then(|b| b.get(..length as usize))
-            .context("native tuning exceeds image")?;
-        ensure!(raw.len() >= HEADER_BYTES, "truncated native tuning header");
-        ensure!(
+            .ok_or(refuse!("native tuning exceeds image"))?;
+        require!(raw.len() >= HEADER_BYTES, "truncated native tuning header");
+        require!(
             [1, 3].contains(&raw[0]),
             "native tuning kind is not qualified"
         );
-        ensure!(raw[1] & !1 == 2, "native tuning flags are not qualified");
+        require!(raw[1] & !1 == 2, "native tuning flags are not qualified");
         let width = if raw[1] & 1 != 0 {
             Width::Bits64
         } else {
             Width::Bits32
         };
         let capacity = raw[2];
-        ensure!(capacity != 0, "native tuning capacity is zero");
-        ensure!(
+        require!(capacity != 0, "native tuning capacity is zero");
+        require!(
             HEADER_BYTES + usize::from(capacity) * width.bytes() <= raw.len(),
             "native tuning capacity exceeds its range"
         );
@@ -157,22 +158,22 @@ impl Staged {
                         .checked_add(u64::from(length))
                         .is_some_and(|e| e <= s.segment.vm_address + s.segment.file_size)
             })
-            .context("native tuning is not wholly file-backed")?;
+            .ok_or(refuse!("native tuning is not wholly file-backed"))?;
         let target_source_file_offset =
             segment.segment.file_offset + linked - segment.segment.vm_address;
         let bay = self
             .plan()
             .patchbay
             .as_ref()
-            .context("native tuning requires patchbay")?;
-        ensure!(
+            .ok_or(refuse!("native tuning requires patchbay"))?;
+        require!(
             bay.records.iter().all(|r| {
                 let start = r.image_offset.saturating_sub(8);
                 end <= start || offset >= r.image_offset + u64::from(r.bytes)
             }),
             "native tuning overlaps patchbay records"
         );
-        ensure!(
+        require!(
             !self
                 .plan()
                 .chains
@@ -188,13 +189,15 @@ impl Staged {
             }
             Override::Required(provenance) => {
                 provenance.validate()?;
-                anyhow::bail!("native dynamic tuning override format is not qualified");
+                return Err(
+                    refuse!("native dynamic tuning override format is not qualified").into(),
+                );
             }
         };
         tables.provenance.validate()?;
         for phase in &tables.additional {
             phase.provenance.validate()?;
-            ensure!(
+            require!(
                 phase.enabled.is_some()
                     || phase.table.as_ref().is_none_or(|t| t.records.is_empty()),
                 "native tuning phase bit is unknown for a nonempty provider"
@@ -213,12 +216,12 @@ impl Staged {
             )
             .filter_map(|table| table.as_ref());
         for table in selected {
-            ensure!(
+            require!(
                 table.width == width && table.source.kind == raw[0],
                 "selected native tuning table format disagrees with target"
             );
             let count = table.records.len() / width.bytes();
-            ensure!(
+            require!(
                 entries + count <= usize::from(capacity),
                 "native tuning tables exceed original capacity"
             );
@@ -227,7 +230,7 @@ impl Staged {
             entries += count;
             selected_sources.push(table.source.clone());
         }
-        bytes[3] = u8::try_from(entries)?;
+        bytes[3] = entries as u8;
         Ok(Proposal {
             receipt: Receipt {
                 source: self.plan().source.clone(),
@@ -264,17 +267,17 @@ impl Configured {
             .plan()
             .patchbay
             .as_ref()
-            .context("configured image lacks patchbay")?;
+            .ok_or(refuse!("configured image lacks patchbay"))?;
         let address = bay.records.iter().find(|r| r.tag == ADDRESS);
         let length = bay.records.iter().find(|r| r.tag == LENGTH);
         if address.is_none() && length.is_none() {
             return Ok(());
         }
         let (address, length) = (
-            address.context("incomplete native tuning family")?,
-            length.context("incomplete native tuning family")?,
+            address.ok_or(refuse!("incomplete native tuning family"))?,
+            length.ok_or(refuse!("incomplete native tuning family"))?,
         );
-        ensure!(
+        require!(
             address.bytes == 8 && length.bytes == 4,
             "native tuning scalar widths disagree"
         );
@@ -282,14 +285,14 @@ impl Configured {
             .receipt
             .tuning
             .as_ref()
-            .context("native tuning must be prepared before publication")?;
-        let at = usize::try_from(receipt.target_image_offset)?;
+            .ok_or(refuse!("native tuning must be prepared before publication"))?;
+        let at = receipt.target_image_offset as usize;
         let bytes = self
             .bytes()
             .get(at..)
             .and_then(|b| b.get(..receipt.target_bytes as usize))
-            .context("native tuning publication target exceeds bytes")?;
-        ensure!(
+            .ok_or(refuse!("native tuning publication target exceeds bytes"))?;
+        require!(
             sha256(bytes) == receipt.configured_target_sha256,
             "native tuning changed after configuration"
         );
@@ -300,11 +303,11 @@ impl Configured {
     /// before a write, and the ordinary configuration hash covers the result.
     pub fn apply_tuning(mut self, proposal: Proposal) -> Result<Self> {
         let receipt = &proposal.receipt;
-        ensure!(
+        require!(
             self.receipt.tuning.is_none(),
             "native tuning was already applied"
         );
-        ensure!(
+        require!(
             self.placement().staged_sha256 == receipt.original_staged_sha256
                 && self.plan().source.decoded_sha256 == receipt.source.decoded_sha256
                 && self.plan().source.container_sha256 == receipt.source.container_sha256
@@ -324,19 +327,19 @@ impl Configured {
             (LENGTH, &proposal.length_source_sha256),
         ] {
             let (_, current) = source_record(&self.staged, tag)?;
-            ensure!(
+            require!(
                 &sha256(current) == expected,
                 "configured tuning scalars differ from proposal"
             );
         }
-        let at = usize::try_from(receipt.target_image_offset)?;
+        let at = receipt.target_image_offset as usize;
         let target = self
             .staged
             .bytes
             .get_mut(at..)
             .and_then(|b| b.get_mut(..receipt.target_bytes as usize))
-            .context("native tuning target exceeds configured bytes")?;
-        ensure!(
+            .ok_or(refuse!("native tuning target exceeds configured bytes"))?;
+        require!(
             sha256(target) == receipt.original_target_sha256,
             "native tuning target differs from proposal source"
         );

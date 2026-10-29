@@ -46,6 +46,7 @@
 //! Stela's `no_std` reader does not open, so its seal is compared with the
 //! forwarded root hash by APFS's `validate_root_hash` at the image root, and
 //! the bundle lists that as unresolved.
+use crate::{Result, Within};
 use crate::{
     apple_device_tree::DeviceTree,
     boot_bundle::{self, Bundle, Input, Inputs, Options, RootHash, Source, Target},
@@ -56,7 +57,7 @@ use crate::{
     root_selection::Root,
 };
 use alloc::{format, string::String, vec, vec::Vec};
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use stela_contracts::{refuse, require};
 use {
     stela_formats::apfs, stela_formats::apfs::ApfsError, stela_formats::apfs::Container,
     stela_formats::apfs::FileKind, stela_formats::apfs::Volume,
@@ -121,15 +122,14 @@ pub struct Found {
 /// The Recovery-role volume of `container`; `None` when it has none.
 fn recovery_volume<R: ReadAt>(container: &mut Container<R>) -> Result<Option<Volume>> {
     let volumes: Vec<Volume> = container
-        .volumes()
-        .map_err(|e| anyhow!("{e}"))?
+        .volumes()?
         .into_iter()
         .filter(|v| v.role == APFS_VOL_ROLE_RECOVERY)
         .collect();
     match volumes.len() {
         0 => Ok(None),
         1 => Ok(volumes.into_iter().next()),
-        count => bail!("the container has {count} Recovery volumes"),
+        count => Err(refuse!("the container has {count} Recovery volumes", count).into()),
     }
 }
 
@@ -148,14 +148,13 @@ fn containers<R: ReadAt>(
             .map(|v| v.partition)
     };
     let partitions: Vec<(u64, Option<[u8; 16]>)> = match kind {
-        Kind::Paired => apfs::container_partitions(source)
-            .map_err(|e| anyhow!("{e}"))?
+        Kind::Paired => apfs::container_partitions(source)?
             .into_iter()
             .map(|(offset, guid)| (offset, guid.map(|g| g.0)))
             .collect(),
         Kind::System => {
             let recovery = Guid::parse(RECOVERY_PARTITION_TYPE).expect("constant GUID");
-            match apfs::typed_partitions(source, recovery).map_err(|e| anyhow!("{e}"))? {
+            match apfs::typed_partitions(source, recovery)? {
                 Some(found) => found
                     .into_iter()
                     .map(|(offset, guid)| (offset, Some(guid.0)))
@@ -184,7 +183,7 @@ fn paired_groups<R: ReadAt>(
     if let Some(volume) = volume.filter(|v| v.kind == VolumeType::Apfs) {
         return Ok(vec![uuid_text(&volume.volume_group)]);
     }
-    preboot::system_groups(container).map_err(|e| anyhow!("{e}"))
+    Ok(preboot::system_groups(container)?)
 }
 
 /// Every recoveryOS of `kind` on `source` (a disk with a GUID partition
@@ -199,9 +198,8 @@ pub fn find<R: ReadAt>(
     let mut found = Vec::new();
     for offset in containers(source, kind, volume)? {
         let mut container = match Container::open(&mut *source, offset) {
-            Ok(container) => container,
             Err(ApfsError::Malformed(_)) if kind == Kind::Paired => continue,
-            Err(error) => bail!("container at {offset:#x}: {error}"),
+            opened => opened.within(|| refuse!("container at {offset:#x}", offset))?,
         };
         let Some(recovery) = recovery_volume(&mut container)? else {
             continue;
@@ -211,7 +209,7 @@ pub fn find<R: ReadAt>(
             Kind::System => Vec::new(),
         };
         let sets = preboot::boot_sets(&mut container, &recovery, &groups)
-            .map_err(|e| anyhow!("container at {offset:#x}: {e}"))?;
+            .within(|| refuse!("container at {offset:#x}", offset))?;
         if !sets.is_empty() {
             found.push(Found {
                 kind,
@@ -249,8 +247,7 @@ fn evaluate<R: ReadAt>(
     };
     let mut manifests: Vec<Vec<u8>> = Vec::new();
     for object in &set.objects {
-        if let Some(manifest) =
-            preboot::manifest(container, volume, object).map_err(|e| anyhow!("{e}"))?
+        if let Some(manifest) = preboot::manifest(container, volume, object)?
             && !manifests.contains(&manifest)
         {
             manifests.push(manifest);
@@ -305,8 +302,8 @@ fn evaluate<R: ReadAt>(
         let Some(manifest) = &manifest else {
             continue;
         };
-        let file = preboot::read(container, volume, &object).map_err(|e| anyhow!("{e}"))?;
-        let parts = img4::parse(&file).map_err(|e| anyhow!("{}: {e}", object.path))?;
+        let file = preboot::read(container, volume, &object)?;
+        let parts = img4::parse(&file).within(|| refuse!("{path}", path = object.path))?;
         match recorded(manifest, &tag) {
             Some(digest) if digest == im4m::sha384(parts.payload).as_slice() => {}
             Some(_) => evidence.problems.push(format!(
@@ -344,7 +341,7 @@ pub fn select<R: ReadAt>(
     groups.dedup();
     for group in groups {
         let in_group = found.sets.iter().filter(|s| s.volume_group == group);
-        match preboot::active(container, &found.volume, group).map_err(|e| anyhow!("{e}"))? {
+        match preboot::active(container, &found.volume, group)? {
             Some(hash) => match in_group
                 .clone()
                 .find(|s| s.boot_hash.eq_ignore_ascii_case(&hash))
@@ -375,20 +372,19 @@ pub fn select<R: ReadAt>(
     }
     match qualified.len() {
         1 => Ok(qualified.remove(0)),
-        0 => bail!(
-            "the {} holds no bootable boot directory ({})",
-            found.kind.label(),
-            refused.join(" | ")
-        ),
-        count => bail!(
-            "{count} boot directories of the {} qualify ({}), and no boot/active names one",
-            found.kind.label(),
-            qualified
+        0 => Err(refuse!(
+            "the {label} holds no bootable boot directory ({refused})",
+            label = found.kind.label(),
+            refused = refused.join(" | ")
+        )
+        .into()),
+        count => {
+            let directories = qualified
                 .iter()
                 .map(|(set, _)| set.directory())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+                .collect::<Vec<_>>();
+            Err(refuse!("{count} boot directories of the {label} qualify ({directories}), and no boot/active names one", count, label = found.kind.label(), directories = directories.join(", ")).into())
+        }
     }
 }
 
@@ -407,10 +403,11 @@ pub fn image_boot_arg(directory: &str) -> String {
 pub fn boot_args(console: &str, directory: &str) -> Result<String> {
     for argument in console.split_whitespace() {
         let name = argument.split('=').next().unwrap_or(argument);
-        ensure!(
+        require!(
             !IMAGE_BOOT_ARGS.contains(&name) && name != "rd" && name != "rootdev",
-            "boot-args {argument:?} names a root; a recoveryOS boot roots from its Recovery \
-             volume and BaseSystem image"
+            "boot-args {argument} names a root; a recoveryOS boot roots from its Recovery \
+             volume and BaseSystem image",
+            argument = alloc::format!("{argument:?}")
         );
     }
     let mut args: Vec<String> = console.split_whitespace().map(String::from).collect();
@@ -451,7 +448,7 @@ struct Reader<'a, R: ReadAt> {
 impl<R: ReadAt> Reader<'_, R> {
     fn file(&mut self, object: &preboot::Object) -> Result<Vec<u8>> {
         preboot::read(self.container, self.volume, object)
-            .map_err(|e| anyhow!("{}: {e}", object.path))
+            .within(|| refuse!("{path}", path = object.path))
     }
 
     fn component(&self, kind: &[u8; 4]) -> String {
@@ -464,9 +461,9 @@ impl<R: ReadAt> Reader<'_, R> {
 
     /// The single object of `kind`, decoded, and its manifest.
     fn decode(&mut self, kind: &[u8; 4], limit: u64) -> Result<(Decoded, Option<Vec<u8>>)> {
-        let object = self.set.require(kind).map_err(|e| anyhow!("{e}"))?.clone();
+        let object = self.set.require(kind)?.clone();
         let file = self.file(&object)?;
-        let parts = img4::parse(&file).map_err(|e| anyhow!("{}: {e}", object.path))?;
+        let parts = img4::parse(&file).within(|| refuse!("{path}", path = object.path))?;
         let (bytes, receipt) = crate::im4p::decode(parts.payload, limit)?;
         let decoded = Decoded {
             source: Source {
@@ -485,11 +482,11 @@ impl<R: ReadAt> Reader<'_, R> {
 
     /// An object kept as its encoded `IM4P`: the SEP firmware, the root hash.
     fn opaque(&mut self, kind: &[u8; 4]) -> Result<Option<Decoded>> {
-        let Some(object) = self.set.object(kind).map_err(|e| anyhow!("{e}"))?.cloned() else {
+        let Some(object) = self.set.object(kind)?.cloned() else {
             return Ok(None);
         };
         let file = self.file(&object)?;
-        let parts = img4::parse(&file).map_err(|e| anyhow!("{}: {e}", object.path))?;
+        let parts = img4::parse(&file).within(|| refuse!("{path}", path = object.path))?;
         Ok(Some(Decoded {
             source: Source {
                 component: self.component(kind),
@@ -510,19 +507,19 @@ impl<R: ReadAt> Reader<'_, R> {
         let path = format!("{}/{SYSTEM_VERSION}", self.set.volume_group);
         let device = &mut self.container.device;
         let inode = match self.volume.lookup(device, &path, true) {
-            Ok(inode) => inode,
             Err(ApfsError::NotFound(_)) => return Ok(None),
-            Err(error) => bail!("{path}: {error}"),
+            found => found.within(|| refuse!("{path}", path))?,
         };
         let bytes = self
             .volume
             .read(device, &inode)
-            .map_err(|e| anyhow!("{path}: {e}"))?;
-        let text = core::str::from_utf8(&bytes).with_context(|| format!("{path} is not UTF-8"))?;
+            .within(|| refuse!("{path}", path))?;
+        let text =
+            core::str::from_utf8(&bytes).map_err(|_| refuse!("{path} is not UTF-8", path))?;
         let field = |key: &str| -> Result<String> {
             plist_string(text, key)
-                .with_context(|| path.clone())?
-                .with_context(|| format!("{path} has no {key}"))
+                .within(|| refuse!("{path}", path))?
+                .ok_or_else(|| refuse!("{path} has no {key}", path, key).into())
         };
         Ok(Some((
             field("ProductVersion")?,
@@ -535,13 +532,19 @@ fn root_string(tree: &DeviceTree, property: &str) -> Result<String> {
     tree.property("/", property)
         .and_then(|p| p.as_str())
         .map(Into::into)
-        .with_context(|| format!("the DeviceTree root has no {property}"))
+        .ok_or_else(|| refuse!("the DeviceTree root has no {property}", property).into())
 }
 
 fn manifest_id(manifest: Option<&im4m::Manifest>, key: &str) -> Result<Option<u32>> {
     match manifest.and_then(|m| m.property(key)) {
-        Some(im4m::Value::Integer(value)) => Ok(Some(u32::try_from(*value)?)),
-        Some(_) => bail!("boot manifest {key} is not an integer"),
+        Some(im4m::Value::Integer(value)) => Ok(Some(u32::try_from(*value).map_err(|_| {
+            refuse!(
+                "boot manifest {key} {value:#x} exceeds u32",
+                key,
+                value = *value
+            )
+        })?)),
+        Some(_) => Err(refuse!("boot manifest {key} is not an integer", key).into()),
         None => Ok(None),
     }
 }
@@ -573,9 +576,11 @@ pub fn prepare<R: ReadAt>(
     let tree = DeviceTree::parse(&device_tree.bytes)?;
     let product_type = root_string(&tree, "model")?;
     if let Some(wanted) = model {
-        ensure!(
+        require!(
             wanted == product_type,
-            "the disk's recoveryOS is a {product_type}'s, not a {wanted}'s"
+            "the disk's recoveryOS is a {product_type}'s, not a {wanted}'s",
+            product_type,
+            wanted
         );
     }
     let target_type = root_string(&tree, "target-type")?;
@@ -683,19 +688,17 @@ pub fn prepare_disk<R: ReadAt>(
     let mut found = find(source, kind, volume)?;
     let found = match found.len() {
         1 => found.remove(0),
-        0 => bail!("the disk holds no {}", kind.label()),
-        count => bail!(
-            "{count} containers hold a {} (at {}); NVRAM's boot-volume must name one",
-            kind.label(),
-            found
+        0 => return Err(refuse!("the disk holds no {label}", label = kind.label()).into()),
+        count => {
+            let offsets = found
                 .iter()
                 .map(|f| format!("{:#x}", f.offset))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+                .collect::<Vec<_>>();
+            return Err(refuse!("{count} containers hold a {label} (at {offsets}); NVRAM's boot-volume must name one", count, label = kind.label(), offsets = offsets.join(", ")).into());
+        }
     };
     let offset = found.offset;
-    let mut container = Container::open(&mut *source, offset).map_err(|e| anyhow!("{e}"))?;
+    let mut container = Container::open(&mut *source, offset)?;
     let recovered = prepare(&mut container, found, model, options)?;
     Ok((offset, recovered))
 }
@@ -703,6 +706,7 @@ pub fn prepare_disk<R: ReadAt>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use {stela_formats::apfs::object::fletcher64, stela_formats::payload::gpt};
 
     const GROUP: &str = "A304C51B-D22F-4CDD-829D-3E30CB5BD87B";

@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::Result;
 
 #[test]
 fn carveouts_pack_from_the_dram_base_and_the_managed_range_starts_on_a_block() {

@@ -4,9 +4,10 @@
 //! its CPU and `arm-io` pass 0x39600) derives from the template itself, and
 //! the explicit list of rows Stela cannot yet produce. The whole contract,
 //! row by row, is `docs/research/iboot-handoff.md`.
+use crate::Result;
 use crate::{apple_device_tree::DeviceTree, boot_policy::Decision};
 use alloc::{format, string::String, vec, vec::Vec};
-use anyhow::{Result, ensure};
+use stela_contracts::{refuse, require};
 pub use stela_formats::boot_bundle::schema::BootCommand;
 use stela_soc_data::board;
 
@@ -26,7 +27,13 @@ pub fn installed_command(requested: Option<BootCommand>, boot_args: &str) -> Res
             BootCommand::FsbootSafe
         }
         BootCommand::Fsboot | BootCommand::FsbootSafe | BootCommand::PostUpgrade => command,
-        _ => anyhow::bail!("boot command {command:?} does not load an installed macOS System root"),
+        _ => {
+            return Err(refuse!(
+                "boot command {command} does not load an installed macOS System root",
+                command = alloc::format!("{command:?}")
+            )
+            .into());
+        }
     })
 }
 
@@ -48,7 +55,11 @@ pub fn apply_boot_command(
             ],
         ));
     };
-    ensure!(tree.node(CHOSEN).is_some(), "DeviceTree has no {CHOSEN}");
+    require!(
+        tree.node(CHOSEN).is_some(),
+        "DeviceTree has no {CHOSEN}",
+        CHOSEN
+    );
     tree.ensure_child(CHOSEN, "handoff")?;
     let value = u32::from(command as u8).to_le_bytes().to_vec();
     let source = format!(
@@ -253,16 +264,18 @@ pub fn apply_identity(
         );
         return Ok((decisions, gaps));
     };
-    ensure!(ecid != 0, "a machine ECID is nonzero");
+    require!(ecid != 0, "a machine ECID is nonzero");
     let mut fill = |name: &str, value: Vec<u8>, source: String| -> Result<()> {
         let Some(slot) = tree.property(CHOSEN, name) else {
             return Ok(());
         };
-        ensure!(
+        require!(
             slot.value.len() >= value.len(),
-            "{CHOSEN} {name} is {} bytes; iBoot writes {}",
-            slot.value.len(),
-            value.len()
+            "{CHOSEN} {name} is {value_len} bytes; iBoot writes {value_len2}",
+            CHOSEN,
+            name,
+            value_len = slot.value.len(),
+            value_len2 = value.len()
         );
         let mut bytes = slot.value.clone();
         bytes[..value.len()].copy_from_slice(&value);
@@ -386,6 +399,7 @@ pub fn remove_environments(tree: &mut DeviceTree) -> Option<Decision> {
 mod tests {
     use super::*;
     use crate::apple_device_tree::Node;
+    use anyhow::Result;
 
     fn tree() -> DeviceTree {
         let mut tree = DeviceTree {

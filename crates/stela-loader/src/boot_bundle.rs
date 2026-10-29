@@ -10,6 +10,7 @@
 //! with x0 holding the `boot_args` address. `boot_args` values follow m1n1
 //! `_write_boot_args`. The format is specified in
 //! `docs/design/runtime.md#kernel-boot-bundle`.
+use crate::Result;
 use crate::aic;
 use crate::apple_device_tree::DeviceTree;
 use crate::boot_args::{self, BootArgs, Video};
@@ -28,9 +29,7 @@ use crate::nvram;
 use crate::root_selection;
 use crate::soc_variant;
 use crate::trust_cache;
-use anyhow::{Context, Result, bail, ensure};
-use stela_contracts::ctrr;
-use stela_contracts::tag_storage;
+use stela_contracts::{ctrr, refuse, require, tag_storage};
 
 use stela_formats::sha256;
 use stela_soc_data::board;
@@ -133,7 +132,7 @@ impl Inputs<'_> {
             .chip_id
             .map(|chip_id| {
                 stela_soc_data::board::board_dram_base(self.device_tree.bytes, chip_id)
-                    .map_err(anyhow::Error::msg)
+                    .map_err(|reason| refuse!("{reason}", reason).into())
             })
             .transpose()
     }
@@ -263,26 +262,34 @@ fn validate_sptm_region_order(regions: &[Region]) -> Result<()> {
     let mut previous: Option<(&str, u64)> = None;
     for &(name, optional) in SPTM_REGION_ORDER {
         let Some(region) = regions.iter().find(|region| region.name == name) else {
-            ensure!(
+            require!(
                 optional,
-                "SPTM region order: missing required region {name}"
+                "SPTM region order: missing required region {name}",
+                name
             );
             continue;
         };
         let start = region.guest_pa;
         let end = start
             .checked_add(region.memory_bytes)
-            .with_context(|| format!("SPTM region order: {name} range overflows"))?;
+            .ok_or_else(|| refuse!("SPTM region order: {name} range overflows", name))?;
         // The original CMN/CCMN checks reject null/sentinel endpoints.
-        ensure!(
+        require!(
             start > 0 && start < u64::MAX - 1 && end > 0 && end < u64::MAX,
-            "SPTM region order: {name} has invalid range {start:#x}..{end:#x}"
+            "SPTM region order: {name} has invalid range {start:#x}..{end:#x}",
+            name,
+            start,
+            end
         );
         if let Some((previous_name, previous_end)) = previous {
-            ensure!(
+            require!(
                 start == previous_end,
                 "SPTM region order: {name} starts at {start:#x}, not immediately after \
-                 {previous_name} ending at {previous_end:#x}"
+                 {previous_name} ending at {previous_end:#x}",
+                name,
+                start,
+                previous_name,
+                previous_end
             );
         }
         previous = Some((name, end));
@@ -299,25 +306,26 @@ fn sptm_image_span(regions: &[Region]) -> Result<core::ops::Range<u64>> {
         let region = regions
             .iter()
             .find(|region| region.name == name)
-            .with_context(|| format!("SPTM image span: missing region {name}"))?;
+            .ok_or_else(|| refuse!("SPTM image span: missing region {name}", name))?;
         let end = region
             .guest_pa
             .checked_add(region.memory_bytes)
-            .with_context(|| format!("SPTM image span: {name} range overflows"))?;
+            .ok_or_else(|| refuse!("SPTM image span: {name} range overflows", name))?;
         match &mut span {
             None => span = Some(region.guest_pa..end),
             Some(span) => {
-                ensure!(
+                require!(
                     region.guest_pa == span.end,
-                    "SPTM image span: {name} starts at {:#x}, expected {:#x}",
-                    region.guest_pa,
-                    span.end
+                    "SPTM image span: {name} starts at {guest_pa:#x}, expected {end:#x}",
+                    name,
+                    guest_pa = region.guest_pa,
+                    end = span.end
                 );
                 span.end = end;
             }
         }
     }
-    span.context("SPTM image span is empty")
+    span.ok_or(refuse!("SPTM image span is empty").into())
 }
 
 /// The secure kernel's entries, unset: the board has no exclave image
@@ -357,7 +365,7 @@ fn resolve(collection: &KernelCollection, mark: Mark) -> Result<u64> {
     let segment = |name: &str| {
         collection
             .segment(name)
-            .with_context(|| format!("image has no segment {name}"))
+            .ok_or_else(|| refuse!("image has no segment {name}", name))
     };
     Ok(match mark {
         ImageStart => 0,
@@ -380,10 +388,11 @@ impl LoadedImage {
         for split in splits {
             let start = resolve(&collection, split.start)?;
             let end = resolve(&collection, split.end)?;
-            ensure!(
+            require!(
                 start < end && start.is_multiple_of(PAGE_BYTES) && end.is_multiple_of(PAGE_BYTES),
-                "{name}-{} is not a non-empty page-aligned range",
-                split.suffix
+                "{name}-{suffix} is not a non-empty page-aligned range",
+                name,
+                suffix = split.suffix
             );
             pieces.push((format!("{name}-{}", split.suffix), start..end));
         }
@@ -392,15 +401,18 @@ impl LoadedImage {
         sorted.sort_by_key(|r| r.start);
         let mut cursor = 0;
         for range in sorted {
-            ensure!(
+            require!(
                 range.start == cursor,
-                "{name} regions leave a gap or overlap at image offset {cursor:#x}"
+                "{name} regions leave a gap or overlap at image offset {cursor:#x}",
+                name,
+                cursor
             );
             cursor = range.end;
         }
-        ensure!(
+        require!(
             cursor == collection.image_bytes(),
-            "{name} regions do not reach the image end"
+            "{name} regions do not reach the image end",
+            name
         );
         Ok(Self {
             name,
@@ -439,7 +451,8 @@ fn range_value(base: u64, length: u64) -> Vec<u8> {
 
 fn parse_size(text: &str, recipe: &str) -> Result<usize> {
     let digits = text.trim_start_matches("0x");
-    usize::from_str_radix(digits, 16).with_context(|| format!("bad size {text} in {recipe}"))
+    usize::from_str_radix(digits, 16)
+        .map_err(|_| refuse!("bad size {text} in {recipe}", text, recipe).into())
 }
 
 /// The value one recipe alternative yields from the supplied board data.
@@ -452,9 +465,11 @@ fn alternative_value(
         let Some(value) = options.mac_addresses.get(name) else {
             return Ok(None);
         };
-        ensure!(
+        require!(
             value.len() == MAC_ADDRESS_BYTES,
-            "MAC address {name} must be {MAC_ADDRESS_BYTES} bytes"
+            "MAC address {name} must be {MAC_ADDRESS_BYTES} bytes",
+            name,
+            MAC_ADDRESS_BYTES
         );
         return Ok(Some(value.clone()));
     }
@@ -485,9 +500,10 @@ fn alternative_value(
             Some((digits, size)) => (digits, Some(parse_size(size, recipe)?)),
             None => (spec, None),
         };
-        ensure!(
+        require!(
             digits.len().is_multiple_of(2) && digits.bytes().all(|b| b.is_ascii_hexdigit()),
-            "{recipe} does not hold whole hex bytes"
+            "{recipe} does not hold whole hex bytes",
+            recipe
         );
         let mut value: Vec<u8> = digits
             .as_bytes()
@@ -500,16 +516,23 @@ fn alternative_value(
             })
             .collect();
         if let Some(size) = size {
-            ensure!(
+            require!(
                 value.len() <= size,
-                "{recipe} holds {} bytes; it allows {size}",
-                value.len()
+                "{recipe} holds {value_len} bytes; it allows {size}",
+                recipe,
+                value_len = value.len(),
+                size
             );
             value.resize(size, 0);
         }
         return Ok(Some(value));
     }
-    bail!("unknown fill-in source {alternative} in {recipe}")
+    Err(refuse!(
+        "unknown fill-in source {alternative} in {recipe}",
+        alternative,
+        recipe
+    )
+    .into())
 }
 
 /// Resolve every template placeholder as iBoot does: the first recipe
@@ -531,7 +554,7 @@ fn resolve_placeholders(
         }
         let node = tree
             .node_mut(&placeholder.path)
-            .context("placeholder node disappeared")?;
+            .ok_or(refuse!("placeholder node disappeared"))?;
         let resolution = match chosen {
             Some((alternative, value)) => {
                 let bytes = value.len();
@@ -576,7 +599,7 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
 /// [`prepare`], with `ramdisk` moved into the bundle; `inputs` must name no
 /// ramdisk of its own.
 pub fn prepare_owned(inputs: &Inputs, ramdisk: OwnedRamdisk, options: &Options) -> Result<Bundle> {
-    ensure!(
+    require!(
         inputs.ramdisk.is_none(),
         "a bundle has one ramdisk, given both borrowed and owned"
     );
@@ -619,18 +642,20 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     let load_base = options
         .phys_base
         .checked_add(options.load_offset)
-        .context("load base overflows")?;
+        .ok_or(refuse!("load base overflows"))?;
     let (mut regions, top_of_kernel_data) = place(contents, load_base)?;
     validate_sptm_region_order(&regions)?;
-    ensure!(
+    require!(
         top_of_kernel_data <= dram_end,
-        "regions end at {top_of_kernel_data:#x}, past DRAM end {dram_end:#x}"
+        "regions end at {top_of_kernel_data:#x}, past DRAM end {dram_end:#x}",
+        top_of_kernel_data,
+        dram_end
     );
     let region = |name: &str| {
         regions
             .iter()
             .find(|r| r.name == name)
-            .with_context(|| format!("no region {name}"))
+            .ok_or_else(|| refuse!("no region {name}", name))
     };
     let read_only_region = shaped
         .memory_controller
@@ -664,10 +689,10 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         .transpose()?;
     if let Some(object) = &shaped.boot_manifest_object {
         let manifest = region("BootManifest")?;
-        let protected = read_only_region
-            .as_ref()
-            .context("boot manifest publication requires a read-only boot region")?;
-        ensure!(
+        let protected = read_only_region.as_ref().ok_or(refuse!(
+            "boot manifest publication requires a read-only boot region"
+        ))?;
+        require!(
             manifest.guest_pa >= protected.base
                 && manifest.guest_pa + manifest.memory_bytes <= protected.base + protected.bytes,
             "boot manifest lies outside the read-only boot region"
@@ -678,7 +703,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     }
     let tree = &shaped.tree;
     let device_tree = tree.serialize();
-    ensure!(
+    require!(
         device_tree.len() as u64 == device_tree_bytes,
         "DeviceTree size changed after placement"
     );
@@ -752,9 +777,12 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
 fn check_board(manifest: &im4m::Manifest, target: &Target) -> Result<()> {
     for (name, expected) in [("CHIP", target.chip_id), ("BORD", target.board_id)] {
         if let (Some(Value::Integer(found)), Some(expected)) = (manifest.property(name), expected) {
-            ensure!(
+            require!(
                 *found == u64::from(expected),
-                "manifest {name} {found:#x} differs from the identity's {expected:#x}"
+                "manifest {name} {found:#x} differs from the identity's {expected:#x}",
+                name,
+                found = *found,
+                expected
             );
         }
     }

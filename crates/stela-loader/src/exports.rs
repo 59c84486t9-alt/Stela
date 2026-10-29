@@ -1,10 +1,11 @@
 //! Export-trie decoding (dyld `ExportsTrie.cpp`). Regular and absolute symbols,
 //! including weak definitions; re-exports, TLV and resolvers are errors.
 use super::load_plan::{LoadPlan, Payload};
-use anyhow::{Context, Result, bail, ensure};
+use crate::Result;
 use object::macho;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use stela_contracts::{refuse, require};
 
 const MAX_TRIE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_VISITS: usize = 65_536;
@@ -51,76 +52,77 @@ fn uleb(bytes: &[u8], cursor: &mut usize) -> Result<u64> {
     for index in 0..10 {
         let byte = *bytes
             .get(*cursor)
-            .context("truncated export-trie ULEB128")?;
+            .ok_or(refuse!("truncated export-trie ULEB128"))?;
         *cursor += 1;
         let part = u64::from(byte & 0x7f);
-        ensure!(index != 9 || part <= 1, "export-trie ULEB128 overflows u64");
+        require!(index != 9 || part <= 1, "export-trie ULEB128 overflows u64");
         value |= part << (index * 7);
         if byte & 0x80 == 0 {
-            ensure!(index == 0 || part != 0, "noncanonical export-trie ULEB128");
+            require!(index == 0 || part != 0, "noncanonical export-trie ULEB128");
             return Ok(value);
         }
     }
-    bail!("export-trie ULEB128 exceeds ten bytes")
+    Err(refuse!("export-trie ULEB128 exceeds ten bytes").into())
 }
 
 fn insert_node_range(ranges: &mut BTreeMap<usize, usize>, start: usize, end: usize) -> Result<()> {
     if let Some((_, previous_end)) = ranges.range(..=start).next_back() {
-        ensure!(*previous_end <= start, "overlapping export-trie node bytes");
+        require!(*previous_end <= start, "overlapping export-trie node bytes");
     }
     if let Some((next_start, _)) = ranges.range(start..).next() {
-        ensure!(end <= *next_start, "overlapping export-trie node bytes");
+        require!(end <= *next_start, "overlapping export-trie node bytes");
     }
     ranges.insert(start, end);
     Ok(())
 }
 
 fn node(bytes: &[u8], offset: usize, ranges: &mut BTreeMap<usize, usize>) -> Result<Node> {
-    ensure!(
+    require!(
         offset < bytes.len(),
         "export-trie node offset exceeds payload"
     );
     if let Some((_, end)) = ranges.range(..=offset).next_back() {
-        ensure!(
+        require!(
             *end <= offset,
             "export-trie node starts inside another node"
         );
     }
     let mut cursor = offset;
-    let terminal_size = usize::try_from(uleb(bytes, &mut cursor)?)?;
+    let terminal_size = uleb(bytes, &mut cursor)? as usize;
     let terminal_end = cursor
         .checked_add(terminal_size)
-        .context("export-trie terminal size overflow")?;
+        .ok_or(refuse!("export-trie terminal size overflow"))?;
     let terminal_bytes = bytes
         .get(cursor..terminal_end)
-        .context("export-trie terminal exceeds payload")?;
+        .ok_or(refuse!("export-trie terminal exceeds payload"))?;
     let terminal = if terminal_size == 0 {
         None
     } else {
         let mut at = 0;
         let flags = uleb(terminal_bytes, &mut at)?;
-        ensure!(
+        require!(
             flags & REEXPORT == 0,
             "unsupported reexport requires dependency/name resolution"
         );
-        ensure!(
+        require!(
             flags & STUB_AND_RESOLVER == 0,
             "unsupported stub/resolver export requires resolver execution"
         );
-        ensure!(
+        require!(
             flags & !(KIND_MASK | WEAK_DEFINITION) == 0,
-            "unsupported export flags {flags:#x}"
+            "unsupported export flags {flags:#x}",
+            flags
         );
-        ensure!(
+        require!(
             flags & KIND_MASK != KIND_THREAD_LOCAL,
             "unsupported thread-local export requires TLV setup"
         );
-        ensure!(
+        require!(
             flags & KIND_MASK != KIND_RESERVED,
             "unsupported export kind"
         );
         let value = uleb(terminal_bytes, &mut at)?;
-        ensure!(
+        require!(
             at == terminal_bytes.len(),
             "unexpected trailing export terminal bytes"
         );
@@ -130,7 +132,7 @@ fn node(bytes: &[u8], offset: usize, ranges: &mut BTreeMap<usize, usize>) -> Res
     let children = usize::from(
         *bytes
             .get(cursor)
-            .context("missing export-trie child count")?,
+            .ok_or(refuse!("missing export-trie child count"))?,
     );
     cursor += 1;
     let mut edges = Vec::with_capacity(children);
@@ -140,12 +142,12 @@ fn node(bytes: &[u8], offset: usize, ranges: &mut BTreeMap<usize, usize>) -> Res
             .iter()
             .take(MAX_NAME_BYTES + 1)
             .position(|&byte| byte == 0)
-            .context("unterminated or excessive export-trie edge name")?;
-        ensure!(length > 0, "empty export-trie edge name");
+            .ok_or(refuse!("unterminated or excessive export-trie edge name"))?;
+        require!(length > 0, "empty export-trie edge name");
         let label = tail[..length].to_vec();
         cursor += length + 1;
-        let target = usize::try_from(uleb(bytes, &mut cursor)?)?;
-        ensure!(
+        let target = uleb(bytes, &mut cursor)? as usize;
+        require!(
             target > 0 && target < bytes.len(),
             "export-trie child offset is zero or exceeds payload"
         );
@@ -155,7 +157,7 @@ fn node(bytes: &[u8], offset: usize, ranges: &mut BTreeMap<usize, usize>) -> Res
     // be disjoint: a shorter matching sibling would make lookup ambiguous.
     edges.sort_by(|a, b| a.0.cmp(&b.0));
     for pair in edges.windows(2) {
-        ensure!(
+        require!(
             !pair[1].0.starts_with(&pair[0].0),
             "duplicate or prefix-ambiguous export-trie edges"
         );
@@ -165,22 +167,20 @@ fn node(bytes: &[u8], offset: usize, ranges: &mut BTreeMap<usize, usize>) -> Res
 }
 
 fn payload_bytes<'a>(data: &'a [u8], source: &Payload) -> Result<&'a [u8]> {
-    ensure!(
+    require!(
         source.file.bytes <= MAX_TRIE_BYTES as u64,
         "export trie exceeds payload limit"
     );
-    let start = usize::try_from(source.file.offset)?;
-    let end = usize::try_from(
-        source
-            .file
-            .offset
-            .checked_add(source.file.bytes)
-            .context("export payload extent overflow")?,
-    )?;
+    let start = source.file.offset as usize;
+    let end = source
+        .file
+        .offset
+        .checked_add(source.file.bytes)
+        .ok_or(refuse!("export payload extent overflow"))? as usize;
     let bytes = data
         .get(start..end)
-        .context("export payload exceeds image")?;
-    ensure!(
+        .ok_or(refuse!("export payload exceeds image"))?;
+    require!(
         source.sha256 == stela_formats::sha256(bytes),
         "export payload differs from load plan"
     );
@@ -190,7 +190,7 @@ fn payload_bytes<'a>(data: &'a [u8], source: &Payload) -> Result<&'a [u8]> {
 fn regular_address(image: &LoadPlan, preferred: u64, loaded: u64, value: u64) -> Result<u64> {
     let offset = i128::from(value as i64);
     let original = u64::try_from(i128::from(preferred) + offset)
-        .context("regular export preferred address overflow")?;
+        .map_err(|_| refuse!("regular export preferred address overflow"))?;
     let covered = image
         .segments
         .iter()
@@ -199,7 +199,7 @@ fn regular_address(image: &LoadPlan, preferred: u64, loaded: u64, value: u64) ->
                 .guest
                 .address
                 .checked_add(segment.guest.bytes)
-                .context("export segment extent overflow")?;
+                .ok_or(refuse!("export segment extent overflow"))?;
             // Stored one-past pointers are permitted; they do not authorize a
             // dereference. Unreserved noaccess guards are never export coverage.
             Ok(found
@@ -208,11 +208,12 @@ fn regular_address(image: &LoadPlan, preferred: u64, loaded: u64, value: u64) ->
                     && segment.guest.address <= original
                     && original <= end))
         })?;
-    ensure!(
+    require!(
         covered,
         "regular export points outside declared image segments"
     );
-    u64::try_from(i128::from(loaded) + offset).context("regular export loaded address overflow")
+    u64::try_from(i128::from(loaded) + offset)
+        .map_err(|_| refuse!("regular export loaded address overflow").into())
 }
 
 /// Parse a modern or legacy export trie. Regular offsets are signed 64-bit
@@ -220,7 +221,7 @@ fn regular_address(image: &LoadPlan, preferred: u64, loaded: u64, value: u64) ->
 /// are allowed; cycles, overlapping nodes and ambiguous edges are errors. Work,
 /// payload size and total name length are bounded.
 pub fn parse(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<Vec<Export>> {
-    ensure!(
+    require!(
         image.slice_bytes == data.len() as u64 && image.slice_sha256 == stela_formats::sha256(data),
         "export image identity differs from load plan"
     );
@@ -235,14 +236,14 @@ pub fn parse(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<Vec<Export
         }
         match source.role.as_str() {
             "exports_trie" => {
-                ensure!(
+                require!(
                     source.command == macho::LC_DYLD_EXPORTS_TRIE && !modern,
                     "duplicate or mismatched modern export payload"
                 );
                 modern = true;
             }
             "export" => {
-                ensure!(
+                require!(
                     matches!(
                         source.command,
                         macho::LC_DYLD_INFO | macho::LC_DYLD_INFO_ONLY
@@ -251,11 +252,11 @@ pub fn parse(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<Vec<Export
                 );
                 legacy = true;
             }
-            _ => bail!("export payload command/role mismatch"),
+            _ => return Err(refuse!("export payload command/role mismatch").into()),
         }
         let bytes = payload_bytes(data, source)?;
         if !bytes.is_empty() {
-            ensure!(selected.is_none(), "conflicting nonempty export tries");
+            require!(selected.is_none(), "conflicting nonempty export tries");
             selected = Some(bytes);
         }
     }
@@ -267,7 +268,7 @@ pub fn parse(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<Vec<Export
         .iter()
         .filter(|segment| segment.name == "__TEXT")
         .collect();
-    ensure!(
+    require!(
         preferred.len() == 1,
         "exports require one preferred __TEXT base"
     );
@@ -292,7 +293,7 @@ pub fn parse(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<Vec<Export
 
 /// Decode every terminal, sorted by name.
 fn decode_trie(bytes: &[u8]) -> Result<Vec<(String, Terminal)>> {
-    ensure!(
+    require!(
         bytes.len() <= MAX_TRIE_BYTES,
         "export trie exceeds payload limit"
     );
@@ -315,39 +316,39 @@ fn decode_trie(bytes: &[u8]) -> Result<Vec<(String, Terminal)>> {
             }
             Action::Visit { offset, name } => (offset, name),
         };
-        ensure!(active.insert(offset), "cyclic export trie");
+        require!(active.insert(offset), "cyclic export trie");
         if let std::collections::btree_map::Entry::Vacant(entry) = nodes.entry(offset) {
             let parsed = node(bytes, offset, &mut ranges)?;
             entry.insert(parsed);
         }
         let current = &nodes[&offset];
         if let Some(terminal) = current.terminal {
-            ensure!(!name.is_empty(), "empty exported symbol name");
+            require!(!name.is_empty(), "empty exported symbol name");
             let name = std::str::from_utf8(&name)
-                .context("unsupported non-UTF-8 export name")?
+                .map_err(|_| refuse!("unsupported non-UTF-8 export name"))?
                 .to_owned();
-            ensure!(names.insert(name.clone()), "duplicate exported symbol name");
+            require!(names.insert(name.clone()), "duplicate exported symbol name");
             exports.push((name, terminal));
         }
         actions.push(Action::Leave(offset));
         for (label, child) in current.edges.iter().rev() {
             scheduled += 1;
-            ensure!(
+            require!(
                 scheduled <= MAX_VISITS,
                 "export-trie traversal exceeds visit limit"
             );
             let length = name
                 .len()
                 .checked_add(label.len())
-                .context("export name length overflow")?;
-            ensure!(
+                .ok_or(refuse!("export name length overflow"))?;
+            require!(
                 length <= MAX_NAME_BYTES,
                 "export symbol name exceeds length limit"
             );
             copied_name_bytes = copied_name_bytes
                 .checked_add(length)
-                .context("export names size overflow")?;
-            ensure!(
+                .ok_or(refuse!("export names size overflow"))?;
+            require!(
                 copied_name_bytes <= MAX_TOTAL_NAME_BYTES,
                 "export-trie cumulative names exceed limit"
             );

@@ -69,6 +69,15 @@ impl core::fmt::Display for PrebootError {
     }
 }
 
+impl core::error::Error for PrebootError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Apfs(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 impl From<ApfsError> for PrebootError {
     fn from(error: ApfsError) -> Self {
         Self::Apfs(error)

@@ -3,9 +3,10 @@
 //! A provenance claim is held, not automatically certified. This byte-level
 //! operation does not check policy values, entropy, vendor trust or RUN.
 use super::{Plan, Staged, digest, label, macho::file_bytes};
+use crate::Result;
 use alloc::{collections::BTreeSet, string::String, vec::Vec};
-use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+use stela_contracts::{refuse, require};
 use stela_formats::sha256;
 
 pub mod arguments;
@@ -23,7 +24,7 @@ pub struct Provenance {
 }
 impl Provenance {
     pub(super) fn validate(&self) -> Result<()> {
-        ensure!(
+        require!(
             digest(&self.input_sha256) && digest(&self.span_sha256) && label(&self.coordinates),
             "invalid coprocessor policy provenance"
         );
@@ -50,19 +51,19 @@ pub(super) fn source_record(staged: &Staged, tag: u32) -> Result<(&Record, &[u8]
         .plan()
         .patchbay
         .as_ref()
-        .context("native policy requires an original patchbay")?;
+        .ok_or(refuse!("native policy requires an original patchbay"))?;
     let record = bay
         .records
         .iter()
         .find(|r| r.tag == tag)
-        .context("native policy requires an original patchbay tag")?;
-    let at = usize::try_from(record.image_offset)?;
+        .ok_or(refuse!("native policy requires an original patchbay tag"))?;
+    let at = record.image_offset as usize;
     let raw = staged
         .bytes()
         .get(at..)
         .and_then(|tail| tail.get(..record.bytes as usize))
-        .context("native policy record exceeds owned source bytes")?;
-    ensure!(
+        .ok_or(refuse!("native policy record exceeds owned source bytes"))?;
+    require!(
         sha256(raw) == record.source_sha256,
         "native policy record differs from original source"
     );
@@ -73,11 +74,11 @@ pub(super) fn parse(data: &[u8], plan: &Plan) -> Result<Option<Patchbay>> {
     let Some(section) = matches.next() else {
         return Ok(None);
     };
-    ensure!(
+    require!(
         matches.next().is_none(),
         "duplicate firmware patchbay section"
     );
-    ensure!(
+    require!(
         section.flags & 0xff == 0,
         "firmware patchbay must be an original regular file-backed section"
     );
@@ -89,20 +90,22 @@ pub(super) fn parse(data: &[u8], plan: &Plan) -> Result<Option<Patchbay>> {
         let header = raw
             .get(at..)
             .and_then(|tail| tail.get(..8))
-            .context("truncated firmware patchbay record header")?;
-        let tag = u32::from_le_bytes(header[..4].try_into()?);
-        let bytes = u32::from_le_bytes(header[4..].try_into()?);
-        ensure!(
+            .ok_or(refuse!("truncated firmware patchbay record header"))?;
+        let tag = u32::from_le_bytes(header[..4].try_into().unwrap());
+        let bytes = u32::from_le_bytes(header[4..].try_into().unwrap());
+        require!(
             records.len() < 4096 && tags.insert(tag),
             "invalid or repeated firmware patchbay tag"
         );
-        let start = at.checked_add(8).context("patchbay header overflows")?;
+        let start = at
+            .checked_add(8)
+            .ok_or(refuse!("patchbay header overflows"))?;
         let end = start
             .checked_add(bytes as usize)
-            .context("patchbay value overflows")?;
+            .ok_or(refuse!("patchbay value overflows"))?;
         let value = raw
             .get(start..end)
-            .context("firmware patchbay value exceeds its section")?;
+            .ok_or(refuse!("firmware patchbay value exceeds its section"))?;
         records.push(Record {
             tag,
             source_file_offset: section.file_offset + start as u64,
@@ -186,8 +189,8 @@ impl Staged {
         let bay = plan
             .patchbay
             .as_ref()
-            .context("firmware image has no qualified patchbay")?;
-        ensure!(
+            .ok_or(refuse!("firmware image has no qualified patchbay"))?;
+        require!(
             label(&policy.owner)
                 && policy.product_build == plan.product_build
                 && policy.hardware_role == plan.hardware.role
@@ -196,7 +199,7 @@ impl Staged {
                 && policy.patchbay_sha256 == bay.source_sha256,
             "firmware configuration policy is not bound to this source/build/hardware"
         );
-        ensure!(
+        require!(
             policy.fields.len() == bay.records.len(),
             "firmware policy does not cover the complete patchbay"
         );
@@ -205,12 +208,12 @@ impl Staged {
         let mut changes = Vec::new();
         for field in policy.fields {
             field.provenance.validate()?;
-            ensure!(tags.insert(field.tag), "duplicate firmware policy decision");
+            require!(tags.insert(field.tag), "duplicate firmware policy decision");
             let record = bay
                 .records
                 .iter()
                 .find(|r| r.tag == field.tag)
-                .context("firmware policy names absent tag")?;
+                .ok_or(refuse!("firmware policy names absent tag"))?;
             let decision = if matches!(field.action, Action::Replace(_)) {
                 Decision::Replace
             } else {
@@ -219,13 +222,13 @@ impl Staged {
             let hash = match field.action {
                 Action::Preserve => record.source_sha256.clone(),
                 Action::Replace(value) => {
-                    ensure!(
+                    require!(
                         value.len() == record.bytes as usize,
                         "firmware patch width disagrees with original record"
                     );
                     let start = record.image_offset;
                     let end = start + u64::from(record.bytes);
-                    ensure!(
+                    require!(
                         record.bytes == 0
                             || !plan
                                 .chains
@@ -301,6 +304,7 @@ pub(super) mod tests {
         tests::{fixture, prepare, w32, w64},
     };
     use alloc::vec;
+    use anyhow::Result;
     use configuration_root::configuration;
 
     pub(in crate::coprocessor) fn config_policy(plan: &Plan) -> configuration::Policy {
@@ -337,7 +341,7 @@ pub(super) mod tests {
     pub(in crate::coprocessor) fn configured() -> Result<configuration::Configured> {
         let p = prepare(&fixture())?;
         let policy = config_policy(p.plan());
-        p.stage(0x800000, 0x3000)?.configure(policy)
+        Ok(p.stage(0x800000, 0x3000)?.configure(policy)?)
     }
 
     #[test]
