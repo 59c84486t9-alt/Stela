@@ -370,6 +370,8 @@ static SUITES: &[SupportedCipherSuite] = &[
 ];
 #[derive(Debug)]
 pub enum PolicyError {
+    Utc(crate::time::TimeError),
+    Verifier(rustls::client::VerifierBuilderError),
     TimeUnavailable,
     TrustUnavailable,
     Configuration(Error),

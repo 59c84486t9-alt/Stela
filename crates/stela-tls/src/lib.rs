@@ -8,6 +8,7 @@ mod allocator;
 mod backend;
 pub mod channel;
 mod provider;
+pub mod time;
 mod verification;
 use backend::{Digest, Entropy, Error, Group, Key};
 pub use provider::{EntropySource, PolicyError, ProviderOwner, client_config};

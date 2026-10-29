@@ -79,6 +79,7 @@ struct Case<'a> {
     name: &'a str,
     trusted: bool,
     time: u64,
+    interval: Option<(u64, u64)>,
     tamper: bool,
     suite: Option<rustls::CipherSuite>,
 }
@@ -92,6 +93,7 @@ impl Default for Case<'_> {
             name: "localhost",
             trusted: true,
             time: now(),
+            interval: None,
             tamper: false,
             suite: None,
         }
@@ -106,6 +108,7 @@ fn exchange(case: Case<'_>) -> Result<Vec<u8>, ChannelError> {
         name,
         trusted,
         time,
+        interval,
         tamper,
         suite,
     } = case;
@@ -118,7 +121,25 @@ fn exchange(case: Case<'_>) -> Result<Vec<u8>, ChannelError> {
             certs(!rsa).0
         }))
         .unwrap();
-    let config = client_config(owner(), Arc::new(Clock(Some(time))), roots).unwrap();
+    let config = if let Some((earliest, latest)) = interval {
+        #[derive(Debug)]
+        struct Fixed(crate::time::UtcInterval);
+        impl crate::time::UtcSource for Fixed {
+            fn interval(&self) -> Result<crate::time::UtcInterval, crate::time::TimeError> {
+                Ok(self.0)
+            }
+        }
+        crate::time::client_config_with_roots(
+            owner(),
+            Arc::new(Fixed(
+                crate::time::UtcInterval::new(earliest, latest).unwrap(),
+            )),
+            roots,
+        )
+        .unwrap()
+    } else {
+        client_config(owner(), Arc::new(Clock(Some(time))), roots).unwrap()
+    };
     let name = ServerName::try_from(alloc::string::String::from(name)).unwrap();
     let mut client = Channel::new(config, name)?;
     let mut provider = rustls::crypto::ring::default_provider();
@@ -514,4 +535,36 @@ fn loss_of_time_admission_clears_pending_records_and_permanently_refuses_the_cha
         channel.advance(&[]),
         Err(ChannelError::TimeUnavailable)
     ));
+}
+
+#[cfg(feature = "native-reference-peer")]
+#[test]
+fn utc_interval_verification_survives_real_tls12_and_tls13_handshakes() {
+    let _serial = SERIAL.lock().unwrap();
+    initialize();
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for rsa in [false, true] {
+            assert!(
+                !exchange(Case {
+                    version,
+                    rsa,
+                    interval: Some((now() - 86_400, now() + 86_400)),
+                    ..Case::default()
+                })
+                .unwrap()
+                .is_empty()
+            );
+            for interval in [(1_735_689_600, now()), (now(), 1_830_297_600)] {
+                assert!(matches!(
+                    exchange(Case {
+                        version,
+                        rsa,
+                        interval: Some(interval),
+                        ..Case::default()
+                    }),
+                    Err(ChannelError::Tls(rustls::Error::InvalidCertificate(_)))
+                ));
+            }
+        }
+    }
 }

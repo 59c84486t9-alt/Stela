@@ -1,0 +1,12 @@
+{
+  "generator": "Python cryptography46.0.5 deterministic ECDSA P256 SHA256",
+  "purpose": "One synthetic issuer key/subject with alternate disjoint, overlapping, or covering validity paths",
+  "sha256": {
+    "cover.der": "418317d74aabaf5b0f99527ac8643a35b33cdc9aa7d1a01ca9ec90c0f4fdab46",
+    "early.der": "7b29c6423734ed8bd84ac2db405d5d4ad9423f09b51998a45db3a0f9efb2df44",
+    "late.der": "21e0781187dc3fdfcd44ff8e1b77474710a3fe384861d1817b271fdfdb357aba",
+    "leaf.der": "3d2dc16abe2b8002fc54da7307396d77763dcf09278d1c08d138bc30d658f2ca",
+    "overlap.der": "8a0fc10a7852b9cc64035469a327c9b0d7fab13edaaa26b2f702289874115fc6",
+    "root.der": "6469f9b510be0fd2f4e136d5b759b6b4dece0fe1ff93ac07ab89c7b9179380da"
+  }
+}
