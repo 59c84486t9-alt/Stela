@@ -332,9 +332,11 @@ barriers_and_fences_follow_their_flags(void)
    check_barrier("declare void @air.wg.barrier(i32, i32) convergent\n",
                  "call void @air.wg.barrier(i32 1, i32 1) convergent",
                  SCOPE_WORKGROUP, SCOPE_WORKGROUP, device);
-   check_barrier("declare void @air.simdgroup.barrier(i32, i32) convergent\n",
-                 "call void @air.simdgroup.barrier(i32 2, i32 1) convergent",
-                 SCOPE_SUBGROUP, SCOPE_WORKGROUP, nir_var_mem_shared);
+   const char *simdgroup = "declare void @air.simdgroup.barrier(i32, i32) convergent\n";
+   check_barrier(simdgroup, "call void @air.simdgroup.barrier(i32 2, i32 4) convergent",
+                 SCOPE_SUBGROUP, SCOPE_SUBGROUP, nir_var_mem_shared);
+   check_barrier(simdgroup, "call void @air.simdgroup.barrier(i32 0, i32 4) convergent",
+                 SCOPE_SUBGROUP, SCOPE_NONE, 0);
    const char *fence = "declare void @air.atomic.fence(i32, i32, i32)\n";
    check_barrier(fence, "call void @air.atomic.fence(i32 1, i32 5, i32 2)", SCOPE_NONE, SCOPE_DEVICE,
                  device);
@@ -346,6 +348,7 @@ barriers_and_fences_follow_their_flags(void)
       {threadgroup, "call void @air.wg.barrier(i32 8, i32 5, i32 1) convergent"},
       {threadgroup, "call void @air.wg.barrier(i32 2, i32 0, i32 1) convergent"},
       {threadgroup, "call void @air.wg.barrier(i32 2, i32 5, i32 2) convergent"},
+      {simdgroup, "call void @air.simdgroup.barrier(i32 2, i32 1) convergent"},
       {"declare void @air.wg.barrier(i32, i32, i32)\n", "call void @air.wg.barrier(i32 2, i32 5, i32 1)"},
       {fence, "call void @air.atomic.fence(i32 1, i32 2, i32 2)"},
       {fence, "call void @air.atomic.fence(i32 1, i32 5, i32 0)"},

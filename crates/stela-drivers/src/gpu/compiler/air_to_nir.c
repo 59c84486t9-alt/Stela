@@ -2857,13 +2857,13 @@ air_atomic_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, co
    return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR atomic function");
 }
 
-/* AIR's barriers and fences, with DXMT's memory flags: 1 device, 2
- * threadgroup and 4 texture memory. A barrier is (flags, scope), as DXMT
- * emits, or (flags, order, scope), as the observed Apple compiler emits; a
- * fence is (flags, order, scope). Orders are C++'s, 0 relaxed and 5
- * sequentially consistent, which NIR's acquire-release barrier implements as
- * SPIR-V's does. Scopes are 1 threadgroup, 2 device and 4 SIMD-group; barriers
- * take only the threadgroup scope both sources record. */
+/* AIR's barriers and fences, with memory flags 1 device, 2 threadgroup and 4
+ * texture memory. A barrier is (flags, scope), as Apple's compiler emits, or
+ * (flags, order, scope); a fence is (flags, order, scope). Orders are C++'s,
+ * 0 relaxed and 5 sequentially consistent, which NIR's acquire-release
+ * barrier implements as SPIR-V's does. Scopes are 1 threadgroup, 2 device and
+ * 4 SIMD-group; a barrier takes its own: threadgroup_barrier the threadgroup,
+ * simdgroup_barrier the SIMD-group. */
 static bool
 synchronization_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee,
                      const char *name, size_t length, bool *lowered)
@@ -2906,7 +2906,8 @@ synchronization_call(struct translator *t, LLVMValueRef inst, LLVMValueRef calle
    }
    unsigned flags = values[0], order = count == 3 ? values[1] : 5, scope = values[count - 1];
    if (flags & ~7u || (kind == FENCE ? order != 0 && order != 5 : order != 5) ||
-       (kind == FENCE ? scope != 1 && scope != 2 && scope != 4 : scope != 1))
+       (kind == FENCE ? scope != 1 && scope != 2 && scope != 4 :
+                        scope != (kind == THREADGROUP_BARRIER ? 1u : 4u)))
       return fail(t, STELA_AIR_INSTRUCTION, "unsupported barrier or fence memory flags/order/scope");
    nir_variable_mode modes = (flags & 1 ? nir_var_mem_ssbo | nir_var_mem_global : 0) |
                              (flags & 2 ? nir_var_mem_shared : 0) | (flags & 4 ? nir_var_image : 0);
