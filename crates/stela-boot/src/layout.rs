@@ -36,6 +36,7 @@ const BOUNCE: u64 = 0x4_0000_0000;
 // 0x5/0x6 windows belong to MMIO and scoped RAM-publication diagnostics.
 const INVOCATION_STACKS: u64 = 0x7_0000_0000;
 const TASK_STACKS: u64 = 0x8_0000_0000;
+const PROTOTYPE_TASK_STACKS: u64 = 0x9_0000_0000;
 
 /// The four-level slices below `U`, or zero under LA57.
 static SLICES: AtomicU8 = AtomicU8::new(0);
@@ -106,6 +107,10 @@ pub fn invocation_stacks() -> u64 {
 }
 pub fn task_stacks() -> u64 {
     window() + TASK_STACKS
+}
+
+pub fn prototype_task_stacks() -> u64 {
+    window() + PROTOTYPE_TASK_STACKS
 }
 
 pub fn code() -> u64 {

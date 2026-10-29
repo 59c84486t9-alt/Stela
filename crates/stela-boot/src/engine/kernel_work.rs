@@ -15,7 +15,7 @@ use core::{
     cell::{Cell, UnsafeCell},
     ffi::c_void,
     ops::Range,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use stela_boot_core::guarded_stacks::mappings;
 use stela_drivers::{
@@ -26,6 +26,13 @@ use stela_drivers::{
 const SLOTS: usize = 64;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 static CLAIMED: AtomicBool = AtomicBool::new(false);
+static PROTOTYPE_CLAIMED: AtomicBool = AtomicBool::new(false);
+mod plan;
+use plan::Plan;
+#[cfg(feature = "diagnostics")]
+mod prototype;
+#[cfg(feature = "diagnostics")]
+pub(super) use prototype::check as check_mixed;
 #[derive(Debug)]
 pub(super) enum Error {
     Inventory,
@@ -62,6 +69,7 @@ struct Reservation {
     _wire: &'static native_mmio::Wire,
     _handoff: &'static Handoff,
     _physical: Region,
+    released_stack_views: AtomicUsize,
 }
 struct Backing {
     _reservation: Arc<Reservation>,
@@ -80,6 +88,15 @@ unsafe impl StackBacking for Backing {
     }
     fn guard(&self) -> Range<usize> {
         self.guard.clone()
+    }
+}
+impl Drop for Backing {
+    fn drop(&mut self) {
+        // This retires one view only. Its raw loader allocation/root mapping
+        // remains owned for the whole boot; no physical reclaim is inferred.
+        self._reservation
+            .released_stack_views
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 struct NativeCpu {
@@ -170,6 +187,18 @@ impl KernelWork {
         handoff: &'static Handoff,
         owner: &mut HostOwner,
     ) -> Result<Self, Error> {
+        // SAFETY: original caller's actual handoff/owner/stack lifetime contract.
+        unsafe { Self::prepare_plan(handoff, owner, Plan::uniform(handoff)) }
+    }
+    /// # Safety
+    /// Same actual original handoff/owner contract as prepare. A Plan describes
+    /// only layout; it cannot supply allocation, root or execution authority.
+    unsafe fn prepare_plan(
+        handoff: &'static Handoff,
+        owner: &mut HostOwner,
+        plan: Plan,
+    ) -> Result<Self, Error> {
+        plan.validate(handoff)?;
         // SAFETY: inherited genuine handoff/physmap lifetime and sealed capture.
         let wire = unsafe { native_mmio::captured(handoff) }.map_err(|_| Error::Inventory)?;
         let identity = owner.root_identity().map_err(Error::Work)?;
@@ -184,9 +213,9 @@ impl KernelWork {
         if handoff.tsc_hz < 1_000_000 {
             return Err(Error::Clock);
         }
-        let geometry = native_smp::resources::task_stacks();
-        let region = handoff.native_resources.tasks;
-        if region.bytes != geometry.physical_bytes()
+        let region = plan.region();
+        if region.physical == 0
+            || region.bytes != plan.raw_bytes()
             || !wire.loader_ram(region.physical, region.bytes)
         {
             return Err(Error::Inventory);
@@ -195,41 +224,47 @@ impl KernelWork {
         let _root = unsafe { RestoreRoot::enter(handoff.root) };
         let mut spans = Vec::new();
         spans
-            .try_reserve_exact(geometry.count())
+            .try_reserve_exact(plan.count())
             .map_err(|_| Error::Allocation)?;
-        for index in 0..geometry.count() {
-            let slot = geometry
-                .slot(layout::task_stacks(), index)
-                .map_err(|_| Error::Geometry)?;
-            let physical = region.physical
-                + geometry
-                    .physical_offset(index)
-                    .map_err(|_| Error::Geometry)?;
+        let mut previous = plan.virtual_range().start;
+        let mut read = |table, index| {
+            if !wire.table_owned(table) {
+                return None;
+            }
+            // SAFETY: actual sealed retained LoaderData table; walker bounds
+            // index to0..512 and this root exclusion admits no table writer.
+            Some(unsafe {
+                (layout::physical(table) as *const u64)
+                    .add(index)
+                    .read_volatile()
+            })
+        };
+        for index in 0..plan.count() {
+            let (slot, physical) = plan.slot(index)?;
+            if plan.mixed() {
+                mappings::absent(
+                    previous..slot.usable.start,
+                    identity.root_pages(),
+                    wire.levels(),
+                    &mut read,
+                )
+                .map_err(Error::Mapping)?;
+            }
+            previous = slot.usable.end;
             mappings::qualify(
                 &slot,
                 physical,
                 identity.root_pages(),
                 wire.levels(),
                 snapshot.pat,
-                |table, index| {
-                    if !wire.table_owned(table) {
-                        return None;
-                    }
-                    // SAFETY: actual sealed LOADER_DATA table page, retained through
-                    // the physmap; walker bounds index to0..512. No table writer runs.
-                    Some(unsafe {
-                        (layout::physical(table) as *const u64)
-                            .add(index)
-                            .read_volatile()
-                    })
-                },
+                &mut read,
             )
             .map_err(Error::Mapping)?;
             // Qualify every physical slot, not merely the first MTRR interval.
             crate::native_memory::cache::verify_writeback(
                 slot.usable.start,
                 physical,
-                native_smp::resources::TASK_STACK_BYTES as usize,
+                (slot.usable.end - slot.usable.start) as usize,
                 layout::physical(0),
             )
             .map_err(Error::Cache)?;
@@ -240,7 +275,28 @@ impl KernelWork {
                     ..usize::try_from(slot.lower_guard.end).map_err(|_| Error::Geometry)?,
             ));
         }
-        CLAIMED
+        if plan.mixed() {
+            mappings::absent(
+                previous..plan.virtual_range().end,
+                identity.root_pages(),
+                wire.levels(),
+                &mut read,
+            )
+            .map_err(Error::Mapping)?;
+            crate::native_memory::cache::verify_writeback(
+                layout::physical(region.physical),
+                region.physical,
+                region.bytes as usize,
+                layout::physical(0),
+            )
+            .map_err(Error::Cache)?;
+        }
+        let claimed = if plan.mixed() {
+            &PROTOTYPE_CLAIMED
+        } else {
+            &CLAIMED
+        };
+        claimed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Error::AlreadyOwned)?;
         // A failed/uncertain admission intentionally never reuses this pool.
@@ -249,6 +305,7 @@ impl KernelWork {
             _wire: wire,
             _handoff: handoff,
             _physical: region,
+            released_stack_views: AtomicUsize::new(0),
         });
         let clock = Clock {
             ticks_per_microsecond: handoff.tsc_hz / 1_000_000,
@@ -276,7 +333,19 @@ impl KernelWork {
         // outlive this boot, and no producer is published by construction.
         let queue =
             unsafe { Queue::<SLOTS>::new(cpu.clone(), reservation) }.map_err(Error::Work)?;
-        let executor = Executor::new_with_services(queue, stacks).map_err(Error::Work)?;
+        let executor = if plan.mixed() {
+            Executor::new_with_profile(
+                queue,
+                stacks,
+                work::ReservationPolicy::NativeFirmware32Protected {
+                    gpe: work::GpeQueueBudget::QUALIFICATION,
+                },
+                plan::profile()?,
+            )
+            .map_err(Error::Work)?
+        } else {
+            Executor::new_with_services(queue, stacks).map_err(Error::Work)?
+        };
         let result = Self {
             executor,
             _cpu: cpu,

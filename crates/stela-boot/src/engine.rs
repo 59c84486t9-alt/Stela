@@ -1705,7 +1705,7 @@ struct InstalledHost {
 
 /// Install the boot processor's host state over `ram`, and run the bounded
 /// diagnostics that stop on it.
-fn install_host(handoff: &Handoff, options: &Options, ram: &[RamRange]) -> InstalledHost {
+fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) -> InstalledHost {
     // Serialized, the BSP runs every PE and the workers no guest code.
     let serialized = !(options.parallel
         || options.native_rounds
@@ -1762,6 +1762,13 @@ fn install_host(handoff: &Handoff, options: &Options, ram: &[RamRange]) -> Insta
     }
     #[cfg(feature = "diagnostics")]
     if options.native_mmio_check {
+        // SAFETY: this explicit UP entry owns its separately reserved mixed32
+        // diagnostic pool. It retires every view before the MMIO phases and
+        // never activates a second authority or publishes a service.
+        unsafe { kernel_work::check_mixed(handoff, &mut host_owner) }.unwrap_or_else(|error| {
+            output::arguments(format_args!("CHECK native-mixed32 FAIL {error}\n"));
+            output::fatal("mixed32 native stack qualification failed")
+        });
         // SAFETY: explicit bounded native diagnostic on the original retained
         // handoff/owner. Success stops before guest entry; permanent mapping
         // and IRQ registries retain this exact physical root until VM shutdown.

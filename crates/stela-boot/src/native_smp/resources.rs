@@ -20,6 +20,36 @@ pub(crate) fn task_stacks() -> stela_boot_core::guarded_stacks::Layout {
         .expect("constant guarded task-stack geometry")
 }
 
+/// Explicit diagnostic reservation metadata, never a task/current grant.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PrototypeTaskPlan {
+    #[default]
+    Disabled = 0,
+    FirmwarePrototype32Mixed = 1,
+}
+pub(crate) const PROTOTYPE_STACKS: usize = 32;
+pub(crate) const PROTOTYPE_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) fn prototype_tasks(
+    base: u64,
+) -> Result<stela_boot_core::guarded_stacks::MixedLayout, stela_boot_core::guarded_stacks::Error> {
+    use stela_boot_core::guarded_stacks::{Error, Geometry, MixedLayout};
+    let kernel = Geometry::new(16 * 1024, 16 * 1024)?;
+    let ordinary = Geometry::new(128 * 1024, PAGE)?;
+    let geometries = core::array::from_fn::<_, PROTOTYPE_STACKS, _>(|index| {
+        if index == 2 || (8..28).contains(&index) {
+            kernel
+        } else {
+            ordinary
+        }
+    });
+    let layout = MixedLayout::new(base, &geometries)?;
+    if layout.virtual_bytes() > PROTOTYPE_WINDOW_BYTES {
+        return Err(Error::Overflow);
+    }
+    Ok(layout)
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(crate) struct Resources {
@@ -32,6 +62,9 @@ pub(crate) struct Resources {
     pub invocations: Region,
     /// One actual BSP work runtime's fixed pool; task roles are admitted later.
     pub tasks: Region,
+    /// Optional bounded UP diagnostic pool; complete raw prefix/suffix remain owned.
+    pub prototype_tasks: Region,
+    pub prototype_task_plan: PrototypeTaskPlan,
     /// Private bounce leaf physical addresses, indexed by fixed worker slot.
     pub bounce: [[u64; 2]; MAX_CORES],
 }
@@ -44,6 +77,8 @@ impl Default for Resources {
             stacks: Region::default(),
             invocations: Region::default(),
             tasks: Region::default(),
+            prototype_tasks: Region::default(),
+            prototype_task_plan: PrototypeTaskPlan::Disabled,
             bounce: [[0; 2]; MAX_CORES],
         }
     }
@@ -122,6 +157,32 @@ pub(crate) fn partition(
 mod tests {
     use super::*;
 
+    #[test]
+    fn optional_mixed_plan_retains_exact_payload_padding_guards_and_classes() {
+        let layout = prototype_tasks(0x9_0000_0000).unwrap();
+        assert_eq!(layout.count(), 32);
+        assert_eq!(layout.physical_bytes(), 1_785_856);
+        assert_eq!(layout.raw_allocation_bytes(), 1_798_144);
+        let mut counts = (0, 0);
+        for index in 0..32 {
+            let slot = layout.slot(index).unwrap();
+            let bytes = slot.usable.end - slot.usable.start;
+            if bytes == 16 * 1024 {
+                counts.0 += 1;
+                assert_eq!(slot.usable.start % (16 * 1024), 0);
+            } else {
+                assert_eq!(bytes, 128 * 1024);
+                counts.1 += 1;
+            }
+            assert_eq!(slot.lower_guard.end, slot.usable.start);
+            assert_eq!(slot.upper_guard.start, slot.usable.end);
+        }
+        assert_eq!(counts, (21, 11));
+        assert!(layout.virtual_bytes() < PROTOTYPE_WINDOW_BYTES);
+        let original = task_stacks();
+        assert_eq!(original.count(), 16);
+        assert_eq!(original.physical_bytes(), 16 * 128 * 1024);
+    }
     #[test]
     fn private_arenas_have_no_overlap_or_fractional_ring_units() {
         for (cores, serialized) in (1..=MAX_CORES).flat_map(|cores| [(cores, false), (cores, true)])

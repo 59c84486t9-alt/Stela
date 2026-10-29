@@ -104,6 +104,20 @@ pub(super) fn reserve(
         tasks: allocate(crate::native_smp::resources::task_stacks().physical_bytes())?,
         ..NativeResources::default()
     };
+    // Only the existing explicit UP MMIO diagnostic requests this additional
+    // plan. Production's uniform16 reservation and constructor stay separate.
+    if system.native_mmio_check {
+        if cores != 1 {
+            return Err("mixed32 diagnostic requires one actual host core");
+        }
+        let geometry =
+            crate::native_smp::resources::prototype_tasks(layout::prototype_task_stacks())
+                .map_err(|_| "mixed32 diagnostic stack geometry overflow")?;
+        let raw = allocate(geometry.raw_allocation_bytes())?;
+        native_resources.prototype_tasks = raw;
+        native_resources.prototype_task_plan =
+            crate::native_smp::resources::PrototypeTaskPlan::FirmwarePrototype32Mixed;
+    }
     if cores > 1 {
         let page = boot::allocate_pages(
             AllocateType::MaxAddress(0x9f000),
@@ -259,6 +273,35 @@ pub(super) fn map(
                         .physical_offset(index)
                         .map_err(|_| "guarded stack physical offset overflow")?,
                 slot.usable.end - slot.usable.start,
+                data,
+            )?;
+        }
+    }
+    if native_resources.prototype_task_plan
+        == crate::native_smp::resources::PrototypeTaskPlan::FirmwarePrototype32Mixed
+    {
+        let geometry =
+            crate::native_smp::resources::prototype_tasks(layout::prototype_task_stacks())
+                .map_err(|_| "mixed32 diagnostic virtual range overflow")?;
+        let raw = native_resources.prototype_tasks;
+        let end = raw
+            .physical
+            .checked_add(raw.bytes)
+            .ok_or("mixed32 raw reservation wraps")?;
+        if raw.bytes != geometry.raw_allocation_bytes() {
+            return Err("mixed32 raw reservation size changed");
+        }
+        for index in 0..geometry.count() {
+            let slot = geometry.slot(index).map_err(|_| "mixed32 slot overflow")?;
+            let backing = geometry
+                .backing(raw.physical..end, index)
+                .map_err(|_| "mixed32 backing alignment overflow")?;
+            tables::map_range(
+                &mut frames,
+                root,
+                slot.usable.start,
+                backing.start,
+                backing.end - backing.start,
                 data,
             )?;
         }

@@ -67,6 +67,35 @@ fn leaf(
     }
     Err(Error::Geometry)
 }
+/// Verify an entire page-aligned alignment/guard hole is absent in every
+/// retained root. The supplied reader and numeric roots remain data only;
+/// native callers separately retain every actual table/root/control owner.
+pub fn absent(
+    range: core::ops::Range<u64>,
+    roots: &[u64],
+    levels: u32,
+    mut read: impl FnMut(u64, usize) -> Option<u64>,
+) -> Result<(), Error> {
+    if !matches!(levels, 4 | 5)
+        || roots.is_empty()
+        || range.start > range.end
+        || !range.start.is_multiple_of(PAGE)
+        || !range.end.is_multiple_of(PAGE)
+    {
+        return Err(Error::Geometry);
+    }
+    for root in roots {
+        if *root == 0 || root & !ADDRESS != 0 {
+            return Err(Error::Geometry);
+        }
+        for address in range.clone().step_by(PAGE as usize) {
+            if leaf(address, *root, levels, &mut read)?.is_some() {
+                return Err(Error::GuardMapped);
+            }
+        }
+    }
+    Ok(())
+}
 /// Check every retained root against the exact physical backing, RW/NX,
 /// supervisor access and WB PAT selection; both guard pages must be absent.
 /// The caller still owns/retains actual table pages, root/control epochs,
@@ -217,6 +246,33 @@ mod tests {
                 .and_then(|n| five.get(n as usize))
                 .map(|t| t[index])),
             Ok(())
+        );
+    }
+    #[test]
+    fn alignment_holes_require_every_page_absent_in_every_root() {
+        let t = tables();
+        let read = |table: u64, index: usize| {
+            table
+                .checked_div(PAGE)
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|n| t.get(n as usize))
+                .map(|page| page[index])
+        };
+        assert_eq!(absent(0..PAGE, &[PAGE, 5 * PAGE], 4, read), Ok(()));
+        assert_eq!(
+            absent(0..2 * PAGE, &[PAGE, 5 * PAGE], 4, read),
+            Err(Error::GuardMapped)
+        );
+        assert_eq!(
+            absent(2 * PAGE..5 * PAGE, &[PAGE, 5 * PAGE], 4, read),
+            Ok(())
+        );
+        assert_eq!(absent(0..PAGE, &[0], 4, read), Err(Error::Geometry));
+        assert_eq!(absent(1..PAGE, &[PAGE], 4, read), Err(Error::Geometry));
+        assert_eq!(absent(0..PAGE, &[PAGE], 3, read), Err(Error::Geometry));
+        assert_eq!(
+            absent(0..PAGE, &[PAGE], 4, |_, _| None),
+            Err(Error::TableUnavailable)
         );
     }
     #[test]
