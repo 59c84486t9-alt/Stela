@@ -2,7 +2,6 @@ use super::*;
 use crate::aarch64::exclusive::{ConstrainedUndefined, decode};
 use alloc::format;
 use alloc::vec;
-use alloc::vec::Vec;
 
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 mod native_component {
@@ -21,6 +20,7 @@ mod native_component {
             },
         },
     };
+    use alloc::vec::Vec;
     use core::ffi::c_void;
 
     unsafe extern "C" {

@@ -159,6 +159,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
 mod tests {
     use super::*;
     use alloc::vec;
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
     use alloc::vec::Vec;
 
     fn occurrences(code: &[u8], opcode: Host) -> usize {

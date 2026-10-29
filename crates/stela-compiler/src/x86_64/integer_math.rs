@@ -287,6 +287,7 @@ mod tests {
     #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
     use crate::GuestState;
 
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
     const VALUES: [u64; 12] = [
         0,
         1,

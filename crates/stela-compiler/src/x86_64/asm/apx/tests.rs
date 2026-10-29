@@ -1,6 +1,8 @@
 //! Independent encoding vectors and architectural NF/zero-extension checks.
 use super::*;
-use crate::x86_64::asm::{Code, Gpr::*, Mem};
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+use crate::x86_64::asm::Mem;
+use crate::x86_64::asm::{Code, Gpr::*};
 
 #[test]
 fn ndd_nf_encodings_match_gnu_assembler() {

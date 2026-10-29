@@ -1,6 +1,7 @@
 //! APX residency, admission boundaries and differential native execution.
 use super::*;
 use crate::GuestAddress;
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 use alloc::vec;
 
 fn prefix(instructions: &[Instruction]) -> Result<Option<OptimizedRegion>, RegionError> {

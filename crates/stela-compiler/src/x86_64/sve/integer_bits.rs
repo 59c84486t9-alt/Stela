@@ -327,7 +327,11 @@ pub(crate) fn requires_declared_dit_zero(operand: Operand, length: VectorLength)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Merge {
     Baseline,
-    #[cfg(test)]
+    #[cfg(all(
+        test,
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux")
+    ))]
     Blend,
     Ternary,
 }
@@ -442,7 +446,11 @@ fn emit_with_merge(
         );
         let merged = match merge {
             Merge::Baseline => false,
-            #[cfg(test)]
+            #[cfg(all(
+                test,
+                target_arch = "x86_64",
+                any(target_os = "macos", target_os = "linux")
+            ))]
             Merge::Blend => vector_extensions::blend_bytes(
                 code,
                 SOURCE_XMM,
