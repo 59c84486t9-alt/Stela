@@ -1369,6 +1369,7 @@ fn native_level_verified(serial: &str) -> bool {
                 [
                     "DSDT=ed48c9772aee854066c14b36ce8f787bb69d279afa15dea729b8ba2f9b77256d",
                     "DSDT=dfe8afc13a175262e7bf69710bf7738c11d22051998d20d820685f373e31cf80",
+                    "DSDT=20c176c76ddccc1f5022ced494275c3694b0998165808aae0e88792268cc3db4",
                 ]
                 .contains(&field)
             })

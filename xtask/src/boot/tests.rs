@@ -473,6 +473,32 @@ fn extended_irq_fixture_never_relabels_msi_only_or_partial_evidence() {
 }
 
 #[test]
+fn owned_config_irq_fixture_keeps_exact_table_and_delivery_requirements() {
+    let record = "CHECK native-irq PASS EDU vector=0x50 actual_cause=0x1 device_ACK+EOI=verified mask+quiesce+IRR/ISR+inflight=drained handler_refs=released late_delivery=absent owner_return=original_function; INTx gsi=22 high+shared+level vector=0x50 first=2 second=1 hold→EOI→retrigger=verified RemoteIRR=observed/drained group_refs=released late_delivery=absent DSDT=20c176c76ddccc1f5022ced494275c3694b0998165808aae0e88792268cc3db4 MADT=730d87a32397365641ca2c58beb3832119c66813e98774fb482571f08668143c FADT=69f40582632a7297a28fee7ff0766c1d746ad60f1e3d473c1bad00341b9fe302 SCI_gsi=9 SCI_polarity=High SCI_trigger=Level";
+    assert!(native_level_verified(record));
+    for required in [
+        "INTx gsi=22 high+shared+level",
+        "first=2 second=1",
+        "hold→EOI→retrigger=verified",
+        "RemoteIRR=observed/drained",
+        "group_refs=released",
+        "late_delivery=absent",
+    ] {
+        assert!(!native_level_verified(&record.replace(required, "missing")));
+    }
+    assert!(!native_level_verified(
+        &record.replace("DSDT=20", "DSDT=00")
+    ));
+    assert!(!native_level_verified(&record.replace(
+        "DSDT=20c176c76ddccc1f5022ced494275c3694b0998165808aae0e88792268cc3db4",
+        "DSDT=20c176c76ddccc1f5022ced494275c3694b0998165808aae0e88792268cc3db40",
+    )));
+    assert!(!native_level_verified(&format!(
+        "{record}\nCHECK native-dma FAIL stop uncertain"
+    )));
+}
+
+#[test]
 fn qemu_host_inventory_does_not_synthesize_a_native_worker_grant() {
     use clap::Parser;
     let prefix = ["xtask", "boot", "run", "--output", "/tmp/owned-cores"];
