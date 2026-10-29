@@ -284,6 +284,13 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
         self.native_entry();
         self.local.install_immutable(code)
     }
+    fn read_native(&mut self, code: NativeCode, bytes: &mut [u8]) -> bool {
+        if self.source_service() {
+            false
+        } else {
+            self.local.read_native(code, bytes)
+        }
+    }
     fn patch(&mut self, code: NativeCode, bytes: &[u8]) {
         self.native_entry();
         self.local.patch(code, bytes);
@@ -413,6 +420,22 @@ pub(in crate::machine::engine::shared_memory) mod tests {
     };
     pub(in crate::machine::engine::shared_memory) struct Local;
     impl Host for Local {
+        fn read_native(&mut self, code: NativeCode, output: &mut [u8]) -> bool {
+            // Initialized permanent fixture bytes owned by this local Host;
+            // this model reader does not assert a physical native arena lease.
+            const CODE: [u8; 5] = [0x90, 0x48, 0x89, 0xc0, 0xc3];
+            let Some(offset) = code.0.checked_sub(0x8000) else {
+                return false;
+            };
+            let Some(bytes) = offset
+                .checked_add(output.len())
+                .and_then(|end| CODE.get(offset..end))
+            else {
+                return false;
+            };
+            output.copy_from_slice(bytes);
+            true
+        }
         fn native_worker(&self) -> Option<WorkerId> {
             Some(WorkerId(17))
         }
@@ -629,6 +652,34 @@ pub(in crate::machine::engine::shared_memory) mod tests {
             .unwrap();
         machine.initialize_native_transport(owners);
         (machine, ram)
+    }
+
+    #[test]
+    fn local_code_readback_forwards_only_outside_held_source_services() {
+        let (mut machine, _) = memory_service_machine(false);
+        let mut bytes = [0; 3];
+        assert!(machine.host.read_native(NativeCode(0x8001), &mut bytes));
+        assert_eq!(bytes, [0x48, 0x89, 0xc0]);
+        assert!(!machine.host.read_native(NativeCode(0x8004), &mut bytes));
+        assert_eq!(
+            bytes,
+            [0x48, 0x89, 0xc0],
+            "owner rejects incomplete extents"
+        );
+        let held = machine.hold_native_services().unwrap();
+        assert!(machine.host.source_service());
+        // An open genuine stopped-worker session supplies no local or remote
+        // executable read authority, even before selecting its source worker.
+        bytes.fill(0xa5);
+        assert!(!machine.host.read_native(NativeCode(0x8001), &mut bytes));
+        assert_eq!(bytes, [0xa5; 3]);
+        assert!(machine.host.select_native_service(WorkerId(17)));
+        assert!(!machine.host.read_native(NativeCode(0x8001), &mut bytes));
+        assert_eq!(bytes, [0xa5; 3]);
+        machine.release_native_services(held);
+        assert!(!machine.host.source_service());
+        assert!(machine.host.read_native(NativeCode(0x8001), &mut bytes));
+        assert_eq!(bytes, [0x48, 0x89, 0xc0]);
     }
 
     #[test]
