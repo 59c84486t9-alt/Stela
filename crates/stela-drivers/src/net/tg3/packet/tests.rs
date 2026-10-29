@@ -1432,22 +1432,15 @@ fn reasserted_low_water_remains_visible_and_counter_never_wraps() {
 }
 #[test]
 fn every_fatal_flow_message_and_dma_cause_remains_an_explicit_retained_fault() {
-    // Each cause register's lowest and highest fatal bit, the bit above the
-    // flow register's low-water bit 6 (the message register's lowest fatal
-    // bit is the one above its MSI request bit 0), and every fatal flow bit
-    // but the top one, whose all-ones read would mean a removed device.
-    for (at, value) in [
-        (0x3c48, 1),
-        (0x3c48, 0x80),
-        (0x3c48, 1 << 31),
-        (0x3c48, 0x7fff_ffbf),
-        (0x6004, 2),
-        (0x6004, 1 << 31),
-        (0x4804, 1),
-        (0x4804, 1 << 31),
-        (0x4c04, 1),
-        (0x4c04, 1 << 31),
-    ] {
+    // Preserve every original single-bit cause: four registers by 32 bits,
+    // excluding only the flow low-water bit and message MSI request bit.
+    // Also retain the combined flow mask to exercise simultaneous causes;
+    // all-ones reads are independently classified as device removal.
+    let single_bits = [0x3c48, 0x6004, 0x4804, 0x4c04]
+        .into_iter()
+        .flat_map(|at| (0..32).map(move |bit| (at, 1u32 << bit)))
+        .filter(|&(at, value)| !((at == 0x3c48 && value == 0x40) || (at == 0x6004 && value == 1)));
+    for (at, value) in single_bits.chain([(0x3c48, 0x7fff_ffbf)]) {
         {
             let (mut packet, pages, domain, peer) = attach();
             {
