@@ -9,7 +9,7 @@ use crate::gpu::metal::{
     library::tests::fixture,
     nvidia::{CHIPS, fixture::nvk},
     shader::{Patch, PatchDomain},
-    vertex::StageInputDescriptor,
+    vertex::{STRIDE_DYNAMIC, StageInputDescriptor, VertexDescriptor},
 };
 use alloc::vec;
 use core::{cell::RefCell, ffi::CStr, ptr, slice};
@@ -23,6 +23,10 @@ struct Compiled {
     constants: Vec<(u32, Vec<u8>)>,
     amplified: bool,
     launched_by_grid: bool,
+    tessellation: Option<ffi::Tessellation>,
+    /// Each attribute's index, format, offset and buffer, with that
+    /// buffer's stride, step function and rate.
+    stage_in: Vec<[u32; 7]>,
 }
 
 /// A refusal's kind, instruction and detail.
@@ -123,6 +127,31 @@ unsafe extern "C" fn compile(
             ),
         )
     };
+    // SAFETY: as above.
+    let (tessellation, stage_in) = unsafe {
+        (
+            specialization.tessellation.as_ref().copied(),
+            specialization.stage_in.as_ref(),
+        )
+    };
+    let stage_in = stage_in.map_or(Vec::new(), |stage_in| {
+        (0..)
+            .zip(&stage_in.attributes)
+            .filter(|(_, attribute)| attribute.format != 0)
+            .map(|(index, attribute)| {
+                let layout = stage_in.layouts[attribute.buffer as usize];
+                [
+                    index,
+                    attribute.format,
+                    attribute.offset,
+                    attribute.buffer,
+                    layout.stride,
+                    layout.step,
+                    layout.rate,
+                ]
+            })
+            .collect()
+    });
     let constants = constants
         .iter()
         .map(|constant| {
@@ -159,9 +188,24 @@ unsafe extern "C" fn compile(
             constants,
             amplified: specialization.amplified != 0,
             launched_by_grid: specialization.launched_by_grid != 0,
+            tessellation,
+            stage_in,
         });
         ptr::without_provenance_mut(0x1000 * fake.compiled.len())
     })
+}
+
+/// The synthesized stages, at addresses no compilation takes.
+unsafe extern "C" fn tessellation_stages(
+    target: *const ffi::Target,
+    tessellation: *const ffi::Tessellation,
+    stages: *mut *mut c_void,
+) {
+    assert!(!target.is_null() && !tessellation.is_null());
+    // SAFETY: the compiler passes room for the two stages.
+    let stages = unsafe { slice::from_raw_parts_mut(stages, 2) };
+    stages[0] = ptr::without_provenance_mut(0x10);
+    stages[1] = ptr::without_provenance_mut(0x20);
 }
 
 unsafe extern "C" fn release(shader: *mut c_void) {
@@ -172,6 +216,7 @@ fn compiler(device: &PhysicalDevice) -> AirCompiler {
     let service = Service {
         reflect,
         compile,
+        tessellation_stages,
         release,
         nir_options: NonNull::dangling(),
     };
@@ -556,32 +601,112 @@ fn what_the_service_cannot_take_is_refused_before_it_runs() {
 }
 
 #[test]
-fn post_tessellation_vertex_functions_are_unsupported() {
+fn post_tessellation_vertex_functions_compile_with_their_stage_in() {
+    use crate::gpu::metal::vertex::{Attribute, Layout, StepFunction, VertexFormat};
+    reflecting(|r| {
+        r.stage = 1;
+        r.patch = 2;
+        r.patch_control_points = 4;
+        r.attributes[0] = ffi::AttributeUse {
+            index: 3,
+            primitive: ffi::primitive::FLOAT,
+            components: 4,
+        };
+        r.attribute_count = 1;
+    });
     let (mut compiler, library) = with_library();
+    let patch = Patch {
+        domain: PatchDomain::Quad,
+        control_points: Some(4),
+    };
+    let interface = compiler
+        .reflect(library, "kernel", &Specialization::default())
+        .unwrap();
+    assert_eq!(interface.patch, Some(patch));
+    assert!(interface.features.contains(ShaderFeatures::TESSELLATION));
     let tessellation = Tessellation {
-        patch: Patch {
-            domain: PatchDomain::Triangle,
-            control_points: None,
-        },
-        partition: TessellationPartitionMode::Pow2,
+        patch,
+        partition: TessellationPartitionMode::FractionalOdd,
         max_factor: 16,
         factor_scale: false,
-        step_function: TessellationFactorStepFunction::Constant,
-        control_point_index: TessellationControlPointIndexType::None,
-        winding: Winding::Clockwise,
-        vertex_descriptor: None,
+        step_function: TessellationFactorStepFunction::PerPatch,
+        control_point_index: TessellationControlPointIndexType::UInt16,
+        winding: Winding::CounterClockwise,
+        vertex_descriptor: Some(VertexDescriptor {
+            attributes: vec![Attribute {
+                index: 3,
+                format: VertexFormat::Float4,
+                offset: 8,
+                buffer_index: 5,
+            }],
+            layouts: vec![Layout {
+                buffer_index: 5,
+                stride: STRIDE_DYNAMIC,
+                step_function: StepFunction::PerPatchControlPoint,
+                step_rate: 1,
+            }],
+        }),
     };
+    let stages = compiler
+        .compile_tessellation(library, "kernel", &Specialization::default(), &tessellation)
+        .unwrap();
     assert_eq!(
-        compiler.compile_tessellation(library, "kernel", &Specialization::default(), &tessellation),
-        Err(Error::Unsupported("post-tessellation vertex functions"))
+        (stages.vertex, stages.control),
+        (ShaderCode(0x10), ShaderCode(0x20))
     );
+    assert_eq!(stages.evaluation.interface.patch, Some(patch));
+    FAKE.with_borrow(|fake| {
+        let compiled = fake.compiled.last().unwrap();
+        assert_eq!(
+            compiled.tessellation,
+            Some(ffi::Tessellation {
+                quad: true,
+                partition: TessellationPartitionMode::FractionalOdd.raw() as u32,
+                max_factor: 16,
+                step: TessellationFactorStepFunction::PerPatch.raw() as u32,
+                winding: Winding::CounterClockwise.raw() as u32,
+                control_point_index_bytes: 2,
+            })
+        );
+        assert_eq!(
+            compiled.stage_in,
+            [[
+                3,
+                VertexFormat::Float4.raw() as u32,
+                8,
+                5,
+                ffi::STRIDE_DYNAMIC,
+                4,
+                1
+            ]]
+        );
+    });
+
+    // Without a vertex descriptor, the function fetches nothing.
+    let bare = Tessellation {
+        vertex_descriptor: None,
+        ..tessellation
+    };
+    compiler
+        .compile_tessellation(library, "kernel", &Specialization::default(), &bare)
+        .unwrap();
+    FAKE.with_borrow(|fake| assert!(fake.compiled.last().unwrap().stage_in.is_empty()));
 }
 
 #[test]
 fn malformed_reflections_are_refused() {
     let (mut compiler, library) = with_library();
-    let edits: [fn(&mut ffi::Reflection); 6] = [
+    let edits: [fn(&mut ffi::Reflection); 8] = [
         |r| r.stage = 4,
+        |r| {
+            r.stage = 1;
+            r.patch = 3;
+        },
+        |r| {
+            r.stage = 1;
+            r.patch = 1;
+            r.patch_control_points = 33;
+        },
         |r| r.buffer_count = 32,
         |r| {
             r.stage = 1;

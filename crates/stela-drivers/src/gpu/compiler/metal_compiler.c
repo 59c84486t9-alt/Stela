@@ -17,6 +17,10 @@ static_assert(sizeof(struct stela_metal_specialization) == STELA_METAL_SPECIALIZ
               "metal/compiler.rs mirrors the specialization");
 static_assert(sizeof(struct stela_air_constant_value) == STELA_METAL_CONSTANT_VALUE_BYTES,
               "metal/compiler.rs mirrors the constant values");
+static_assert(sizeof(struct stela_metal_tessellation) == STELA_METAL_PIPELINE_TESSELLATION_BYTES,
+              "metal/compiler.rs mirrors the pipeline tessellation");
+static_assert(sizeof(struct stela_metal_stage_in) == STELA_METAL_STAGE_IN_BYTES,
+              "metal/compiler.rs mirrors the stage-in layout");
 static_assert(STELA_METAL_FUNCTION_CONSTANTS == AIR_MAX_FUNCTION_CONSTANTS,
               "the reflection holds every function constant the frontend admits");
 
@@ -173,6 +177,18 @@ add_varying(struct reflecting *r, const struct stela_air_stage_io *io)
 }
 
 static bool
+add_attribute(struct reflecting *r, unsigned location, enum stela_air_primitive primitive,
+              unsigned components)
+{
+   struct stela_metal_reflection *out = r->out;
+   if (out->attribute_count == STELA_METAL_ATTRIBUTES)
+      return fail(r->error, STELA_AIR_LIMIT, "attributes exceed the table");
+   out->attributes[out->attribute_count++] = (struct stela_metal_attribute_use){
+      location, primitive, components};
+   return true;
+}
+
+static bool
 add_input(struct reflecting *r, const struct stela_air_stage_io *io)
 {
    struct stela_metal_reflection *out = r->out;
@@ -182,10 +198,15 @@ add_input(struct reflecting *r, const struct stela_air_stage_io *io)
    case STELA_AIR_STAGE_SAMPLER: return add_sampler(r, &io->sampler);
    case STELA_AIR_VARYING: return add_varying(r, io);
    case STELA_AIR_VERTEX_INPUT:
-      if (out->attribute_count == STELA_METAL_ATTRIBUTES)
-         return fail(r->error, STELA_AIR_LIMIT, "attributes exceed the table");
-      out->attributes[out->attribute_count++] = (struct stela_metal_attribute_use){
-         io->location, io->primitive, io->components};
+      return add_attribute(r, io->location, io->primitive, io->components);
+   case STELA_AIR_CONTROL_POINTS:
+      /* The members the function reads. */
+      for (unsigned i = 0; i < io->member_count; i++) {
+         const struct stela_air_struct_member *member = &io->members[i];
+         if (!member->unused && !add_attribute(r, member->location, member->primitive,
+                                               member->components))
+            return false;
+      }
       return true;
    case STELA_AIR_STAGE_BUILTIN:
       out->amplification |= io->builtin == STELA_AIR_AMPLIFICATION_ID;
@@ -224,6 +245,8 @@ reflect_stage(const struct stela_air_inspection *info, const struct stela_air_st
    r->out->max_total_threads = entry->max_threads;
    r->out->threadgroup_bytes = entry->threadgroup_bytes;
    r->out->discards = entry->discards;
+   r->out->patch = entry->patch;
+   r->out->patch_control_points = entry->patch_control_points;
    for (unsigned i = 0; i < entry->input_count; i++) {
       if (!add_input(r, &entry->inputs[i]))
          return false;
@@ -291,6 +314,19 @@ bind_threadgroup(const struct stela_air_buffer *buffer, struct stela_air_threadg
       return length->bytes != 0;
    }
    return false;
+}
+
+/* stela_air_fetch_attribute over the pipeline's stage-in layout. */
+static nir_def *
+fetch_attribute(nir_builder *b, unsigned location, nir_def *ids, nir_def *point, bool integer,
+                void *data)
+{
+   const struct stela_metal_specialization *specialization =
+      ((const struct binding *)data)->specialization;
+   if (!specialization->stage_in)
+      return NULL;
+   return stela_metal_fetch_patch_attribute(b, specialization->stage_in, specialization->tessellation,
+                                            location, ids, point, integer);
 }
 
 static enum stela_metal_table
@@ -363,6 +399,18 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
    enum stela_metal_function_stage stage = reflection->stage;
    bool compute = stage == STELA_METAL_KERNEL || stage == STELA_METAL_OBJECT ||
                   stage == STELA_METAL_MESH;
+   /* A post-tessellation vertex function is its pipeline's evaluation
+    * stage, which no vertex stage can take the place of. */
+   const struct stela_metal_tessellation *tessellation = specialization->tessellation;
+   bool patch = reflection->patch != STELA_AIR_PATCH_NONE;
+   if (patch && !tessellation) {
+      fail(error, STELA_AIR_ARGUMENT, "post-tessellation vertex functions need tessellation stages");
+      goto done;
+   }
+   if (tessellation && (!patch || tessellation->quad != (reflection->patch == STELA_AIR_PATCH_QUAD))) {
+      fail(error, STELA_AIR_INPUT, "tessellation of another patch");
+      goto done;
+   }
    struct binding binding = {{stage_table(stage)}, specialization};
    struct stela_air_options resources = {
       .max_instructions = target->max_instructions,
@@ -379,6 +427,7 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       .bind_sampler_id = stela_metal_bind_sampler_id,
       .texture_levels = stela_metal_texture_levels,
       .load_device_value = stela_metal_load_device_value,
+      .fetch_attribute = patch ? fetch_attribute : NULL,
       .constants = specialization->constants,
       .constant_count = specialization->constant_count,
    };
@@ -413,16 +462,18 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       .max_mesh_primitives = target->max_mesh_primitives,
    };
    shader = stela_air_stage_to_nir(air, size, entry, target->nir, &options, error);
-   /* A post-tessellation vertex function is its pipeline's evaluation stage,
-    * which no vertex stage can take the place of. */
-   if (shader && shader->info.stage == MESA_SHADER_TESS_EVAL) {
-      fail(error, STELA_AIR_ARGUMENT, "post-tessellation vertex functions need tessellation stages");
-      ralloc_free(shader);
-      shader = NULL;
-   }
 done:
    free(reflection);
    return shader;
+}
+
+void
+stela_metal_tessellation_stages(const struct stela_metal_target *target,
+                                const struct stela_metal_tessellation *tessellation,
+                                nir_shader *stages[2])
+{
+   stages[0] = stela_metal_tessellation_vertex(target->nir);
+   stages[1] = stela_metal_tessellation_control(target->nir, tessellation);
 }
 
 void

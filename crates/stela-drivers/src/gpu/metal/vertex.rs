@@ -380,13 +380,16 @@ pub fn vertex_input(
 /// whose evaluation stage fetches it from the bound buffers.
 pub fn patch_input(capabilities: &Capabilities, descriptor: &VertexDescriptor) -> Result<()> {
     validate(capabilities, descriptor)?;
-    ensure(
-        descriptor
-            .layouts
-            .iter()
-            .all(|layout| layout.step_function != StepFunction::PerVertex),
-        "post-tessellation layouts step per patch, control point or instance",
-    )
+    for layout in &descriptor.layouts {
+        ensure(
+            layout.step_function != StepFunction::PerVertex,
+            "post-tessellation layouts step per patch, control point or instance",
+        )?;
+        if layout.step_function == StepFunction::PerPatch {
+            ensure(layout.step_rate >= 1, "per-patch step rates are nonzero")?;
+        }
+    }
+    Ok(())
 }
 
 /// The rules every stage-in layout follows, however it is fetched.

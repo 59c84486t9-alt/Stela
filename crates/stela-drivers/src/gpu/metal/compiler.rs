@@ -10,22 +10,26 @@
 //! The service refuses AIR it does not lower with a typed kind and a detail:
 //! the call fails with `Error::Unsupported` naming the kind, and
 //! [`AirCompiler::refusal`] keeps the detail for the frontend's `NSError`.
-//! Kernel stage-in and post-tessellation vertex functions have no AIR form
-//! the frontend lowers, so they are refused before it runs.
+//! Kernel stage-in has no AIR form the frontend lowers, so it is refused
+//! before it runs. A post-tessellation vertex function compiles with its
+//! pipeline's tessellation and stage-in layout into the evaluation stage,
+//! and the service synthesizes the stages ahead of it.
 pub mod ffi;
 #[cfg(test)]
 mod tests;
 
 use super::{
-    abi::{DataType, TextureType},
+    abi::{DataType, TessellationControlPointIndexType, TextureType},
     capabilities::ShaderFeatures,
     error::{Error, Result, require},
     library::{Air, Library},
     shader::{
         Access, AttributeUse, BufferUse, ColorOutput, CompiledShader, Compiler, FunctionConstant,
-        Interface, NumericClass, Provenance, Scalar, Specialization, Stage, Tessellation,
-        TessellationStages, TextureUse, ThreadgroupUse, Varying,
+        Interface, MAX_PATCH_CONTROL_POINTS, NumericClass, Patch, PatchDomain, Provenance, Scalar,
+        Specialization, Stage, Tessellation, TessellationStages, TextureUse, ThreadgroupUse,
+        Varying,
     },
+    vertex::{STRIDE_DYNAMIC, VertexDescriptor},
     vulkan::{object::ShaderCode, physical::PhysicalDevice},
 };
 use alloc::{
@@ -37,7 +41,7 @@ use alloc::{
 };
 use core::{
     ffi::{c_char, c_void},
-    ptr::NonNull,
+    ptr::{self, NonNull},
     str,
 };
 
@@ -56,7 +60,8 @@ const FEATURES: ShaderFeatures = ShaderFeatures::COMPUTE
     .union(ShaderFeatures::QUADGROUP)
     .union(ShaderFeatures::ARGUMENT_BUFFERS)
     .union(ShaderFeatures::LAYERED_RENDERING)
-    .union(ShaderFeatures::VERTEX_AMPLIFICATION);
+    .union(ShaderFeatures::VERTEX_AMPLIFICATION)
+    .union(ShaderFeatures::TESSELLATION);
 
 /// LLVM instructions one compilation may lower, legalization included. Far
 /// beyond the functions Metal compiles, it bounds the work of hostile input.
@@ -87,6 +92,9 @@ pub struct Service {
         *const ffi::Specialization,
         *mut ffi::AirError,
     ) -> *mut c_void,
+    /// `stela_metal_tessellation_stages`.
+    pub tessellation_stages:
+        unsafe extern "C" fn(*const ffi::Target, *const ffi::Tessellation, *mut *mut c_void),
     /// `stela_metal_release`.
     pub release: unsafe extern "C" fn(*mut c_void),
     /// The Vulkan driver's `nir_shader_compiler_options`.
@@ -195,6 +203,59 @@ impl Compiler for AirCompiler {
         entry: &str,
         specialization: &Specialization,
     ) -> Result<CompiledShader> {
+        self.compile_function(library, entry, specialization, None)
+    }
+
+    fn compile_tessellation(
+        &mut self,
+        library: u64,
+        entry: &str,
+        specialization: &Specialization,
+        tessellation: &Tessellation,
+    ) -> Result<TessellationStages> {
+        let properties = ffi::Tessellation::new(tessellation);
+        let stage_in = tessellation
+            .vertex_descriptor
+            .as_ref()
+            .map(ffi::StageIn::new)
+            .transpose()?;
+        let evaluation = self.compile_function(
+            library,
+            entry,
+            specialization,
+            Some((&properties, stage_in.as_deref())),
+        )?;
+        let mut stages = [ptr::null_mut(); 2];
+        // SAFETY: the target and tessellation outlive the call, which writes
+        // only the two stages.
+        unsafe {
+            (self.service.tessellation_stages)(&self.target, &properties, stages.as_mut_ptr());
+        }
+        let [vertex, control] = stages.map(|stage| ShaderCode(stage as usize as u64));
+        Ok(TessellationStages {
+            vertex,
+            control,
+            evaluation,
+        })
+    }
+
+    fn release(&mut self, code: ShaderCode) {
+        // SAFETY: the code is NIR this compiler's service compiled, which the
+        // device releases once.
+        unsafe { (self.service.release)(code.0 as usize as *mut c_void) }
+    }
+}
+
+impl AirCompiler {
+    /// Compiles `entry` of `library`, a post-tessellation vertex function
+    /// with its pipeline's tessellation and stage-in layout.
+    fn compile_function(
+        &mut self,
+        library: u64,
+        entry: &str,
+        specialization: &Specialization,
+        tessellation: Option<(&ffi::Tessellation, Option<&ffi::StageIn>)>,
+    ) -> Result<CompiledShader> {
         let selected = select(&self.libraries, library, entry, specialization)?;
         let (interface, provenance) = selected.reflect(&self.service, &mut self.refusal)?;
         let lengths = specialization
@@ -235,12 +296,16 @@ impl Compiler for AirCompiler {
             launched_by_grid: specialization.launched_by_grid.into(),
             constant_count: count(constants.len())?,
             constants: constants.as_ptr(),
+            tessellation: tessellation.map_or(ptr::null(), |(properties, _)| properties),
+            stage_in: tessellation
+                .and_then(|(_, stage_in)| stage_in)
+                .map_or(ptr::null(), |stage_in| stage_in),
         };
         let mut error = ffi::AirError::NONE;
         let air = selected.air.bitcode;
         // SAFETY: the AIR, entry, target and specialization, with the arrays,
-        // identifiers and values it points to, outlive the call, which writes
-        // only the error.
+        // identifiers, values and layouts it points to, outlive the call,
+        // which writes only the error.
         let shader = unsafe {
             (self.service.compile)(
                 air.as_ptr().cast(),
@@ -260,21 +325,60 @@ impl Compiler for AirCompiler {
             provenance,
         })
     }
+}
 
-    fn compile_tessellation(
-        &mut self,
-        _library: u64,
-        _entry: &str,
-        _specialization: &Specialization,
-        _tessellation: &Tessellation,
-    ) -> Result<TessellationStages> {
-        Err(Error::Unsupported("post-tessellation vertex functions"))
+impl ffi::Tessellation {
+    fn new(tessellation: &Tessellation) -> Self {
+        Self {
+            quad: tessellation.patch.domain == PatchDomain::Quad,
+            partition: tessellation.partition.raw() as u32,
+            max_factor: tessellation.max_factor,
+            step: tessellation.step_function.raw() as u32,
+            winding: tessellation.winding.raw() as u32,
+            control_point_index_bytes: match tessellation.control_point_index {
+                TessellationControlPointIndexType::None => 0,
+                TessellationControlPointIndexType::UInt16 => 2,
+                TessellationControlPointIndexType::UInt32 => 4,
+            },
+        }
     }
+}
 
-    fn release(&mut self, code: ShaderCode) {
-        // SAFETY: the code is NIR this compiler's service compiled, which the
-        // device releases once.
-        unsafe { (self.service.release)(code.0 as usize as *mut c_void) }
+impl ffi::StageIn {
+    /// The layout of a validated vertex descriptor.
+    fn new(descriptor: &VertexDescriptor) -> Result<Box<Self>> {
+        let invalid = |_| Error::Invalid("vertex descriptor");
+        let mut stage_in = Box::new(Self {
+            attributes: [ffi::StageInAttribute::default(); ffi::ATTRIBUTES],
+            layouts: Default::default(),
+        });
+        for attribute in &descriptor.attributes {
+            *stage_in
+                .attributes
+                .get_mut(attribute.index as usize)
+                .ok_or(Error::Invalid("vertex descriptor"))? = ffi::StageInAttribute {
+                format: attribute.format.raw() as u32,
+                offset: u32::try_from(attribute.offset).map_err(invalid)?,
+                buffer: attribute.buffer_index,
+            };
+        }
+        for layout in &descriptor.layouts {
+            *stage_in
+                .layouts
+                .get_mut(layout.buffer_index as usize)
+                .ok_or(Error::Invalid("vertex descriptor"))? = ffi::StageInLayout {
+                stride: match layout.stride {
+                    STRIDE_DYNAMIC => ffi::STRIDE_DYNAMIC,
+                    stride => u32::try_from(stride)
+                        .ok()
+                        .filter(|stride| *stride != ffi::STRIDE_DYNAMIC)
+                        .ok_or(Error::Invalid("vertex descriptor"))?,
+                },
+                step: layout.step_function.raw() as u32,
+                rate: u32::try_from(layout.step_rate).map_err(invalid)?,
+            };
+        }
+        Ok(stage_in)
     }
 }
 
@@ -453,6 +557,25 @@ fn data_type(spelling: &[u8]) -> Result<DataType> {
     DataType::vector(scalar, lanes).ok_or(MALFORMED)
 }
 
+/// `enum stela_air_patch` and the control points the function declares.
+fn patch(raw: u32, control_points: u32) -> Result<Option<Patch>> {
+    let domain = match raw {
+        0 => return (control_points == 0).then_some(None).ok_or(MALFORMED),
+        1 => PatchDomain::Triangle,
+        2 => PatchDomain::Quad,
+        _ => return Err(MALFORMED),
+    };
+    let control_points = match control_points {
+        0 => None,
+        1..=MAX_PATCH_CONTROL_POINTS => Some(control_points),
+        _ => return Err(MALFORMED),
+    };
+    Ok(Some(Patch {
+        domain,
+        control_points,
+    }))
+}
+
 /// `enum stela_air_texture_type`.
 fn texture_type(raw: u32) -> Result<TextureType> {
     const TYPES: [TextureType; 10] = [
@@ -474,6 +597,7 @@ fn texture_type(raw: u32) -> Result<TextureType> {
 fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
     let r = reflection;
     let stage = Stage::from_raw(r.stage.into()).ok_or(MALFORMED)?;
+    let patch = patch(r.patch, r.patch_control_points)?;
     let buffers = rows(&r.buffers, r.buffer_count)?
         .iter()
         .map(|buffer| {
@@ -569,10 +693,11 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
         ShaderFeatures::ARGUMENT_BUFFERS,
         buffers.iter().any(|buffer| buffer.argument_buffer),
     )
-    .with(ShaderFeatures::VERTEX_AMPLIFICATION, r.amplification != 0);
+    .with(ShaderFeatures::VERTEX_AMPLIFICATION, r.amplification != 0)
+    .with(ShaderFeatures::TESSELLATION, patch.is_some());
     let interface = Interface {
         stage,
-        patch: None,
+        patch,
         buffers,
         textures,
         samplers: rows(&r.samplers, r.sampler_count)?.to_vec(),

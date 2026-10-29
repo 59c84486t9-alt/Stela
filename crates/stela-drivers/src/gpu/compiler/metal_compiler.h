@@ -70,6 +70,9 @@ struct stela_metal_reflection {
    uint32_t attribute_count, varying_count, color_output_count;
    uint32_t writes_depth, writes_stencil, writes_sample_mask, discards, amplification;
    uint32_t ident, ident_bytes, names_bytes, function_constant_count;
+   /* A post-tessellation vertex function's enum stela_air_patch and the
+    * control points it declares, zero when it declares none. */
+   uint32_t patch, patch_control_points;
    struct stela_metal_buffer_use buffers[STELA_METAL_BUFFERS];
    struct stela_metal_texture_use textures[STELA_METAL_TEXTURES];
    uint32_t samplers[STELA_METAL_SAMPLERS];
@@ -80,7 +83,7 @@ struct stela_metal_reflection {
    struct stela_metal_function_constant function_constants[STELA_METAL_FUNCTION_CONSTANTS];
    char names[STELA_METAL_NAME_BYTES];
 };
-#define STELA_METAL_REFLECTION_BYTES 18272u
+#define STELA_METAL_REFLECTION_BYTES 18280u
 
 /* The target's facts, fixed for a device. nir is the Vulkan driver's
  * compiler options, which must outlive every shader compiled with them. */
@@ -106,7 +109,9 @@ struct stela_metal_linked_varying {
 #define STELA_METAL_CONSTANT_VALUE_BYTES 24u
 
 /* shader.rs Specialization, less kernels' stage-in, which the frontend
- * refuses. */
+ * refuses, with a post-tessellation vertex function's pipeline
+ * tessellation and the stage-in layout it fetches by, which may be NULL;
+ * every other function has neither. */
 struct stela_metal_specialization {
    uint32_t workgroup_size[3];
    uint32_t threadgroup_length_count;
@@ -114,8 +119,13 @@ struct stela_metal_specialization {
    const struct stela_metal_linked_varying *varyings;
    uint32_t varying_count, amplified, launched_by_grid, constant_count;
    const struct stela_air_constant_value *constants;
+   const struct stela_metal_tessellation *tessellation;
+   const struct stela_metal_stage_in *stage_in;
 };
-#define STELA_METAL_SPECIALIZATION_BYTES 56u
+#define STELA_METAL_SPECIALIZATION_BYTES 72u
+/* The metal_abi.h layouts it points to. */
+#define STELA_METAL_PIPELINE_TESSELLATION_BYTES 24u
+#define STELA_METAL_STAGE_IN_BYTES 744u
 
 /* Reflects entry of the AIR module. False after reporting why in error. */
 bool stela_metal_reflect(const void *air, size_t size, const char *entry,
@@ -128,6 +138,13 @@ nir_shader *stela_metal_compile(const void *air, size_t size, const char *entry,
                                 const struct stela_metal_target *target,
                                 const struct stela_metal_specialization *specialization,
                                 struct stela_air_error *error);
+
+/* The vertex and control stages a tessellated pipeline runs ahead of its
+ * post-tessellation vertex function (metal_abi.h), each with entry point
+ * main, which stela_metal_release frees. */
+void stela_metal_tessellation_stages(const struct stela_metal_target *target,
+                                     const struct stela_metal_tessellation *tessellation,
+                                     nir_shader *stages[2]);
 
 void stela_metal_release(nir_shader *shader);
 #endif

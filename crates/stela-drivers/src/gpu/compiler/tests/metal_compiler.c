@@ -102,6 +102,31 @@ static const char *vertex =
    "!40 = !{i32 0, !\"air.vertex_input\", !\"air.location_index\", i32 3, i32 1,"
    " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"p\"}\n";
 
+#define CONTROL_POINT "{ <4 x float>, <2 x float> }"
+
+/* A triangle patch's function at the position of a control point its
+ * patch ID selects; it never reads the points' second member. */
+static const char *patch =
+   "define <4 x float> @patch(ptr %points, <3 x float> %at, i32 %id) {\n"
+   "%point = call " CONTROL_POINT " @control_point(i32 %id, ptr %points)\n"
+   "%position = extractvalue " CONTROL_POINT " %point, 0\n"
+   "ret <4 x float> %position\n}\n"
+   "declare " CONTROL_POINT " @control_point(i32, ptr) section \"air.externally_defined\"\n"
+   "!air.vertex = !{!2}\n"
+   "!2 = !{ptr @patch, !3, !4, !5}\n!3 = !{!30}\n"
+   "!30 = !{!\"air.position\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n"
+   "!4 = !{!40, !41, !42}\n"
+   "!40 = !{i32 0, !\"air.patch_control_point_input\", !43, !44, !45}\n"
+   "!43 = !{!\"air.patch_control_point_function\", ptr @control_point}\n"
+   "!44 = !{!\"air.location_index\", i32 1, i32 1, !\"air.arg_type_name\", !\"float4\","
+   " !\"air.arg_name\", !\"position\"}\n"
+   "!45 = !{!\"air.location_index\", i32 2, i32 1, !\"air.arg_type_name\", !\"float2\","
+   " !\"air.arg_name\", !\"uv\", !\"air.arg_unused\"}\n"
+   "!41 = !{i32 1, !\"air.position_in_patch\", !\"air.arg_type_name\", !\"float3\","
+   " !\"air.arg_name\", !\"at\"}\n"
+   "!42 = !{i32 2, !\"air.patch_id\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"id\"}\n"
+   "!5 = !{!\"air.patch\", !\"triangle\", !\"air.patch_control_point\", i32 3}\n";
+
 /* Discards fragments left of the origin. */
 static const char *fragment =
    "declare void @air.discard_fragment()\n"
@@ -290,6 +315,52 @@ render_stages_compile_at_their_linked_locations(void)
 }
 
 static void
+patch_functions_compile_behind_their_tessellation_stages(void)
+{
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   assert(reflect(patch, "patch", &reflection, &error));
+   assert(reflection.stage == STELA_METAL_VERTEX && reflection.patch == STELA_AIR_PATCH_TRIANGLE &&
+          reflection.patch_control_points == 3);
+   /* The control points' members the function reads. */
+   assert(reflection.attribute_count == 1 && reflection.attributes[0].index == 1 &&
+          reflection.attributes[0].components == 4);
+
+   const struct stela_metal_specialization plain = {0};
+   assert(!compile(patch, "patch", &plain, &error) && error.kind == STELA_AIR_ARGUMENT);
+   struct stela_metal_tessellation tessellation = {
+      .partition = STELA_METAL_PARTITION_INTEGER, .max_factor = 16};
+   struct stela_metal_stage_in stage_in = {0};
+   stage_in.attributes[1] = (struct stela_metal_stage_in_attribute){31, 0, 4};
+   stage_in.layouts[4] = (struct stela_metal_stage_in_layout){
+      16, STELA_METAL_STEP_PER_PATCH_CONTROL_POINT, 1};
+   const struct stela_metal_specialization specialization = {
+      .tessellation = &tessellation, .stage_in = &stage_in};
+   nir_shader *shader = compile(patch, "patch", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "patch: %u %s\n", error.kind, error.detail);
+   assert(shader && shader->info.stage == MESA_SHADER_TESS_EVAL);
+   assert(shader->info.tess._primitive_mode == TESS_PRIMITIVE_TRIANGLES);
+   stela_metal_release(shader);
+
+   /* The pipeline tessellates the function's patch, from a layout with its
+    * attributes; no other function tessellates. */
+   tessellation.quad = true;
+   assert(!compile(patch, "patch", &specialization, &error) && error.kind == STELA_AIR_INPUT);
+   tessellation.quad = false;
+   stage_in.attributes[1].format = 0;
+   assert(!compile(patch, "patch", &specialization, &error) && error.kind == STELA_AIR_ARGUMENT);
+   assert(!compile(vertex, "vertex", &specialization, &error) && error.kind == STELA_AIR_INPUT);
+
+   nir_shader *stages[2];
+   stela_metal_tessellation_stages(&target, &tessellation, stages);
+   assert(stages[0]->info.stage == MESA_SHADER_VERTEX);
+   assert(stages[1]->info.stage == MESA_SHADER_TESS_CTRL);
+   for (unsigned i = 0; i < 2; i++)
+      stela_metal_release(stages[i]);
+}
+
+static void
 mesh_stages_compile_with_their_launch(void)
 {
    struct stela_metal_reflection reflection;
@@ -376,6 +447,7 @@ main(void)
    glsl_type_singleton_init_or_ref();
    kernels_reflect_and_compile_their_threadgroup_memory();
    render_stages_compile_at_their_linked_locations();
+   patch_functions_compile_behind_their_tessellation_stages();
    mesh_stages_compile_with_their_launch();
    function_constants_reflect_and_specialize();
    glsl_type_singleton_decref();

@@ -146,6 +146,9 @@ pub struct Reflection {
     pub(super) ident_bytes: u32,
     pub(super) names_bytes: u32,
     pub(super) function_constant_count: u32,
+    /// `enum stela_air_patch`.
+    pub(super) patch: u32,
+    pub(super) patch_control_points: u32,
     pub(super) buffers: [BufferUse; MAX_BUFFER_BINDINGS as usize],
     pub(super) textures: [TextureUse; MAX_TEXTURE_BINDINGS as usize],
     pub(super) samplers: [u32; MAX_SAMPLER_BINDINGS as usize],
@@ -214,6 +217,50 @@ pub struct Specialization {
     pub(super) launched_by_grid: u32,
     pub(super) constant_count: u32,
     pub(super) constants: *const ConstantValue,
+    pub(super) tessellation: *const Tessellation,
+    pub(super) stage_in: *const StageIn,
+}
+
+/// `struct stela_metal_tessellation`: the raw values of the pipeline's
+/// partition, factor step function and winding.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Tessellation {
+    pub(super) quad: bool,
+    pub(super) partition: u32,
+    pub(super) max_factor: u32,
+    pub(super) step: u32,
+    pub(super) winding: u32,
+    pub(super) control_point_index_bytes: u32,
+}
+
+/// `struct stela_metal_stage_in_attribute`; a zero format is absent.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct StageInAttribute {
+    pub format: u32,
+    pub offset: u32,
+    pub buffer: u32,
+}
+
+/// `struct stela_metal_stage_in_layout`, with the raw `MTLStepFunction`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct StageInLayout {
+    pub stride: u32,
+    pub step: u32,
+    pub rate: u32,
+}
+
+/// `STELA_METAL_STRIDE_DYNAMIC`.
+pub(super) const STRIDE_DYNAMIC: u32 = u32::MAX;
+
+/// `struct stela_metal_stage_in`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct StageIn {
+    pub(super) attributes: [StageInAttribute; ATTRIBUTES],
+    pub(super) layouts: [StageInLayout; MAX_BUFFER_BINDINGS as usize],
 }
 
 #[cfg(test)]
@@ -253,6 +300,11 @@ mod tests {
                 "STELA_METAL_CONSTANT_VALUE_BYTES",
                 size_of::<ConstantValue>(),
             ),
+            (
+                "STELA_METAL_PIPELINE_TESSELLATION_BYTES",
+                size_of::<Tessellation>(),
+            ),
+            ("STELA_METAL_STAGE_IN_BYTES", size_of::<StageIn>()),
         ];
         for (name, value) in expected {
             assert_eq!(define(name), value, "{name}");
