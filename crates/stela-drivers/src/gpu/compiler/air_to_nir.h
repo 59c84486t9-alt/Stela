@@ -128,12 +128,13 @@ enum stela_air_device_value {
 typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_device_value,
                                                 void *binding_data);
 
-/* A post-tessellation vertex function's stage-in attribute at location, as
- * four 32-bit lanes: the attribute of the control point `point` of the patch
- * ids (its STELA_AIR_PATCH_IDS), or of the patch when point is NULL. integer
- * says whether the function reads it as integers. NULL when the stage-in
- * layout does not provide it so. */
-typedef nir_def *(*stela_air_fetch_attribute)(nir_builder *, unsigned location, nir_def *ids,
+/* A stage-in attribute at location, as four 32-bit lanes. For a
+ * post-tessellation vertex function, `at` is its STELA_AIR_PATCH_IDS, and
+ * the attribute is that of the patch's control point `point`, or of the
+ * patch when point is NULL; for a kernel, `at` is the thread's position in
+ * the grid and point is NULL. integer says whether the function reads it as
+ * integers. NULL when the stage-in layout does not provide it so. */
+typedef nir_def *(*stela_air_fetch_attribute)(nir_builder *, unsigned location, nir_def *at,
                                               nir_def *point, bool integer, void *binding_data);
 
 /* A MTLFunctionConstantValues value, laid out as Metal's: its lanes packed,
@@ -182,8 +183,8 @@ struct stela_air_options {
     * kernel threads outside a dispatchThreads grid return before the
     * function runs, as Metal's smaller edge threadgroups never run them. */
    stela_air_load_device_value load_device_value;
-   /* Stage-in attributes of post-tessellation vertex functions; NULL refuses
-    * them. */
+   /* Stage-in attributes of kernels and post-tessellation vertex
+    * functions; NULL refuses them. */
    stela_air_fetch_attribute fetch_attribute;
    /* Function constant values by index (see air_constants.c). A required
     * constant without one is refused; values for constants the module does

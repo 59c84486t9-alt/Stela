@@ -294,14 +294,14 @@ if stela_air_llvm != ''
     build_rpath : fs.parent(stela_air_llvm),
   )
   test('stela_air_render_io', stela_air_render_io_test, suite : 'stela')
-  stela_air_patch_test = executable(
-    'stela_air_patch_test',
-    'tests/air_patch.c',
+  stela_air_stage_in_test = executable(
+    'stela_air_stage_in_test',
+    'tests/air_stage_in.c',
     include_directories : [inc_include, inc_src, inc_gpu],
     dependencies : [idep_stela_air],
     build_rpath : fs.parent(stela_air_llvm),
   )
-  test('stela_air_patch', stela_air_patch_test, suite : 'stela')
+  test('stela_air_stage_in', stela_air_stage_in_test, suite : 'stela')
   stela_air_math_test = executable(
     'stela_air_math_test',
     'tests/air_math.c',

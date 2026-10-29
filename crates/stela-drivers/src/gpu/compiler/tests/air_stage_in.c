@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MIT */
-/* Post-tessellation vertex functions. Original LLVM IR fixtures in the
- * patch forms air_metadata.c documents; no Apple output. */
+/* Stage-in the functions fetch themselves: post-tessellation vertex
+ * functions' control points and per-patch attributes, and kernels'.
+ * Original LLVM IR fixtures in the forms air_metadata.c documents; no Apple
+ * output. */
 #include "compiler/air_to_nir.h"
 #include "air_test_fixture.h"
 #include "util/ralloc.h"
@@ -96,12 +98,14 @@ load_device_value(nir_builder *b, enum stela_air_device_value value, void *data)
    return patch_ids;
 }
 
+/* Patch functions fetch at their patch IDs, kernels at a position. */
 static nir_def *
-fetch_attribute(nir_builder *b, unsigned location, nir_def *ids, nir_def *point, bool integer,
+fetch_attribute(nir_builder *b, unsigned location, nir_def *at, nir_def *point, bool integer,
                 void *data)
 {
    (void)data;
-   assert(ids == patch_ids && fetch_count < ARRAY_SIZE(fetches));
+   assert(at->num_components == 3 && (!patch_ids || at == patch_ids));
+   assert(fetch_count < ARRAY_SIZE(fetches));
    fetches[fetch_count++] = (struct fetch){location, point != NULL, integer};
    nir_def *address = nir_imm_int64(b, 16 * location);
    return nir_load_global(b, 4, 32, address, .access = ACCESS_NON_WRITEABLE, .align_mul = 16);
@@ -146,6 +150,7 @@ translate(const char *text, bool fetch, struct stela_air_error *error)
       },
    };
    fetch_count = 0;
+   patch_ids = NULL;
    nir_shader *shader = stela_air_stage_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
                                                "patch", &nir_options, &o, error);
    LLVMDisposeMemoryBuffer(input);
@@ -259,12 +264,99 @@ patch_functions_refuse_what_they_cannot_read(void)
    free(text);
 }
 
+/* A kernel storing the stage-in value at its thread position; it never
+ * reads its index. */
+static const char *kernel =
+   "define void @kernel(<4 x float> %value, <2 x i32> %index, ptr addrspace(1) %out, i32 %gid) {\n"
+   "%slot = zext i32 %gid to i64\n"
+   "%at = getelementptr <4 x float>, ptr addrspace(1) %out, i64 %slot\n"
+   "store <4 x float> %value, ptr addrspace(1) %at, align 16\n"
+   "ret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @kernel, !3, !4}\n!3 = !{}\n"
+   "!4 = !{!40, !41, !42, !43}\n"
+   "!40 = !{i32 0, !\"air.stage_in\", !\"air.location_index\", i32 0, i32 1,"
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"value\"}\n"
+   "!41 = !{i32 1, !\"air.stage_in\", !\"air.location_index\", i32 1, i32 1,"
+   " !\"air.arg_type_name\", !\"uint2\", !\"air.arg_name\", !\"index\"}\n"
+   "!42 = !{i32 2, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 16, !\"air.arg_type_align_size\","
+   " i32 16, !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"out\"}\n"
+   "!43 = !{i32 3, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"gid\"}\n";
+
+static nir_def *
+bind_buffer(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
+{
+   (void)buffer;
+   (void)data;
+   return nir_load_push_constant(b, 1, 64, nir_imm_int(b, 0), .base = 16, .range = 8);
+}
+
+static nir_shader *
+translate_kernel(const char *text, struct stela_air_error *error)
+{
+   LLVMMemoryBufferRef input = bitcode(text);
+   const struct stela_air_options o = {
+      .max_instructions = 10000, .workgroup_size = {64, 1, 1}, .bind_buffer = bind_buffer,
+      .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41, .fetch_attribute = fetch_attribute,
+   };
+   fetch_count = 0;
+   patch_ids = NULL;
+   nir_shader *shader = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                         "kernel", &nir_options, &o, error);
+   LLVMDisposeMemoryBuffer(input);
+   return shader;
+}
+
+static bool
+reflect_kernel(const struct stela_air_inspection *info, const struct stela_air_entry *entry,
+               void *data)
+{
+   (void)info;
+   const struct stela_air_argument_info *arguments = entry->arguments;
+   assert(entry->argument_count == 4);
+   assert(arguments[0].kind == 5 && arguments[0].location == 0 &&
+          arguments[0].primitive == STELA_AIR_FLOAT && arguments[0].type_components == 4);
+   assert(arguments[1].kind == 5 && arguments[1].location == 1 &&
+          arguments[1].primitive == STELA_AIR_UINT && !arguments[1].used);
+   *(bool *)data = true;
+   return true;
+}
+
+static void
+kernels_fetch_their_stage_in_at_their_position(void)
+{
+   LLVMMemoryBufferRef input = bitcode(kernel);
+   struct stela_air_error error = {0};
+   bool seen = false;
+   assert(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, reflect_kernel,
+                            &seen, &error) && seen);
+   LLVMDisposeMemoryBuffer(input);
+
+   nir_shader *shader = translate_kernel(kernel, &error);
+   if (!shader)
+      fprintf(stderr, "kernel: %u %s\n", error.kind, error.detail);
+   assert(shader && shader->info.stage == MESA_SHADER_COMPUTE);
+   /* Only the attribute it reads. */
+   assert(fetch_count == 1 && fetches[0].location == 0 && !fetches[0].point &&
+          !fetches[0].integer);
+   ralloc_free(shader);
+
+   /* Attributes have their own locations. */
+   char *text = change(kernel, "i32 1, i32 1, !\"air.arg_type_name\", !\"uint2\"",
+                       "i32 0, i32 1, !\"air.arg_type_name\", !\"uint2\"");
+   assert(!translate_kernel(text, &error) && error.kind == STELA_AIR_ARGUMENT);
+   free(text);
+}
+
 int
 main(void)
 {
    patch_metadata_reflects_control_points_and_patch_inputs();
    patch_functions_become_evaluation_shaders();
    patch_functions_refuse_what_they_cannot_read();
-   printf("AIR patch tests passed\n");
+   kernels_fetch_their_stage_in_at_their_position();
+   printf("AIR stage-in tests passed\n");
    return 0;
 }

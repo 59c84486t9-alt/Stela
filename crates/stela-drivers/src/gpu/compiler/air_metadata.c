@@ -1369,9 +1369,12 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
                       stela_air_md_string(fields[1], "air.position");
       bool varying = render && render->entry.stage == STELA_AIR_FRAGMENT &&
                      stela_air_md_string(fields[1], "air.fragment_input");
-      /* A post-tessellation vertex function's per-patch stage-in. */
-      bool vertex_input = render && render->entry.stage == STELA_AIR_VERTEX &&
-                          stela_air_md_string(fields[1], patch ? "air.patch_input" : "air.vertex_input");
+      /* A stage-in attribute: a vertex function's, a post-tessellation
+       * vertex function's per-patch one, or a kernel's. */
+      bool vertex_input = render ? render->entry.stage == STELA_AIR_VERTEX &&
+                                      stela_air_md_string(fields[1], patch ? "air.patch_input" :
+                                                                             "air.vertex_input") :
+                                   stela_air_md_string(fields[1], "air.stage_in");
       bool control_points = patch && stela_air_md_string(fields[1], "air.patch_control_point_input");
       bool in_patch = patch && stela_air_md_string(fields[1], "air.position_in_patch");
       bool texture = stela_air_md_string(fields[1], "air.texture");
@@ -1424,7 +1427,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       unsigned buffer_size = 0;
       struct stela_air_fields argument_buffer = {0};
       enum stela_air_primitive primitive = STELA_AIR_PRIMITIVE_UNKNOWN;
-      unsigned type_components = 0;
+      unsigned type_components = 0, location = 0;
       const char *name = NULL, *type_name = NULL;
       unsigned name_bytes = 0, type_name_bytes = 0;
       for (unsigned f = first_field; f < fields_count;) {
@@ -1439,7 +1442,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
                                   STELA_AIR_TEXTURE_READ_WRITE;
             has_access = true;
          } else if ((texture || sampler || vertex_input) && stela_air_md_string(key, "air.location_index")) {
-            unsigned *slot = texture ? &texture_desc.index : sampler ? &sampler_desc.index : &io->location;
+            unsigned *slot = texture ? &texture_desc.index : sampler ? &sampler_desc.index : &location;
             unsigned locations;
             if (has_location || f + 2 > fields_count || !stela_air_md_uint(fields[f], slot) ||
                 !stela_air_md_uint(fields[f + 1], &locations))
@@ -1507,7 +1510,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             io->interpolation = stela_air_md_string(key, "air.perspective") ? STELA_AIR_PERSPECTIVE :
                                 stela_air_md_string(key, "air.no_perspective") ? STELA_AIR_NO_PERSPECTIVE :
                                 STELA_AIR_FLAT;
-         } else if (io && (position || varying || vertex_input) &&
+         } else if (((io && (position || varying)) || vertex_input) &&
                     stela_air_md_string(key, "air.arg_unused")) {
             if (unused) return fail(t, STELA_AIR_METADATA, "duplicate unused qualifier");
             unused = true;
@@ -1592,11 +1595,11 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             return fail(t, STELA_AIR_ARGUMENT, "unsupported fragment input type/interpolation");
          components = type_components;
       } else if (vertex_input) {
-         if (!has_location || io->location >= AIR_MAX_VERTEX_ATTRIBUTES || attribute_locations[io->location] ||
+         if (!has_location || location >= AIR_MAX_VERTEX_ATTRIBUTES || attribute_locations[location] ||
              !stage_varying(primitive) ||
              !stage_type_matches(LLVMTypeOf(param), primitive, type_components))
             return fail(t, STELA_AIR_ARGUMENT, "unsupported/duplicate stage-in attribute at %u", index);
-         attribute_locations[io->location] = true;
+         attribute_locations[location] = true;
          components = type_components;
       } else if (in_patch) {
          unsigned lanes = render->entry.patch == STELA_AIR_PATCH_QUAD ? 2 : 3;
@@ -1619,6 +1622,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       }
       if (io) {
          io->buffer = desc; io->primitive = primitive; io->argument_buffer = indirect;
+         io->location = location;
          io->components = builtin ? components : type_components;
          io->texture = texture_desc; io->sampler = sampler_desc; io->builtin = builtin;
          io->name = name; io->name_bytes = name_bytes;
@@ -1633,6 +1637,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          .value = param, .buffer = desc, .is_buffer = buffer, .components = components,
          .is_argument_buffer = indirect, .fields = argument_buffer,
          .is_payload = payload, .is_mesh = mesh, .is_mesh_grid = grid,
+         .is_stage_in = vertex_input, .location = location,
          .texture = texture_desc, .sampler = sampler_desc, .is_texture = texture, .is_sampler = sampler,
          .builtin = builtin,
          .plain_buffer_type = primitive != STELA_AIR_PRIMITIVE_UNKNOWN,
@@ -2125,8 +2130,10 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
       for (unsigned a = 0; a < entries[i].kernel.count; a++) {
          const struct stela_air_argument *arg = &entries[i].kernel.arguments[a];
          args[a] = (struct stela_air_argument_info) {
-            .buffer = arg->buffer, .kind = arg->is_buffer ? 1 : arg->is_texture ? 3 : arg->is_sampler ? 4 : 2,
+            .buffer = arg->buffer,
+            .kind = arg->is_buffer ? 1 : arg->is_texture ? 3 : arg->is_sampler ? 4 : arg->is_stage_in ? 5 : 2,
             .texture = arg->texture, .sampler = arg->sampler, .builtin = arg->builtin,
+            .location = arg->location,
             .components = arg->components,
             .plain_buffer_type = arg->plain_buffer_type, .argument_buffer = arg->is_argument_buffer,
             .name = arg->name, .name_bytes = arg->name_bytes,

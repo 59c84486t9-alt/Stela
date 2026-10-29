@@ -168,8 +168,9 @@ enum stela_air_builtin {
 
 struct stela_air_argument_info {
    struct stela_air_buffer buffer;
-   unsigned kind; /* 1=buffer, 2=builtin, 3=texture, 4=sampler. */
+   unsigned kind; /* 1=buffer, 2=builtin, 3=texture, 4=sampler, 5=stage-in. */
    enum stela_air_builtin builtin; /* kind 2 */
+   unsigned location; /* kind 5: the attribute. */
    struct stela_air_texture texture; /* kind 3 */
    struct stela_air_sampler sampler; /* kind 4 */
    unsigned components;
@@ -426,6 +427,9 @@ struct stela_air_argument {
    /* Object and mesh inputs; the payload's buffer holds its size, alignment
     * and access. */
    bool is_payload, is_mesh, is_mesh_grid;
+   /* A stage-in attribute at location: a kernel's air.stage_in. */
+   bool is_stage_in;
+   unsigned location;
    enum stela_air_builtin builtin; /* Otherwise a builtin input. */
    unsigned components; /* The builtin's lanes. */
    bool plain_buffer_type; /* Reflected MSL builtin scalar/vector, not a struct. */

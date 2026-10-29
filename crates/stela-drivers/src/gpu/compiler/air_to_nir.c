@@ -325,6 +325,7 @@ find_value(struct translator *t, LLVMValueRef llvm)
 
 static nir_def *module_global(struct translator *t, LLVMValueRef global);
 static nir_variable *shared_resource(struct translator *t, uint64_t size, unsigned alignment);
+static nir_def *stage_narrow(nir_builder *b, nir_def *def, enum stela_air_primitive p);
 
 /* Static pointer authority is separate from the offset/VA in def. */
 static void
@@ -644,6 +645,23 @@ builtin_argument(struct translator *t, enum stela_air_builtin builtin, LLVMValue
    return LLVMGetIntTypeWidth(type) == 16 ? nir_u2u16(&t->b, value) : value;
 }
 
+/* A stage-in attribute at location in its type, as fetch_attribute reads
+ * it at `at`. */
+static nir_def *
+stage_in_attribute(struct translator *t, unsigned location, nir_def *at, nir_def *point,
+                   enum stela_air_primitive p, unsigned components)
+{
+   bool integer = p != STELA_AIR_FLOAT && p != STELA_AIR_HALF;
+   const struct stela_air_options *options = t->options;
+   nir_def *lanes = options->fetch_attribute ?
+      options->fetch_attribute(&t->b, location, at, point, integer, options->binding_data) : NULL;
+   if (!lanes || lanes->num_components != 4 || lanes->bit_size != 32) {
+      fail(t, STELA_AIR_ARGUMENT, "stage-in attribute %u is not provided", location);
+      return NULL;
+   }
+   return stage_narrow(&t->b, nir_trim_vector(&t->b, lanes, components), p);
+}
+
 /* A buffer argument's value as the root of its pointers. Argument buffers
  * hold device addresses, which SSBO bindings have no counterpart of. */
 static bool
@@ -703,6 +721,16 @@ compute_arguments(struct translator *t, const struct stela_air_kernel *kernel)
       if (argument->is_texture || argument->is_sampler) {
          if (!put_resource(t, param, argument->is_texture ? &argument->texture : NULL,
                            &argument->sampler))
+            return false;
+         continue;
+      }
+      if (argument->is_stage_in) {
+         /* Attributes the kernel never reads need no layout. */
+         if (!LLVMGetFirstUse(param))
+            continue;
+         nir_def *def = stage_in_attribute(t, argument->location, grid_position(t), NULL,
+                                           argument->primitive, argument->type_components);
+         if (!def || !put_value(t, param, def, 0))
             return false;
          continue;
       }
@@ -1774,23 +1802,6 @@ view_output(struct translator *t, gl_varying_slot slot, const char *name)
    return var;
 }
 
-/* A post-tessellation vertex function's stage-in attribute in its type: of
- * control point `point`, or of the patch when point is NULL. */
-static nir_def *
-patch_attribute(struct translator *t, unsigned location, nir_def *point,
-                enum stela_air_primitive p, unsigned components)
-{
-   bool integer = p != STELA_AIR_FLOAT && p != STELA_AIR_HALF;
-   const struct stela_air_options *options = t->options;
-   nir_def *lanes = options->fetch_attribute ?
-      options->fetch_attribute(&t->b, location, t->patch_ids, point, integer, options->binding_data) : NULL;
-   if (!lanes || lanes->num_components != 4 || lanes->bit_size != 32) {
-      fail(t, STELA_AIR_ARGUMENT, "stage-in attribute %u is not provided", location);
-      return NULL;
-   }
-   return stage_narrow(&t->b, nir_trim_vector(&t->b, lanes, components), p);
-}
-
 /* A call of a post-tessellation vertex function's control point function:
  * the attributes of the control point its first operand indexes. Members
  * the function never reads stay undefined. */
@@ -1814,7 +1825,8 @@ control_point_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee,
       const struct stela_air_struct_member *member = &io->members[i];
       if (member->unused)
          continue;
-      nir_def *def = patch_attribute(t, member->location, point, member->primitive, member->components);
+      nir_def *def = stage_in_attribute(t, member->location, t->patch_ids, point, member->primitive,
+                                        member->components);
       if (!def)
          return false;
       struct value *leaf = rzalloc(t->values, struct value);
@@ -1883,7 +1895,8 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
          def = nir_trim_vector(&t->b, nir_load_tess_coord(&t->b), io->components);
       } else if (t->render.entry.patch) {
          if (!io->used) continue;
-         if (!(def = patch_attribute(t, io->location, NULL, io->primitive, io->components)))
+         if (!(def = stage_in_attribute(t, io->location, t->patch_ids, NULL, io->primitive,
+                                        io->components)))
             return false;
       } else {
          nir_variable *var = stage_variable(t, io, false);
