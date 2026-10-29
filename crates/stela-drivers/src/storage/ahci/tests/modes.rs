@@ -1,7 +1,8 @@
 //! AHCI modes cases.
 use super::*;
 #[test]
-fn speed_down_verdicts_follow_ata_eh_speed_down_verdict() {
+fn error_history_selects_speed_down_actions() {
+    // Reference: libata ata_eh_speed_down_verdict.
     let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
     let disk = &mut fixture.disk;
     // Errors `minutes` old, newest last.
@@ -75,7 +76,8 @@ fn speed_down_verdicts_follow_ata_eh_speed_down_verdict() {
 }
 
 #[test]
-fn transfer_modes_follow_ata_id_xfermask_and_ata_set_mode() {
+fn identify_capabilities_select_transfer_modes() {
+    // Reference: libata ata_id_xfermask and ata_set_mode.
     fn words(pairs: &[(usize, u16)]) -> impl Fn(usize) -> u16 + '_ {
         move |index| {
             pairs
@@ -132,7 +134,8 @@ fn transfer_modes_follow_ata_id_xfermask_and_ata_set_mode() {
 }
 
 #[test]
-fn quirks_configure_the_disk_like_ata_dev_configure() {
+fn device_quirks_adjust_transfer_configuration() {
+    // Reference: libata ata_dev_configure.
     // An NCQ disk with auto-activation, by model and firmware revision.
     let page = |model: &str, firmware: &str| {
         let mut page = identify_page("S1", 1024);

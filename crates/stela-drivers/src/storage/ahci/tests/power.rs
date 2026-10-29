@@ -1,7 +1,8 @@
 //! AHCI power cases.
 use super::*;
 #[test]
-fn link_power_management_follows_ata_eh_link_set_lpm() {
+fn link_power_policy_follows_port_and_device_features() {
+    // Reference: libata ata_eh_link_set_lpm.
     let host = CAP_AGGRESSIVE_LPM | CAP_SLUMBER | CAP_PARTIAL;
     // Hotplug-capable and eSATA ports, and hosts without LPM states,
     // stay at maximum power.
@@ -53,7 +54,8 @@ fn link_power_management_follows_ata_eh_link_set_lpm() {
 }
 
 #[test]
-fn devslp_follows_ata_dev_config_devslp_and_ahci_set_aggressive_devslp() {
+fn devslp_uses_reported_timing_and_port_capabilities() {
+    // Reference: ata_dev_config_devslp and ahci_set_aggressive_devslp.
     let mut page = identify_page("S1", 1024);
     page[2 * 78..2 * 78 + 2].copy_from_slice(&(1u16 << 8).to_le_bytes());
     let found = identify(&page).unwrap();
@@ -95,7 +97,7 @@ fn devslp_follows_ata_dev_config_devslp_and_ahci_set_aggressive_devslp() {
 }
 
 #[test]
-fn flush_follows_the_write_cache_and_the_extended_command_like_linux() {
+fn flush_opcode_follows_write_cache_capabilities() {
     let identify = |defaults: u16, enabled: u16, commands: u16| {
         move |index: usize| match index {
             IDENTIFY_DEFAULTS => defaults,

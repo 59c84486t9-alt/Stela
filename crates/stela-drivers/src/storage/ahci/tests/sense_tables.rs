@@ -1,7 +1,8 @@
 //! AHCI sense tables cases.
 use super::*;
 #[test]
-fn generated_sense_follows_ata_to_sense_error() {
+fn taskfile_errors_map_to_sense_data() {
+    // Reference: libata ata_to_sense_error.
     let sense = |key, asc, ascq| Sense { key, asc, ascq };
     for (status, error, expected) in [
         (0x51, 0x40, sense(Sense::MEDIUM_ERROR, 0x11, 0x04)),
@@ -62,7 +63,8 @@ fn generated_sense_follows_ata_to_sense_error() {
 }
 
 #[test]
-fn sense_reporting_follows_ata_id_sense_reporting_enabled() {
+fn identify_words_control_sense_reporting() {
+    // Reference: libata ata_id_sense_reporting_enabled.
     fn words(pairs: &[(usize, u16)]) -> impl Fn(usize) -> u16 + '_ {
         move |index| {
             pairs
@@ -91,7 +93,8 @@ fn sense_reporting_follows_ata_id_sense_reporting_enabled() {
 }
 
 #[test]
-fn sense_dispositions_follow_scsi_check_sense_and_sd_completion() {
+fn sense_keys_select_completion_dispositions() {
+    // Reference: scsi_check_sense and sd_completion.
     let sense = |key, asc, ascq| Sense { key, asc, ascq };
     for (key, asc, ascq, retry, done) in [
         (

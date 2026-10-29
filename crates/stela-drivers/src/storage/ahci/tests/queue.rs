@@ -1,7 +1,8 @@
 //! AHCI queue cases.
 use super::*;
 #[test]
-fn queued_commands_run_in_their_own_slots_like_ahci_qc_issue() {
+fn queued_commands_keep_independent_slots() {
+    // Reference: ahci_qc_issue.
     // An NCQ disk taking 32 queued commands, on a host with three slots.
     let mut page = identify_page("S1", 1024);
     for (word, value) in [
@@ -108,7 +109,7 @@ fn queued_commands_run_in_their_own_slots_like_ahci_qc_issue() {
 }
 
 #[test]
-fn started_commands_complete_at_a_later_look_without_waiting() {
+fn posted_commands_complete_without_synchronous_waits() {
     let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
     // A write is staged in the bounce buffer and completes at once.
     let link = Link::new(&[]);
@@ -155,7 +156,8 @@ fn started_commands_complete_at_a_later_look_without_waiting() {
 }
 
 #[test]
-fn ncq_follows_ata_dev_config_ncq_and_ata_eh_analyze_ncq_error() {
+fn ncq_limits_and_error_logs_follow_identify_capabilities() {
+    // Reference: libata ata_dev_config_ncq and ata_eh_analyze_ncq_error.
     // NCQ with auto-activation, NCQ autosense and READ LOG DMA EXT.
     let mut page = identify_page("S1", 1024);
     for (word, value) in [(76u16, 1u16 << 8), (78, 0x84), (86, 1 << 15), (119, 0x4008)] {
@@ -232,7 +234,7 @@ fn ncq_follows_ata_dev_config_ncq_and_ata_eh_analyze_ncq_error() {
 }
 
 #[test]
-fn acknowledged_completions_keep_the_real_command_path_usable() {
+fn completion_acknowledgment_preserves_command_progress() {
     let mut fixture = Fixture::new();
     let model = Link::new(&[]);
     fixture

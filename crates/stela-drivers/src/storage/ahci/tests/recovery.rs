@@ -1,7 +1,8 @@
 //! AHCI recovery cases.
 use super::*;
 #[test]
-fn device_errors_restart_the_engine_and_follow_ata_eh_worth_retry() {
+fn taskfile_faults_retry_after_engine_restart() {
+    // Reference: libata ata_eh_worth_retry.
     // An aborted read revalidates the disk without a reset (IDENTIFY,
     // SET FEATURES with UDMA 6 and its IDENTIFY) and is retried after
     // the engine restarts.
@@ -72,7 +73,7 @@ fn device_errors_restart_the_engine_and_follow_ata_eh_worth_retry() {
 }
 
 #[test]
-fn timeouts_and_link_errors_hard_reset_revalidate_and_retry() {
+fn timeout_and_interface_faults_reset_before_retry() {
     for fault in [Fault::Timeout, Fault::Interface, Fault::TaskFile(0x8051)] {
         let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
         fixture.disk.bounce.bytes_mut()[..512].fill(0x44);
@@ -109,7 +110,7 @@ fn timeouts_and_link_errors_hard_reset_revalidate_and_retry() {
 }
 
 #[test]
-fn repeated_link_errors_lower_the_sata_speed_like_linux() {
+fn repeated_interface_faults_reduce_link_speed() {
     let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
     let link = Link::new(&[]);
     link.fastest.set(3);

@@ -1,7 +1,8 @@
 //! AHCI lifecycle cases.
 use super::*;
 #[test]
-fn amd_raid_class_functions_bind_like_ahci_pci_tbl() {
+fn supported_amd_raid_classes_match_controller_profiles() {
+    // Reference: ahci_pci_tbl.
     struct Config([u32; 4]);
     impl ConfigSpace for Config {
         fn read32(&self, offset: u16) -> u32 {
@@ -27,7 +28,7 @@ fn amd_raid_class_functions_bind_like_ahci_pci_tbl() {
 }
 
 #[test]
-fn a_disk_that_leaves_or_changes_is_disabled() {
+fn removed_or_replaced_disks_are_disabled() {
     let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
     let link = Link::new(&[Fault::Gone]);
     assert_eq!(
@@ -62,7 +63,7 @@ fn a_disk_that_leaves_or_changes_is_disabled() {
     }
 }
 #[test]
-fn ports_stop_the_command_list_before_fis_reception() {
+fn engine_shutdown_stops_commands_before_fis_receive() {
     let port = Engines {
         command: Cell::new(
             COMMAND_START | COMMAND_LIST_RUNNING | COMMAND_FIS_RECEIVE | COMMAND_FIS_RUNNING,
@@ -86,7 +87,7 @@ fn ports_stop_the_command_list_before_fis_reception() {
 }
 
 #[test]
-fn invalid_clock_never_attempts_an_engine_transition() {
+fn invalid_clock_refuses_engine_register_writes() {
     for ticks_per_microsecond in [0, u64::MAX, u64::MAX / (2 * COMMAND_TIMEOUT_US) + 1] {
         let command =
             COMMAND_START | COMMAND_LIST_RUNNING | COMMAND_FIS_RECEIVE | COMMAND_FIS_RUNNING;
@@ -109,7 +110,7 @@ fn invalid_clock_never_attempts_an_engine_transition() {
 }
 
 #[test]
-fn an_unprogrammed_port_map_comes_from_the_port_count() {
+fn zero_port_map_uses_controller_port_count() {
     assert_eq!(port_map(0x4000_0005, 0), 0x3f);
     assert_eq!(port_map(CAP_PORTS, 0), u32::MAX);
     assert_eq!(port_map(0x5, 0x21), 0x21);

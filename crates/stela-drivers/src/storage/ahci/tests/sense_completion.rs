@@ -1,7 +1,8 @@
 //! AHCI sense completion cases.
 use super::*;
 #[test]
-fn revalidation_reenables_sense_reporting_like_ata_dev_configure() {
+fn revalidation_restores_sense_reporting() {
+    // Reference: libata ata_dev_configure.
     // A disk whose reset left Sense Data Reporting supported but off.
     let mut page = identify_page("S1", 1024);
     for (word, value) in [(86u16, 1u16 << 15), (119, 0x4040), (120, 0x4000)] {
@@ -22,7 +23,7 @@ fn revalidation_reenables_sense_reporting_like_ata_dev_configure() {
 }
 
 #[test]
-fn reported_sense_data_is_fetched_and_decides_completion_like_libata() {
+fn sense_fetch_results_decide_command_completion() {
     // The disk's D2H FIS for REQUEST SENSE DATA EXT.
     let reply = |fixture: &mut Fixture, status: u8, sense: [u8; 3]| {
         let d2h = &mut fixture.disk.commands.bytes_mut()[RECEIVED_D2H..];
