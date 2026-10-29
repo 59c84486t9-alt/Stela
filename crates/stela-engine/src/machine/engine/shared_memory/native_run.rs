@@ -255,14 +255,14 @@ impl ArtifactCache {
         let geometric = self.entries.capacity().checked_mul(2).unwrap_or(available);
         Some(geometric.max(required).min(available))
     }
-    fn reserve_slots(&mut self, capacity: usize) -> Result<(), ()> {
+    fn reserve_slots(&mut self, capacity: usize) -> Option<()> {
         #[cfg(test)]
         if core::mem::take(&mut self.fail_next_growth) {
-            return Err(());
+            return None;
         }
         // Vec's additional count is relative to length, not current capacity.
-        let additional = capacity.checked_sub(self.entries.len()).ok_or(())?;
-        self.entries.try_reserve_exact(additional).map_err(|_| ())
+        let additional = capacity.checked_sub(self.entries.len())?;
+        self.entries.try_reserve_exact(additional).ok()
     }
     fn insert(&mut self, artifact: Arc<Artifact>) {
         self.compiled = self.compiled.saturating_add(1);
@@ -290,7 +290,7 @@ impl ArtifactCache {
             if self.entries.len() == self.entries.capacity()
                 && let Some(capacity) = self.growth_capacity(bytes)
             {
-                if self.reserve_slots(capacity).is_err() {
+                if self.reserve_slots(capacity).is_none() {
                     return; // Cache decline only: the caller still owns/runs it.
                 }
                 // Allocators may supply more capacity than requested. The

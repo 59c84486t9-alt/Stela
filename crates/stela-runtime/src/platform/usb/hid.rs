@@ -33,7 +33,7 @@
 //! full the newest report replaces its last entry, so the final state
 //! always reaches the host. A nonzero SET_IDLE rate repeats the current
 //! report at that rate while nothing changes (HID 1.11 7.2.4).
-use super::{BusPeer, Function, Reply, Token};
+use super::{BusPeer, Function, Reply, Token, control::Stall};
 use alloc::{collections::VecDeque, vec::Vec};
 use stela_drivers::input::{Input, POINTER_MAX};
 
@@ -508,7 +508,7 @@ impl Peripheral {
 
     /// Evaluates a request whose data stage, if any, is complete. `Err`
     /// is a request error: the device STALLs the rest of the transfer.
-    fn request(&mut self, setup: [u8; 8], data: &[u8]) -> Result<Outcome, ()> {
+    fn request(&mut self, setup: [u8; 8], data: &[u8]) -> Result<Outcome, Stall> {
         let kind = setup[0];
         let request = setup[1];
         let value = u16::from_le_bytes([setup[2], setup[3]]);
@@ -522,19 +522,19 @@ impl Peripheral {
             (0x82, GET_STATUS) => match index as u8 {
                 0 | 0x80 => reply(&[0, 0]),
                 ep if configured => {
-                    let n = Self::interface_of(ep).ok_or(())?;
+                    let n = Self::interface_of(ep).ok_or(Stall)?;
                     reply(&[u8::from(self.interfaces[n].halted), 0])
                 }
-                _ => Err(()),
+                _ => Err(Stall),
             },
             (0x02, CLEAR_FEATURE | SET_FEATURE) if value == ENDPOINT_HALT => match index as u8 {
                 0 | 0x80 => Ok(Outcome::Done(None)),
                 ep if configured => {
-                    let n = Self::interface_of(ep).ok_or(())?;
+                    let n = Self::interface_of(ep).ok_or(Stall)?;
                     self.interfaces[n].halted = request == SET_FEATURE;
                     Ok(Outcome::Done(None))
                 }
-                _ => Err(()),
+                _ => Err(Stall),
             },
             (0x00, SET_ADDRESS) if value <= 127 && index == 0 && !configured => {
                 Ok(Outcome::Done(Some(value as u8)))
@@ -545,7 +545,7 @@ impl Peripheral {
                 (STRING, 0) => reply(&[4, STRING, 0x09, 0x04]),
                 (STRING, 1) if index == ENGLISH => reply(&string("Stela")),
                 (STRING, 2) if index == ENGLISH => reply(&string("Stela Keyboard and Pointers")),
-                _ => Err(()),
+                _ => Err(Stall),
             },
             (0x81, GET_DESCRIPTOR) if interface < INTERFACES => {
                 match ((value >> 8) as u8, value as u8) {
@@ -558,7 +558,7 @@ impl Peripheral {
                         POINTER => &POINTER_REPORT_DESCRIPTOR[..],
                         _ => &MOUSE_REPORT_DESCRIPTOR[..],
                     }),
-                    _ => Err(()),
+                    _ => Err(Stall),
                 }
             }
             (0x80, GET_CONFIGURATION) => reply(&[self.configuration]),
@@ -602,7 +602,7 @@ impl Peripheral {
                 self.interfaces[interface].protocol = value as u8;
                 Ok(Outcome::Done(None))
             }
-            _ => Err(()),
+            _ => Err(Stall),
         }
     }
 

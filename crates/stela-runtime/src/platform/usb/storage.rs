@@ -27,7 +27,7 @@ use super::{
     control::{
         self, CLASS, CLEAR_FEATURE, Control, DEVICE, DEVICE_QUALIFIER, Descriptors, ENDPOINT,
         ENDPOINT_HALT, GET_INTERFACE, GET_STATUS, INTERFACE, Outcome, RECIPIENT_ENDPOINT,
-        RECIPIENT_INTERFACE, Requests, SET_FEATURE, SET_INTERFACE, STANDARD, Setup,
+        RECIPIENT_INTERFACE, Requests, SET_FEATURE, SET_INTERFACE, STANDARD, Setup, Stall,
     },
 };
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
@@ -733,7 +733,7 @@ impl State {
 }
 
 impl Requests for State {
-    fn configure(&mut self, _value: u8) -> Result<(), ()> {
+    fn configure(&mut self, _value: u8) -> Result<(), Stall> {
         self.phase = Phase::Command;
         self.halted_in = false;
         self.halted_out = false;
@@ -741,7 +741,7 @@ impl Requests for State {
         Ok(())
     }
 
-    fn request(&mut self, setup: Setup, _data: &[u8]) -> Result<Outcome, ()> {
+    fn request(&mut self, setup: Setup, _data: &[u8]) -> Result<Outcome, Stall> {
         let read = setup.device_to_host();
         match (setup.kind(), setup.recipient(), setup.request, read) {
             (CLASS, RECIPIENT_INTERFACE, RESET, false)
@@ -771,7 +771,7 @@ impl Requests for State {
             (STANDARD, RECIPIENT_ENDPOINT, GET_STATUS, true) => match setup.index as u8 {
                 BULK_IN => Ok(Outcome::Data(vec![u8::from(self.halted_in), 0])),
                 BULK_OUT => Ok(Outcome::Data(vec![u8::from(self.halted_out), 0])),
-                _ => Err(()),
+                _ => Err(Stall),
             },
             (STANDARD, RECIPIENT_ENDPOINT, CLEAR_FEATURE | SET_FEATURE, false)
                 if setup.value == ENDPOINT_HALT =>
@@ -780,11 +780,11 @@ impl Requests for State {
                 match setup.index as u8 {
                     BULK_IN => self.halted_in = halt,
                     BULK_OUT => self.halted_out = halt,
-                    _ => return Err(()),
+                    _ => return Err(Stall),
                 }
                 Ok(Outcome::Done)
             }
-            _ => Err(()),
+            _ => Err(Stall),
         }
     }
 }
@@ -792,7 +792,9 @@ impl Requests for State {
 impl BusPeer for MassStorage {
     fn reset(&mut self) -> Result<(), &'static str> {
         self.control.reset(&mut self.state)?;
-        self.state.configure(0).map_err(|()| "mass storage reset")
+        self.state
+            .configure(0)
+            .map_err(|Stall| "mass storage reset")
     }
 
     fn packet(

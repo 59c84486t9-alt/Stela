@@ -37,11 +37,11 @@ mod tests {
     use super::*;
     struct Source;
     impl ReadAt for Source {
-        type Error = ();
+        type Error = core::convert::Infallible;
         fn len(&self) -> u64 {
             1024
         }
-        fn read_at(&mut self, _: u64, b: &mut [u8]) -> core::result::Result<(), ()> {
+        fn read_at(&mut self, _: u64, b: &mut [u8]) -> core::result::Result<(), Self::Error> {
             b.fill(42);
             Ok(())
         }

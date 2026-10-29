@@ -40,7 +40,7 @@ use super::{
     control::{
         self, CLASS, CLEAR_FEATURE, Control, DEVICE, DEVICE_QUALIFIER, Descriptors, ENDPOINT,
         ENDPOINT_HALT, GET_INTERFACE, GET_STATUS, INTERFACE, Outcome, RECIPIENT_ENDPOINT,
-        RECIPIENT_INTERFACE, Requests, SET_FEATURE, SET_INTERFACE, STANDARD, Setup,
+        RECIPIENT_INTERFACE, Requests, SET_FEATURE, SET_INTERFACE, STANDARD, Setup, Stall,
     },
 };
 use alloc::{collections::VecDeque, format, string::String, vec, vec::Vec};
@@ -488,7 +488,7 @@ impl State {
 }
 
 impl Requests for State {
-    fn configure(&mut self, _value: u8) -> Result<(), ()> {
+    fn configure(&mut self, _value: u8) -> Result<(), Stall> {
         self.alternate = 0;
         self.filter = DIRECTED | BROADCAST | ALL_MULTICAST;
         self.multicast.clear();
@@ -502,14 +502,14 @@ impl Requests for State {
         Ok(())
     }
 
-    fn request(&mut self, setup: Setup, data: &[u8]) -> Result<Outcome, ()> {
+    fn request(&mut self, setup: Setup, data: &[u8]) -> Result<Outcome, Stall> {
         let read = setup.device_to_host();
         match (setup.kind(), setup.recipient(), setup.request, read) {
             (CLASS, RECIPIENT_INTERFACE, SET_ETHERNET_PACKET_FILTER, false)
                 if setup.index == CONTROL_INTERFACE && setup.length == 0 =>
             {
                 if setup.value & !0x1f != 0 {
-                    return Err(());
+                    return Err(Stall);
                 }
                 self.filter = setup.value;
                 Ok(Outcome::Done)
@@ -522,7 +522,7 @@ impl Requests for State {
             {
                 let groups: Vec<Mac> = data.as_chunks::<6>().0.iter().copied().map(Mac).collect();
                 if !groups.iter().all(|group| group.is_multicast()) {
-                    return Err(());
+                    return Err(Stall);
                 }
                 self.multicast = groups;
                 Ok(Outcome::Done)
@@ -530,7 +530,7 @@ impl Requests for State {
             (CLASS, RECIPIENT_INTERFACE, GET_ETHERNET_STATISTIC, true)
                 if setup.index == CONTROL_INTERFACE && setup.length == 4 =>
             {
-                let count = self.statistic(setup.value).ok_or(())?;
+                let count = self.statistic(setup.value).ok_or(Stall)?;
                 Ok(Outcome::Data(count.to_le_bytes().to_vec()))
             }
             (STANDARD, RECIPIENT_INTERFACE, GET_STATUS, true) if setup.index <= DATA_INTERFACE => {
@@ -539,7 +539,7 @@ impl Requests for State {
             (STANDARD, RECIPIENT_INTERFACE, GET_INTERFACE, true) => match setup.index {
                 CONTROL_INTERFACE => Ok(Outcome::Data(vec![0])),
                 DATA_INTERFACE => Ok(Outcome::Data(vec![self.alternate])),
-                _ => Err(()),
+                _ => Err(Stall),
             },
             (STANDARD, RECIPIENT_INTERFACE, SET_INTERFACE, false) => {
                 match (setup.index, setup.value) {
@@ -548,20 +548,20 @@ impl Requests for State {
                         self.select(alternate as u8);
                         Ok(Outcome::Done)
                     }
-                    _ => Err(()),
+                    _ => Err(Stall),
                 }
             }
             (STANDARD, RECIPIENT_ENDPOINT, GET_STATUS, true) => {
-                let halted = *self.halt(setup.index as u8).ok_or(())?;
+                let halted = *self.halt(setup.index as u8).ok_or(Stall)?;
                 Ok(Outcome::Data(vec![u8::from(halted), 0]))
             }
             (STANDARD, RECIPIENT_ENDPOINT, CLEAR_FEATURE | SET_FEATURE, false)
                 if setup.value == ENDPOINT_HALT =>
             {
-                *self.halt(setup.index as u8).ok_or(())? = setup.request == SET_FEATURE;
+                *self.halt(setup.index as u8).ok_or(Stall)? = setup.request == SET_FEATURE;
                 Ok(Outcome::Done)
             }
-            _ => Err(()),
+            _ => Err(Stall),
         }
     }
 }
@@ -569,7 +569,9 @@ impl Requests for State {
 impl BusPeer for Ecm {
     fn reset(&mut self) -> Result<(), &'static str> {
         self.control.reset(&mut self.state)?;
-        self.state.configure(0).map_err(|()| "USB Ethernet reset")
+        self.state
+            .configure(0)
+            .map_err(|Stall| "USB Ethernet reset")
     }
 
     fn packet(

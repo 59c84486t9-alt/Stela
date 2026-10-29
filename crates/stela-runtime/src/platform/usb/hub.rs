@@ -44,7 +44,7 @@ use super::{
         self, CLASS, CLEAR_FEATURE, Control, DEVICE, DEVICE_QUALIFIER, Descriptors, ENDPOINT,
         ENDPOINT_HALT, GET_DESCRIPTOR, GET_INTERFACE, GET_STATUS, INTERFACE, Outcome,
         RECIPIENT_DEVICE, RECIPIENT_ENDPOINT, RECIPIENT_INTERFACE, RECIPIENT_OTHER, Requests,
-        SET_FEATURE, SET_INTERFACE, STANDARD, Setup,
+        SET_FEATURE, SET_INTERFACE, STANDARD, Setup, Stall,
     },
 };
 use alloc::{string::String, vec, vec::Vec};
@@ -278,20 +278,20 @@ impl<P: Ports> Hub<P> {
 }
 
 /// The port wIndex names, from 1.
-fn port(ports: &mut [Port], index: u16) -> Result<(usize, &mut Port), ()> {
-    let n = usize::from(index as u8).checked_sub(1).ok_or(())?;
+fn port(ports: &mut [Port], index: u16) -> Result<(usize, &mut Port), Stall> {
+    let n = usize::from(index as u8).checked_sub(1).ok_or(Stall)?;
     if index >> 8 != 0 {
-        return Err(());
+        return Err(Stall);
     }
-    ports.get_mut(n).map(|p| (n, p)).ok_or(())
+    ports.get_mut(n).map(|p| (n, p)).ok_or(Stall)
 }
 
 impl<P: Ports> Context<'_, P> {
-    fn port(&mut self, index: u16) -> Result<(usize, &mut Port), ()> {
+    fn port(&mut self, index: u16) -> Result<(usize, &mut Port), Stall> {
         port(&mut self.state.ports, index)
     }
 
-    fn set_port_feature(&mut self, setup: Setup) -> Result<Outcome, ()> {
+    fn set_port_feature(&mut self, setup: Setup) -> Result<Outcome, Stall> {
         // PORT_TEST and PORT_INDICATOR carry a selector in wIndex 15:8.
         let selector = (setup.index >> 8) as u8;
         let index = match setup.value {
@@ -301,7 +301,7 @@ impl<P: Ports> Context<'_, P> {
         let (n, port) = port(&mut self.state.ports, index)?;
         if port.testing() {
             // A port in test mode leaves it only through a hub reset.
-            return Err(());
+            return Err(Stall);
         }
         let powered = port.status & bit(PORT_POWER) != 0;
         match setup.value {
@@ -313,7 +313,7 @@ impl<P: Ports> Context<'_, P> {
                     port.status |= bit(PORT_HIGH_SPEED);
                 }
                 port.change |= bit(PORT_RESET);
-                self.functions.function(n).reset().map_err(|_| ())?;
+                self.functions.function(n).reset().map_err(|_| Stall)?;
             }
             // Reset of an unconnected or unpowered port has no effect.
             PORT_RESET => {}
@@ -325,7 +325,7 @@ impl<P: Ports> Context<'_, P> {
                 let enabled = port.status & bit(PORT_ENABLE) != 0;
                 let suspended = port.status & bit(PORT_SUSPEND) != 0;
                 if enabled && !suspended {
-                    return Err(());
+                    return Err(Stall);
                 }
                 port.status |= bit(PORT_TEST);
             }
@@ -337,15 +337,15 @@ impl<P: Ports> Context<'_, P> {
                     port.status |= bit(PORT_INDICATOR);
                 }
             }
-            _ => return Err(()),
+            _ => return Err(Stall),
         }
         Ok(Outcome::Done)
     }
 
-    fn clear_port_feature(&mut self, setup: Setup) -> Result<Outcome, ()> {
+    fn clear_port_feature(&mut self, setup: Setup) -> Result<Outcome, Stall> {
         let (_, port) = self.port(setup.index)?;
         if port.testing() {
-            return Err(());
+            return Err(Stall);
         }
         match setup.value {
             PORT_ENABLE => port.status &= !(bit(PORT_ENABLE) | bit(PORT_SUSPEND)),
@@ -359,19 +359,19 @@ impl<P: Ports> Context<'_, P> {
             INDICATOR_FEATURE => port.status &= !bit(PORT_INDICATOR),
             C_PORT_CONNECTION | C_PORT_ENABLE | C_PORT_SUSPEND | C_PORT_OVER_CURRENT
             | C_PORT_RESET => port.change &= !bit(setup.value - C_PORT_CONNECTION),
-            _ => return Err(()),
+            _ => return Err(Stall),
         }
         Ok(Outcome::Done)
     }
 
     /// The single TT's port argument is 1 (11.24.2.6, 11.24.2.11).
-    fn single_tt(setup: Setup) -> Result<(), ()> {
-        (setup.index == 1).then_some(()).ok_or(())
+    fn single_tt(setup: Setup) -> Result<(), Stall> {
+        (setup.index == 1).then_some(()).ok_or(Stall)
     }
 }
 
 impl<P: Ports> Requests for Context<'_, P> {
-    fn configure(&mut self, value: u8) -> Result<(), ()> {
+    fn configure(&mut self, value: u8) -> Result<(), Stall> {
         self.state.halted = false;
         if value == 0 {
             // Back to Address: ports lose power (11.11).
@@ -381,7 +381,7 @@ impl<P: Ports> Requests for Context<'_, P> {
         Ok(())
     }
 
-    fn request(&mut self, setup: Setup, _data: &[u8]) -> Result<Outcome, ()> {
+    fn request(&mut self, setup: Setup, _data: &[u8]) -> Result<Outcome, Stall> {
         let read = setup.device_to_host();
         match (setup.kind(), setup.recipient(), setup.request, read) {
             (CLASS, RECIPIENT_DEVICE, GET_DESCRIPTOR, true)
@@ -466,7 +466,7 @@ impl<P: Ports> Requests for Context<'_, P> {
                 self.state.halted = setup.request == SET_FEATURE;
                 Ok(Outcome::Done)
             }
-            _ => Err(()),
+            _ => Err(Stall),
         }
     }
 }

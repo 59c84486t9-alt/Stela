@@ -125,9 +125,13 @@ mod tests {
         ] {
             let mut state = GuestState::default();
             let initial = state.clone();
-            let result = complete(instruction, &mut state, |_, _| -> Result<u64, ()> {
-                panic!("invalid operand reached key service")
-            });
+            let result = complete(
+                instruction,
+                &mut state,
+                |_, _| -> Result<u64, core::convert::Infallible> {
+                    panic!("invalid operand reached key service")
+                },
+            );
             assert_eq!(result, Err(Fault::InvalidOperands));
             assert_eq!(state, initial);
         }

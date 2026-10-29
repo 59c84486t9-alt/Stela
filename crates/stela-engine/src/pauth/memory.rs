@@ -342,8 +342,12 @@ mod tests {
                 instruction,
                 Controls::default(),
                 &mut state,
-                |_, _| -> Result<u64, ()> { panic!("invalid descriptor authenticated") },
-                |_| -> Result<u64, ()> { panic!("invalid descriptor read memory") },
+                |_, _| -> Result<u64, core::convert::Infallible> {
+                    panic!("invalid descriptor authenticated")
+                },
+                |_| -> Result<u64, core::convert::Infallible> {
+                    panic!("invalid descriptor read memory")
+                },
             );
             assert_eq!(result, Err(Fault::InvalidOperands));
             assert_eq!(state, initial);

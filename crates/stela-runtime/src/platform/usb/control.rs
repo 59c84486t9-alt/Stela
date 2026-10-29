@@ -80,7 +80,7 @@ impl Setup {
     }
 }
 
-/// A request's outcome before its status stage. `Err(())` is a request
+/// A request's outcome before its status stage. `Err(Stall)` is a request
 /// error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -140,13 +140,18 @@ pub fn configuration(value: u8, power_ma: u16, parts: &[&[u8]]) -> Vec<u8> {
     bytes
 }
 
+/// A request the device refuses, answered with a STALL handshake (USB 2.0
+/// 8.5.3.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stall;
+
 /// The class, vendor, interface and endpoint requests of a function.
 pub trait Requests {
     /// The host selected configuration `value` (0: back to Address).
-    /// `Err(())` refuses a value the device does not have.
-    fn configure(&mut self, value: u8) -> Result<(), ()>;
+    /// `Err(Stall)` refuses a value the device does not have.
+    fn configure(&mut self, value: u8) -> Result<(), Stall>;
     /// A request [`Control`] does not answer itself, with its OUT data.
-    fn request(&mut self, setup: Setup, data: &[u8]) -> Result<Outcome, ()>;
+    fn request(&mut self, setup: Setup, data: &[u8]) -> Result<Outcome, Stall>;
 }
 
 #[derive(Debug, Clone)]
@@ -204,7 +209,7 @@ impl Control {
             self.configuration = 0;
             requests
                 .configure(0)
-                .map_err(|()| "function refused deconfiguration at reset")?;
+                .map_err(|Stall| "function refused deconfiguration at reset")?;
         }
         Ok(())
     }
@@ -317,7 +322,7 @@ impl Control {
         setup: Setup,
         data: &[u8],
         requests: &mut dyn Requests,
-    ) -> Result<(Outcome, Option<u8>), ()> {
+    ) -> Result<(Outcome, Option<u8>), Stall> {
         let standard_device = setup.kind() == STANDARD && setup.recipient() == RECIPIENT_DEVICE;
         if !standard_device {
             // Interface and endpoint requests need a configuration
@@ -329,11 +334,11 @@ impl Control {
                     (CLEAR_FEATURE, false) if setup.value == ENDPOINT_HALT => {
                         Ok((Outcome::Done, None))
                     }
-                    _ => Err(()),
+                    _ => Err(Stall),
                 };
             }
             if self.configuration == 0 && setup.kind() == STANDARD {
-                return Err(());
+                return Err(Stall);
             }
             return requests.request(setup, data).map(|outcome| (outcome, None));
         }
@@ -350,11 +355,11 @@ impl Control {
             (GET_DESCRIPTOR, true) => match ((setup.value >> 8) as u8, setup.value as u8) {
                 (DEVICE, 0) => reply(&d.device),
                 (CONFIGURATION, 0) => reply(&d.configuration),
-                (DEVICE_QUALIFIER, 0) => d.other_speed.as_ref().map_or(Err(()), |o| reply(&o.0)),
+                (DEVICE_QUALIFIER, 0) => d.other_speed.as_ref().map_or(Err(Stall), |o| reply(&o.0)),
                 (OTHER_SPEED_CONFIGURATION, 0) => {
                     d.other_speed
                         .as_ref()
-                        .map_or(Err(()), |(_, configuration)| {
+                        .map_or(Err(Stall), |(_, configuration)| {
                             let mut bytes = configuration.clone();
                             bytes[1] = OTHER_SPEED_CONFIGURATION;
                             Ok((Outcome::Data(bytes), None))
@@ -364,21 +369,21 @@ impl Control {
                 (STRING, n) if setup.index == ENGLISH => d
                     .strings
                     .get(usize::from(n) - 1)
-                    .map_or(Err(()), |text| reply(&string(text))),
-                _ => Err(()),
+                    .map_or(Err(Stall), |text| reply(&string(text))),
+                _ => Err(Stall),
             },
             (GET_CONFIGURATION, true) => reply(&[self.configuration]),
             (SET_CONFIGURATION, false) if setup.value <= 255 && self.address != 0 => {
                 let value = setup.value as u8;
                 let ours = d.configuration.get(5).copied();
                 if value != 0 && Some(value) != ours {
-                    return Err(());
+                    return Err(Stall);
                 }
                 requests.configure(value)?;
                 self.configuration = value;
                 Ok((Outcome::Done, None))
             }
-            _ => Err(()),
+            _ => Err(Stall),
         }
     }
 }
@@ -394,7 +399,7 @@ pub(crate) mod tests {
         peer: &mut dyn BusPeer,
         setup: [u8; 8],
         out: &[u8],
-    ) -> Result<Vec<u8>, ()> {
+    ) -> Result<Vec<u8>, Stall> {
         assert_eq!(
             peer.packet(0, Token::Setup, &mut setup.clone()),
             Ok(Reply::Ack(8))
@@ -411,23 +416,23 @@ pub(crate) mod tests {
                             break;
                         }
                     }
-                    Reply::Stall => return Err(()),
+                    Reply::Stall => return Err(Stall),
                     Reply::Nak => panic!("control IN NAK"),
                 }
             }
             match peer.packet(0, Token::Out, &mut []).unwrap() {
                 Reply::Ack(0) => Ok(data),
-                _ => Err(()),
+                _ => Err(Stall),
             }
         } else {
             for chunk in out.chunks(EP0_PACKET) {
                 if peer.packet(0, Token::Out, &mut chunk.to_vec()).unwrap() == Reply::Stall {
-                    return Err(());
+                    return Err(Stall);
                 }
             }
             match peer.packet(0, Token::In, &mut []).unwrap() {
                 Reply::Ack(0) => Ok(data),
-                _ => Err(()),
+                _ => Err(Stall),
             }
         }
     }
@@ -453,18 +458,18 @@ pub(crate) mod tests {
     }
 
     impl Requests for (u8, Vec<u8>) {
-        fn configure(&mut self, value: u8) -> Result<(), ()> {
+        fn configure(&mut self, value: u8) -> Result<(), Stall> {
             self.0 = value;
             Ok(())
         }
-        fn request(&mut self, setup: Setup, data: &[u8]) -> Result<Outcome, ()> {
+        fn request(&mut self, setup: Setup, data: &[u8]) -> Result<Outcome, Stall> {
             match (setup.request_type, setup.request) {
                 (0x41, 1) => {
                     self.1 = data.to_vec();
                     Ok(Outcome::Done)
                 }
                 (0xc1, 2) => Ok(Outcome::Data(self.1.clone())),
-                _ => Err(()),
+                _ => Err(Stall),
             }
         }
     }
