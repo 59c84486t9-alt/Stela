@@ -1,5 +1,5 @@
 use super::{
-    pipelines::{MeshPipelineRequest, RenderPipelineRequest},
+    pipelines::{ComputePipelineRequest, MeshPipelineRequest, RenderPipelineRequest},
     queue::{AttachmentRequest, RenderPassRequest},
     *,
 };
@@ -791,7 +791,14 @@ fn post_tessellation_functions_compile_with_their_feeding_stages() {
 fn compute_and_mesh_variants_compile_per_shape() {
     let mut device = device();
     let kernel = device.new_function(1, "kernel", Vec::new()).unwrap();
-    let pipeline = device.new_compute_pipeline(kernel, false, 0).unwrap();
+    let pipeline = device
+        .new_compute_pipeline(&ComputePipelineRequest {
+            compute_function: kernel,
+            threadgroup_size_is_multiple_of_thread_execution_width: false,
+            max_total_threads_per_threadgroup: 0,
+            stage_input: None,
+        })
+        .unwrap();
     let state = device.compute_pipeline_state(pipeline).unwrap().clone();
     let buffer = device
         .new_buffer(4096, options(StorageMode::Private))

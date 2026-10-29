@@ -5,10 +5,10 @@ use super::{
 };
 use crate::gpu::metal::{
     abi::{
-        BarrierScope, BlitOption, CpuCacheMode, DispatchType, HazardTrackingMode, LoadAction,
-        PrimitiveTopologyClass, PrimitiveType, RenderStages, ResourceOptions, StorageMode,
-        StoreAction, StoreActionOptions, SwizzleChannels, TessellationControlPointIndexType,
-        TextureType, TextureUsage, VisibilityResultMode,
+        BarrierScope, BlitOption, CpuCacheMode, DispatchType, HazardTrackingMode, IndexType,
+        LoadAction, PrimitiveTopologyClass, PrimitiveType, RenderStages, ResourceOptions,
+        StorageMode, StoreAction, StoreActionOptions, SwizzleChannels,
+        TessellationControlPointIndexType, TextureType, TextureUsage, VisibilityResultMode,
     },
     binding::{ArgumentTable, BufferBinding, PushConstants, TessellationArguments},
     capabilities::Size,
@@ -24,10 +24,13 @@ use crate::gpu::metal::{
     pixel_format::PixelFormat,
     resource::TextureDescriptor,
     shader::{
-        Access as ShaderAccess, BufferUse, CompiledShader, Patch, PatchDomain, Provenance,
-        tests::interface,
+        Access as ShaderAccess, AttributeUse, BufferUse, CompiledShader, NumericClass, Patch,
+        PatchDomain, Provenance, tests::interface,
     },
-    vertex::{Attribute, Layout, StepFunction, VertexDescriptor, VertexFormat},
+    vertex::{
+        Attribute, Layout, StageInLayout, StageInStep, StageInputDescriptor, StepFunction,
+        VertexDescriptor, VertexFormat,
+    },
     vulkan::{
         Access, AttachmentLoadOp, AttachmentStoreOp, PipelineStages,
         command::{Barrier, BufferCopy},
@@ -322,7 +325,7 @@ fn patch_draws_upload_their_tessellation_arguments() {
     });
     let constants: PushConstants = constants.unwrap();
     let (chunk, bytes) = &recording.uploads[0];
-    let arguments = &bytes[(constants.tessellation - chunk.address) as usize..]
+    let arguments = &bytes[(constants.arguments - chunk.address) as usize..]
         [..TessellationArguments::BYTES as usize];
     let expected = TessellationArguments {
         factors: BufferBinding {
@@ -709,6 +712,7 @@ fn kernel_state(writes: bool) -> ComputePipelineState {
         compute_function: &kernel.interface,
         threadgroup_size_is_multiple_of_thread_execution_width: false,
         max_total_threads_per_threadgroup: 0,
+        stage_input: None,
     };
     let plan = compute_pipeline(&capabilities(), &descriptor).unwrap();
     ComputePipelineState {
@@ -716,6 +720,90 @@ fn kernel_state(writes: bool) -> ComputePipelineState {
         plan,
         interface: kernel.interface,
     }
+}
+
+#[test]
+fn stage_in_dispatches_pass_their_region() {
+    let kernel = shader(Stage::Kernel, |interface| {
+        interface.attributes = alloc::vec![AttributeUse {
+            index: 0,
+            numeric: NumericClass::Float,
+            components: 4,
+        }];
+    });
+    let layout = StageInputDescriptor {
+        attributes: alloc::vec![Attribute {
+            index: 0,
+            format: VertexFormat::Float4,
+            offset: 0,
+            buffer_index: 1,
+        }],
+        layouts: alloc::vec![StageInLayout {
+            buffer_index: 1,
+            stride: 16,
+            step_function: StageInStep::ThreadPositionInGridX,
+            step_rate: 1,
+        }],
+        index_type: IndexType::UInt16,
+        index_buffer_index: 0,
+    };
+    let descriptor = ComputePipelineDescriptor {
+        compute_function: &kernel.interface,
+        threadgroup_size_is_multiple_of_thread_execution_width: false,
+        max_total_threads_per_threadgroup: 0,
+        stage_input: Some(&layout),
+    };
+    let state = ComputePipelineState {
+        id: 1,
+        plan: compute_pipeline(&capabilities(), &descriptor).unwrap(),
+        interface: kernel.interface,
+    };
+    let threads = Size {
+        width: 32,
+        height: 1,
+        depth: 1,
+    };
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands.begin_compute(DispatchType::Serial).unwrap();
+    commands.set_compute_pipeline_state(&state).unwrap();
+    assert_eq!(
+        commands.dispatch_threadgroups(&mut resolver, [1, 1, 1], threads),
+        Err(Error::Invalid("no stage-in region is set"))
+    );
+    commands.set_stage_in_region([4, 0, 0], [60, 1, 1]).unwrap();
+    commands
+        .dispatch_threadgroups(&mut resolver, [2, 1, 1], threads)
+        .unwrap();
+    commands
+        .set_stage_in_region_indirect(buffer(9, 64), 8)
+        .unwrap();
+    commands
+        .dispatch_threadgroups(&mut resolver, [2, 1, 1], threads)
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    assert_eq!(
+        resolver.compiled[0].stage_in.as_ref(),
+        Some(&layout),
+        "the compiler specializes on the layout"
+    );
+    let recording = commands.commit((Semaphore(1), 1)).unwrap();
+    let pushed: Vec<PushConstants> = recording.segments[0]
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::PushConstants(constants) => Some(*constants),
+            _ => None,
+        })
+        .collect();
+    let (chunk, bytes) = &recording.uploads[0];
+    let region = &bytes[(pushed[0].arguments - chunk.address) as usize..][..24];
+    let expected: Vec<u8> = [4u32, 0, 0, 60, 1, 1]
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    assert_eq!(region, &expected[..]);
+    assert_eq!(pushed[1].arguments, (9 << 32) + 8);
 }
 
 fn barriers(recording: &Recording) -> usize {

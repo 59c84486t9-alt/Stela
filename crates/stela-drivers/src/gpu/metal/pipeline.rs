@@ -27,7 +27,9 @@ use super::{
     pixel_format::{Kind, PixelFormat},
     sampler::test_op,
     shader::{CompiledShader, Interface, NumericClass, Specialization, Stage, Tessellation},
-    vertex::{VertexDescriptor, patch_input, vertex_input},
+    vertex::{
+        Attribute, StageInputDescriptor, VertexDescriptor, patch_input, stage_input, vertex_input,
+    },
     vulkan::{
         BlendFactor, BlendOp, ColorComponents, CompareOp, DynamicState, Format, PrimitiveTopology,
         SampleCounts, ShaderStages, StencilOp,
@@ -253,7 +255,7 @@ pub fn tessellation(
     match vertex_descriptor {
         Some(layout) => {
             patch_input(capabilities, layout)?;
-            stage_in(function, layout)?;
+            stage_in(function, &layout.attributes)?;
         }
         None => ensure(
             function.attributes.is_empty(),
@@ -354,7 +356,7 @@ pub fn render_pipeline(
         (Some(_), _) => VertexInput::default(),
         (None, Some(layout)) => {
             let input = vertex_input(capabilities, layout)?;
-            stage_in(vertex, layout)?;
+            stage_in(vertex, &layout.attributes)?;
             input
         }
         (None, None) => {
@@ -395,12 +397,11 @@ pub fn render_pipeline(
     Ok(plan)
 }
 
-/// Checks that the layout declares each stage-in attribute of `function`
+/// Checks that `declared` holds each stage-in attribute of `function`
 /// with a format of the attribute's type.
-fn stage_in(function: &Interface, layout: &VertexDescriptor) -> Result<()> {
+fn stage_in(function: &Interface, declared: &[Attribute]) -> Result<()> {
     for attribute in &function.attributes {
-        let declared = layout
-            .attributes
+        let declared = declared
             .iter()
             .find(|declared| declared.index == attribute.index)
             .ok_or(Error::Invalid(
@@ -695,9 +696,10 @@ pub struct ComputePipelineDescriptor<'a> {
     pub threadgroup_size_is_multiple_of_thread_execution_width: bool,
     /// Zero leaves the device's limit.
     pub max_total_threads_per_threadgroup: u64,
+    pub stage_input: Option<&'a StageInputDescriptor>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ComputePipelinePlan {
     pub max_total_threads_per_threadgroup: u64,
     pub thread_execution_width: u64,
@@ -706,6 +708,8 @@ pub struct ComputePipelinePlan {
     /// The device's per-dimension threadgroup limits.
     pub max_threads_per_threadgroup: Size,
     pub max_threadgroup_memory_length: u64,
+    /// Dispatches fetch `[[stage_in]]` over a stage-in region.
+    pub stage_in: Option<StageInputDescriptor>,
 }
 
 pub fn compute_pipeline(
@@ -730,6 +734,16 @@ pub fn compute_pipeline(
         interface.static_threadgroup_bytes <= limits.max_threadgroup_memory_length,
         "the kernel's threadgroup memory exceeds the device limit",
     )?;
+    match descriptor.stage_input {
+        Some(layout) => {
+            stage_input(layout)?;
+            stage_in(interface, &layout.attributes)?;
+        }
+        None => ensure(
+            interface.attributes.is_empty(),
+            "stage-in attributes need a stage input descriptor",
+        )?,
+    }
     Ok(ComputePipelinePlan {
         max_total_threads_per_threadgroup: max_threads,
         thread_execution_width: limits.thread_execution_width,
@@ -737,6 +751,10 @@ pub fn compute_pipeline(
         full_subgroups: descriptor.threadgroup_size_is_multiple_of_thread_execution_width,
         max_threads_per_threadgroup: limits.max_threads_per_threadgroup,
         max_threadgroup_memory_length: limits.max_threadgroup_memory_length,
+        stage_in: descriptor
+            .stage_input
+            .filter(|_| !interface.attributes.is_empty())
+            .cloned(),
     })
 }
 
@@ -803,6 +821,7 @@ pub fn compute_variant(
         "threadgroup memory exceeds the device limit",
     )?;
     Ok(Specialization {
+        stage_in: plan.stage_in.clone(),
         workgroup_size: Some(dimensions.map(|size| size as u32)),
         threadgroup_lengths: lengths,
         ..Specialization::default()

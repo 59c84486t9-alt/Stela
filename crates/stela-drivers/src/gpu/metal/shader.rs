@@ -17,7 +17,7 @@ use super::{
     },
     error::{Result, ensure},
     pixel_format::Numeric,
-    vertex::VertexDescriptor,
+    vertex::{StageInputDescriptor, VertexDescriptor},
     vulkan::{ShaderStages, object::ShaderCode},
 };
 use alloc::vec::Vec;
@@ -235,8 +235,8 @@ impl Interface {
             "fragment outputs outside a fragment function",
         )?;
         ensure(
-            self.attributes.is_empty() || self.stage == Stage::Vertex,
-            "stage-in outside a vertex function",
+            self.attributes.is_empty() || matches!(self.stage, Stage::Vertex | Stage::Kernel),
+            "stage-in outside a vertex or kernel function",
         )?;
         if let Some(patch) = self.patch {
             ensure(
@@ -299,6 +299,9 @@ pub struct Specialization {
     pub workgroup_size: Option<[u32; 3]>,
     /// `setThreadgroupMemoryLength:atIndex:` lengths, as (index, bytes).
     pub threadgroup_lengths: Vec<(u32, u64)>,
+    /// A kernel's stage-in layout. The region it is fetched over is the
+    /// push constants' `arguments`.
+    pub stage_in: Option<StageInputDescriptor>,
 }
 
 /// What a post-tessellation vertex function compiles against: its

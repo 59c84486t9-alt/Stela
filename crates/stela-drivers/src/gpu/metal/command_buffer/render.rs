@@ -1206,7 +1206,7 @@ impl CommandBuffer {
             &arguments.encode(),
             TessellationArguments::ALIGNMENT,
         )?;
-        self.bindings.constants.tessellation = upload.address;
+        self.bindings.constants.arguments = upload.address;
         self.begin_query(resolver)?;
         self.bindings.flush(
             &mut self.recorder,

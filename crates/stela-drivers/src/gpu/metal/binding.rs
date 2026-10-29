@@ -6,9 +6,8 @@
 //!   update-after-bind, partially bound array per [`HeapArray`]. Index 0 of
 //!   each array is a null descriptor, so an unbound slot reads zero.
 //! - **Push constants** are [`PushConstants`]: the GPU address of each
-//!   stage's argument table, of the latest patch draw's
-//!   [`TessellationArguments`], and the dispatch's grid size. Every stage
-//!   may read them.
+//!   stage's argument table, of the latest draw's or dispatch's own
+//!   arguments, and the dispatch's grid size. Every stage may read them.
 //!
 //! An [`ArgumentTable`] mirrors Metal's per-stage binding slots. Buffers are
 //! device addresses with their bound lengths; textures and samplers are
@@ -79,9 +78,10 @@ raw_enum! {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PushConstants {
     pub tables: [u64; 3],
-    /// The latest patch draw's [`TessellationArguments`]; only the stages
-    /// synthesized for tessellation read it.
-    pub tessellation: u64,
+    /// The latest patch draw's [`TessellationArguments`], or a stage-in
+    /// dispatch's region (`MTLStageInRegionIndirectArguments`: `uint`
+    /// origin and size). Only stages synthesized for those read it.
+    pub arguments: u64,
     /// Threads in the grid (`dispatchThreads`), for the compiler's bounds
     /// check of non-uniform threadgroups; zero for uniform dispatches.
     pub grid: [u32; 3],
@@ -99,7 +99,7 @@ const _: () = assert!(PushConstants::BYTES <= 128);
 impl PushConstants {
     pub const BYTES: u32 = 52;
     pub const TABLES_OFFSET: u32 = 0;
-    pub const TESSELLATION_OFFSET: u32 = 24;
+    pub const ARGUMENTS_OFFSET: u32 = 24;
     pub const GRID_OFFSET: u32 = 32;
     pub const AMPLIFICATION_OFFSET: u32 = 44;
     pub const VIEW_MAPPING_OFFSET: u32 = 48;
@@ -111,7 +111,7 @@ impl PushConstants {
             offset: 0,
         };
         self.tables.iter().for_each(|table| writer.u64(*table));
-        writer.u64(self.tessellation);
+        writer.u64(self.arguments);
         self.grid.iter().for_each(|size| writer.u32(*size));
         writer.u32(self.amplification_id);
         writer.u32(self.view_mapping);
@@ -400,14 +400,14 @@ mod tests {
     fn push_constants_encode_in_layout_order() {
         let constants = PushConstants {
             tables: [1, 2, 3],
-            tessellation: 7,
+            arguments: 7,
             grid: [4, 5, 6],
             amplification_id: 1,
             view_mapping: 2 << 16 | 1,
         };
         let bytes = constants.encode();
         assert_eq!(bytes[PushConstants::TABLES_OFFSET as usize + 16], 3);
-        assert_eq!(bytes[PushConstants::TESSELLATION_OFFSET as usize], 7);
+        assert_eq!(bytes[PushConstants::ARGUMENTS_OFFSET as usize], 7);
         assert_eq!(bytes[PushConstants::GRID_OFFSET as usize + 8], 6);
         assert_eq!(bytes[PushConstants::AMPLIFICATION_OFFSET as usize], 1);
         assert_eq!(bytes[PushConstants::VIEW_MAPPING_OFFSET as usize + 2], 2);

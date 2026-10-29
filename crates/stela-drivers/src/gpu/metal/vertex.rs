@@ -7,6 +7,7 @@
 //! Post-tessellation vertex functions step per patch or control point; the
 //! compiler fetches their attributes from this layout ([`patch_input`]).
 use super::{
+    abi::IndexType,
     capabilities::{Capabilities, MAX_BUFFER_BINDINGS, MAX_VERTEX_ATTRIBUTES},
     error::{Error, Result, ensure, require},
     shader::NumericClass,
@@ -210,6 +211,110 @@ pub struct Layout {
 pub struct VertexDescriptor {
     pub attributes: Vec<Attribute>,
     pub layouts: Vec<Layout>,
+}
+
+raw_enum! {
+    /// `MTLStepFunction`, for kernel stage-in.
+    pub enum StageInStep: u64 {
+        Constant = 0,
+        ThreadPositionInGridX = 5,
+        ThreadPositionInGridY = 6,
+        ThreadPositionInGridXIndexed = 7,
+        ThreadPositionInGridYIndexed = 8,
+    }
+}
+
+impl StageInStep {
+    pub const fn indexed(self) -> bool {
+        matches!(
+            self,
+            Self::ThreadPositionInGridXIndexed | Self::ThreadPositionInGridYIndexed
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct StageInLayout {
+    pub buffer_index: u32,
+    pub stride: u64,
+    pub step_function: StageInStep,
+    pub step_rate: u64,
+}
+
+/// `MTLStageInputOutputDescriptor`: the kernel fetches its `[[stage_in]]`
+/// attributes from bound buffers at its thread position within the
+/// dispatch's stage-in region, through the index buffer for indexed steps.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct StageInputDescriptor {
+    pub attributes: Vec<Attribute>,
+    pub layouts: Vec<StageInLayout>,
+    pub index_type: IndexType,
+    pub index_buffer_index: u32,
+}
+
+pub fn stage_input(descriptor: &StageInputDescriptor) -> Result<()> {
+    let mut indexed = false;
+    for layout in &descriptor.layouts {
+        ensure(
+            layout.buffer_index < MAX_BUFFER_BINDINGS,
+            "stage-in buffer index exceeds the argument table",
+        )?;
+        ensure(
+            descriptor
+                .layouts
+                .iter()
+                .filter(|other| other.buffer_index == layout.buffer_index)
+                .count()
+                == 1,
+            "stage-in buffer layouts are unique",
+        )?;
+        ensure(
+            layout.stride.is_multiple_of(4),
+            "stage-in strides are multiples of four",
+        )?;
+        ensure(
+            layout.step_function == StageInStep::Constant || layout.step_rate >= 1,
+            "stage-in step rates are nonzero",
+        )?;
+        indexed |= layout.step_function.indexed();
+    }
+    if indexed {
+        ensure(
+            descriptor.index_buffer_index < MAX_BUFFER_BINDINGS
+                && descriptor
+                    .layouts
+                    .iter()
+                    .all(|layout| layout.buffer_index != descriptor.index_buffer_index),
+            "the stage-in index buffer has its own slot",
+        )?;
+    }
+    for attribute in &descriptor.attributes {
+        ensure(
+            descriptor
+                .attributes
+                .iter()
+                .filter(|other| other.index == attribute.index)
+                .count()
+                == 1,
+            "stage-in attributes are unique",
+        )?;
+        ensure(
+            attribute.offset.is_multiple_of(4),
+            "stage-in attribute offsets are multiples of four",
+        )?;
+        let layout = descriptor
+            .layouts
+            .iter()
+            .find(|layout| layout.buffer_index == attribute.buffer_index)
+            .ok_or(Error::Invalid("stage-in attribute names no buffer layout"))?;
+        if layout.step_function != StageInStep::Constant {
+            ensure(
+                attribute.offset + attribute.format.vulkan().1 <= layout.stride,
+                "stage-in attribute extends past its stride",
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Lowers a vertex function's stage-in layout to fixed-function vertex

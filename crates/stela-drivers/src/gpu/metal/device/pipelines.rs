@@ -12,7 +12,7 @@ use crate::gpu::metal::{
         CompiledShader, Compiler, Interface, Specialization, Stage, Tessellation,
         TessellationStages,
     },
-    vertex::VertexDescriptor,
+    vertex::{StageInputDescriptor, VertexDescriptor},
     vulkan::{
         backend::{Backend, Object},
         object::{ComputePipelineInfo, Pipeline, ShaderCode},
@@ -77,6 +77,16 @@ pub struct RenderPipelineRequest {
     pub input_primitive_topology: PrimitiveTopologyClass,
     pub max_vertex_amplification_count: u64,
     pub tessellation: TessellationDescriptor,
+}
+
+/// `MTLComputePipelineDescriptor` with the device's function id.
+#[derive(Clone, Debug)]
+pub struct ComputePipelineRequest {
+    pub compute_function: FunctionId,
+    pub threadgroup_size_is_multiple_of_thread_execution_width: bool,
+    /// Zero leaves the device's limit.
+    pub max_total_threads_per_threadgroup: u64,
+    pub stage_input: Option<StageInputDescriptor>,
 }
 
 /// `MTLMeshRenderPipelineDescriptor` with the device's function ids.
@@ -382,15 +392,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// dispatch shape.
     pub fn new_compute_pipeline(
         &mut self,
-        function: FunctionId,
-        threadgroup_size_is_multiple_of_thread_execution_width: bool,
-        max_total_threads_per_threadgroup: u64,
+        request: &ComputePipelineRequest,
     ) -> Result<ComputePipelineId> {
+        let function = request.compute_function;
         let interface = self.pipelines.functions.get(function.0)?.interface.clone();
         let descriptor = ComputePipelineDescriptor {
             compute_function: &interface,
-            threadgroup_size_is_multiple_of_thread_execution_width,
-            max_total_threads_per_threadgroup,
+            threadgroup_size_is_multiple_of_thread_execution_width: request
+                .threadgroup_size_is_multiple_of_thread_execution_width,
+            max_total_threads_per_threadgroup: request.max_total_threads_per_threadgroup,
+            stage_input: request.stage_input.as_ref(),
         };
         let plan = pipeline::compute_pipeline(&self.capabilities, &descriptor)?;
         let state = ComputePipelineState {
@@ -426,12 +437,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         {
             return Ok(*pipeline);
         }
-        let (function, plan) = (compute.function, compute.state.plan);
+        let plan = &compute.state.plan;
+        let (function, width, full_subgroups) = (
+            compute.function,
+            plan.thread_execution_width as u32,
+            plan.full_subgroups,
+        );
         let compiled = self.compile(function, specialization.clone())?;
         let info = ComputePipelineInfo {
             code: compiled.code,
-            required_subgroup_size: plan.thread_execution_width as u32,
-            full_subgroups: plan.full_subgroups,
+            required_subgroup_size: width,
+            full_subgroups,
         };
         let pipeline = self.backend.create_compute_pipeline(&info);
         self.compiler.release(compiled.code);

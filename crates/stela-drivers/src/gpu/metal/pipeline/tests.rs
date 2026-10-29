@@ -390,6 +390,7 @@ fn compute_variants_validate_dispatch_shape_and_memory() {
         compute_function: &kernel.interface,
         threadgroup_size_is_multiple_of_thread_execution_width: true,
         max_total_threads_per_threadgroup: 0,
+        stage_input: None,
     };
     let plan = compute_pipeline(&capabilities, &descriptor).unwrap();
     assert_eq!(plan.max_total_threads_per_threadgroup, 512);

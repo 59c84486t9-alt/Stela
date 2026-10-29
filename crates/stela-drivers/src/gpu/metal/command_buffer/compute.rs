@@ -3,7 +3,9 @@
 //! Each dispatch binds the pipeline variant for its threadgroup size and
 //! threadgroup memory lengths. A serial encoder orders dispatches through
 //! the hazard tracker; a concurrent one orders only against earlier
-//! encoders and explicit memory barriers, as Metal does.
+//! encoders and explicit memory barriers, as Metal does. A stage-in
+//! pipeline's dispatches carry the address of their stage-in region in the
+//! push constants' `arguments`.
 use super::{BufferRef, CommandBuffer, ComputePipelineState, Encoder, Resolver};
 use crate::gpu::metal::{
     abi::{BarrierScope, DispatchType},
@@ -25,11 +27,21 @@ const COMPUTE: Use = Use::new(
         .union(Access::INDIRECT_COMMAND_READ),
 );
 
+/// `setStageInRegion:` or `setStageInRegionWithIndirectBuffer:…`.
+#[derive(Clone, Copy, Debug)]
+enum StageInRegion {
+    /// Origin and size, as `MTLStageInRegionIndirectArguments` holds them.
+    Direct([u32; 6]),
+    /// The address of the GPU's `MTLStageInRegionIndirectArguments`.
+    Indirect(u64),
+}
+
 pub(super) struct ComputeState {
     dispatch_type: DispatchType,
     pipeline: Option<ComputePipelineState>,
     threadgroup_lengths: Vec<(u32, u64)>,
     bound: Option<Pipeline>,
+    stage_in: Option<StageInRegion>,
 }
 
 fn compute(encoder: &mut Encoder) -> Result<&mut ComputeState> {
@@ -52,6 +64,7 @@ impl CommandBuffer {
             pipeline: None,
             threadgroup_lengths: Vec::new(),
             bound: None,
+            stage_in: None,
         }));
         Ok(())
     }
@@ -193,10 +206,27 @@ impl CommandBuffer {
         Ok(())
     }
 
-    /// `setStageInRegion:`: kernel stage-in is not compiled.
-    pub fn set_stage_in_region(&mut self) -> Result<()> {
-        compute(&mut self.encoder)?;
-        Err(Error::Unsupported("kernel stage-in"))
+    /// `setStageInRegion:`.
+    pub fn set_stage_in_region(&mut self, origin: [u64; 3], size: [u64; 3]) -> Result<()> {
+        let state = compute(&mut self.encoder)?;
+        let mut region = [0; 6];
+        for (value, field) in origin.iter().chain(&size).zip(&mut region) {
+            *field = u32::try_from(*value).map_err(|_| Error::Invalid("stage-in region"))?;
+        }
+        state.stage_in = Some(StageInRegion::Direct(region));
+        Ok(())
+    }
+
+    /// `setStageInRegionWithIndirectBuffer:indirectBufferOffset:`.
+    pub fn set_stage_in_region_indirect(&mut self, indirect: BufferRef, offset: u64) -> Result<()> {
+        let state = compute(&mut self.encoder)?;
+        ensure(
+            offset.is_multiple_of(4),
+            "indirect arguments are 4-byte aligned",
+        )?;
+        indirect.at(offset, 24)?;
+        state.stage_in = Some(StageInRegion::Indirect(indirect.address + offset));
+        Ok(())
     }
 
     fn prepare_dispatch(
@@ -239,9 +269,25 @@ impl CommandBuffer {
                 PipelineStages::COMPUTE_SHADER.with(PipelineStages::DRAW_INDIRECT, indirect);
             self.recorder.access(Use::new(stages, access));
         }
+        let stage_in = match (&pipeline.plan.stage_in, state.stage_in) {
+            (None, _) => None,
+            (Some(_), Some(region)) => Some(region),
+            (Some(_), None) => return Err(Error::Invalid("no stage-in region is set")),
+        };
         if rebind {
             self.recorder.push(Command::BindPipeline(variant));
         }
+        self.bindings.constants.arguments = match stage_in {
+            None => self.bindings.constants.arguments,
+            Some(StageInRegion::Indirect(address)) => address,
+            Some(StageInRegion::Direct(region)) => {
+                let bytes: Vec<u8> = region
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect();
+                self.recorder.upload(resolver, &bytes, 16)?.address
+            }
+        };
         self.bindings.constants.grid = grid;
         self.bindings
             .flush(&mut self.recorder, resolver, &[Stage::Kernel])
