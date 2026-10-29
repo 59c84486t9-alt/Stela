@@ -454,6 +454,54 @@ texture_type(const char *name, unsigned bytes, struct stela_air_texture *texture
           (!texture->depth || texture->primitive == STELA_AIR_FLOAT);
 }
 
+/* Whether value is used, directly or through constant expressions, in fn. */
+static bool
+used_in(LLVMValueRef value, LLVMValueRef fn, unsigned depth)
+{
+   for (LLVMUseRef use = LLVMGetFirstUse(value); use; use = LLVMGetNextUse(use)) {
+      LLVMValueRef user = LLVMGetUser(use);
+      if (LLVMIsAInstruction(user) ? LLVMGetBasicBlockParent(LLVMGetInstructionParent(user)) == fn :
+          LLVMIsAConstantExpr(user) && depth < 8 && used_in(user, fn, depth + 1))
+         return true;
+   }
+   return false;
+}
+
+/* The bytes of the threadgroup globals fn uses, in module order at their
+ * alignments, and whether it calls air.discard_fragment. Globals are
+ * qualified by compilation, which refuses the rest; here they add nothing. */
+static void
+entry_facts(const struct stela_air_metadata *m, LLVMValueRef fn, uint64_t *threadgroup_bytes,
+            bool *discards)
+{
+   *threadgroup_bytes = 0;
+   *discards = false;
+   struct stela_air_error observed_error = {0};
+   struct stela_air_metadata observed = *m;
+   observed.error = &observed_error;
+   for (LLVMValueRef global = LLVMGetFirstGlobal(m->module); global;
+        global = LLVMGetNextGlobal(global)) {
+      struct stela_air_global info;
+      observed_error.kind = STELA_AIR_OK;
+      if (!stela_air_metadata_global(&observed, global, &info))
+         continue;
+      if (!info.constant && used_in(global, fn, 0))
+         *threadgroup_bytes = (*threadgroup_bytes + info.alignment - 1) / info.alignment *
+                                 info.alignment + info.size;
+   }
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block;
+        block = LLVMGetNextBasicBlock(block)) {
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst;
+           inst = LLVMGetNextInstruction(inst)) {
+         LLVMValueRef callee = LLVMIsACallInst(inst) ? LLVMGetCalledValue(inst) : NULL;
+         size_t bytes = 0;
+         const char *name = callee && LLVMIsAFunction(callee) ? LLVMGetValueName2(callee, &bytes) : NULL;
+         *discards |= name && bytes == strlen("air.discard_fragment") &&
+                      !memcmp(name, "air.discard_fragment", bytes);
+      }
+   }
+}
+
 /* This is reflection admission, not a change to executable/NIR admission.
  * Reject unknown function metadata/string attributes and unqualified globals
  * instead of claiming absent annotations/constants/static-resource reflection.
@@ -1375,7 +1423,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             return fail(t, STELA_AIR_ARGUMENT, "unsupported builtin type at %u", index);
       }
       if (io) {
-         io->buffer = desc; io->primitive = primitive;
+         io->buffer = desc; io->primitive = primitive; io->argument_buffer = indirect;
          io->components = builtin ? components : type_components;
          io->texture = texture_desc; io->sampler = sampler_desc; io->builtin = builtin;
          io->name = name; io->name_bytes = name_bytes;
@@ -1514,6 +1562,7 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
       return fail(m, STELA_AIR_METADATA, "selected entry is not a supported render stage");
    r->entry.input_count = r->arguments.count;
    r->entry.inputs = r->inputs; r->entry.outputs = r->outputs;
+   entry_facts(m, fn, &r->entry.threadgroup_bytes, &r->entry.discards);
    bool position = false;
    for (unsigned i = 0; i < r->entry.input_count; i++) {
       struct stela_air_stage_io *io = &r->inputs[i];
@@ -1778,12 +1827,27 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
       fail(&m, STELA_AIR_TARGET, "AIR version and target triple disagree");
       goto done;
    }
+   struct stela_air_inspection info = {
+      .target = target, .target_bytes = strlen(target), .air_minor = m.air_minor,
+      .language_major = m.language_major, .language_minor = m.language_minor,
+      .denorms_disable = m.denorms_disable, .fast_math = m.fast_math,
+   };
+   /* The identity is observational: its absence or shape refuses nothing. */
+   struct stela_air_error ident_error = {0};
+   struct stela_air_metadata observed = m;
+   observed.error = &ident_error;
+   LLVMValueRef idents[AIR_MAX_METADATA_OPERANDS], ident[AIR_MAX_METADATA_OPERANDS];
+   unsigned ident_count, ident_fields;
+   if (stela_air_named_md(&observed, "llvm.ident", idents, &ident_count) && ident_count == 1 &&
+       stela_air_md_node(&observed, idents[0], ident, &ident_fields) && ident_fields == 1 &&
+       ident[0] && LLVMIsAMDString(ident[0])) {
+      unsigned bytes;
+      info.ident = LLVMGetMDString(ident[0], &bytes);
+      info.ident_bytes = bytes;
+   }
    if (render_name) {
       struct stela_air_render render;
       if (!stela_air_metadata_stage(&m, LLVMGetNamedFunction(m.module, render_name), stage, &render)) goto done;
-      struct stela_air_inspection info = {.target = target, .target_bytes = strlen(target),
-         .air_minor = m.air_minor, .language_major = m.language_major, .language_minor = m.language_minor,
-         .denorms_disable = m.denorms_disable, .fast_math = m.fast_math};
       success = render_visit(&info, &render.entry, data);
       if (!success) fail(&m, STELA_AIR_LIMIT, "AIR stage receiver refused entry");
       goto done;
@@ -1827,11 +1891,6 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
       if (!stela_air_metadata_kernel(&m, entries[i].fn, &entries[i].kernel))
          goto done;
    }
-   struct stela_air_inspection info = {
-      .target = target, .target_bytes = strlen(target), .air_minor = m.air_minor,
-      .language_major = m.language_major, .language_minor = m.language_minor,
-      .denorms_disable = m.denorms_disable, .fast_math = m.fast_math,
-   };
    for (unsigned i = 0; i < count; i++) {
       struct stela_air_argument_info args[AIR_MAX_ARGUMENTS];
       for (unsigned a = 0; a < entries[i].kernel.count; a++) {
@@ -1840,7 +1899,7 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
             .buffer = arg->buffer, .kind = arg->is_buffer ? 1 : arg->is_texture ? 3 : arg->is_sampler ? 4 : 2,
             .texture = arg->texture, .sampler = arg->sampler, .builtin = arg->builtin,
             .components = arg->components,
-            .plain_buffer_type = arg->plain_buffer_type,
+            .plain_buffer_type = arg->plain_buffer_type, .argument_buffer = arg->is_argument_buffer,
             .name = arg->name, .name_bytes = arg->name_bytes,
             .type_name = arg->type_name, .type_name_bytes = arg->type_name_bytes,
             .primitive = arg->primitive, .type_components = arg->type_components, .used = arg->used,
@@ -1852,6 +1911,8 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
          .reflection_complete = complete_reflection(&m, entries[i].fn, &entries[i].kernel),
          .max_threads = entries[i].kernel.max_threads,
       };
+      bool discards;
+      entry_facts(&m, entries[i].fn, &entry.threadgroup_bytes, &discards);
       if (!visit(&info, &entry, data)) {
          fail(&m, STELA_AIR_LIMIT, "AIR manifest receiver refused entry");
          goto done;
@@ -1883,4 +1944,59 @@ stela_air_inspect_stage(const void *bitcode, size_t size, const char *entry,
       return false;
    }
    return inspect(bitcode, size, AIR_MAX_METADATA_OPERANDS, NULL, data, error, entry, stage, visit);
+}
+
+bool
+stela_air_entry_stage(const void *bitcode, size_t size, const char *entry, unsigned *stage,
+                      struct stela_air_error *error)
+{
+   struct stela_air_error local = {0};
+   struct stela_air_metadata m = {.error = error ? error : &local};
+   *m.error = (struct stela_air_error){0};
+   if (!bitcode || size < 4 || size > AIR_MAX_BITCODE_BYTES || memcmp(bitcode, "BC\xc0\xde", 4) ||
+       !entry || !stage_text(entry, strlen(entry)))
+      return fail(&m, STELA_AIR_INPUT, "invalid AIR entry query");
+   LLVMContextRef context = LLVMContextCreate();
+   if (!context)
+      return fail(&m, STELA_AIR_ALLOCATION, "LLVM context unavailable");
+   LLVMContextSetDiagnosticHandler(context, inspection_diagnostic, &m);
+   LLVMMemoryBufferRef buffer = LLVMCreateMemoryBufferWithMemoryRangeCopy(bitcode, size, "Metal input");
+   bool parsed = buffer && !LLVMParseBitcodeInContext2(context, buffer, &m.module);
+   if (buffer)
+      LLVMDisposeMemoryBuffer(buffer);
+   bool found = false;
+   if (!parsed || m.error->kind != STELA_AIR_OK) {
+      fail(&m, STELA_AIR_BITCODE, "LLVM refused AIR bitcode");
+      goto done;
+   }
+   LLVMValueRef fn = LLVMGetNamedFunction(m.module, entry);
+   /* In enum stela_air_stage order after the kernels. */
+   const char *lists[] = {"air.kernel", "air.vertex", "air.fragment", "air.object", "air.mesh"};
+   for (unsigned list = 0; fn && list < ARRAY_SIZE(lists); list++) {
+      LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
+      unsigned count;
+      if (!stela_air_named_md(&m, lists[list], nodes, &count))
+         goto done;
+      for (unsigned i = 0; i < count; i++) {
+         LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+         unsigned fields_count;
+         if (!stela_air_md_node(&m, nodes[i], fields, &fields_count) || !fields_count)
+            goto done;
+         if (fields[0] != fn)
+            continue;
+         if (found) {
+            fail(&m, STELA_AIR_METADATA, "entry listed more than once");
+            goto done;
+         }
+         found = true;
+         *stage = list;
+      }
+   }
+   if (!found)
+      fail(&m, STELA_AIR_ARGUMENT, "entry is not a listed AIR function");
+done:
+   if (m.module)
+      LLVMDisposeModule(m.module);
+   LLVMContextDispose(context);
+   return found && m.error->kind == STELA_AIR_OK;
 }

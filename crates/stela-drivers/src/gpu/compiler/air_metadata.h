@@ -61,6 +61,10 @@ struct stela_air_buffer {
 struct stela_air_inspection {
    const char *target;
    size_t target_bytes;
+   /* The module's llvm.ident, its compiler's build identity; NULL when it
+    * records none. */
+   const char *ident;
+   size_t ident_bytes;
    unsigned air_minor, language_major, language_minor;
    bool denorms_disable, fast_math;
 };
@@ -151,6 +155,7 @@ struct stela_air_argument_info {
    struct stela_air_sampler sampler; /* kind 4 */
    unsigned components;
    bool plain_buffer_type;
+   bool argument_buffer; /* kind 1: an air.indirect_buffer. */
    const char *name, *type_name;
    size_t name_bytes, type_name_bytes;
    enum stela_air_primitive primitive;
@@ -164,6 +169,9 @@ struct stela_air_entry {
    const struct stela_air_argument_info *arguments;
    bool reflection_complete; /* Bounded plain-resource reflection; see README. */
    unsigned max_threads; /* air.max_work_group_size, or zero when undeclared. */
+   /* The threadgroup globals the entry uses, in module order, each placed at
+    * its alignment. */
+   uint64_t threadgroup_bytes;
 };
 typedef bool (*stela_air_visit_entry)(const struct stela_air_inspection *,
                                      const struct stela_air_entry *, void *);
@@ -226,6 +234,7 @@ struct stela_air_stage_io {
    enum stela_air_sampling sampling;
    enum stela_air_depth_qualifier depth; /* Only DEPTH. */
    bool used, invariant;
+   bool argument_buffer; /* Only STAGE_BUFFER: an air.indirect_buffer. */
    /* A mesh output each primitive has, rather than each vertex; a fragment
     * input of one. */
    bool per_primitive;
@@ -255,12 +264,20 @@ struct stela_air_stage_entry {
     * outputs are its mesh's vertex and primitive data. */
    unsigned max_vertices, max_primitives;
    enum stela_air_topology topology;
+   /* As a kernel's stela_air_entry; a fragment function that calls
+    * air.discard_fragment. */
+   uint64_t threadgroup_bytes;
+   bool discards;
 };
 typedef bool (*stela_air_visit_stage)(const struct stela_air_inspection *,
                                      const struct stela_air_stage_entry *, void *);
 bool stela_air_inspect_stage(const void *, size_t, const char *entry,
                              enum stela_air_stage, stela_air_visit_stage, void *,
                              struct stela_air_error *);
+/* The stage whose entry list names entry: *stage is zero for air.kernel.
+ * Only the lists are read; inspection validates the rest. */
+bool stela_air_entry_stage(const void *, size_t, const char *entry, unsigned *stage,
+                           struct stela_air_error *);
 
 /* One validated VS/FS varying map. Identifiers borrow from the supplied entry
  * descriptors; caller must own/copy those strings beyond inspector callbacks.

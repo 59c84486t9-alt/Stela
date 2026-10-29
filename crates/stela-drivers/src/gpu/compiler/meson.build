@@ -204,6 +204,14 @@ if stela_air_llvm != ''
     include_directories : include_directories('.'),
     dependencies : [idep_nir, idep_mesautil, stela_air_llvm_dep],
   )
+  # The device's compiler service: the AIR frontend over the binding ABI.
+  stela_metal_compiler = static_library(
+    'stela_metal_compiler',
+    'metal_compiler.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : [idep_stela_air],
+    link_with : [stela_metal_abi],
+  )
   stela_threadgroup_nir_test = executable(
     'stela_threadgroup_nir_test',
     'tests/threadgroup_nir.c',
@@ -335,6 +343,16 @@ if stela_air_llvm != ''
     build_rpath : fs.parent(stela_air_llvm),
   )
   test('stela_air_mesh', stela_air_mesh_test, suite : 'stela')
+  stela_metal_compiler_test = executable(
+    'stela_metal_compiler_test',
+    'tests/metal_compiler.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : stela_air_test_dependencies,
+    link_with : [stela_metal_compiler, stela_metal_abi, stela_air_test_links],
+    c_args : stela_air_test_args,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_metal_compiler', stela_metal_compiler_test, suite : 'stela')
   if with_nvidia
     stela_nvidia_air_render_test = executable(
       'stela_nvidia_air_render_test',
