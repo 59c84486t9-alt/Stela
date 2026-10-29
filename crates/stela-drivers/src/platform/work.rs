@@ -36,8 +36,12 @@ pub mod scheduling;
 #[cfg(target_arch = "x86_64")]
 pub mod service;
 
+#[cfg(target_arch = "x86_64")]
+mod general_reservation;
 mod reservation;
 mod stack_requirement;
+#[cfg(target_arch = "x86_64")]
+pub use general_reservation::{AssignedGeneral, EnteredProcess, GeneralReservation};
 pub use stack_requirement::{StackProfile, StackRequirement};
 #[cfg(all(test, unix, target_arch = "x86_64"))]
 pub(crate) mod test_support;
@@ -183,6 +187,9 @@ struct Job {
 }
 struct State<const N: usize> {
     jobs: [Option<Job>; N],
+    reservations: [u64; N],
+    #[cfg(target_arch = "x86_64")]
+    next_reservation: u64,
     layout: Layout,
     stack_profile: Option<StackProfile>,
     stack_catalog: stack_requirement::Catalog,
@@ -294,6 +301,9 @@ impl<const N: usize> Queue<N> {
             owner: ManuallyDrop::new(owner),
             state: ManuallyDrop::new(UnsafeCell::new(State {
                 jobs: [None; N],
+                reservations: [0; N],
+                #[cfg(target_arch = "x86_64")]
+                next_reservation: 1,
                 layout: Layout::Ordinary,
                 stack_profile: None,
                 stack_catalog: stack_requirement::Catalog::empty(),
@@ -387,7 +397,7 @@ impl<const N: usize> Queue<N> {
         let slot = ranges
             .into_iter()
             .flatten()
-            .find(|index| state.jobs[*index].is_none())
+            .find(|index| state.jobs[*index].is_none() && state.reservations[*index] == 0)
             .ok_or(WorkError::Full)?;
         let sequence = state.next;
         state.next = sequence.checked_add(1).ok_or(WorkError::Exhausted)?;
@@ -504,7 +514,8 @@ impl<const N: usize> Queue<N> {
             .enumerate()
             .filter_map(|(i, j)| {
                 j.filter(|j| {
-                    j.lane == lane
+                    state.reservations[i] == 0
+                        && j.lane == lane
                         && !j.running
                         && stack_requirement::compatible(j.requirement, geometry)
                 })
@@ -520,6 +531,9 @@ impl<const N: usize> Queue<N> {
     fn finish(&self, slot: usize, sequence: u64) -> Result<(), WorkError> {
         let mut g = self.lock()?;
         let state = g.state();
+        if state.reservations.get(slot).is_none_or(|nonce| *nonce != 0) {
+            return Err(WorkError::CorruptContext);
+        }
         if !state
             .jobs
             .get(slot)
@@ -544,7 +558,12 @@ impl<const N: usize> Queue<N> {
         if !state.scheduling.quiet() {
             return Err(WorkError::Pending);
         }
-        if !state.closed || state.poisoned || state.jobs.iter().any(Option::is_some) {
+        if !state.closed
+            || state.poisoned
+            || self.abandoned.load(Ordering::Acquire)
+            || state.jobs.iter().any(Option::is_some)
+            || state.reservations.iter().any(|nonce| *nonce != 0)
+        {
             return Err(WorkError::Pending);
         }
         #[cfg(target_arch = "x86_64")]
@@ -768,6 +787,7 @@ impl<const N: usize> Drop for WakeHandle<N> {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum TaskState {
     Idle,
+    Reserved,
     Ready,
     Running,
     Runnable,
@@ -801,6 +821,7 @@ pub struct Runtime<const N: usize> {
     current: Cell<usize>,
     cursor: Cell<usize>,
     retired: Cell<bool>,
+    pending_reservations: Cell<usize>,
     service_started: Cell<bool>,
     firmware_started: Cell<bool>,
     firmware_turn: Cell<bool>,
@@ -929,7 +950,8 @@ impl<const N: usize> Runtime<N> {
             // Native worker permits require an empty pre-admission queue: a
             // legacy Notify job in an ordinary slot otherwise bypasses the two
             // real-worker limit. Legacy constructors keep their prior contract.
-            if (layout.firmware_roles() && state.jobs.iter().any(Option::is_some))
+            if state.reservations.iter().any(|nonce| *nonce != 0)
+                || (layout.firmware_roles() && state.jobs.iter().any(Option::is_some))
                 || state.jobs[N - layout.slots()..].iter().any(Option::is_some)
             {
                 return Err(WorkError::Busy);
@@ -955,6 +977,7 @@ impl<const N: usize> Runtime<N> {
             current: Cell::new(NONE),
             cursor: Cell::new(0),
             retired: Cell::new(false),
+            pending_reservations: Cell::new(0),
             service_started: Cell::new(false),
             firmware_started: Cell::new(false),
             firmware_turn: Cell::new(true),
@@ -1311,6 +1334,9 @@ impl<const N: usize> Runtime<N> {
     }
     fn suspend(self: Pin<&Self>, reason: LeaveReason) -> Result<ParkOutcome, WorkError> {
         self.current_id()?;
+        if self.pending_reservations.get() != 0 {
+            return Err(WorkError::Busy);
+        }
         let index = self.current.get();
         let flags = self.queue.cpu.save_disable()?;
         let view = self.context_view(index, true);
@@ -1677,7 +1703,7 @@ impl<const N: usize> Runtime<N> {
                         TaskState::Ready | TaskState::Runnable => true,
                         TaskState::Blocked => task.signal.pending.load(Ordering::Acquire),
                         TaskState::Idle => queued_lanes[lane_index(task.lane)],
-                        TaskState::Running => false,
+                        TaskState::Running | TaskState::Reserved => false,
                     }
             })
         }
@@ -1856,6 +1882,12 @@ impl<const N: usize> Runtime<N> {
     /// Timeout/failed drain is not retirement authority and retains every owner.
     pub unsafe fn retire(self: Pin<&Self>) -> Result<(), WorkError> {
         self.queue.process()?;
+        if self.queue.abandoned.load(Ordering::Acquire) {
+            return Err(WorkError::Closed);
+        }
+        if self.pending_reservations.get() != 0 {
+            return Err(WorkError::Pending);
+        }
         if self.domain().is_some_and(|domain| !domain.retired()) {
             return Err(WorkError::Pending);
         }
@@ -1895,6 +1927,11 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
         // SAFETY: covered by this function's own safety contract.
         unsafe { (job.callback)(job.context as *mut c_void) };
         executor.valid();
+        if executor.pending_reservations.get() != 0 {
+            executor.queue.abandoned.store(true, Ordering::Release);
+            quarantine();
+            executor.queue.cpu.fatal(WorkError::Pending);
+        }
         let _flags = match executor.queue.cpu.save_disable() {
             Ok(f) => f,
             Err(e) => executor.queue.cpu.fatal(e),

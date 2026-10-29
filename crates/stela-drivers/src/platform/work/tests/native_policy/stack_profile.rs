@@ -301,3 +301,5 @@ fn nonempty_queue_refuses_profile_without_reinterpreting_its_original_callback()
     drop(executor);
     assert_eq!(dropped.load(Ordering::Relaxed), 48);
 }
+
+mod general_reservation;
