@@ -188,6 +188,22 @@ pub mod native {
     }
 
     impl<'a> Device<'a> {
+        /// Read the validated ECDT's ports before namespace initialization.
+        /// `_GLK` remains the device's firmware-lock policy. Reduced-hardware
+        /// firmware ignores the ECDT GPE field, as ACPI requires.
+        pub fn discover_ecdt(
+            handle: Handle<'a>,
+            table: Ecdt<'_>,
+            hardware_reduced: bool,
+        ) -> Result<Self, DiscoveryError> {
+            Ok(Self {
+                handle,
+                ports: table.ports().map_err(DiscoveryError::Resources)?,
+                global_lock: optional_integer(handle, "_GLK")?.unwrap_or(0) != 0,
+                gpe: (!hardware_reduced).then_some(u32::from(table.gpe)),
+            })
+        }
+
         /// Use an actual PNP0C09 handle from Session::devices. Evaluate only
         /// after required native operation regions and firmware services exist.
         /// `_GPE` package/GPIO routing is explicitly outside this IO subset.

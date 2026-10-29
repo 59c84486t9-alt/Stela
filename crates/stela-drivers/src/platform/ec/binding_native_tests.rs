@@ -210,6 +210,66 @@ mod ec_binding_tests {
         assert!(result.success());
     }
     #[test]
+    fn native_ec_capability_requires_activation_and_pins_actual_binding() {
+        let _serial = TEST_SERIAL.lock().unwrap();
+        let (provider, counts) = fixture_ec_legacy(false);
+        let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+        let device = Device::discover(session.devices("PNP0C09").unwrap()[0]).unwrap();
+        let binding =
+            unsafe { Binding::install(device, ec::Config::default(), Scope::Device) }.unwrap();
+        assert!(matches!(
+            ec::capability::Installed::from_binding(&binding),
+            Err(resources::Error::Unassigned)
+        ));
+        session.enable_hardware().unwrap();
+        let installed = ec::capability::Installed::from_binding(&binding).unwrap();
+        assert_eq!(installed.handle(), device.handle);
+        let retained = installed.clone();
+        drop(installed);
+        assert_eq!(binding.remove(), Err(SUPPORT));
+        assert_eq!(
+            retained.handle().evaluate(Some("READ"), &[]),
+            Ok(Some(Value::Integer(0x33)))
+        );
+        drop(retained);
+        session.shutdown().unwrap();
+        assert!(counts.destroyed.load(Ordering::Acquire));
+        assert_eq!(SEMAPHORES.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn native_ec_ecdt_discovery_uses_table_ports_and_reduced_hardware_gpe_policy() {
+        use ec::discovery::{Ecdt, Ports, Register};
+        let _serial = TEST_SERIAL.lock().unwrap();
+        let (provider, counts) = fixture_ec(true);
+        let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+        let handle = session.devices("PNP0C09").unwrap()[0];
+        assert_eq!(Device::discover(handle).unwrap().ports.data, 0x72);
+        let table = Ecdt {
+            control: Register::Io(0x66),
+            data: Register::Io(0x62),
+            uid: 0,
+            gpe: 0x17,
+            path: "\\EC00",
+        };
+        let device = Device::discover_ecdt(handle, table, false).unwrap();
+        assert_eq!(
+            device.ports,
+            Ports {
+                data: 0x62,
+                command: 0x66
+            }
+        );
+        assert!(device.global_lock);
+        assert_eq!(device.gpe, Some(0x17));
+        let reduced = Device::discover_ecdt(handle, table, true).unwrap();
+        assert_eq!(reduced.gpe, None);
+        assert!(reduced.global_lock);
+        session.shutdown().unwrap();
+        assert!(counts.destroyed.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn native_installed_ec_dependency_requires_actual_activation_and_retains_owner() {
         let _serial = TEST_SERIAL.lock().unwrap();
         let (provider, counts) = fixture_ec_legacy(true);

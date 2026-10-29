@@ -85,6 +85,16 @@ pub unsafe trait NativeServices {
     /// drivers that need a delivered interrupt, such as Intel's ISH.
     fn interrupts(&self) -> Result<&'static dyn IrqController, ServiceError>;
 
+    /// The first EC installed and connected during boot's staged ACPI
+    /// initialization. Probe retains the receipt instead of installing a
+    /// second operation-region handler.
+    #[cfg(feature = "native-acpi")]
+    fn embedded_controller(
+        &self,
+    ) -> Result<Option<crate::platform::ec::capability::Installed<'static>>, ServiceError> {
+        Ok(None)
+    }
+
     /// The ACPI namespace, for devices described there rather than on PCI:
     /// i8042 keyboards and mice, embedded controllers, I²C-HID devices and
     /// batteries ([`platform::acpi::Session::devices`](crate::platform::acpi::Session::devices)

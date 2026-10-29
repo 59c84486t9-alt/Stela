@@ -8,6 +8,8 @@
 //! Commands follow pinned Linux `drivers/acpi/ec.c`; see `THIRD_PARTY.md`.
 #[cfg(feature = "native-acpi")]
 pub mod binding;
+#[cfg(feature = "native-acpi")]
+pub mod capability;
 pub mod discovery;
 
 use crate::{Clock, bus::i2c::Timer};

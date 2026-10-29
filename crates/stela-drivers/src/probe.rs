@@ -29,7 +29,7 @@ mod i2c;
 #[cfg(feature = "native-acpi")]
 mod power;
 #[cfg(feature = "native-acpi")]
-pub use power::Power;
+pub use power::{EmbeddedControllerInstallation, Power, install_embedded_controller};
 pub mod native;
 #[cfg(any(test, feature = "native-acpi"))]
 mod platform;
@@ -932,17 +932,24 @@ pub unsafe fn probe_with_provider(
     // After every USB host left firmware, as Linux's i8042 probe runs after
     // its PCI fixups.
     #[cfg(feature = "native-acpi")]
-    if let Some(session) = services.and_then(|services| services.acpi()) {
+    if let Some((services, session)) =
+        services.and_then(|services| services.acpi().map(|session| (services, session)))
+    {
         // Before any other device's methods, which may read EC fields.
-        power::attach_ec(session, &mut devices);
+        match services.embedded_controller() {
+            Ok(Some(installed)) => devices.owners.push(Box::new(installed)),
+            Ok(None) => power::attach_ec(session, &mut devices),
+            Err(error) => devices.platform_failures.push((
+                String::from("embedded controller"),
+                PlatformError::Native(error),
+            )),
+        }
         let usb_released = !devices
             .platform_failures
             .iter()
             .any(|(_, error)| matches!(error, PlatformError::Handoff(_)));
         platform::attach_i8042(session, handoff.clock, usb_released, &mut devices);
-        if let Some(services) = services {
-            i2c::attach(services, session, handoff.clock, &mut devices);
-        }
+        i2c::attach(services, session, handoff.clock, &mut devices);
         power::attach_power(session, &mut devices);
     }
     devices

@@ -41,71 +41,111 @@ fn location(handle: Handle<'_>, id: &str) -> String {
     handle.path().unwrap_or_else(|_| String::from(id))
 }
 
-/// Install the first embedded controller's operation regions before other
-/// devices' methods run, as Linux's `acpi_ec_ecdt_probe` and
-/// `acpi_ec_dsdt_probe` do: the controller the ECDT names, otherwise the
-/// namespace's first PNP0C09.
-pub(super) fn attach_ec(session: &'static Session, devices: &mut Devices) {
-    let named = match session.table(b"ECDT") {
-        Ok(Some(table)) => match Ecdt::parse(&table) {
-            Ok(ecdt) => match session.handle(ecdt.path) {
-                Ok(handle) => Some(handle),
-                Err(error) => {
-                    fail(
-                        devices,
-                        String::from(ecdt.path),
-                        PlatformError::AcpiMethod(error),
-                    );
-                    None
-                }
-            },
-            Err(_) => {
-                fail(
-                    devices,
-                    String::from("ECDT"),
-                    PlatformError::EcDiscovery(DiscoveryError::Malformed("ECDT")),
-                );
-                None
-            }
-        },
+/// The first EC binding and discovery failures reported while selecting it.
+/// A malformed ECDT may coexist with a valid DSDT fallback controller.
+pub struct EmbeddedControllerInstallation {
+    pub binding: Option<Binding<'static>>,
+    pub failures: Vec<(String, PlatformError)>,
+}
+
+/// Install the boot EC before namespace initialization. ECDT ports take
+/// precedence; DSDT discovery is the fallback, as Linux's EC probes do.
+///
+/// # Safety
+/// The session provider owns this controller's ports, decode, power and
+/// firmware global-lock services, and no other byte owner reaches it.
+pub unsafe fn install_embedded_controller(
+    session: &'static Session,
+) -> EmbeddedControllerInstallation {
+    let mut result = EmbeddedControllerInstallation {
+        binding: None,
+        failures: Vec::new(),
+    };
+    let from_ecdt = || -> Result<Option<Device<'static>>, (String, PlatformError)> {
+        let Some(table) = session
+            .table(b"ECDT")
+            .map_err(|error| (String::from("ECDT"), PlatformError::AcpiMethod(error)))?
+        else {
+            return Ok(None);
+        };
+        let ecdt = Ecdt::parse(&table).map_err(|_| {
+            (
+                String::from("ECDT"),
+                PlatformError::EcDiscovery(DiscoveryError::Malformed("ECDT")),
+            )
+        })?;
+        let handle = session
+            .handle(ecdt.path)
+            .map_err(|error| (String::from(ecdt.path), PlatformError::AcpiMethod(error)))?;
+        let fadt = session
+            .table(b"FACP")
+            .map_err(|error| (String::from("FACP"), PlatformError::AcpiMethod(error)))?
+            .ok_or_else(|| {
+                (
+                    String::from("FACP"),
+                    PlatformError::Refused("EC discovery requires the FADT"),
+                )
+            })?;
+        let flags = fadt.get(112..116).ok_or_else(|| {
+            (
+                String::from("FACP"),
+                PlatformError::Refused("FADT has no flags field"),
+            )
+        })?;
+        let reduced = u32::from_le_bytes(flags.try_into().unwrap()) & (1 << 20) != 0;
+        Device::discover_ecdt(handle, ecdt, reduced)
+            .map(Some)
+            .map_err(|error| (location(handle, EC), PlatformError::EcDiscovery(error)))
+    };
+    let device = match from_ecdt() {
+        Ok(Some(device)) => Some(device),
         Ok(None) => None,
         Err(error) => {
-            fail(
-                devices,
-                String::from("ECDT"),
-                PlatformError::AcpiMethod(error),
-            );
+            result.failures.push(error);
             None
         }
     };
-    let handle = match named {
-        Some(handle) => handle,
-        None => match session.devices(EC) {
-            Ok(handles) => match handles.into_iter().next() {
-                Some(handle) => handle,
-                None => return,
-            },
+    let device = device.or_else(|| {
+        let handles = match session.devices(EC) {
+            Ok(handles) => handles,
             Err(error) => {
-                fail(devices, String::from(EC), PlatformError::AcpiMethod(error));
-                return;
+                result
+                    .failures
+                    .push((String::from(EC), PlatformError::AcpiMethod(error)));
+                return None;
             }
-        },
-    };
-    let at = location(handle, EC);
-    let device = match Device::discover(handle) {
-        Ok(device) => device,
-        Err(error) => {
-            fail(devices, at, PlatformError::EcDiscovery(error));
-            return;
+        };
+        let handle = handles.into_iter().next()?;
+        match Device::discover(handle) {
+            Ok(device) => Some(device),
+            Err(error) => {
+                result
+                    .failures
+                    .push((location(handle, EC), PlatformError::EcDiscovery(error)));
+                None
+            }
         }
-    };
-    // SAFETY: [`super::NativeServices::acpi`]'s session provider serves this
-    // first controller's ports, decode, power and global lock for the
-    // session's life, and no other owner reaches it.
-    match unsafe { Binding::install(device, ec::Config::default(), Scope::FirstController) } {
-        Ok(binding) => devices.owners.push(Box::new(binding)),
-        Err(error) => fail(devices, at, PlatformError::Ec(error)),
+    });
+    if let Some(device) = device {
+        let at = location(device.handle, EC);
+        // SAFETY: forwarded from the caller; the ECDT/DSDT selected this controller.
+        match unsafe { Binding::install(device, ec::Config::default(), Scope::FirstController) } {
+            Ok(binding) => result.binding = Some(binding),
+            Err(error) => result.failures.push((at, PlatformError::Ec(error))),
+        }
     }
+    result
+}
+
+pub(super) fn attach_ec(session: &'static Session, devices: &mut Devices) {
+    // SAFETY: NativeServices::acpi grants the provider/controller contract.
+    let installed = unsafe { install_embedded_controller(session) };
+    devices.platform_failures.extend(installed.failures);
+    devices.owners.extend(
+        installed
+            .binding
+            .map(|binding| Box::new(binding) as Box<dyn core::any::Any>),
+    );
 }
 
 /// Attach every battery and the first AC adapter and lid, reading each once
