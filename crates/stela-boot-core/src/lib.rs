@@ -30,6 +30,7 @@ pub mod requester;
 pub mod root_transition;
 pub mod storage;
 pub mod topology;
+pub mod tsc;
 #[cfg(target_arch = "x86_64")]
 pub mod vtd;
 pub mod worker_bindings;

@@ -178,6 +178,7 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
     for leaf in [
         0,
         1,
+        5,
         6,
         7,
         0x15,
@@ -220,6 +221,7 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
             }
         }
     }
+    let vendor = snapshot.get(0, 0).ok_or(Error::ProcessorIdentity)?;
     let basic = snapshot.get(1, 0).ok_or(Error::ProcessorIdentity)?;
     if maximum >= 0xd && basic.ecx & (1 << 26) != 0 {
         let xstate = cpuid(0xd, 0);
@@ -287,6 +289,25 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
                 let index = msr::MTRR_PHYS_BASE.at(offset).index;
                 push_msr(&mut snapshot, index, msr::rdmsr(index))?;
             }
+        }
+        // Pinned Linux hpet.c mwait_pc10_supported/hpet_is_pc10_damaged:
+        // Intel advertises extended MWAIT+interrupt-break and PC10 substates
+        // before the package C-state limit MSR is observed. Neither ordinary
+        // leaf5 support nor a table alone authorizes this conditional RDMSR.
+        if [vendor.ebx, vendor.edx, vendor.ecx]
+            == [
+                u32::from_le_bytes(*b"Genu"),
+                u32::from_le_bytes(*b"ineI"),
+                u32::from_le_bytes(*b"ntel"),
+            ]
+            && basic.ecx & (1 << 3) != 0
+            && snapshot
+                .get(5, 0)
+                .is_some_and(|record| record.ecx & 3 == 3 && record.edx & (0xf << 28) != 0)
+        {
+            // SAFETY: actual Intel CPU's PC10 MWAIT enumeration is the pinned
+            // Linux gate for MSR_PKG_CST_CONFIG_CONTROL, on this same CPL0 CPU.
+            push_msr(&mut snapshot, 0xe2, msr::rdmsr(0xe2))?;
         }
         if snapshot
             .get(7, 0)
