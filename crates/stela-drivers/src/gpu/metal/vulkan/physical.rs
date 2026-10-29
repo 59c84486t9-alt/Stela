@@ -133,6 +133,9 @@ pub struct Limits {
     pub sample_locations: Option<SampleLocationLimits>,
     /// `VkPhysicalDeviceMeshShaderPropertiesEXT`; `None` without the extension.
     pub mesh: Option<MeshLimits>,
+    /// `VkPhysicalDeviceDeviceGeneratedCommandsPropertiesEXT`; `None` unless
+    /// the device enables `deviceGeneratedCommands`.
+    pub generated_commands: Option<GeneratedCommandsLimits>,
     /// `VkPhysicalDeviceSparseProperties`.
     pub sparse: SparseLimits,
 }
@@ -157,6 +160,18 @@ pub struct MeshLimits {
     pub max_mesh_work_group_invocations: u32,
     pub max_mesh_output_vertices: u32,
     pub max_mesh_output_primitives: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GeneratedCommandsLimits {
+    pub max_pipelines: u32,
+    pub max_sequences: u32,
+    pub max_tokens: u32,
+    pub max_token_offset: u32,
+    pub max_stride: u32,
+    /// `supportedIndirectCommandsShaderStagesPipelineBinding`: stages an
+    /// execution set of pipelines may bind.
+    pub pipeline_stages: ShaderStages,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

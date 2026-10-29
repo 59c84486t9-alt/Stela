@@ -183,6 +183,9 @@ pub struct GraphicsPipelineInfo {
     pub stencil_format: Option<Format>,
     pub color_blend: Vec<ColorBlendAttachment>,
     pub dynamic_states: Vec<DynamicState>,
+    /// `VK_PIPELINE_CREATE_2_INDIRECT_BINDABLE_BIT_EXT`: execution sets may
+    /// hold the pipeline.
+    pub indirect_bindable: bool,
 }
 
 /// `VkComputePipelineCreateInfo` over the device's single pipeline layout.
@@ -193,6 +196,42 @@ pub struct ComputePipelineInfo {
     pub required_subgroup_size: u32,
     /// `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT`.
     pub full_subgroups: bool,
+    /// As [`GraphicsPipelineInfo::indirect_bindable`].
+    pub indirect_bindable: bool,
+}
+
+/// What one token of a device-generated command sequence reads at its
+/// offset in the sequence (`VkIndirectCommandsLayoutTokenEXT`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndirectToken {
+    /// A `uint32_t` index into the execution set, which binds that
+    /// pipeline's shaders for `stages`.
+    ExecutionSet(ShaderStages),
+    /// Push constant data for the layout's range.
+    PushConstants { offset: u32, size: u32 },
+    /// `VkBindIndexBufferIndirectCommandEXT`, with Vulkan index types.
+    IndexBuffer,
+    /// `VkBindVertexBufferIndirectCommandEXT` for the binding.
+    VertexBuffer(u32),
+    /// `VkDrawIndirectCommand`.
+    Draw,
+    /// `VkDrawIndexedIndirectCommand`.
+    DrawIndexed,
+    /// `VkDrawMeshTasksIndirectCommandEXT`.
+    DrawMeshTasks,
+    /// `VkDispatchIndirectCommand`.
+    Dispatch,
+}
+
+/// `VkIndirectCommandsLayoutCreateInfoEXT` over the device's pipeline
+/// layout: sequences of `stride` bytes holding each token at its offset.
+/// The last token is the one draw or dispatch. Execution preprocesses
+/// implicitly, and sequences run in order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndirectCommandsLayoutInfo {
+    pub stages: ShaderStages,
+    pub stride: u32,
+    pub tokens: Vec<(u32, IndirectToken)>,
 }
 
 macro_rules! handles {
@@ -217,6 +256,10 @@ handles! {
     Semaphore;
     /// `VkDeviceMemory`, for heaps and sparse backing.
     Memory;
+    /// `VkIndirectCommandsLayoutEXT`.
+    IndirectCommandsLayout;
+    /// `VkIndirectExecutionSetEXT` of pipelines.
+    ExecutionSet;
 }
 
 raw_enum! {

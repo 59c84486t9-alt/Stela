@@ -325,6 +325,8 @@ option_set! {
         const INDIRECT_BUFFER = 0x100;
         const CONDITIONAL_RENDERING = 0x200;
         const SHADER_DEVICE_ADDRESS = 0x2_0000;
+        /// `VK_BUFFER_USAGE_2_PREPROCESS_BUFFER_BIT_EXT`.
+        const PREPROCESS_BUFFER = 0x8000_0000;
     }
 }
 
@@ -626,6 +628,8 @@ option_set! {
         const HOST = 0x4000;
         const ALL_GRAPHICS = 0x8000;
         const ALL_COMMANDS = 0x1_0000;
+        /// `VK_PIPELINE_STAGE_2_COMMAND_PREPROCESS_BIT_EXT`.
+        const COMMAND_PREPROCESS = 0x2_0000;
         const CONDITIONAL_RENDERING = 0x4_0000;
         const TASK_SHADER = 0x8_0000;
         const MESH_SHADER = 0x10_0000;
@@ -651,6 +655,8 @@ option_set! {
         const HOST_WRITE = 0x4000;
         const MEMORY_READ = 0x8000;
         const MEMORY_WRITE = 0x1_0000;
+        const COMMAND_PREPROCESS_READ = 0x2_0000;
+        const COMMAND_PREPROCESS_WRITE = 0x4_0000;
         const CONDITIONAL_RENDERING_READ = 0x10_0000;
     }
 }
@@ -662,7 +668,8 @@ impl Access {
         .union(Self::DEPTH_STENCIL_ATTACHMENT_WRITE)
         .union(Self::TRANSFER_WRITE)
         .union(Self::HOST_WRITE)
-        .union(Self::MEMORY_WRITE);
+        .union(Self::MEMORY_WRITE)
+        .union(Self::COMMAND_PREPROCESS_WRITE);
 }
 
 option_set! {

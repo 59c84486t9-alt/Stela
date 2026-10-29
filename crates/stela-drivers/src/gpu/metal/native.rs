@@ -12,6 +12,7 @@
 //! (as Mesa's own meta shaders do) without a module or SPIR-V. Images are moved to `VK_IMAGE_LAYOUT_GENERAL` once, on the host
 //! when they allow host transfers and otherwise at the start of the next
 //! submission, and stay there.
+mod generated;
 mod objects;
 mod physical;
 mod record;
@@ -28,10 +29,11 @@ use super::{
         backend::{Backend, BufferAllocation, Descriptor, Object, Requirements, requirements},
         command::BufferImageCopy,
         object::{
-            Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo,
-            GraphicsPipelineInfo, Image, ImageInfo, ImageView, ImageViewInfo, Memory,
-            MemoryRequest, Pipeline, QueryPool, QueryPoolInfo, Sampler, SamplerInfo, Semaphore,
-            ShaderCode, SparseImageRequirements,
+            Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo, ExecutionSet,
+            GraphicsPipelineInfo, Image, ImageInfo, ImageView, ImageViewInfo,
+            IndirectCommandsLayout, IndirectCommandsLayoutInfo, Memory, MemoryRequest, Pipeline,
+            QueryPool, QueryPoolInfo, Sampler, SamplerInfo, Semaphore, ShaderCode,
+            SparseImageRequirements,
         },
         physical::{PciBusInfo, PhysicalDevice},
     },
@@ -94,6 +96,8 @@ struct ExtensionFns {
     mesh: Option<ext::mesh_shader::Device>,
     calibrated: Option<khr::calibrated_timestamps::Device>,
     conditional: ext::conditional_rendering::Device,
+    /// With the snapshot's `generated_commands` limits.
+    generated: Option<generated::Fns>,
 }
 
 pub struct NativeBackend {
@@ -119,6 +123,17 @@ pub struct NativeBackend {
     bind_value: u64,
     accumulate: vk::Pipeline,
     select: vk::Pipeline,
+}
+
+impl NativeBackend {
+    /// The generated-commands entry points, which the Metal layer uses only
+    /// with the snapshot's `generated_commands` limits.
+    fn generated(&self) -> &generated::Fns {
+        self.fns
+            .generated
+            .as_ref()
+            .expect("generated commands without the extension")
+    }
 }
 
 /// Maps a Vulkan failure to the Metal layer's.
@@ -206,7 +221,15 @@ impl NativeBackend {
                 .then(|| khr::calibrated_timestamps::Device::new(&instance, &device)),
             // A requirement: the device was refused without it.
             conditional: ext::conditional_rendering::Device::new(&instance, &device),
+            generated: features
+                .generated_commands()
+                .then(|| generated::Fns::load(&instance, &device))
+                .flatten(),
         };
+        let mut snapshot = snapshot;
+        if fns.generated.is_none() {
+            snapshot.limits.generated_commands = None;
+        }
         // SAFETY: the device was created with one queue in `family`.
         let queue = unsafe { device.get_device_queue(family, 0) };
         let mut backend = Self {
@@ -239,6 +262,7 @@ impl NativeBackend {
             code,
             required_subgroup_size: 0,
             full_subgroups: false,
+            indirect_bindable: false,
         };
         backend.accumulate = backend.create_compute(&kernel(kernels.accumulate))?;
         backend.select = backend.create_compute(&kernel(kernels.select))?;
@@ -831,6 +855,39 @@ impl Backend for NativeBackend {
             .map_err(failure)
     }
 
+    fn create_indirect_commands_layout(
+        &mut self,
+        info: &IndirectCommandsLayoutInfo,
+    ) -> Result<IndirectCommandsLayout> {
+        self.generated()
+            .create_layout(info, self.layout)
+            .map(IndirectCommandsLayout)
+            .map_err(failure)
+    }
+
+    fn create_execution_set(&mut self, initial: Pipeline, capacity: u32) -> Result<ExecutionSet> {
+        self.generated()
+            .create_set(handle(initial.0), capacity)
+            .map(ExecutionSet)
+            .map_err(failure)
+    }
+
+    fn write_execution_set(&mut self, set: ExecutionSet, index: u32, pipeline: Pipeline) {
+        // SAFETY: the Metal device writes only indices no pending
+        // submission uses.
+        unsafe { self.generated().write_set(set.0, index, handle(pipeline.0)) }
+    }
+
+    fn generated_commands_size(
+        &mut self,
+        layout: IndirectCommandsLayout,
+        set: Option<ExecutionSet>,
+        sequences: u32,
+    ) -> u64 {
+        self.generated()
+            .memory_size(layout.0, set.map(|set| set.0), sequences)
+    }
+
     fn destroy(&mut self, object: Object) {
         // SAFETY: the Metal device destroys an object only after every
         // submission that could use it completed, and only once.
@@ -858,6 +915,8 @@ impl Backend for NativeBackend {
                     self.mappings.remove(&memory.0);
                     self.device.free_memory(handle(memory.0), None);
                 }
+                Object::IndirectCommandsLayout(layout) => self.generated().destroy_layout(layout.0),
+                Object::ExecutionSet(set) => self.generated().destroy_set(set.0),
             }
         }
     }

@@ -599,6 +599,7 @@ fn targets(
             stencil_format: stencil,
             color_blend,
             dynamic_states,
+            indirect_bindable: false,
         },
         topology_class: PrimitiveTopologyClass::Unspecified,
         amplification_count: 1,

@@ -40,10 +40,10 @@ use crate::gpu::metal::{
         backend::{BufferAllocation, Descriptor, Requirements},
         command::{BufferImageCopy, Command, Subresource},
         object::{
-            Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo,
-            GraphicsPipelineInfo, Image, ImageInfo, ImageView, ImageViewInfo, MemoryRequest,
-            Pipeline, QueryPool, QueryPoolInfo, Sampler, SamplerInfo, ShaderCode,
-            SparseImageRequirements,
+            Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo, ExecutionSet,
+            GraphicsPipelineInfo, Image, ImageInfo, ImageView, ImageViewInfo,
+            IndirectCommandsLayout, IndirectCommandsLayoutInfo, MemoryRequest, Pipeline, QueryPool,
+            QueryPoolInfo, Sampler, SamplerInfo, ShaderCode, SparseImageRequirements,
         },
         physical::PhysicalDevice,
     },
@@ -62,6 +62,9 @@ struct MockBackend {
     writes: Vec<(Memory, u64, Vec<u8>)>,
     semaphores: BTreeMap<u64, u64>,
     queries_ready: bool,
+    layouts: Vec<IndirectCommandsLayoutInfo>,
+    /// Each execution set's pipelines by index.
+    execution_sets: BTreeMap<u64, BTreeMap<u32, Pipeline>>,
 }
 
 impl MockBackend {
@@ -177,6 +180,33 @@ impl Backend for MockBackend {
         let id = self.id();
         self.semaphores.insert(id, initial);
         Ok(Semaphore(id))
+    }
+    fn create_indirect_commands_layout(
+        &mut self,
+        info: &IndirectCommandsLayoutInfo,
+    ) -> Result<IndirectCommandsLayout> {
+        self.layouts.push(info.clone());
+        Ok(IndirectCommandsLayout(self.id()))
+    }
+    fn create_execution_set(&mut self, initial: Pipeline, _: u32) -> Result<ExecutionSet> {
+        let id = self.id();
+        self.execution_sets
+            .insert(id, BTreeMap::from([(0, initial)]));
+        Ok(ExecutionSet(id))
+    }
+    fn write_execution_set(&mut self, set: ExecutionSet, index: u32, pipeline: Pipeline) {
+        self.execution_sets
+            .get_mut(&set.0)
+            .unwrap()
+            .insert(index, pipeline);
+    }
+    fn generated_commands_size(
+        &mut self,
+        _: IndirectCommandsLayout,
+        _: Option<ExecutionSet>,
+        sequences: u32,
+    ) -> u64 {
+        u64::from(sequences) * 64
     }
     fn destroy(&mut self, object: Object) {
         self.destroyed.push(object);

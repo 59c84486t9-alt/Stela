@@ -619,6 +619,9 @@ impl Recorder<'_> {
                 Command::EndConditionalRendering => {
                     (fns.conditional.fp().cmd_end_conditional_rendering_ext)(buffer);
                 }
+                Command::ExecuteGeneratedCommands(commands) => {
+                    self.backend.generated().execute(buffer, commands);
+                }
             }
         }
         Ok(())

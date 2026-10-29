@@ -13,9 +13,10 @@
 //! [`Error::DeviceLost`]: crate::gpu::metal::error::Error::DeviceLost
 use super::{
     object::{
-        Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo, GraphicsPipelineInfo,
-        Image, ImageInfo, ImageView, ImageViewInfo, Memory, MemoryRequest, Pipeline, QueryPool,
-        QueryPoolInfo, Sampler, SamplerInfo, Semaphore, SparseImageRequirements,
+        Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo, ExecutionSet,
+        GraphicsPipelineInfo, Image, ImageInfo, ImageView, ImageViewInfo, IndirectCommandsLayout,
+        IndirectCommandsLayoutInfo, Memory, MemoryRequest, Pipeline, QueryPool, QueryPoolInfo,
+        Sampler, SamplerInfo, Semaphore, SparseImageRequirements,
     },
     physical::{Features, PhysicalDevice},
 };
@@ -74,6 +75,8 @@ pub enum Object {
     QueryPool(QueryPool),
     Semaphore(Semaphore),
     Memory(Memory),
+    IndirectCommandsLayout(IndirectCommandsLayout),
+    ExecutionSet(ExecutionSet),
 }
 
 pub trait Backend {
@@ -122,6 +125,28 @@ pub trait Backend {
     fn create_compute_pipeline(&mut self, info: &ComputePipelineInfo) -> Result<Pipeline>;
     fn create_query_pool(&mut self, info: &QueryPoolInfo) -> Result<QueryPool>;
     fn create_semaphore(&mut self, initial: u64) -> Result<Semaphore>;
+    /// `vkCreateIndirectCommandsLayoutEXT`; only with
+    /// [`Limits::generated_commands`].
+    ///
+    /// [`Limits::generated_commands`]: super::physical::Limits::generated_commands
+    fn create_indirect_commands_layout(
+        &mut self,
+        info: &IndirectCommandsLayoutInfo,
+    ) -> Result<IndirectCommandsLayout>;
+    /// `vkCreateIndirectExecutionSetEXT` of up to `capacity` pipelines, with
+    /// `initial`, an indirect-bindable pipeline, at index 0.
+    fn create_execution_set(&mut self, initial: Pipeline, capacity: u32) -> Result<ExecutionSet>;
+    /// `vkUpdateIndirectExecutionSetPipelineEXT` of one index, which no
+    /// pending submission uses.
+    fn write_execution_set(&mut self, set: ExecutionSet, index: u32, pipeline: Pipeline);
+    /// Preprocess bytes `sequences` of `layout` need
+    /// (`vkGetGeneratedCommandsMemoryRequirementsEXT`).
+    fn generated_commands_size(
+        &mut self,
+        layout: IndirectCommandsLayout,
+        set: Option<ExecutionSet>,
+        sequences: u32,
+    ) -> u64;
     fn destroy(&mut self, object: Object);
 
     /// `vkUpdateDescriptorSets` into heap slot `index`.

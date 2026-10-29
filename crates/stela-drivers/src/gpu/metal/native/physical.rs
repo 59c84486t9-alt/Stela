@@ -1,6 +1,7 @@
 //! The driver's answers for one `VkPhysicalDevice`: the device extensions
 //! this backend uses, the feature chain it probes and enables, and the
 //! [`PhysicalDevice`] snapshot Metal's capabilities derive from.
+use super::generated;
 use crate::gpu::metal::vulkan::{
     DriverId, Format, FormatFeatures, MemoryHeapFlags, MemoryProperties, PhysicalDeviceType,
     ResolveModes, SampleCounts, ShaderStages, SubgroupFeatures,
@@ -44,8 +45,9 @@ impl Default for UnifiedImageLayoutsFeatures {
 
 /// Extensions the device enables when the driver offers them. The
 /// requirements decide which absences refuse the device.
-const ENABLED: [&CStr; 23] = [
+const ENABLED: [&CStr; 24] = [
     UNIFIED_IMAGE_LAYOUTS,
+    generated::NAME,
     ext::robustness2::NAME,
     ext::dynamic_rendering_unused_attachments::NAME,
     ext::extended_dynamic_state3::NAME,
@@ -142,6 +144,7 @@ pub(super) struct FeatureChain {
     cooperative_matrix: vk::PhysicalDeviceCooperativeMatrixFeaturesKHR<'static>,
     local_read: vk::PhysicalDeviceDynamicRenderingLocalReadFeaturesKHR<'static>,
     float16_vector: vk::PhysicalDeviceShaderAtomicFloat16VectorFeaturesNV<'static>,
+    generated: generated::Features,
     acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'static>,
     ray_query: vk::PhysicalDeviceRayQueryFeaturesKHR<'static>,
     ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR<'static>,
@@ -189,6 +192,7 @@ impl FeatureChain {
             cooperative_matrix if extensions.has(khr::cooperative_matrix::NAME);
             local_read if extensions.has(khr::dynamic_rendering_local_read::NAME);
             float16_vector if extensions.has(nv::shader_atomic_float16_vector::NAME);
+            generated if extensions.has(generated::NAME);
             acceleration_structure if probe && extensions.has(khr::acceleration_structure::NAME);
             ray_query if probe && extensions.has(khr::ray_query::NAME);
             ray_tracing if probe && extensions.has(khr::ray_tracing_pipeline::NAME);
@@ -213,6 +217,13 @@ impl FeatureChain {
         self.mesh.primitive_fragment_shading_rate_mesh_shader = vk::FALSE;
         // Only primary command buffers record.
         self.conditional.inherited_conditional_rendering = vk::FALSE;
+        // Generated commands use the device's one pipeline layout.
+        self.generated.dynamic_generated_pipeline_layout = vk::FALSE;
+    }
+
+    /// Whether the device enables device-generated commands.
+    pub(super) fn generated_commands(&self) -> bool {
+        self.generated.device_generated_commands == vk::TRUE
     }
 
     fn features(&self, extensions: &Extensions, api_version: u32) -> Features {
@@ -391,6 +402,7 @@ pub(super) fn probe(
     let mut mesh = vk::PhysicalDeviceMeshShaderPropertiesEXT::default();
     let mut divisor = vk::PhysicalDeviceVertexAttributeDivisorPropertiesKHR::default();
     let mut dynamic_state3 = vk::PhysicalDeviceExtendedDynamicState3PropertiesEXT::default();
+    let mut generated = generated::Properties::default();
     let mut properties = vk::PhysicalDeviceProperties2::default()
         .push_next(&mut v11)
         .push_next(&mut v12)
@@ -409,6 +421,11 @@ pub(super) fn probe(
     }
     if extensions.has(ext::extended_dynamic_state3::NAME) {
         properties = properties.push_next(&mut dynamic_state3);
+    }
+    if extensions.has(generated::NAME) {
+        // The bindings cannot chain the structure, so it goes first by hand.
+        generated.p_next = properties.p_next;
+        properties.p_next = ptr::addr_of_mut!(generated).cast();
     }
     // SAFETY: `device` came from this instance and every chained structure
     // belongs to an extension the device supports.
@@ -464,13 +481,16 @@ pub(super) fn probe(
     let divisor = extensions
         .has(khr::vertex_attribute_divisor::NAME)
         .then_some(divisor.max_vertex_attrib_divisor);
-    let limits = limits(
+    let mut limits = limits(
         &core,
         (&v11, &v12, &v13),
         locations,
         features.mesh_shader.then_some(&mesh),
         divisor,
     );
+    limits.generated_commands = chain
+        .generated_commands()
+        .then(|| generated::limits(&generated));
     Some(PhysicalDevice {
         identity,
         limits,
@@ -616,6 +636,7 @@ fn limits(
             max_mesh_output_vertices: mesh.max_mesh_output_vertices,
             max_mesh_output_primitives: mesh.max_mesh_output_primitives,
         }),
+        generated_commands: None,
         sparse: SparseLimits {
             residency_standard_2d_block_shape: on(sparse.residency_standard2_d_block_shape),
             residency_standard_2d_multisample_block_shape: on(

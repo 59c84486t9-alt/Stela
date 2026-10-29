@@ -13,8 +13,9 @@ use crate::gpu::metal::{
         DriverId, Format, FormatFeatures as F, MemoryHeapFlags, MemoryProperties as M,
         PhysicalDeviceType, ResolveModes, SampleCounts, ShaderStages, SubgroupFeatures,
         physical::{
-            Features, FormatSupport, FormatTable, Identity, Limits, Memory, MemoryHeap, MemoryType,
-            MeshLimits, PciBusInfo, PhysicalDevice, SampleLocationLimits, SparseLimits,
+            Features, FormatSupport, FormatTable, GeneratedCommandsLimits, Identity, Limits,
+            Memory, MemoryHeap, MemoryType, MeshLimits, PciBusInfo, PhysicalDevice,
+            SampleLocationLimits, SparseLimits,
         },
     },
 };
@@ -206,6 +207,14 @@ fn limits() -> Limits {
             max_mesh_work_group_invocations: 128,
             max_mesh_output_vertices: 256,
             max_mesh_output_primitives: 256,
+        }),
+        generated_commands: Some(GeneratedCommandsLimits {
+            max_pipelines: u32::MAX,
+            max_sequences: 1 << 20,
+            max_tokens: 16,
+            max_token_offset: 2047,
+            max_stride: 1 << 12,
+            pipeline_stages: ShaderStages::KNOWN.difference(ShaderStages::GEOMETRY),
         }),
         sparse: SparseLimits {
             residency_standard_2d_block_shape: true,

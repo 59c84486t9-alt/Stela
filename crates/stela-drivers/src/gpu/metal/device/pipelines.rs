@@ -645,6 +645,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             code: compiled.code,
             required_subgroup_size: width,
             full_subgroups,
+            indirect_bindable: false,
         };
         let pipeline = self.backend.create_compute_pipeline(&info);
         self.compiler.release(compiled.code);

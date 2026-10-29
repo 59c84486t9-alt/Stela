@@ -10,11 +10,34 @@
 use super::{
     AttachmentLoadOp, AttachmentStoreOp, CompareOp, CullMode, Filter, FrontFace, ImageAspects,
     IndexType, PipelineBindPoint, PipelineStages, PolygonMode, PrimitiveTopology, ResolveModes,
-    SampleCounts, StencilOp,
-    object::{Buffer, Image, ImageView, Memory, Pipeline, QueryPool},
+    SampleCounts, ShaderStages, StencilOp,
+    object::{
+        Buffer, ExecutionSet, Image, ImageView, IndirectCommandsLayout, Memory, Pipeline, QueryPool,
+    },
 };
 use crate::gpu::metal::{binding::PushConstants, pass::ClearValue};
 use alloc::vec::Vec;
+
+/// `vkCmdExecuteGeneratedCommandsEXT` without explicit preprocessing
+/// (`VkGeneratedCommandsInfoEXT`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GeneratedCommands {
+    pub stages: ShaderStages,
+    /// The execution set the layout's execution set token indexes.
+    pub set: Option<ExecutionSet>,
+    pub layout: IndirectCommandsLayout,
+    /// The sequences, `size` bytes from `address`.
+    pub address: u64,
+    pub size: u64,
+    /// Memory of `preprocess_size` bytes the driver generates into, at least
+    /// [`Backend::generated_commands_size`] for the sequences, in a buffer
+    /// with `PREPROCESS_BUFFER` usage.
+    ///
+    /// [`Backend::generated_commands_size`]: super::backend::Backend::generated_commands_size
+    pub preprocess: u64,
+    pub preprocess_size: u64,
+    pub sequences: u32,
+}
 
 /// `VkMemoryBarrier2` in a `vkCmdPipelineBarrier2` without buffer or image
 /// barriers.
@@ -322,4 +345,5 @@ pub enum Command {
         offset: u64,
     },
     EndConditionalRendering,
+    ExecuteGeneratedCommands(GeneratedCommands),
 }

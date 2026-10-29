@@ -1,7 +1,7 @@
 //! Vulkan create infos for the boundary's object descriptions. Each builder
 //! assembles the structure and its `pNext` chain on the stack and hands it
 //! to `build`, so the chain outlives the Vulkan call that reads it.
-use super::handle;
+use super::{generated, handle};
 use crate::gpu::metal::{
     binding::HeapArray,
     error::Result,
@@ -310,9 +310,14 @@ pub(super) fn compute_pipeline<T>(
     if info.required_subgroup_size != 0 {
         stage = stage.push_next(&mut subgroup);
     }
-    let create = vk::ComputePipelineCreateInfo::default()
+    let mut flags =
+        vk::PipelineCreateFlags2CreateInfoKHR::default().flags(generated::INDIRECT_BINDABLE);
+    let mut create = vk::ComputePipelineCreateInfo::default()
         .stage(stage)
         .layout(layout);
+    if info.indirect_bindable {
+        create = create.push_next(&mut flags);
+    }
     build(&create)
 }
 
@@ -443,6 +448,11 @@ pub(super) fn graphics_pipeline<T>(
     }
     if info.topology == PrimitiveTopology::PatchList {
         create = create.tessellation_state(&tessellation);
+    }
+    let mut flags =
+        vk::PipelineCreateFlags2CreateInfoKHR::default().flags(generated::INDIRECT_BINDABLE);
+    if info.indirect_bindable {
+        create = create.push_next(&mut flags);
     }
     build(&create)
 }
