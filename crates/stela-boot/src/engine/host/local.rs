@@ -26,8 +26,8 @@ pub(crate) struct Local {
     /// none, and the latest shootdown generation it has flushed.
     shootdown_slot: AtomicUsize,
     shootdown_flushed: AtomicU64,
-    worker: UnsafeCell<Option<stela_runtime::machine::engine::publication::WorkerId>>,
-    declarations: UnsafeCell<Option<stela_runtime::NativeCpuOwner>>,
+    worker: UnsafeCell<Option<stela_engine::machine::engine::publication::WorkerId>>,
+    declarations: UnsafeCell<Option<stela_engine::NativeCpuOwner>>,
 }
 
 impl Local {
@@ -129,7 +129,7 @@ impl Owner {
     /// requires the canonical reservation/event ownership join.
     pub(crate) unsafe fn register_system_ram(
         &mut self,
-        ram: alloc::sync::Arc<stela_runtime::memory::RegisteredSystemRam>,
+        ram: alloc::sync::Arc<stela_engine::memory::RegisteredSystemRam>,
     ) -> Result<(), &'static str> {
         if current() != self.local.as_ptr() {
             return Err("native Host owner migrated");
@@ -157,7 +157,7 @@ impl Owner {
     /// Bind this actual selected physical core once, before runtime dispatch.
     pub(crate) fn bind_worker(
         &mut self,
-        worker: stela_runtime::machine::engine::publication::WorkerId,
+        worker: stela_engine::machine::engine::publication::WorkerId,
         expected_apic: u32,
     ) -> Result<(), &'static str> {
         if current() != self.local.as_ptr() {
@@ -185,7 +185,7 @@ impl Owner {
         // BSP canonical preparation and AP Initial both arrive here only after
         // their local Host/control installation. No firmware snapshot or BSP
         // observation mints an AP lease. Hardware qualification stays separate.
-        let declarations = unsafe { stela_runtime::NativeCpuOwner::new(worker, expected_apic) }
+        let declarations = unsafe { stela_engine::NativeCpuOwner::new(worker, expected_apic) }
             .map_err(|_| "native Host CPU declaration admission refused")?;
         // SAFETY: same unique processor-local owner, no active dispatch.
         let slot = unsafe { &mut *self.local.as_ref().declarations.get() };
@@ -411,14 +411,14 @@ impl Drop for Owner {
     }
 }
 
-pub(super) fn native_worker() -> Option<stela_runtime::machine::engine::publication::WorkerId> {
+pub(super) fn native_worker() -> Option<stela_engine::machine::engine::publication::WorkerId> {
     // SAFETY: callers retain this processor's live Owner/GS record. The worker
     // binding is set once by that owner after checking its real local APIC ID.
     unsafe { *(*current()).worker.get() }
 }
 
 /// Lend only the current GS owner's destination-local declaration handle.
-pub(super) fn native_cpu_lease() -> Option<stela_runtime::NativeCpuLease> {
+pub(super) fn native_cpu_lease() -> Option<stela_engine::NativeCpuLease> {
     // SAFETY: callers retain this actual processor's live exclusive HostOwner;
     // retirement revokes before destroying state, and handlers never lend it.
     unsafe {

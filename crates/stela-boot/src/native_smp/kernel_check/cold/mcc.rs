@@ -2,22 +2,24 @@
 //! Geometry follows the model's direct resource contract; these configuration
 //! words are explicit fixture policy, never Apple boot-state measurements.
 use alloc::{sync::Arc, vec};
-use stela_runtime::{
-    machine::apple::memory_resources::{
-        LifecycleState,
-        amcc::{self, Layout, LockGroup, Register},
-        ptd,
-        t8112::{
-            CHANNEL_STRIDE, CHANNELS, ChannelConfiguration, Prepared,
-            cache::{EmptyResource, SoftwareImage, ZeroWayConfiguration},
-        },
-    },
-    machine::{
-        apple::AppleDevices,
-        soc::{MemoryCache, MemoryController, PtdBank},
-    },
-    memory::RegisteredSystemRam,
-};
+use stela_engine::memory::RegisteredSystemRam;
+use stela_runtime::machine::apple::AppleDevices;
+use stela_runtime::machine::apple::memory_resources::LifecycleState;
+use stela_runtime::machine::apple::memory_resources::amcc;
+use stela_runtime::machine::apple::memory_resources::amcc::Layout;
+use stela_runtime::machine::apple::memory_resources::amcc::LockGroup;
+use stela_runtime::machine::apple::memory_resources::amcc::Register;
+use stela_runtime::machine::apple::memory_resources::ptd;
+use stela_runtime::machine::apple::memory_resources::t8112::CHANNEL_STRIDE;
+use stela_runtime::machine::apple::memory_resources::t8112::CHANNELS;
+use stela_runtime::machine::apple::memory_resources::t8112::ChannelConfiguration;
+use stela_runtime::machine::apple::memory_resources::t8112::Prepared;
+use stela_runtime::machine::apple::memory_resources::t8112::cache::EmptyResource;
+use stela_runtime::machine::apple::memory_resources::t8112::cache::SoftwareImage;
+use stela_runtime::machine::apple::memory_resources::t8112::cache::ZeroWayConfiguration;
+use stela_runtime::machine::soc::MemoryCache;
+use stela_runtime::machine::soc::MemoryController;
+use stela_runtime::machine::soc::PtdBank;
 
 const APERTURE: u64 = 0x200000000;
 const PUBLICATION: u64 = 0x300000000;

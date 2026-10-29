@@ -15,11 +15,13 @@ stela-drivers = { path = "../stela-drivers" }
 [target.'cfg(target_os = "uefi")'.dependencies]
 stela-compiler = { path = "../stela-compiler", default-features = false }
 stela-loader = { path = "../stela-loader", default-features = false }
+stela-engine = { path = "../stela-engine", default-features = false }
 stela-runtime = { path = "../stela-runtime", default-features = false }
 
 [target.'cfg(not(target_os = "uefi"))'.dependencies]
 stela-compiler = { path = "../stela-compiler" }
 stela-loader = { path = "../stela-loader" }
+stela-engine = { path = "../stela-engine" }
 stela-runtime = { path = "../stela-runtime" }
 
 [lints]

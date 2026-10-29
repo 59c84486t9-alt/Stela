@@ -25,6 +25,15 @@ use crate::{
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::arch::asm;
 use stela_drivers::block::{BlockDevice, BlockError};
+use stela_engine::machine::Host;
+use stela_formats::boot_bundle::Framebuffer;
+use stela_formats::boot_bundle::MANIFEST_FILE;
+use stela_formats::boot_bundle::Machine;
+use stela_formats::boot_bundle::Manifest;
+use stela_formats::boot_bundle::Nvram;
+use stela_formats::payload;
+use stela_formats::payload::PayloadManifest;
+use stela_formats::payload::ReadAt;
 use stela_loader::{
     apple_device_tree::DeviceTree, boot_bundle::Options, boot_selection::BootVolume, boot_trace,
     installed, recovery, upgrade,
@@ -35,13 +44,6 @@ use uefi::{
         file::{Directory, File as _, FileAttribute, FileInfo, FileMode, RegularFile},
         fs::SimpleFileSystem,
     },
-};
-use {
-    stela_formats::boot_bundle::Framebuffer, stela_formats::boot_bundle::MANIFEST_FILE,
-    stela_formats::boot_bundle::Machine, stela_formats::boot_bundle::Manifest,
-    stela_formats::boot_bundle::Nvram, stela_formats::payload,
-    stela_formats::payload::PayloadManifest, stela_formats::payload::ReadAt,
-    stela_runtime::machine::Host,
 };
 
 /// The counter frequency the machine presents in CNTFRQ_EL0.
@@ -66,7 +68,7 @@ pub struct Entry {
     /// The AMCC CTRR-A region iBoot programs, `(base, bytes)`.
     pub read_only_region: Option<(u64, u64)>,
     /// What iBoot leaves in the cores' lock registers (M4 and later).
-    pub core_locks: stela_runtime::machine::ctrr::CoreLocks,
+    pub core_locks: stela_engine::machine::ctrr::CoreLocks,
 }
 
 pub(super) fn contents(file: &File) -> &'static [u8] {

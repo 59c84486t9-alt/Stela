@@ -193,7 +193,7 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
         observed
             .qualify_native(matches!(
                 config.placement,
-                stela_runtime::machine::mmu::placement::Placement::FiveLevel
+                stela_engine::machine::mmu::placement::Placement::FiveLevel
             ))
             .map_err(|_| "AP native controls refused")?;
         // The trampoline installs the BSP's already-qualified effective PAT;
@@ -501,7 +501,7 @@ pub(crate) unsafe fn start(
                     root: handoff.root,
                     five_level: matches!(
                         handoff.placement,
-                        stela_runtime::machine::mmu::placement::Placement::FiveLevel
+                        stela_engine::machine::mmu::placement::Placement::FiveLevel
                     ),
                     pat: effective_pat,
                     memory_types: &memory_types,

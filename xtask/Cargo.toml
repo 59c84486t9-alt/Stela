@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+stela-engine.workspace = true
 stela-contracts = { path = "../crates/stela-contracts", default-features = false }
 stela-formats = { path = "../crates/stela-formats", default-features = false }
 anyhow.workspace = true

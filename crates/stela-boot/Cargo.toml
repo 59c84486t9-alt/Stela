@@ -27,9 +27,10 @@ test = false
 [features]
 default = []
 diagnostics = []
-native-profile = ["stela-runtime/native-profile"]
+native-profile = ["stela-runtime/native-profile", "stela-engine/native-profile"]
 
 [dependencies]
+stela-engine = { path = "../stela-engine", default-features = false }
 stela-contracts = { path = "../stela-contracts", default-features = false }
 stela-crypto = { path = "../stela-crypto" }
 stela-formats = { path = "../stela-formats", default-features = false }

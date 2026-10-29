@@ -234,7 +234,7 @@ struct Listed {
 
 /// The generation a bundle directory's `bundle.json` declares.
 pub(super) fn generation(directory: &Path) -> Result<Generation> {
-    let listing: Listing = stela_runtime::read_json(&directory.join(MANIFEST))?;
+    let listing: Listing = stela_engine::read_json(&directory.join(MANIFEST))?;
     Ok(Generation {
         schema: listing.schema_version,
         revision: listing.revision,
@@ -398,7 +398,7 @@ pub(super) fn verify(directory: &Path, manifest_sha256: &str) -> Vec<String> {
         Ok(_) => {}
         Err(error) => problems.push(format!("{error:#}")),
     }
-    let listing: Listing = match stela_runtime::read_json(&manifest) {
+    let listing: Listing = match stela_engine::read_json(&manifest) {
         Ok(listing) => listing,
         Err(error) => {
             problems.push(format!("{} cannot be read: {error:#}", manifest.display()));
@@ -469,7 +469,7 @@ pub(super) mod tests {
         if generation.revision != FIRST_REVISION {
             listing["revision"] = generation.revision.into();
         }
-        stela_runtime::write_json(&directory.join(MANIFEST), &listing)
+        stela_engine::write_json(&directory.join(MANIFEST), &listing)
     }
 
     #[test]
@@ -515,10 +515,10 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         // As every loader before revisions wrote it.
         let listing = serde_json::json!({"schema_version": 1, "files": []});
-        stela_runtime::write_json(&dir.path().join(MANIFEST), &listing).unwrap();
+        stela_engine::write_json(&dir.path().join(MANIFEST), &listing).unwrap();
         assert_eq!(generation(dir.path()).unwrap(), Generation::FIRST);
         let listing = serde_json::json!({"schema_version": 1, "revision": 3, "files": []});
-        stela_runtime::write_json(&dir.path().join(MANIFEST), &listing).unwrap();
+        stela_engine::write_json(&dir.path().join(MANIFEST), &listing).unwrap();
         assert_eq!(generation(dir.path()).unwrap(), of(1, 3));
         // So is a bundle an older setup recorded.
         let kept: Bundle =

@@ -23,14 +23,16 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 use stela_drivers::block::BlockDevice;
-use stela_runtime::{
-    machine::{Offer, Translations},
-    pc::{fat32::Fat32, gpt::Guid},
-    translations::{
-        self, Digest, Record,
-        pack::{self, Pack, Store},
-    },
-};
+use stela_engine::machine::Offer;
+use stela_engine::machine::Translations;
+use stela_engine::translations;
+use stela_engine::translations::Digest;
+use stela_engine::translations::Record;
+use stela_engine::translations::pack;
+use stela_engine::translations::pack::Pack;
+use stela_engine::translations::pack::Store;
+use stela_runtime::pc::fat32::Fat32;
+use stela_runtime::pc::gpt::Guid;
 use uefi::{
     CString16, boot,
     proto::{
@@ -461,7 +463,11 @@ pub fn write() {
         "TRANSLATIONS writing extents={}\n",
         file.extents.len()
     ));
-    match pack::write_in_place(&mut *device, &file.extents, &planned.layout) {
+    match stela_runtime::translation_store::write_in_place(
+        &mut *device,
+        &file.extents,
+        &planned.layout,
+    ) {
         Ok(()) => output::arguments(format_args!(
             "TRANSLATIONS written records={} bytes={} proven={} unprovable={} unproven={} \
              evicted={} ms={}\n",

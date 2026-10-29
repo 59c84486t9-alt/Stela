@@ -11,6 +11,7 @@ members = [
     "crates/stela-fingerprint",
     "crates/stela-contracts",
     "crates/stela-formats",
+    "crates/stela-engine",
     "crates/stela-runtime",
     "xtask",
 ]
@@ -28,6 +29,7 @@ default-members = [
     "crates/stela-drivers/src/gpu/metal/input",
     "crates/stela-contracts",
     "crates/stela-formats",
+    "crates/stela-engine",
     "crates/stela-runtime",
 ]
 # The UEFI application builds for its own target with aborting panics.
@@ -56,6 +58,7 @@ stela-fingerprint = { path = "crates/stela-fingerprint" }
 stela-drivers = { path = "crates/stela-drivers" }
 stela-contracts = { path = "crates/stela-contracts" }
 stela-formats = { path = "crates/stela-formats" }
+stela-engine = { path = "crates/stela-engine" }
 stela-runtime = { path = "crates/stela-runtime" }
 stela-loader = { path = "crates/stela-loader" }
 stela-cli = { path = "crates/stela-cli" }

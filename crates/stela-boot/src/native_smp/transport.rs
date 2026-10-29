@@ -3,18 +3,20 @@
 use super::executor::Executors;
 use crate::apic::Apic;
 use alloc::{sync::Arc, vec::Vec};
-use stela_runtime::machine::{
-    Host,
-    engine::{
-        self, NativeRun, NativeRunIdentity, NativeRunObservation, NativeTransport,
-        ServiceTransport,
-        publication::{
-            self, HostEffectCommand, HostEffectReceipt, WithPayload, WorkerOwner,
-            WorkerPublications,
-        },
-    },
-};
-use stela_runtime::memory::RegisteredSystemRam;
+use stela_engine::machine::Host;
+use stela_engine::machine::engine;
+use stela_engine::machine::engine::NativeRun;
+use stela_engine::machine::engine::NativeRunIdentity;
+use stela_engine::machine::engine::NativeRunObservation;
+use stela_engine::machine::engine::NativeTransport;
+use stela_engine::machine::engine::ServiceTransport;
+use stela_engine::machine::engine::publication;
+use stela_engine::machine::engine::publication::HostEffectCommand;
+use stela_engine::machine::engine::publication::HostEffectReceipt;
+use stela_engine::machine::engine::publication::WithPayload;
+use stela_engine::machine::engine::publication::WorkerOwner;
+use stela_engine::machine::engine::publication::WorkerPublications;
+use stela_engine::memory::RegisteredSystemRam;
 
 /// Bounded recent identities suppress loop diagnostics without retaining code,
 /// frames or execution authority. Eviction only permits a diagnostic to repeat.

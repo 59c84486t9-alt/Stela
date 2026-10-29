@@ -35,7 +35,7 @@ pub fn parse_memory_query(value: &str) -> Result<MemoryQuery, ArgumentError> {
         value: size,
         source,
     })?;
-    let maximum = stela_runtime::memory::MAX_IMAGE_MEMORY_BYTES;
+    let maximum = stela_engine::memory::MAX_IMAGE_MEMORY_BYTES;
     if size > maximum {
         return Err(ArgumentError::MemoryLimit {
             bytes: size,

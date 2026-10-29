@@ -5,14 +5,16 @@
 mod projection;
 
 use super::*;
+use crate::machine::soc::PowerStates;
+use crate::machine::soc::assigned::Plan;
 pub(super) use projection::AssignedPower;
 use projection::Request;
-use {
-    crate::machine::CpuProfile, crate::machine::engine::CanonicalDeviceWrite,
-    crate::machine::engine::ConsumedWrite, crate::machine::engine::ProcessorBinding,
-    crate::machine::engine::ProcessorWrite, crate::machine::soc::PowerStates,
-    crate::machine::soc::assigned::Plan, stela_contracts::adt::Node,
-};
+use stela_contracts::adt::Node;
+use stela_engine::machine::CpuProfile;
+use stela_engine::machine::engine::CanonicalDeviceWrite;
+use stela_engine::machine::engine::ConsumedWrite;
+use stela_engine::machine::engine::ProcessorBinding;
+use stela_engine::machine::engine::ProcessorWrite;
 
 impl AppleDevices {
     /// Cold placement only. Retain `plan` and its source/roster owners through
@@ -225,16 +227,18 @@ impl AppleDevices {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::{
-        Cpu, Host, Machine,
-        engine::{InstallError, NativeCode, NativeExit},
-        exception::Pstate,
-    };
     use alloc::{rc::Rc, vec};
     use core::cell::Cell;
     use projection::tests::{BASE, COMPLEX, CORE};
     use stela_compiler::{GuestState, TargetCpu};
     use stela_contracts::bus::Lifecycle;
+    use stela_engine::machine::Cpu;
+    use stela_engine::machine::Host;
+    use stela_engine::machine::Machine;
+    use stela_engine::machine::engine::InstallError;
+    use stela_engine::machine::engine::NativeCode;
+    use stela_engine::machine::engine::NativeExit;
+    use stela_engine::machine::exception::Pstate;
 
     struct Local;
     impl Host for Local {
@@ -251,7 +255,7 @@ mod tests {
             panic!("no native code in owner test")
         }
         fn discard_code(&mut self) {}
-        fn set_regime(&mut self, _: &crate::machine::engine::Regime) {}
+        fn set_regime(&mut self, _: &stela_engine::machine::engine::Regime) {}
         fn invalidate_translations(&mut self) {}
         unsafe fn execute(&mut self, _: NativeCode, _: &mut GuestState) -> NativeExit {
             panic!("no native execution in owner test")

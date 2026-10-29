@@ -23,10 +23,9 @@ use core::{
     ops::{Range, RangeInclusive},
 };
 use stela_boot_core::options::{DEFAULT_WIFI_KEY, System};
-use stela_runtime::{
-    machine::mmu::placement::Placement,
-    pc::{self, gpt::Guid},
-};
+use stela_engine::machine::mmu::placement::Placement;
+use stela_runtime::pc;
+use stela_runtime::pc::gpt::Guid;
 use uefi::{
     boot::{self, AllocateType, MemoryType},
     fs::FileSystem,

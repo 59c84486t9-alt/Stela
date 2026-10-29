@@ -61,7 +61,7 @@ pub(crate) unsafe fn validate(
     }
     let five_level = matches!(
         handoff.placement,
-        stela_runtime::machine::mmu::placement::Placement::FiveLevel
+        stela_engine::machine::mmu::placement::Placement::FiveLevel
     );
     crate::output::arguments(format_args!(
         "NATIVE INVENTORY firmware_processors={} enabled={} physical_cores={} assignable={} retired_cores={} requested={cores}\n",

@@ -16,7 +16,7 @@ use std::{
     path::Path,
 };
 
-pub const GENERATED: &str = "crates/stela-runtime/src/machine/system/generated.rs";
+pub const GENERATED: &str = "crates/stela-engine/src/machine/system/generated.rs";
 pub const FEATURES: &str = "crates/stela-contracts/src/cpu_features.rs";
 
 /// A register of the profile: instances and, per chip, the bits that are

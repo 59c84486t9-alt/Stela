@@ -74,14 +74,14 @@ impl AppleDevices {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stela_contracts::bus::Access;
+    use stela_contracts::bus::LifecycleState;
+    use stela_contracts::bus::MmioDevice;
+    use stela_contracts::interrupt::InterruptLatch;
+    use stela_engine::machine::Devices;
     use t8112::{
         amcc::tests::{frontend, ram, source},
         cache::{EmptyResource, SoftwareImage, ZeroWayConfiguration},
-    };
-    use {
-        crate::machine::Devices, stela_contracts::bus::Access,
-        stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
-        stela_contracts::interrupt::InterruptLatch,
     };
 
     fn components() -> (t8112::Prepared, EmptyResource) {

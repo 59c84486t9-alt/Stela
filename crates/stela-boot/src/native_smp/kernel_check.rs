@@ -5,18 +5,25 @@ use super::{executor::Executors, firmware::Capture};
 use crate::{apic::Apic, engine::host, handoff::Handoff};
 use alloc::{sync::Arc, vec::Vec};
 use stela_compiler::{GuestState, TargetCpu};
+use stela_contracts::Chip;
+use stela_contracts::identity::Identity;
 use stela_drivers::bus::dma::memory::{CacheAttribute, CpuMapping, PageSource, PinnedPages};
-use {
-    stela_contracts::Chip, stela_contracts::identity::Identity, stela_runtime::machine,
-    stela_runtime::machine::Cpu, stela_runtime::machine::CpuProfile,
-    stela_runtime::machine::DeviceError, stela_runtime::machine::Devices,
-    stela_runtime::machine::Host, stela_runtime::machine::Lines, stela_runtime::machine::Machine,
-    stela_runtime::machine::PeerState, stela_runtime::machine::Stop,
-    stela_runtime::machine::engine, stela_runtime::machine::engine::publication::WorkerBinding,
-    stela_runtime::machine::engine::publication::WorkerId,
-    stela_runtime::machine::exception::Pstate, stela_runtime::memory::RegisteredSystemRam,
-    stela_runtime::memory::ReservedSystemRamRange,
-};
+use stela_engine::machine::Cpu;
+use stela_engine::machine::CpuProfile;
+use stela_engine::machine::DeviceError;
+use stela_engine::machine::Devices;
+use stela_engine::machine::Host;
+use stela_engine::machine::Lines;
+use stela_engine::machine::Machine;
+use stela_engine::machine::PeerState;
+use stela_engine::machine::Stop;
+use stela_engine::machine::engine;
+use stela_engine::machine::engine::publication::WorkerBinding;
+use stela_engine::machine::engine::publication::WorkerId;
+use stela_engine::machine::exception::Pstate;
+use stela_engine::memory::RegisteredSystemRam;
+use stela_engine::memory::ReservedSystemRamRange;
+use stela_runtime::machine;
 
 struct Reservation {
     pages: PinnedPages,
@@ -179,7 +186,12 @@ fn reservation() -> Result<Arc<RegisteredSystemRam>, &'static str> {
     // callbacks, fault recovery and exact source-PC/publication settlement.
     let ram = Arc::new(
         unsafe {
-            RegisteredSystemRam::register(&[range], owner, machine::cpu::RESERVATION_GRANULE, 64)
+            RegisteredSystemRam::register(
+                &[range],
+                owner,
+                stela_engine::machine::cpu::RESERVATION_GRANULE,
+                64,
+            )
         }
         .map_err(|_| "native kernel canonical RAM registration refused")?,
     );
@@ -194,11 +206,11 @@ fn reservation() -> Result<Arc<RegisteredSystemRam>, &'static str> {
 }
 fn profile(cores: usize) -> Result<CpuProfile, &'static str> {
     let chip = Chip::AppleM1;
-    let fixed = machine::identification::derive(
+    let fixed = stela_engine::machine::identification::derive(
         chip,
         TargetCpu::Baseline,
         true,
-        machine::identification::Speculation::NONE,
+        stela_engine::machine::identification::Speculation::NONE,
     );
     // The diagnostic declares the existing t8103 P-core interface. Variant1 /
     // revision0 have the same explicitly inferred status as soc::cpus; this is
@@ -439,13 +451,13 @@ pub(crate) unsafe fn check(
             cpu.retired,
             cpu.pstate,
             cpu.state,
-            cpu.read(machine::system::Register::ESR_EL2),
-            cpu.read(machine::system::Register::FAR_EL2),
-            cpu.read(machine::system::Register::ELR_EL2)
+            cpu.read(stela_engine::machine::system::Register::ESR_EL2),
+            cpu.read(stela_engine::machine::system::Register::FAR_EL2),
+            cpu.read(stela_engine::machine::system::Register::ELR_EL2)
         ));
         if cpu.event
             || !cpu.event_is_set()
-            || cpu.read(machine::system::Register::ELR_EL2) != fault_pc
+            || cpu.read(stela_engine::machine::system::Register::ELR_EL2) != fault_pc
         {
             return Err("native scheduler lost canonical event or precise abort source PC");
         }

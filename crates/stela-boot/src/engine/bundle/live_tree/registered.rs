@@ -1,6 +1,6 @@
 //! Cold input publication through the same registered native RAM writer.
 use super::Ram;
-use stela_runtime::memory::RegisteredSystemRam;
+use stela_engine::memory::RegisteredSystemRam;
 
 /// Borrowed only before the first guest instruction and native publication.
 /// A physical pointer or legacy BareHost is not another permitted writer.

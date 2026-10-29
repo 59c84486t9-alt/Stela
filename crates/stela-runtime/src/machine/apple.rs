@@ -5,11 +5,7 @@
 //! and time, and turns each `MmioError` into an explicit refusal.
 pub mod t6000_pmgr;
 
-use super::{
-    engine::{ConsumedPair, DeviceError, Devices, Memory, Reset, Start, Transition},
-    registers::Lines,
-    soc::PowerOwner,
-};
+use super::soc::PowerOwner;
 pub use crate::platform::apple::pmu::{RtcEpoch, WallClock};
 use crate::platform::usb::{
     Function, Speed,
@@ -25,10 +21,19 @@ pub use crate::platform::usb::{
     mux::{State as MuxState, StreamId as MuxStream, StreamState as MuxStreamState},
     session::Log as UsbLog,
 };
-use crate::system::access::{AccessKind, Encoding};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::cell::Cell;
+use stela_compiler::aarch64::system::registers::Encoding;
 use stela_drivers::{block::BlockDevice, input::Input, net::Mac};
+use stela_engine::machine::engine::ConsumedPair;
+use stela_engine::machine::engine::DeviceError;
+use stela_engine::machine::engine::Devices;
+use stela_engine::machine::engine::Memory;
+use stela_engine::machine::engine::Reset;
+use stela_engine::machine::engine::Start;
+use stela_engine::machine::engine::Transition;
+use stela_engine::machine::registers::Lines;
+use stela_engine::system::access::AccessKind;
 use {
     crate::platform::apple::aes, crate::platform::apple::aes::Aes,
     crate::platform::apple::agx::firmware::Coprocessor as GfxCoprocessor,
@@ -82,6 +87,8 @@ mod canonical_reads;
 mod canonical_writes;
 mod display_resources;
 pub mod memory_resources;
+#[cfg(test)]
+mod pc_sampler_tests;
 mod pmp_dma;
 mod pmp_services;
 pub use pmp_dma::{ExplicitRuntimeConfiguration, SourceProvenance};
@@ -2968,7 +2975,7 @@ impl Devices for AppleDevices {
         &self,
         _cpu: usize,
         physical: u64,
-        shape: super::engine::DeviceReadShape,
+        shape: stela_engine::machine::engine::DeviceReadShape,
     ) -> bool {
         self.read_needs_ram(physical, shape)
     }
@@ -2977,7 +2984,10 @@ impl Devices for AppleDevices {
     /// memory controller words that drain or flush to RAM.
     fn requires_canonical_write(&self, _cpu: usize, physical: u64, bytes: u8) -> bool {
         self.is_processor_power_register(physical)
-            || self.read_needs_ram(physical, super::engine::DeviceReadShape::Scalar { bytes })
+            || self.read_needs_ram(
+                physical,
+                stela_engine::machine::engine::DeviceReadShape::Scalar { bytes },
+            )
             || width(bytes).is_ok_and(|width| self.empty_cache_flush_needs_ram(physical, width))
     }
 
@@ -2987,8 +2997,8 @@ impl Devices for AppleDevices {
         physical: u64,
         bytes: u8,
         now: u64,
-        memory: &mut dyn super::engine::CanonicalDeviceMemory,
-    ) -> Result<super::engine::ConsumedScalar, DeviceError> {
+        memory: &mut dyn stela_engine::machine::engine::CanonicalDeviceMemory,
+    ) -> Result<stela_engine::machine::engine::ConsumedScalar, DeviceError> {
         self.observe_time(now, "read");
         self.consume_scalar_read(cpu, physical, bytes, now, Some(memory))
     }
@@ -2999,7 +3009,7 @@ impl Devices for AppleDevices {
         physical: u64,
         bytes: u8,
         now: u64,
-        _memory: &mut dyn super::engine::CanonicalDeviceMemory,
+        _memory: &mut dyn stela_engine::machine::engine::CanonicalDeviceMemory,
     ) -> Result<ConsumedPair, DeviceError> {
         self.observe_time(now, "paired read");
         // Only the actual Prepared publication/status owner has a qualified
@@ -3062,7 +3072,7 @@ impl Devices for AppleDevices {
         now: u64,
     ) -> Result<(), DeviceError> {
         self.observe_time(now, "write");
-        use super::engine::ConsumedWrite;
+        use stela_engine::machine::engine::ConsumedWrite;
         match self.consume_scalar_write(cpu, physical, bytes, value, now, None)? {
             ConsumedWrite::Complete { settlement } => settlement,
             ConsumedWrite::Prefix { error, .. } | ConsumedWrite::Unknown { error } => Err(error),
@@ -3076,15 +3086,15 @@ impl Devices for AppleDevices {
         bytes: u8,
         value: u64,
         now: u64,
-        owners: &mut dyn super::engine::CanonicalDeviceWrite,
-    ) -> Result<super::engine::ConsumedWrite, DeviceError> {
+        owners: &mut dyn stela_engine::machine::engine::CanonicalDeviceWrite,
+    ) -> Result<stela_engine::machine::engine::ConsumedWrite, DeviceError> {
         self.observe_time(now, "write");
         if let Some(completed) =
             self.consume_processor_power_write(cpu, physical, bytes, value, now, owners)?
         {
             return Ok(completed);
         }
-        use super::engine::CanonicalDeviceMemory;
+        use stela_engine::machine::engine::CanonicalDeviceMemory;
         let mut memory = owners.memory()?;
         memory.fence_cpu_memory();
         self.consume_scalar_write(cpu, physical, bytes, value, now, Some(&mut memory))
@@ -3109,7 +3119,7 @@ impl Devices for AppleDevices {
         {
             return Some(Ok(value));
         }
-        let register = ipi::Register::decode(encoding)?;
+        let register = stela_engine::machine::fast_ipi::Register::decode(encoding)?;
         let ipi = self.ipi.as_mut()?;
         let kind = match write {
             Some(value) => AccessKind::Write { value },
@@ -3125,7 +3135,7 @@ impl Devices for AppleDevices {
     }
 
     fn serves_register(&self, encoding: Encoding) -> bool {
-        self.ipi.is_some() && ipi::Register::decode(encoding).is_some()
+        self.ipi.is_some() && stela_engine::machine::fast_ipi::Register::decode(encoding).is_some()
             || self.core_counters.iter().flatten().any(|&device| {
                 self.bus
                     .device::<CoreCounters>(device)
@@ -3271,7 +3281,7 @@ impl Devices for AppleDevices {
             .fold(false, |due, master| master.session.take_due() | due)
     }
 
-    fn memory_lock(&self) -> super::mmu::MemoryLocks {
+    fn memory_lock(&self) -> stela_engine::machine::mmu::MemoryLocks {
         let Some(device) = self.memory_controller else {
             return [None; amcc::GROUPS];
         };

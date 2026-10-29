@@ -23,7 +23,7 @@ use core::{
     },
     sync::atomic::{AtomicBool, Ordering},
 };
-use stela_runtime::machine::identification::Speculation;
+use stela_engine::machine::identification::Speculation;
 
 /// IA32_PRED_CMD (MSR 49H) bit 0, IBPB: indirect branch predictions after
 /// it are not controlled by code before it (Intel, "Speculative Execution

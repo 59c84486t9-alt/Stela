@@ -7,17 +7,17 @@ use super::{executor::Executors, firmware::Capture, transport::FixedWorkers};
 use crate::{apic::Apic, engine::host, handoff::Handoff, layout};
 use alloc::{sync::Arc, vec::Vec};
 use core::ptr::NonNull;
-use stela_runtime::{
-    machine::{
-        Cpu, CpuProfile, Devices, Machine, Stop,
-        engine::{
-            ServiceHost,
-            publication::{WorkerBinding, WorkerId},
-        },
-    },
-    memory::{RegisteredSystemRam, ReservedSystemRamRange},
-    system::events::EventDomain,
-};
+use stela_engine::machine::Cpu;
+use stela_engine::machine::CpuProfile;
+use stela_engine::machine::Devices;
+use stela_engine::machine::Machine;
+use stela_engine::machine::Stop;
+use stela_engine::machine::engine::ServiceHost;
+use stela_engine::machine::engine::publication::WorkerBinding;
+use stela_engine::machine::engine::publication::WorkerId;
+use stela_engine::memory::RegisteredSystemRam;
+use stela_engine::memory::ReservedSystemRamRange;
+use stela_engine::system::events::EventDomain;
 
 struct Reservation {
     _handoff: &'static Handoff,
@@ -81,7 +81,7 @@ pub(crate) unsafe fn reserve_for_workers(
     }
     let five_level = matches!(
         handoff.placement,
-        stela_runtime::machine::mmu::placement::Placement::FiveLevel
+        stela_engine::machine::mmu::placement::Placement::FiveLevel
     );
     bsp.qualify_native(five_level)
         .map_err(|_| "canonical target BSP floor refused")?;
@@ -176,14 +176,14 @@ unsafe fn reserve_with_limit(
             Some(limit) => RegisteredSystemRam::register_with_target_limit(
                 &registered,
                 owner,
-                stela_runtime::machine::cpu::RESERVATION_GRANULE,
+                stela_engine::machine::cpu::RESERVATION_GRANULE,
                 64,
                 limit,
             ),
             None => RegisteredSystemRam::register(
                 &registered,
                 owner,
-                stela_runtime::machine::cpu::RESERVATION_GRANULE,
+                stela_engine::machine::cpu::RESERVATION_GRANULE,
                 64,
             ),
         }
@@ -212,7 +212,7 @@ pub(crate) struct Preparation<'host, 'plan, D> {
     pub profile: CpuProfile,
     pub boot_processor: usize,
     pub assignments: &'plan [WorkerBinding],
-    pub processor_power: &'plan [stela_runtime::machine::engine::ProcessorBinding],
+    pub processor_power: &'plan [stela_engine::machine::engine::ProcessorBinding],
 }
 
 /// Construct a cold machine with its selected boot PE on the BSP worker.
@@ -241,7 +241,7 @@ pub(crate) unsafe fn prepare<'host, D: Devices>(
 pub(crate) unsafe fn prepare_with_locks<'host, D: Devices>(
     preparation: Preparation<'host, '_, D>,
     trace_artifacts: bool,
-    core_locks: Option<stela_runtime::machine::ctrr::CoreLocks>,
+    core_locks: Option<stela_engine::machine::ctrr::CoreLocks>,
 ) -> Result<CanonicalMachine<'host, D>, &'static str> {
     let Preparation {
         handoff,
@@ -366,7 +366,7 @@ pub(crate) unsafe fn run_slice_for<D: Devices>(
 unsafe fn run_slice_while<D: Devices>(
     machine: &mut CanonicalMachine<'_, D>,
     limit: u64,
-    deadline: Option<stela_runtime::machine::engine::NativeEpochDeadline>,
+    deadline: Option<stela_engine::machine::engine::NativeEpochDeadline>,
     mut continue_running: impl FnMut() -> bool,
 ) -> Stop {
     loop {

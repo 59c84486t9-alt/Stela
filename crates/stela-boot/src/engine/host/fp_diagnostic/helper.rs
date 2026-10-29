@@ -5,7 +5,12 @@ use alloc::vec::Vec;
 use core::{arch::global_asm, mem, mem::offset_of, ptr};
 use stela_compiler::{GuestState, block::BlockExit, context::ExecutionContext};
 use stela_drivers::bus::dma::memory::{CacheAttribute, CpuMapping, PageSource, PinnedPages};
-use stela_runtime::machine::{FaultCause, Host, NativeExit, Regime, engine::Watch, mmu};
+use stela_engine::machine::FaultCause;
+use stela_engine::machine::Host;
+use stela_engine::machine::NativeExit;
+use stela_engine::machine::Regime;
+use stela_engine::machine::engine::Watch;
+use stela_engine::machine::mmu;
 
 const PAGE: usize = 4096;
 const TABLE_BASE: u64 = 0x10_0000;

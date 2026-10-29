@@ -3,13 +3,12 @@
 //! No native PMP private ARM cache exists in this implementation. Ordering is
 //! coherent Normal-WB CPU visibility, never an MCC/DCS/PTD/MC completion.
 use super::{Access, AppleDevices, Asc, Bus, Dart, DeviceError, DeviceId, Memory, Port, dart};
-use crate::{
-    machine::soc,
-    memory::RegisteredSystemRam,
-    platform::apple::pmp::native::{dma, platform::owner::Completion},
-};
+use crate::machine::soc;
+use crate::platform::apple::pmp::native::dma;
+use crate::platform::apple::pmp::native::platform::owner::Completion;
 use alloc::{collections::BTreeMap, rc::Rc, string::String, sync::Arc};
 use core::sync::atomic::{Ordering, fence};
+use stela_engine::memory::RegisteredSystemRam;
 
 /// Exact static source inputs, not runtime IORegistry observations. Native
 /// startup admits no later mapper-index or asc-dram-mask overlay. Hashes retain
@@ -200,7 +199,6 @@ impl AppleDevices {
             stream,
         };
         let generation = ram
-            .domain()
             .generation()
             .map_err(|e| format!("PMP native DMA RAM domain is unavailable: {e:?}"))?;
         let owners = dma::Owners {
@@ -472,7 +470,8 @@ mod tests {
     use super::*;
     use alloc::{boxed::Box, vec, vec::Vec};
     use core::{cell::UnsafeCell, ptr::NonNull};
-    use {crate::memory::ReservedSystemRamRange, stela_contracts::adt::encode};
+    use stela_contracts::adt::encode;
+    use stela_engine::memory::ReservedSystemRamRange;
 
     fn pmp() -> soc::PmpController {
         soc::PmpController {
@@ -585,7 +584,7 @@ mod tests {
         let pointer =
             unsafe { NonNull::new_unchecked((*storage.0.get()).as_mut_ptr().cast::<u8>()) };
         let ram = Arc::new(unsafe {
-            crate::memory::system_ram::fixture(
+            stela_engine::memory::system_ram::fixture(
                 &[ReservedSystemRamRange {
                     source_pa: 0x4000,
                     host_pa: 0x1000_0000,
@@ -595,7 +594,7 @@ mod tests {
                 storage,
             )
         });
-        let generation = ram.domain().generation().unwrap();
+        let generation = ram.generation().unwrap();
         WriteBackCoherence {
             ram,
             generation,
@@ -674,7 +673,7 @@ mod tests {
     #[test]
     fn actual_native_loan_is_busy_and_a_failed_domain_retires_the_session() {
         let mut coherence = coherence();
-        let loan = coherence.ram.domain().execution_loan().unwrap();
+        let loan = coherence.ram.reference_execution_loan().unwrap();
         assert_eq!(coherence.ready(), Completion::Busy { deadline: None });
         assert!(!coherence.terminal);
         drop(loan);
@@ -698,7 +697,7 @@ mod tests {
         coherence.generation += 1;
         assert!(matches!(coherence.ready(), Completion::Refused(_)));
         assert!(coherence.terminal);
-        assert!(coherence.ram.domain().generation().is_err());
+        assert!(coherence.ram.generation().is_err());
     }
     #[test]
     #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]

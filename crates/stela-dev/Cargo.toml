@@ -11,6 +11,7 @@ name = "stela-dev"
 path = "src/main.rs"
 
 [dependencies]
+stela-engine = { path = "../stela-engine" }
 stela-contracts = { path = "../stela-contracts" }
 stela-formats = { path = "../stela-formats", default-features = false }
 anyhow.workspace = true

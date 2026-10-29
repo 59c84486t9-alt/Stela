@@ -13,7 +13,9 @@ use stela_compiler::{
         },
     },
 };
-use stela_runtime::machine::{FaultCause, Host, NativeExit};
+use stela_engine::machine::FaultCause;
+use stela_engine::machine::Host;
+use stela_engine::machine::NativeExit;
 
 const BASE: u64 = 0x4000;
 const ADD_X0: u32 = 0x9100_0400;

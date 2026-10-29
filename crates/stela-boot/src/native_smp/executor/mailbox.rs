@@ -1,9 +1,12 @@
 //! One scoped ownership transfer to one fixed physical AP. Erasure is private;
 //! the heap-pinned job retains the actual non-'static native frame loan.
 use super::*;
-use stela_runtime::machine::engine::publication::{
-    self, NativeFrame, NativeLoan, NativeReturned, WithPayload, WorkerOwner,
-};
+use stela_engine::machine::engine::publication;
+use stela_engine::machine::engine::publication::NativeFrame;
+use stela_engine::machine::engine::publication::NativeLoan;
+use stela_engine::machine::engine::publication::NativeReturned;
+use stela_engine::machine::engine::publication::WithPayload;
+use stela_engine::machine::engine::publication::WorkerOwner;
 
 const IDLE: u8 = 0;
 const RESERVED: u8 = 1;
@@ -169,7 +172,7 @@ impl Processor {
     pub(crate) fn initialize(
         &self,
         owner: WorkerOwner,
-        ram: alloc::sync::Arc<stela_runtime::memory::RegisteredSystemRam>,
+        ram: alloc::sync::Arc<stela_engine::memory::RegisteredSystemRam>,
         sender: &Apic,
         tsc_hz: u64,
     ) -> Result<publication::InitialPublication, &'static str> {
@@ -294,7 +297,7 @@ impl<T: NativeFrame> NativePending<T> {
 struct Initial {
     owner: WorkerOwner,
     apic: u32,
-    ram: alloc::sync::Arc<stela_runtime::memory::RegisteredSystemRam>,
+    ram: alloc::sync::Arc<stela_engine::memory::RegisteredSystemRam>,
 }
 impl Command for Initial {
     type Output = Result<publication::InitialPublication, &'static str>;

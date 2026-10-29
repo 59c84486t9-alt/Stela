@@ -501,12 +501,12 @@ mod tests {
 
     #[test]
     fn actual_aic_and_gpio_hooks_receive_only_their_qualified_supply() {
+        use crate::machine::apple::AppleDevices;
         use crate::machine::apple::Range;
-        use crate::machine::{
-            apple::AppleDevices,
-            engine::Devices,
-            soc::{AicLayout, AuxGpioBank, GpioBank},
-        };
+        use crate::machine::soc::AicLayout;
+        use crate::machine::soc::AuxGpioBank;
+        use crate::machine::soc::GpioBank;
+        use stela_engine::machine::engine::Devices;
         let states = states(&fixture(), "pmgr1,t8112", domains()).unwrap();
         let mut board = AppleDevices::new();
         board

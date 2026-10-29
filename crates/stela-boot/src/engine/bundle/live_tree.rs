@@ -8,8 +8,9 @@
 pub(crate) mod registered;
 
 use alloc::{format, string::String, vec::Vec};
+use stela_engine::machine::Host;
+use stela_formats::boot_bundle::LoadedRegion;
 use stela_loader::{apple_device_tree::DeviceTree, boot_args};
-use {stela_formats::boot_bundle::LoadedRegion, stela_runtime::machine::Host};
 
 pub(crate) trait Ram {
     fn read(&mut self, physical: u64, bytes: &mut [u8]) -> bool;

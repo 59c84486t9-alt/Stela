@@ -1,7 +1,7 @@
 //! Effect-free validation of the guest-PE/physical-worker bijection. These
 //! records grant no execution authority; the real Hosts must still initialize
 //! their publication owners against the retained capture and executor roster.
-use stela_runtime::machine::engine::publication::WorkerBinding;
+use stela_engine::machine::engine::publication::WorkerBinding;
 
 pub fn validate(
     cores: usize,
@@ -32,7 +32,7 @@ pub fn validate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stela_runtime::machine::engine::publication::WorkerId;
+    use stela_engine::machine::engine::publication::WorkerId;
 
     #[test]
     fn an_unordered_assignment_preserves_nonzero_boot_pe_and_physical_worker_ids() {
@@ -115,7 +115,7 @@ mod tests {
     }
     #[test]
     fn a_guest_subset_retains_sparse_actual_worker_ids() {
-        use stela_runtime::machine::engine::publication::WorkerId;
+        use stela_engine::machine::engine::publication::WorkerId;
         let bindings = [
             WorkerBinding {
                 pe: 0,

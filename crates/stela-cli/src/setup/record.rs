@@ -429,7 +429,7 @@ pub(super) fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<R
         "{} has no setup; run `stela setup` first",
         esp.display()
     );
-    let header: serde_json::Value = stela_runtime::read_json(&path)?;
+    let header: serde_json::Value = stela_engine::read_json(&path)?;
     let schema = header["schema_version"].as_u64().unwrap_or(0);
     ensure!(
         header["kind"] == RECORD_KIND && schema <= u64::from(RECORD_SCHEMA),
@@ -447,7 +447,7 @@ pub(super) fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<R
         },
         usb.display()
     );
-    let record: Record = stela_runtime::read_json(&path)?;
+    let record: Record = stela_engine::read_json(&path)?;
     ensure!(
         !record.installs.is_empty(),
         "{} names no install; run `stela setup uninstall --usb {}` and set the USB up again",
@@ -464,7 +464,7 @@ pub(super) fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<R
 /// `EFI/`, which the record's volumes then gain, so every directory derived
 /// from them is where that setup wrote it.
 pub(super) fn read_any_record(path: &Path) -> Result<Record> {
-    let mut value: serde_json::Value = stela_runtime::read_json(path)?;
+    let mut value: serde_json::Value = stela_engine::read_json(path)?;
     let schema = value["schema_version"].as_u64().unwrap_or(0);
     ensure!(
         value["kind"] == RECORD_KIND && (1..=u64::from(RECORD_SCHEMA)).contains(&schema),

@@ -10,11 +10,12 @@ workspace = true
 [features]
 default = ["std"]
 # Host-side native hardware-reference runners; never enables guest OS services.
-test-support = []
-native-profile = ["stela-contracts/native-profile"]
-std = ["anyhow/std", "stela-contracts/std", "stela-formats/std", "serde/std", "serde_json/std", "stela-compiler/std", "dep:tempfile", "dep:libc"]
+test-support = ["stela-engine/test-support"]
+native-profile = ["stela-contracts/native-profile", "stela-engine/native-profile"]
+std = ["stela-engine/std", "anyhow/std", "stela-contracts/std", "stela-formats/std", "serde/std", "serde_json/std", "stela-compiler/std", "dep:tempfile", "dep:libc"]
 
 [dependencies]
+stela-engine = { path = "../stela-engine", default-features = false }
 stela-contracts = { path = "../stela-contracts", default-features = false }
 stela-crypto = { path = "../stela-crypto" }
 stela-formats = { path = "../stela-formats", default-features = false }
@@ -46,10 +47,8 @@ smoltcp = { version = "0.14", default-features = false, features = ["alloc", "me
 # HTTP/1.1 response heads and chunk sizes.
 httparse = { version = "1.10", default-features = false }
 
-[build-dependencies]
-stela-fingerprint.workspace = true
-
 [dev-dependencies]
+stela-engine = { path = "../stela-engine", features = ["test-support"] }
 stela-formats = { path = "../stela-formats", features = ["test-support"] }
 stela-contracts = { path = "../stela-contracts", features = ["test-support"] }
 # The drivers' RAM disk, which the device model tests run on.

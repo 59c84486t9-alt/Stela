@@ -60,7 +60,7 @@
 //!
 //! On the M4 and later iBoot also locks the cores' per-cluster CTRR-C/D and
 //! CTXR-A..D copies, and CTRR-A/B's controls, before SPTM starts
-//! ([`core_handoff`]; the contract is in `stela_runtime::machine::ctrr`).
+//! ([`core_handoff`]; the contract is in `stela_engine::machine::ctrr`).
 //! M5 iBoot (`iBoot.j813`) writes each region's per-core and per-cluster
 //! copies together (`0x31588`, `0x316e0`) and locks them (`0x31658`,
 //! `0x317b0`); SPTM 26A434 derives the same six regions from
@@ -72,8 +72,10 @@ use crate::apple_device_tree::DeviceTree;
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use core::ops::Range;
+use stela_engine::machine::ctrr::CoreLocks;
+use stela_engine::machine::ctrr::LockRegion;
+use stela_engine::machine::ctrr::Locked;
 pub use stela_formats::boot_bundle::schema::Programmed;
-use stela_runtime::machine::ctrr::{CoreLocks, LockRegion, Locked};
 
 pub const AMCC: &str = "/chosen/lock-regs/amcc";
 pub const IOA: &str = "/chosen/lock-regs/ioa";
@@ -687,7 +689,7 @@ pub fn cl4_dummy_page() -> Vec<u8> {
 /// SPTM 26A434 derives (`0x...bebec..0x...bed5c` in the T8132 build), locked
 /// into the per-cluster copies, CTRR-D only when `kernel_ctrr`
 /// (`/chosen kernel-ctrr-to-be-enabled` is not a present 0), and CTRR-A/B's
-/// controls locked, with `tag_offset` (`stela_runtime::machine::tag_storage`).
+/// controls locked, with `tag_offset` (`stela_engine::machine::tag_storage`).
 pub fn core_handoff(
     region: impl Fn(&str) -> Option<Range<u64>>,
     kernel_ctrr: bool,

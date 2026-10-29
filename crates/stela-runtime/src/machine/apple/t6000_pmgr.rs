@@ -398,7 +398,8 @@ pub struct Mounted {
 mod original {
     use super::*;
     use alloc::vec;
-    use {crate::machine::engine::Devices, stela_contracts::bus::Access};
+    use stela_contracts::bus::Access;
+    use stela_engine::machine::engine::Devices;
     const ADT_SHA: &str = "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad";
     const IBDT_SHA: &str = "6d38d4b30deedb1be526e36179205004957f10e23254392fc3645c63dfd2b095";
     // These values declare a newly owned test resource, never Apple reset.
@@ -534,7 +535,7 @@ mod original {
         );
         for (address, width) in [(cluster_word, 8), (bridge_word, 4)] {
             assert!(
-                matches!(devices.read(0, address, width, 0), Err(crate::machine::engine::DeviceError::Refused(reason)) if reason.contains("unknown"))
+                matches!(devices.read(0, address, width, 0), Err(stela_engine::machine::engine::DeviceError::Refused(reason)) if reason.contains("unknown"))
             );
         }
         assert_eq!(

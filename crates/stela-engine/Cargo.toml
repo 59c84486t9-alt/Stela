@@ -1,0 +1,33 @@
+[package]
+name = "stela-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["std"]
+test-support = []
+native-profile = ["stela-contracts/native-profile"]
+std = ["anyhow/std", "serde/std", "serde_json/std", "stela-compiler/std", "stela-contracts/std", "stela-formats/std", "dep:tempfile", "dep:libc"]
+
+[dependencies]
+anyhow = { version = "1", default-features = false }
+serde.workspace = true
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+tempfile = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+sha2 = { version = "0.10", default-features = false }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+stela-compiler = { path = "../stela-compiler", default-features = false }
+stela-contracts = { path = "../stela-contracts", default-features = false }
+stela-crypto = { path = "../stela-crypto" }
+stela-formats = { path = "../stela-formats", default-features = false }
+
+[build-dependencies]
+stela-fingerprint = { path = "../stela-fingerprint" }
+
+[dev-dependencies]
+stela-contracts = { path = "../stela-contracts", features = ["test-support"] }

@@ -6,15 +6,18 @@
 //! Parent provider recipes, absent arrays and caller booleans are never
 //! controller/PMP/cache completion. Full source PowerStates remain retained.
 use super::{Configuration, MemoryController, Prepared, T6020Memory, amcc, validate_ram};
+use crate::machine::apple::AppleDevices;
+use crate::machine::soc::PowerOwner;
+use crate::machine::soc::PowerStates;
+use crate::platform::apple::pmgr;
+use crate::platform::apple::pmgr::Pmgr;
+use crate::platform::apple::pmgr::coverage;
+use crate::platform::apple::pmgr::coverage::Consumer;
+use crate::platform::apple::pmgr::coverage::LifecycleSinks;
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
-use {
-    crate::machine::apple::AppleDevices, crate::machine::soc::PowerOwner,
-    crate::machine::soc::PowerStates, crate::memory::RegisteredSystemRam,
-    crate::platform::apple::pmgr, crate::platform::apple::pmgr::Pmgr,
-    crate::platform::apple::pmgr::coverage, crate::platform::apple::pmgr::coverage::Consumer,
-    crate::platform::apple::pmgr::coverage::LifecycleSinks, stela_contracts::bus::LifecycleState,
-    stela_contracts::bus::Width,
-};
+use stela_contracts::bus::LifecycleState;
+use stela_contracts::bus::Width;
+use stela_engine::memory::RegisteredSystemRam;
 
 /// Private inputs retain actual source identities. Construction supplies no
 /// lifecycle status, native topology, firmware PTD service or cache grant.
@@ -52,7 +55,6 @@ impl Plan {
         }
         let (resources, domains) = source_inputs(power, descriptor)?;
         let generation = ram
-            .domain()
             .generation()
             .map_err(|_| "cold T602x canonical RAM is not live")?;
         Ok(Self {
@@ -104,7 +106,6 @@ impl Plan {
     fn validate_ram(&self) -> Result<(), String> {
         if self
             .ram
-            .domain()
             .generation()
             .map_err(|_| "cold T602x canonical RAM is not live")?
             != self.generation

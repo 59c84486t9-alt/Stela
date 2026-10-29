@@ -4,18 +4,26 @@
 //! their service/interrupt state is not inferred from the original ADT's
 //! physical capacity. Construction is not native PMP admission, a cache grant
 //! or a source-supported initial CPU/PMGR handoff. Root owns those joins.
+use crate::machine::soc::MemoryController;
+use crate::machine::soc::T6020Memory;
+use crate::platform::apple::amcc;
+use crate::platform::apple::amcc::Amcc;
+use crate::platform::apple::mcc::t6020;
+use crate::platform::apple::mcc::t6020::Configuration;
+use crate::platform::apple::mcc::t6020::Controller;
+use crate::platform::apple::mcc::t6020::View;
+use crate::platform::apple::ptd;
 use alloc::{string::String, sync::Arc, vec::Vec};
-use {
-    crate::machine::soc::MemoryController, crate::machine::soc::T6020Memory,
-    crate::memory::CanonicalRamService, crate::memory::RegisteredSystemRam,
-    crate::platform::apple::amcc, crate::platform::apple::amcc::Amcc,
-    crate::platform::apple::mcc::t6020, crate::platform::apple::mcc::t6020::Configuration,
-    crate::platform::apple::mcc::t6020::Controller, crate::platform::apple::mcc::t6020::View,
-    crate::platform::apple::ptd, stela_contracts::bus::Access, stela_contracts::bus::Direction,
-    stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState,
-    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
-    stela_contracts::bus::refuse,
-};
+use stela_contracts::bus::Access;
+use stela_contracts::bus::Direction;
+use stela_contracts::bus::Lifecycle;
+use stela_contracts::bus::LifecycleState;
+use stela_contracts::bus::MmioDevice;
+use stela_contracts::bus::MmioError;
+use stela_contracts::bus::Width;
+use stela_contracts::bus::refuse;
+use stela_engine::memory::CanonicalRamService;
+use stela_engine::memory::RegisteredSystemRam;
 
 pub mod cold;
 
@@ -101,7 +109,6 @@ impl Prepared {
             .collect::<Result<Vec<_>, _>>()
             .map_err(String::from)?;
         let generation = ram
-            .domain()
             .generation()
             .map_err(|_| "T602x canonical RAM generation is not live")?;
         Ok(Self {
@@ -153,7 +160,6 @@ impl Prepared {
     fn live_generation(&self) -> Result<(), &'static str> {
         if self
             .ram
-            .domain()
             .generation()
             .map_err(|_| "T602x canonical RAM is not live")?
             != self.generation
@@ -399,14 +405,17 @@ impl crate::machine::apple::AppleDevices {
 #[cfg(test)]
 pub(in crate::machine::apple) mod tests {
     use super::*;
+    use crate::machine::apple::AppleDevices;
+    use crate::machine::soc::PtdBank;
+    use crate::platform::apple::amcc::Layout;
+    use crate::platform::apple::amcc::LockGroup;
+    use crate::platform::apple::amcc::Register;
     use core::{cell::UnsafeCell, ptr::NonNull};
-    use {
-        crate::machine::Devices, crate::machine::apple::AppleDevices,
-        crate::machine::engine::DeviceReadShape, crate::machine::soc::PtdBank,
-        crate::memory::ReservedSystemRamRange, crate::memory::system_ram::fixture,
-        crate::platform::apple::amcc::Layout, crate::platform::apple::amcc::LockGroup,
-        crate::platform::apple::amcc::Register, stela_contracts::interrupt::InterruptLatch,
-    };
+    use stela_contracts::interrupt::InterruptLatch;
+    use stela_engine::machine::Devices;
+    use stela_engine::machine::engine::DeviceReadShape;
+    use stela_engine::memory::ReservedSystemRamRange;
+    use stela_engine::memory::system_ram::fixture;
     const RAM: u64 = 0x10000000000;
     #[repr(C, align(16))]
     struct Storage(UnsafeCell<[u8; 0x10000]>);

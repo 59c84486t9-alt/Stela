@@ -7,7 +7,9 @@ use super::{BareHost, native_return, state};
 use crate::output;
 use core::{arch::global_asm, mem::offset_of, ptr};
 use stela_compiler::{GuestState, block::BlockExit, context::ExecutionContext};
-use stela_runtime::machine::{FaultCause, Host, NativeExit};
+use stela_engine::machine::FaultCause;
+use stela_engine::machine::Host;
+use stela_engine::machine::NativeExit;
 
 const RETURN_RAX: u64 = 0x1234_5678_9abc_def0;
 const RETURN_RDX: u64 = 0x0fed_cba9_8765_4321;

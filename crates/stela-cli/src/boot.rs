@@ -525,7 +525,7 @@ struct OverlayEntry {
 }
 
 fn read_overlay(path: &std::path::Path) -> Result<Vec<OverlayProperty>> {
-    let entries: Vec<OverlayEntry> = stela_runtime::read_json(path)?;
+    let entries: Vec<OverlayEntry> = stela_engine::read_json(path)?;
     entries
         .into_iter()
         .map(|entry| {
@@ -1018,7 +1018,7 @@ impl Prepare {
         {
             object.extend(extra);
         }
-        stela_runtime::write_json(&self.output.join(MANIFEST_FILE), &written)?;
+        stela_engine::write_json(&self.output.join(MANIFEST_FILE), &written)?;
         let manifest = &bundle.manifest;
         if !self.quiet
             && let Some(target) = &manifest.target

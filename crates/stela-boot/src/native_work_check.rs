@@ -22,7 +22,8 @@ use stela_drivers::{
         self, Callback, Cpu, Executor, Kind, Queue, Runtime, Stack, StackBacking, WorkError,
     },
 };
-use stela_runtime::{freestanding::BootArena, pc::acpi};
+use stela_engine::freestanding::BootArena;
+use stela_runtime::pc::acpi;
 mod fixture;
 // Reuse the actual read-only native PAT/MTRR/translation qualifier unchanged.
 use crate::native_memory::cache;

@@ -1,8 +1,9 @@
 //! Sparse, jittered, owner-local timing. Staging is allocated before sampled
 //! Begin timestamps; no sample buffer grows during actual epoch execution.
 use alloc::vec::Vec;
-use stela_runtime::machine::engine::MAX_NATIVE_EPOCH_BODIES;
-use stela_runtime::machine::engine::{NativeTimingPhase as Phase, NativeTimingWork as Work};
+use stela_engine::machine::engine::MAX_NATIVE_EPOCH_BODIES;
+use stela_engine::machine::engine::NativeTimingPhase as Phase;
+use stela_engine::machine::engine::NativeTimingWork as Work;
 #[path = "profile/words.rs"]
 pub(crate) mod words;
 
@@ -135,7 +136,7 @@ impl Profile {
 
     pub(crate) fn instructions(
         &mut self,
-        sample: stela_runtime::machine::engine::NativeInstructionSample<'_>,
+        sample: stela_engine::machine::engine::NativeInstructionSample<'_>,
     ) {
         if !self.active {
             return;
@@ -269,8 +270,8 @@ mod tests {
         Phase::End,
     ];
 
-    fn instruction() -> stela_runtime::machine::engine::NativeInstructionSample<'static> {
-        stela_runtime::machine::engine::NativeInstructionSample {
+    fn instruction() -> stela_engine::machine::engine::NativeInstructionSample<'static> {
+        stela_engine::machine::engine::NativeInstructionSample {
             source: &[1, 0, 0, 0],
             source_map: &[(stela_compiler::GuestAddress(0x4000), 3)],
             native_bytes: 12,

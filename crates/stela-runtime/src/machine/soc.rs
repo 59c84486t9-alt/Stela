@@ -2404,10 +2404,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_TEST_DART_DT"]
     fn original_j314s_watchdog_mounts_one_shared_panic_flags_word() {
-        use crate::machine::{
-            Devices,
-            apple::{AppleDevices, Range},
-        };
+        use crate::machine::apple::AppleDevices;
+        use crate::machine::apple::Range;
+        use stela_engine::machine::Devices;
         let data = std::fs::read(std::env::var("STELA_TEST_DART_DT").unwrap()).unwrap();
         assert_eq!(
             stela_formats::sha256(&data),
@@ -2595,7 +2594,7 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_TEST_SPMI_DT"]
     fn original_j314s_spmi_parent_qualifies_all_seven_independent_resource_owners() {
-        use crate::machine::Devices;
+        use stela_engine::machine::Devices;
         let data = std::fs::read(std::env::var("STELA_TEST_SPMI_DT").unwrap()).unwrap();
         assert_eq!(
             stela_formats::sha256(&data),
@@ -2836,7 +2835,9 @@ mod tests {
     /// two P cores fill its kernel's six CPU slots.
     #[test]
     fn the_a18_pro_takes_the_m4_cpu_profile() {
-        use super::super::{ctrr, identification, timer::agt};
+        use stela_engine::machine::ctrr;
+        use stela_engine::machine::identification;
+        use stela_engine::machine::timer::agt;
         assert_eq!(chip(0x8140), Some(Chip::AppleM4));
         assert_eq!(name(0x8140), Some("Apple A18 Pro"));
         assert_eq!(midr_part(0x8140, b'E'), Some(0x60));
@@ -2875,7 +2876,8 @@ mod tests {
     /// refuse for their unestablished caches; the chip ID alone names no row.
     #[test]
     fn the_t6050_rows_follow_the_template_soc_name() {
-        use super::super::{identification, timer::agt};
+        use stela_engine::machine::identification;
+        use stela_engine::machine::timer::agt;
         assert_eq!(chip(0x6050), Some(Chip::AppleM5));
         assert!(agt::present(Chip::AppleM5) && identification::memory_tagging(Chip::AppleM5));
         assert!(name(0x6050).is_none() && core_types(0x6050).is_none());

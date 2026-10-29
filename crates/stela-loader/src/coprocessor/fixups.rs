@@ -8,7 +8,8 @@ use super::macho::{Layout, end, file_bytes};
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use {stela_formats::sha256, stela_runtime::pauth};
+use stela_engine::pauth;
+use stela_formats::sha256;
 
 const FORMAT_ARM64E_KERNEL: u32 = 7;
 const STARTS_USE_VM_OFFSET: u32 = 2;

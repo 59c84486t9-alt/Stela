@@ -7,16 +7,22 @@
 //! windows and DCS/PTD. See docs/research/apple-mcc.md for the source contract
 //! and missing all-access cache accounting. No Apple firmware is executed.
 use super::Prepared;
+use crate::machine::soc::MemoryController;
+use crate::platform::apple::amcc::Amcc;
+use crate::platform::apple::amcc::Locked;
+use crate::platform::apple::amcc::Programmed;
+use crate::platform::apple::amcc::Register;
 use alloc::sync::Arc;
-use {
-    crate::machine::soc::MemoryController, crate::memory::CanonicalRamService,
-    crate::memory::RegisteredSystemRam, crate::platform::apple::amcc::Amcc,
-    crate::platform::apple::amcc::Locked, crate::platform::apple::amcc::Programmed,
-    crate::platform::apple::amcc::Register, stela_contracts::bus::Access,
-    stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
-    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
-    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
-};
+use stela_contracts::bus::Access;
+use stela_contracts::bus::Direction;
+use stela_contracts::bus::Lifecycle;
+use stela_contracts::bus::LifecycleState;
+use stela_contracts::bus::MmioDevice;
+use stela_contracts::bus::MmioError;
+use stela_contracts::bus::Width;
+use stela_contracts::bus::refuse;
+use stela_engine::memory::CanonicalRamService;
+use stela_engine::memory::RegisteredSystemRam;
 
 const PLANES: u32 = 4;
 pub(super) const STRIDE: u64 = 0x40000;
@@ -277,13 +283,13 @@ impl MmioDevice for LockResource {
 pub(in crate::machine::apple) mod tests {
     use super::super::tests::{configuration, descriptor, ram_at};
     use super::*;
+    use crate::platform::apple::amcc::Layout;
+    use crate::platform::apple::amcc::LockGroup;
     use alloc::{boxed::Box, vec};
     use core::{cell::UnsafeCell, ptr::NonNull};
-    use {
-        crate::memory::ReservedSystemRamRange, crate::memory::system_ram::fixture,
-        crate::platform::apple::amcc::Layout, crate::platform::apple::amcc::LockGroup,
-        stela_contracts::interrupt::InterruptLatch,
-    };
+    use stela_contracts::interrupt::InterruptLatch;
+    use stela_engine::memory::ReservedSystemRamRange;
+    use stela_engine::memory::system_ram::fixture;
     const BASE: u64 = 0x200000000;
     const RAM: u64 = 0x800000000;
     const LIVE: LifecycleState = LifecycleState {

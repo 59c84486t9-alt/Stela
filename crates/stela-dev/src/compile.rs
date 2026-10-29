@@ -8,7 +8,7 @@ use stela_compiler::{
     block::{BlockProfile, CompilationPlan, Features},
     scalable_context::ScalableProfile,
 };
-use stela_runtime::write_json;
+use stela_engine::write_json;
 
 mod profile;
 pub(crate) use profile::block_profile;
@@ -266,7 +266,7 @@ impl PrepareLeaf {
             cache_dir,
         } = self;
         let source = std::fs::read(input)?;
-        let prepared = stela_runtime::prepare_leaf(
+        let prepared = stela_engine::prepare_leaf(
             &source,
             stela_compiler::GuestAddress(guest_base),
             &cache_dir,

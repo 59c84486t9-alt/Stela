@@ -1,16 +1,19 @@
 //! Canonical RAM service join for the actual T8112 DCS channel owner.
 //! This component is composed into the prepared memory resource; it does not
 //! create another AMCC/PTD owner or qualify missing PMP service producers.
+use crate::platform::apple::dcs::native::CHANNELS;
+use crate::platform::apple::dcs::native::ChannelConfiguration;
+use crate::platform::apple::dcs::native::ChannelProgress;
+use crate::platform::apple::dcs::native::Controller;
 use alloc::{sync::Arc, vec::Vec};
-use {
-    crate::memory::CanonicalRamService, crate::memory::RegisteredSystemRam,
-    crate::platform::apple::dcs::native::CHANNELS,
-    crate::platform::apple::dcs::native::ChannelConfiguration,
-    crate::platform::apple::dcs::native::ChannelProgress,
-    crate::platform::apple::dcs::native::Controller, stela_contracts::bus::Access,
-    stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState,
-    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
-};
+use stela_contracts::bus::Access;
+use stela_contracts::bus::Lifecycle;
+use stela_contracts::bus::LifecycleState;
+use stela_contracts::bus::MmioDevice;
+use stela_contracts::bus::MmioError;
+use stela_contracts::bus::Width;
+use stela_engine::memory::CanonicalRamService;
+use stela_engine::memory::RegisteredSystemRam;
 
 /// Exact channel backing and canonical guest RAM association. Clones retain
 /// the same controller, lifecycle, pending effects and actual memory identity.
@@ -131,10 +134,9 @@ mod tests {
     const REFRESH: u64 = 0x41c;
     const DRAIN: u64 = 0xa40;
     use core::{cell::UnsafeCell, ptr::NonNull};
-    use {
-        crate::memory::ReservedSystemRamRange, crate::memory::system_ram::fixture,
-        stela_contracts::interrupt::InterruptLatch,
-    };
+    use stela_contracts::interrupt::InterruptLatch;
+    use stela_engine::memory::ReservedSystemRamRange;
+    use stela_engine::memory::system_ram::fixture;
 
     const LIVE: LifecycleState = LifecycleState {
         powered: true,

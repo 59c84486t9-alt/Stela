@@ -3,20 +3,25 @@
 //! a machine of its own on the AP its worker binding names, from the first
 //! time a device starts it. Whichever PE waits for an interrupt serves the
 //! host (`service`). The machines share guest
-//! RAM, the board's devices and a hub (`stela_runtime::machine::engine::
+//! RAM, the board's devices and a hub (`stela_engine::machine::engine::
 //! parallel`).
 use super::{SLICE, WAIT_POLLS_PER_SECOND, host, output};
 use crate::{apic::Apic, native_smp::executor::Executors};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use stela_compiler::TargetCpu;
-pub(crate) use stela_runtime::machine::engine::{Counts, RunBudget, SourcePhase};
-use stela_runtime::machine::{
-    Cpu, CpuProfile, Host, Machine, Stop,
-    apple::AppleDevices,
-    ctrr,
-    engine::{Kick, SharedDevices, publication::WorkerBinding},
-    exception::Pstate,
-};
+use stela_engine::machine::Cpu;
+use stela_engine::machine::CpuProfile;
+use stela_engine::machine::Host;
+use stela_engine::machine::Machine;
+use stela_engine::machine::Stop;
+use stela_engine::machine::ctrr;
+pub(crate) use stela_engine::machine::engine::{Counts, RunBudget};
+use stela_engine::machine::engine::Kick;
+use stela_engine::machine::engine::SharedDevices;
+pub(crate) use stela_engine::machine::engine::SourcePhase;
+use stela_engine::machine::engine::publication::WorkerBinding;
+use stela_engine::machine::exception::Pstate;
+use stela_runtime::machine::apple::AppleDevices;
 
 /// The native code of the blocks the PEs share, compiled once by whichever
 /// runs them first (`translations::share`).

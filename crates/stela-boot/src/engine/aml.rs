@@ -39,7 +39,7 @@ use stela_drivers::{
     bus::pci::EcamWindow,
     platform::acpi::{Interrupt, Mode, PciId, Services, Session, Status, Value, Work},
 };
-use stela_runtime::machine::mmu::placement::Placement;
+use stela_engine::machine::mmu::placement::Placement;
 
 // ACPICA's statuses (`acexcep.h`).
 const AE_OK: Status = 0;

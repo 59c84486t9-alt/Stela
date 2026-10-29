@@ -1,6 +1,6 @@
 //! Bounded space-saving histogram. Frequency bounds apply to the sampled
 //! population only; attributed bytes exclude Rust helpers and are not uops.
-use stela_runtime::machine::engine::NativeInstructionSample;
+use stela_engine::machine::engine::NativeInstructionSample;
 
 const CAPACITY: usize = 256;
 pub(crate) const TOP: usize = 16;

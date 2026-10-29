@@ -10,18 +10,26 @@
 use sha2::{Digest, Sha256};
 use std::{cell::RefCell, collections::VecDeque, io::Write as _, rc::Rc};
 use stela_compiler::{GuestState, TargetCpu, aarch64::system::registers::Encoding};
-use {
-    stela_contracts::Chip, stela_runtime::execution::reference::NativeRunner,
-    stela_runtime::machine::Cpu, stela_runtime::machine::CpuProfile,
-    stela_runtime::machine::DeviceError, stela_runtime::machine::Devices,
-    stela_runtime::machine::FaultCause, stela_runtime::machine::Host,
-    stela_runtime::machine::InstallError, stela_runtime::machine::Lines,
-    stela_runtime::machine::Machine, stela_runtime::machine::NativeCode,
-    stela_runtime::machine::NativeExit, stela_runtime::machine::Regime,
-    stela_runtime::machine::Stop, stela_runtime::machine::exception::Pstate,
-    stela_runtime::machine::identification, stela_runtime::machine::identification::Speculation,
-    stela_runtime::machine::mmu, stela_runtime::machine::registers::encodings::MPIDR_EL1,
-};
+use stela_contracts::Chip;
+use stela_engine::execution::reference::NativeRunner;
+use stela_engine::machine::Cpu;
+use stela_engine::machine::CpuProfile;
+use stela_engine::machine::DeviceError;
+use stela_engine::machine::Devices;
+use stela_engine::machine::FaultCause;
+use stela_engine::machine::Host;
+use stela_engine::machine::InstallError;
+use stela_engine::machine::Lines;
+use stela_engine::machine::Machine;
+use stela_engine::machine::NativeCode;
+use stela_engine::machine::NativeExit;
+use stela_engine::machine::Regime;
+use stela_engine::machine::Stop;
+use stela_engine::machine::exception::Pstate;
+use stela_engine::machine::identification;
+use stela_engine::machine::identification::Speculation;
+use stela_engine::machine::mmu;
+use stela_engine::machine::registers::encodings::MPIDR_EL1;
 
 const BASE: u64 = 0x1fc050000;
 const SOURCE_SHA: &str = "d6c695d26e5d816a2ecd523c0be20a15307af24c404b1603d74a970b53e75e77";

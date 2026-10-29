@@ -51,23 +51,33 @@ use stela_boot_core::{
     ram,
 };
 use stela_compiler::TargetCpu;
+use stela_contracts::Chip;
+use stela_engine::machine::Cpu;
+use stela_engine::machine::CpuProfile;
+use stela_engine::machine::Event;
+use stela_engine::machine::Host;
+use stela_engine::machine::Machine;
+use stela_engine::machine::PeerState;
+use stela_engine::machine::Stop;
+use stela_engine::machine::Transition;
+use stela_engine::machine::engine::Call;
+use stela_engine::machine::engine::step_timing;
+use stela_engine::machine::exception::Pstate;
+use stela_engine::machine::identification::Speculation;
+use stela_engine::machine::registers::encodings::DCZID_EL0;
+use stela_engine::machine::system::Register;
 use stela_loader::{apple_device_tree::DeviceTree, boot_bundle, installed};
+use stela_runtime::machine::apple::AicInput;
+use stela_runtime::machine::apple::AicLayout;
+use stela_runtime::machine::apple::AppleDevices;
+use stela_runtime::machine::apple::ConsoleBusy;
+use stela_runtime::machine::apple::ConsoleSink;
+use stela_runtime::machine::apple::Range;
 use stela_runtime::machine::apple::WallClock;
-use stela_runtime::machine::engine::{Call, step_timing};
+use stela_runtime::machine::mount;
+use stela_runtime::machine::soc;
 use stela_runtime::pc::{gpt::Guid, storage::Target};
 use stela_runtime::restore::store::Verify;
-use {
-    stela_contracts::Chip, stela_runtime::machine::Cpu, stela_runtime::machine::CpuProfile,
-    stela_runtime::machine::Event, stela_runtime::machine::Host, stela_runtime::machine::Machine,
-    stela_runtime::machine::PeerState, stela_runtime::machine::Stop,
-    stela_runtime::machine::Transition, stela_runtime::machine::apple::AicInput,
-    stela_runtime::machine::apple::AicLayout, stela_runtime::machine::apple::AppleDevices,
-    stela_runtime::machine::apple::ConsoleBusy, stela_runtime::machine::apple::ConsoleSink,
-    stela_runtime::machine::apple::Range, stela_runtime::machine::exception::Pstate,
-    stela_runtime::machine::identification::Speculation, stela_runtime::machine::mount,
-    stela_runtime::machine::registers::encodings::DCZID_EL0, stela_runtime::machine::soc,
-    stela_runtime::machine::system::Register,
-};
 
 /// The most of the engine heap (at least 512 MiB) `--storage-ram` may
 /// take for written blocks; a restore or recovery boot writes far less.
@@ -322,7 +332,7 @@ fn guest_ram(handoff: &Handoff, options: &mut Options) -> Result<Vec<RamRange>, 
 /// a board profile's do. Its DC ZVA block is Stela's choice of 64 bytes.
 fn test_profile(target: TargetCpu, speculation: Speculation) -> CpuProfile {
     let chip = Chip::DEFAULT;
-    let mut fixed = stela_runtime::machine::identification::derive(chip, target, true, speculation);
+    let mut fixed = stela_engine::machine::identification::derive(chip, target, true, speculation);
     fixed.push((DCZID_EL0, 4));
     CpuProfile {
         name: "stela-test-kernel",
@@ -341,7 +351,7 @@ fn test_profile(target: TargetCpu, speculation: Speculation) -> CpuProfile {
 /// The CSV fields disclose the host's `speculation` guarantees.
 fn board_profile(board: &soc::Board, target: TargetCpu, speculation: Speculation) -> CpuProfile {
     let chip = board.cpus.chip;
-    let mut fixed = stela_runtime::machine::identification::derive(chip, target, true, speculation);
+    let mut fixed = stela_engine::machine::identification::derive(chip, target, true, speculation);
     // 64-byte DC ZVA blocks, enabled: XNU `osfmk/arm64/bzero.s` zeroes with
     // `dc zva` in fixed 64-byte steps.
     fixed.push((DCZID_EL0, 4));
@@ -487,12 +497,12 @@ pub(crate) fn report(event: &Event) {
     let count = EVENTS.fetch_add(1, Ordering::Relaxed);
     let interrupt = matches!(
         event,
-        Event::Exception { vector, .. } if *vector != stela_runtime::machine::exception::Vector::Synchronous
+        Event::Exception { vector, .. } if *vector != stela_engine::machine::exception::Vector::Synchronous
     );
     let guarded_fault = matches!(
         event,
         Event::Exception { vector, from_guarded: true, syndrome, .. }
-            if *vector == stela_runtime::machine::exception::Vector::Synchronous
+            if *vector == stela_engine::machine::exception::Vector::Synchronous
                 && syndrome >> ESR_EC_SHIFT != EC_SVC64
     );
     // An abort on an address no translation regime can hold, such as a
@@ -500,7 +510,7 @@ pub(crate) fn report(event: &Event) {
     let noncanonical_fault = matches!(
         event,
         Event::Exception { vector, syndrome, fault_address: Some(address), .. }
-            if *vector == stela_runtime::machine::exception::Vector::Synchronous
+            if *vector == stela_engine::machine::exception::Vector::Synchronous
                 && EC_LOWER_ABORTS.contains(&(syndrome >> ESR_EC_SHIFT))
                 && !matches!((address >> 48) as u8, 0 | 0xff)
     );
@@ -1289,7 +1299,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     ));
     let mut cpu = Cpu::of(profile.chip, entry, Pstate::reset(el));
     cpu.state.x[0] = x0;
-    let now = stela_runtime::machine::Host::counter(&mut bare);
+    let now = stela_engine::machine::Host::counter(&mut bare);
     let reset = options.bundle.then_some(entry);
     // Board device firmware images travel in the bundle by guest file name.
     let files = &handoff.files[..handoff.file_count];
@@ -1454,9 +1464,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         Some(assigned) => assigned
             .worker_bindings()
             .unwrap_or_else(|error| output::fatal(&error)),
-        None => alloc::vec![stela_runtime::machine::engine::publication::WorkerBinding {
+        None => alloc::vec![stela_engine::machine::engine::publication::WorkerBinding {
             pe: 0,
-            worker: stela_runtime::machine::engine::publication::WorkerId(0),
+            worker: stela_engine::machine::engine::publication::WorkerId(0),
         }],
     };
     if tree.is_some() {
@@ -1564,7 +1574,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         None => None,
     };
     let capture = native_processors.expect("validated native roster");
-    let hub = stela_runtime::machine::engine::Hub::new(
+    let hub = stela_engine::machine::engine::Hub::new(
         profile.processors.len().max(1),
         parallel::Doorbells::new(profile.processors.len().max(1), &worker_bindings, |slot| {
             let selected = *capture.selected.get(slot)? as usize;
@@ -2720,7 +2730,10 @@ fn run<H: Host>(
 /// have recovered. This walker can read RAM descriptors only: diagnostic
 /// failures neither update guest tables nor raise a guest exception.
 fn observed_instruction<H: Host>(machine: &mut Machine<H, parallel::Board>) -> Option<u64> {
-    use stela_runtime::machine::mmu::{self, Access, Outcome, TableMemory};
+    use stela_engine::machine::mmu;
+    use stela_engine::machine::mmu::Access;
+    use stela_engine::machine::mmu::Outcome;
+    use stela_engine::machine::mmu::TableMemory;
     struct ReadOnlyTables<'a, H>(&'a mut H);
     impl<H: Host> TableMemory for ReadOnlyTables<'_, H> {
         fn read_descriptor(&mut self, physical: u64) -> Option<u64> {
@@ -2783,7 +2796,7 @@ const SUSPENSION_CHAIN: usize = 12;
 fn suspension_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
     const SHOWN: usize = 32;
     let now = machine.host.counter();
-    let frequency = stela_runtime::machine::timer::system_frequency(&machine.cpu).max(1);
+    let frequency = stela_engine::machine::timer::system_frequency(&machine.cpu).max(1);
     let suspended: Vec<_> = machine.suspended().values().copied().collect();
     let mut chains: Vec<([u64; SUSPENSION_CHAIN], u64)> = suspended
         .iter()
@@ -2940,7 +2953,7 @@ fn hot_report(hot: &mut BTreeMap<u64, u32>) {
 /// The counter, PSTATE.DAIF and each generic timer's CTL and CVAL, which
 /// show why a PE that should sleep in WFI does not.
 fn timer_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
-    use stela_runtime::machine::timer::CHANNELS;
+    use stela_engine::machine::timer::CHANNELS;
     let (now, timers) = machine.timer_snapshot();
     output::arguments(format_args!(
         "TIMERS now={now:#x} daif={:#x}",
@@ -3391,7 +3404,7 @@ fn survey_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
 /// four-level host's upper window can lie below the guest's mappings.
 fn occupancy_report<H: Host>(
     machine: &mut Machine<H, parallel::Board>,
-    last: &mut Option<stela_runtime::machine::engine::Occupancy>,
+    last: &mut Option<stela_engine::machine::engine::Occupancy>,
 ) {
     let Some(now) = machine.upper_occupancy() else {
         return;

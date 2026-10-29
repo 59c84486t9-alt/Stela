@@ -1,8 +1,9 @@
 //! Live synchronous RAM visibility for the cacheless Stela frontend. This
 //! never settles DRAM timing, clock/power or an outstanding controller request.
 use super::*;
-use crate::memory::{CanonicalRamService, RegisteredSystemRam};
 use alloc::sync::Arc;
+use stela_engine::memory::CanonicalRamService;
+use stela_engine::memory::RegisteredSystemRam;
 
 impl super::super::AppleDevices {
     /// Publish one prepared MCC/AMCC/PTD owner at its complete physical map.
@@ -136,10 +137,9 @@ impl Prepared {
 mod tests {
     use super::*;
     use core::{cell::UnsafeCell, ptr::NonNull};
-    use {
-        crate::memory::ReservedSystemRamRange, crate::memory::system_ram::fixture,
-        stela_contracts::interrupt::InterruptLatch,
-    };
+    use stela_contracts::interrupt::InterruptLatch;
+    use stela_engine::memory::ReservedSystemRamRange;
+    use stela_engine::memory::system_ram::fixture;
 
     #[repr(C, align(16))]
     struct Storage(UnsafeCell<[u8; 128]>);
@@ -277,7 +277,8 @@ mod tests {
 
     #[test]
     fn placement_requires_registered_ram_and_keeps_one_complete_owner() {
-        use crate::machine::{Devices, apple::AppleDevices};
+        use crate::machine::apple::AppleDevices;
+        use stela_engine::machine::Devices;
         let mut devices = AppleDevices::new();
         assert!(
             devices
@@ -320,7 +321,9 @@ mod tests {
 
     #[test]
     fn actual_drain_routes_require_a_live_service_before_any_ordinary_read() {
-        use crate::machine::{Devices, apple::AppleDevices, engine::DeviceReadShape};
+        use crate::machine::apple::AppleDevices;
+        use stela_engine::machine::Devices;
+        use stela_engine::machine::engine::DeviceReadShape;
         let mut devices = AppleDevices::new();
         let owner = super::super::tests::prepared()
             .with_registered_ram(ram())

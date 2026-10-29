@@ -10,17 +10,22 @@
 //! reset, capacity, timing or completed DRAM programming. Source cacheless
 //! disable_mcc command/waiter evidence is retained in t6000-mcc-backend-20261021-1.
 use super::{Prepared, amcc, mcc, ptd};
+use crate::machine::apple::AppleDevices;
+use crate::machine::soc::Board;
+use crate::machine::soc::DirectMemoryCache;
+use crate::machine::soc::MemoryController;
+use crate::machine::soc::PowerOwner;
+use crate::machine::soc::PowerStates;
+use crate::platform::apple::pmgr;
+use crate::platform::apple::pmgr::Pmgr;
+use crate::platform::apple::pmgr::coverage;
+use crate::platform::apple::pmgr::coverage::Consumer;
+use crate::platform::apple::pmgr::coverage::LifecycleSinks;
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
-use {
-    crate::machine::apple::AppleDevices, crate::machine::soc::Board,
-    crate::machine::soc::DirectMemoryCache, crate::machine::soc::MemoryController,
-    crate::machine::soc::PowerOwner, crate::machine::soc::PowerStates,
-    crate::memory::RegisteredSystemRam, crate::platform::apple::pmgr,
-    crate::platform::apple::pmgr::Pmgr, crate::platform::apple::pmgr::coverage,
-    crate::platform::apple::pmgr::coverage::Consumer,
-    crate::platform::apple::pmgr::coverage::LifecycleSinks, stela_contracts::Chip,
-    stela_contracts::bus::LifecycleState, stela_contracts::bus::Width,
-};
+use stela_contracts::Chip;
+use stela_contracts::bus::LifecycleState;
+use stela_contracts::bus::Width;
+use stela_engine::memory::RegisteredSystemRam;
 
 /// Entire new-software control image, independent of RAM capacity and opaque
 /// DT config-data/alternate dramcfg-data. Every weight is an explicit policy.
@@ -110,7 +115,6 @@ impl Plan {
         }
         let domains = power_domains(power, direct)?;
         let generation = ram
-            .domain()
             .generation()
             .map_err(|e| format!("cold T6000 RAM is not live: {e:?}"))?;
         Ok(Self {
@@ -154,7 +158,6 @@ impl Plan {
     fn validate_ram(&self) -> Result<(), String> {
         if self
             .ram
-            .domain()
             .generation()
             .map_err(|e| format!("cold T6000 RAM is not live: {e:?}"))?
             != self.generation
@@ -446,17 +449,18 @@ fn geometry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::soc::ClockRole;
+    use crate::machine::soc::PowerResource;
+    use crate::platform::apple::pmgr::PowerState;
+    use crate::platform::apple::pmgr::coverage::Admission;
+    use crate::platform::apple::pmgr::coverage::Domain;
+    use crate::platform::apple::pmgr::coverage::DomainId;
     use alloc::{boxed::Box, vec};
     use core::{cell::UnsafeCell, ptr::NonNull};
-    use {
-        crate::machine::soc::ClockRole, crate::machine::soc::PowerResource,
-        crate::memory::ReservedSystemRamRange, crate::memory::system_ram::fixture,
-        crate::platform::apple::pmgr::PowerState,
-        crate::platform::apple::pmgr::coverage::Admission,
-        crate::platform::apple::pmgr::coverage::Domain,
-        crate::platform::apple::pmgr::coverage::DomainId, stela_contracts::bus::Access,
-        stela_contracts::interrupt::InterruptLatch,
-    };
+    use stela_contracts::bus::Access;
+    use stela_contracts::interrupt::InterruptLatch;
+    use stela_engine::memory::ReservedSystemRamRange;
+    use stela_engine::memory::system_ram::fixture;
     const SUPPLY: u64 = 0x1000;
     const RAM: u64 = 0x800000000;
     #[repr(C, align(16))]

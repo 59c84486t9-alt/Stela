@@ -1712,9 +1712,9 @@ mod tests {
                 decoded.authenticated_binds[0].authentication.diversity,
                 u16::MAX
             );
-            let context = stela_runtime::pauth::Context::new(
+            let context = stela_engine::pauth::Context::new(
                 1,
-                stela_runtime::pauth::Keys::from_words([1, 2], [3, 4], [5, 6], [7, 8]),
+                stela_engine::pauth::Keys::from_words([1, 2], [3, 4], [5, 6], [7, 8]),
             );
             assert!(decoded.sign_rebases(&context).is_err());
             for changed in [raw | 1, raw | (1 << if format == 12 { 24 } else { 16 })] {
@@ -1726,7 +1726,8 @@ mod tests {
     }
     #[test]
     fn mixed_authenticated_chain_is_complete_and_signing_never_strips_or_invents_keys() {
-        use stela_runtime::pauth::{Context, Keys};
+        use stela_engine::pauth::Context;
+        use stela_engine::pauth::Keys;
         let (mut data, mut image) = fixture(12);
         put64(&mut data, SLOT, raw(12, 0x4120, 0, 1));
         put64(

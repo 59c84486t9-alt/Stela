@@ -1,12 +1,13 @@
 //! Physical CPU-domain identities projected through one retained assigned Plan.
 use super::*;
+use crate::machine::soc::ProcessorAssociation;
+use crate::machine::soc::assigned::PlanIdentity;
+use crate::machine::soc::assigned::PlannedPe;
 use crate::platform::apple::pmgr::{DomainTransition, coverage::DomainId};
-use {
-    crate::machine::engine::ProcessorChange, crate::machine::engine::ProcessorTarget,
-    crate::machine::engine::Processors, crate::machine::soc::ProcessorAssociation,
-    crate::machine::soc::assigned::PlanIdentity, crate::machine::soc::assigned::PlannedPe,
-    stela_contracts::identity::Identity,
-};
+use stela_contracts::identity::Identity;
+use stela_engine::machine::engine::ProcessorChange;
+use stela_engine::machine::engine::ProcessorTarget;
+use stela_engine::machine::engine::Processors;
 
 struct Domain {
     identity: DomainId,

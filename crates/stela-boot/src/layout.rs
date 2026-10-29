@@ -9,7 +9,9 @@
 //! sets it again from the handoff first thing: its image is a copy taken
 //! before the loader ran.
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use stela_runtime::machine::mmu::placement::{Placement, SLICE, UPPER_HALF};
+use stela_engine::machine::mmu::placement::Placement;
+use stela_engine::machine::mmu::placement::SLICE;
+use stela_engine::machine::mmu::placement::UPPER_HALF;
 
 /// PML5 entry 64: bits 56:48 = 0x40.
 const FIVE_LEVEL_WINDOW: u64 = 0x0040_0000_0000_0000;

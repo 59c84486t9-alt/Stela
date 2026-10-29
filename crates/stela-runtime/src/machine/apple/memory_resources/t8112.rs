@@ -10,8 +10,6 @@
 //! the drivers wait for are modeled behaviorally (`pmp::duties`).
 use super::dcs::NativeDcs;
 use crate::machine::soc::MemoryCache;
-use crate::memory::CanonicalRamService;
-use crate::memory::RegisteredSystemRam;
 use crate::platform::apple::dcs::native::ChannelProgress;
 pub use crate::platform::apple::dcs::native::{CHANNEL_STRIDE, CHANNELS, ChannelConfiguration};
 use crate::platform::apple::pmp::duties::Duties;
@@ -32,6 +30,8 @@ use stela_contracts::bus::MmioDevice;
 use stela_contracts::bus::MmioError;
 use stela_contracts::bus::Width;
 use stela_contracts::bus::refuse;
+use stela_engine::memory::CanonicalRamService;
+use stela_engine::memory::RegisteredSystemRam;
 
 const DCS_BYTES: u64 = CHANNEL_STRIDE * CHANNELS as u64;
 const PTD_OFFSET: u64 = DCS_BYTES;
@@ -336,15 +336,15 @@ impl crate::machine::apple::AppleDevices {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::Devices;
     use crate::machine::apple::AppleDevices;
     use crate::machine::soc::PtdBank;
-    use crate::memory::ReservedSystemRamRange;
-    use crate::memory::system_ram::fixture;
     use crate::platform::apple::amcc;
     use alloc::{boxed::Box, vec};
     use core::{cell::UnsafeCell, ptr::NonNull};
     use stela_contracts::interrupt::InterruptLatch;
+    use stela_engine::machine::Devices;
+    use stela_engine::memory::ReservedSystemRamRange;
+    use stela_engine::memory::system_ram::fixture;
     const DCS: u64 = 0x201000000;
     const PTD: u64 = 0x23b3c0000;
     const DRAIN: u64 = 0xa40;
@@ -639,11 +639,11 @@ mod tests {
             let offset = i as u64 * CHANNEL_STRIDE + DRAIN;
             assert!(board.read_needs_ram(
                 DCS + offset,
-                crate::machine::engine::DeviceReadShape::Scalar { bytes: 4 }
+                stela_engine::machine::engine::DeviceReadShape::Scalar { bytes: 4 }
             ));
             assert!(!board.read_needs_ram(
                 DCS + offset,
-                crate::machine::engine::DeviceReadShape::Scalar { bytes: 8 }
+                stela_engine::machine::engine::DeviceReadShape::Scalar { bytes: 8 }
             ));
             let resource = super::super::resource_for(&board.bus, id).unwrap();
             // SAFETY: no PE/background publisher exists; all actual fixture gates and exclusive board ownership remain held.

@@ -10,7 +10,8 @@
 //! actual unit/limit, physical sharing, or untouched memory contents. No chip
 //! supplies defaults here. A register image and actual retained aperture owner
 //! must agree before this component exists. No production backing is qualified.
-use crate::memory::backing::{BackingId, MappingId};
+use stela_engine::memory::backing::BackingId;
+use stela_engine::memory::backing::MappingId;
 
 const COUNT: u64 = 0x3f;
 const READY: u64 = 1 << 63;
@@ -271,14 +272,17 @@ impl<B: ApertureBacking> Cram<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{
-        backing::{AccessKind, AccessPermissions, MemoryBacking, MemoryView},
-        domain::{MappingAttributes, MemoryDomain, MemorySystem},
-    };
     use alloc::{sync::Arc, vec};
     use std::alloc::{Layout, alloc, dealloc};
     use std::ptr::NonNull;
     use stela_compiler::TargetCpu;
+    use stela_engine::memory::backing::AccessKind;
+    use stela_engine::memory::backing::AccessPermissions;
+    use stela_engine::memory::backing::MemoryBacking;
+    use stela_engine::memory::backing::MemoryView;
+    use stela_engine::memory::domain::MappingAttributes;
+    use stela_engine::memory::domain::MemoryDomain;
+    use stela_engine::memory::domain::MemorySystem;
 
     const PAGE_BYTES: usize = 4096;
 
@@ -700,27 +704,27 @@ mod tests {
     #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
     mod original {
         use super::*;
-        use crate::execution::platform::Mapping;
-        use crate::execution::reference::NativeRunner;
-        use crate::machine::Cpu;
-        use crate::machine::CpuProfile;
-        use crate::machine::DeviceError;
-        use crate::machine::Devices;
-        use crate::machine::FaultCause;
-        use crate::machine::Host;
-        use crate::machine::InstallError;
-        use crate::machine::Lines;
-        use crate::machine::Machine;
-        use crate::machine::NativeCode;
-        use crate::machine::NativeExit;
-        use crate::machine::Regime;
-        use crate::machine::RequirementKind;
-        use crate::machine::Stop;
-        use crate::machine::exception::Pstate;
-        use crate::machine::registers::encodings::MPIDR_EL1;
         use stela_compiler::{GuestState, aarch64::system::registers::Encoding};
         use stela_contracts::Chip;
         use stela_contracts::identity::Identity;
+        use stela_engine::execution::platform::Mapping;
+        use stela_engine::execution::reference::NativeRunner;
+        use stela_engine::machine::Cpu;
+        use stela_engine::machine::CpuProfile;
+        use stela_engine::machine::DeviceError;
+        use stela_engine::machine::Devices;
+        use stela_engine::machine::FaultCause;
+        use stela_engine::machine::Host;
+        use stela_engine::machine::InstallError;
+        use stela_engine::machine::Lines;
+        use stela_engine::machine::Machine;
+        use stela_engine::machine::NativeCode;
+        use stela_engine::machine::NativeExit;
+        use stela_engine::machine::Regime;
+        use stela_engine::machine::RequirementKind;
+        use stela_engine::machine::Stop;
+        use stela_engine::machine::exception::Pstate;
+        use stela_engine::machine::registers::encodings::MPIDR_EL1;
 
         const BASE: u64 = 0x8_0000_0000;
         #[derive(Clone, Copy)]
@@ -898,26 +902,26 @@ mod tests {
                                 .regime
                                 .as_ref()
                                 .expect("Machine publishes actual regime");
-                            match crate::machine::mmu::translate(
+                            match stela_engine::machine::mmu::translate(
                                 &regime.controls,
                                 fault.address,
                                 if fault.write {
-                                    crate::machine::mmu::Access::Write
+                                    stela_engine::machine::mmu::Access::Write
                                 } else {
-                                    crate::machine::mmu::Access::Read
+                                    stela_engine::machine::mmu::Access::Read
                                 },
                                 regime.requester,
                                 &mut EntryTables(entry.clone()),
                             ) {
-                                crate::machine::mmu::Outcome::Mapped(mapping) => {
+                                stela_engine::machine::mmu::Outcome::Mapped(mapping) => {
                                     FaultCause::Device {
                                         physical: mapping.physical,
                                     }
                                 }
-                                crate::machine::mmu::Outcome::Fault(fault) => {
+                                stela_engine::machine::mmu::Outcome::Fault(fault) => {
                                     FaultCause::Guest(fault)
                                 }
-                                crate::machine::mmu::Outcome::Unsupported(reason) => {
+                                stela_engine::machine::mmu::Outcome::Unsupported(reason) => {
                                     FaultCause::Translation(reason)
                                 }
                             }
@@ -1255,7 +1259,7 @@ mod tests {
             }
         }
         struct EntryTables(std::rc::Rc<std::cell::RefCell<EntryRam>>);
-        impl crate::machine::mmu::TableMemory for EntryTables {
+        impl stela_engine::machine::mmu::TableMemory for EntryTables {
             fn read_descriptor(&mut self, address: u64) -> Option<u64> {
                 let mut bytes = [0; 8];
                 self.0
@@ -1614,11 +1618,11 @@ mod tests {
                 runner: NativeRunner::new(vec![]).expect("reference fault handlers"),
             };
             let target = TargetCpu::Baseline;
-            let mut fixed = crate::machine::identification::derive(
+            let mut fixed = stela_engine::machine::identification::derive(
                 Chip::AppleM1,
                 target,
                 true,
-                crate::machine::identification::Speculation::NONE,
+                stela_engine::machine::identification::Speculation::NONE,
             );
             fixed.push((MPIDR_EL1, 0x80000000));
             let profile = CpuProfile {
@@ -1647,7 +1651,7 @@ mod tests {
                     stop = Stop::Unsupported(first);
                 }
                 if machine.statistics.exceptions != old_exceptions {
-                    use crate::machine::system::Register;
+                    use stela_engine::machine::system::Register;
                     exceptions.push(serde_json::json!({"previous_pc":old_pc,"vector_pc":machine.cpu.pc,
                         "esr_el1":machine.cpu.read(Register::ESR_EL1),"elr_el1":machine.cpu.read(Register::ELR_EL1),
                         "far_el1":machine.cpu.read(Register::FAR_EL1),"esr_el2":machine.cpu.read(Register::ESR_EL2),
@@ -1724,7 +1728,7 @@ mod tests {
                 assert_eq!(entry.unknown.last(), Some(&(0x396408114, 4)));
                 assert_eq!(machine.statistics.exceptions, 0);
                 assert!(entry.registers.iter().any(|event| event.encoding
-                    == crate::machine::registers::encodings::ACNTPCT_EL0
+                    == stela_engine::machine::registers::encodings::ACNTPCT_EL0
                     && !event.write));
             } else {
                 let Stop::Unsupported(requirement) = &stop else {
@@ -1763,7 +1767,7 @@ mod tests {
                     "guest_store_parts":entry.committed.len()+entry.redacted_stores.len(),"unknown_reads":entry.unknown,
                     "peripheral_effects":machine.devices.effects,"peripheral_irqs":machine.devices.irq_changes,
                     "entropy_requests":machine.devices.entropy_calls.get(),
-                    "el2_key_pairs_initialized":if mount_sep {Some(machine.cpu.apple.pointer_keys.pairs().map(|pair|pair.is_some()))} else {None},
+                    "el2_key_pairs_initialized":if mount_sep {Some(machine.cpu.apple.pointer_keys.initialized())} else {None},
                     "sep_handoff":if mount_sep {"explicit Stela running ROM/enabled actual mailboxes; real host entropy; declared test ECID5354454c41544553, unknownsecurityNone, volatile state; AIC input transitions recorded, CPU delivery unmounted"} else {"no peripheral provider"},
                     "system_accesses":entry.registers.iter().map(|event|serde_json::json!({"encoding":format!("{:?}",event.encoding),"write":event.write,"value":event.value})).collect::<Vec<_>>(),"watch":watch,
                     "redaction":if mount_sep {"all runtime registers/store bytes/mailbox values/watch values omitted at collection; only coordinates, sizes, directions and counts retained"} else {"no native entropy/key provider in this scenario"},

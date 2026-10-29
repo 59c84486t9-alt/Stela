@@ -1,6 +1,8 @@
 //! Consumed scalar results and the live canonical RAM boundary for MCC drains.
 use super::*;
-use crate::machine::engine::{CanonicalDeviceMemory, ConsumedScalar, DeviceReadShape};
+use stela_engine::machine::engine::CanonicalDeviceMemory;
+use stela_engine::machine::engine::ConsumedScalar;
+use stela_engine::machine::engine::DeviceReadShape;
 
 impl AppleDevices {
     pub(super) fn read_needs_ram(&self, physical: u64, shape: DeviceReadShape) -> bool {

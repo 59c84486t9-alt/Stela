@@ -2,7 +2,8 @@
 //! physical; the engine reaches them through its physmap.
 use crate::console::Framebuffer;
 use alloc::vec::Vec;
-use stela_runtime::{machine::mmu::placement::Placement, pc};
+use stela_engine::machine::mmu::placement::Placement;
+use stela_runtime::pc;
 
 pub const MAGIC: u64 = 0x5354_454c_4153_5953; // "SYSALETS"
 pub const MAX_GUEST_RANGES: usize = 128;

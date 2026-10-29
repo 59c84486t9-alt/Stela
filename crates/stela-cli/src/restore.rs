@@ -234,7 +234,7 @@ pub fn receipt(image: &Path) -> Result<Option<Receipt>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let receipt: Receipt = stela_runtime::read_json(&path)
+    let receipt: Receipt = stela_engine::read_json(&path)
         .with_context(|| format!("{} is not a download receipt", path.display()))?;
     let bytes = std::fs::metadata(image)?.len();
     ensure!(
@@ -369,7 +369,7 @@ fn download_with_client(image: &Image, output: &Path, client: &Client) -> Result
     let mut previous_total = None;
     if part.exists() {
         let previous: Partial =
-            stela_runtime::read_json(&metadata).context("partial image has no valid metadata")?;
+            stela_engine::read_json(&metadata).context("partial image has no valid metadata")?;
         ensure!(
             previous.image == *image,
             "partial image belongs to a different catalog entry"
@@ -418,7 +418,7 @@ fn download_with_client(image: &Image, output: &Path, client: &Client) -> Result
     } else {
         bail!("unexpected download status: {}", response.status());
     }
-    stela_runtime::write_json(
+    stela_engine::write_json(
         &metadata,
         &Partial {
             image: image.clone(),
@@ -499,7 +499,7 @@ fn publish(
     };
     // Do not clobber an output created while the download was running.
     std::fs::hard_link(part, output).context("publish completed image")?;
-    stela_runtime::write_json(&sidecar(output, ".json"), &receipt)?;
+    stela_engine::write_json(&sidecar(output, ".json"), &receipt)?;
     std::fs::remove_file(part)?;
     std::fs::remove_file(metadata)?;
     progress.finish();
@@ -543,7 +543,7 @@ mod tests {
             sha256: "0".repeat(64),
             catalog_sha1_verified: true,
         };
-        stela_runtime::write_json(&sidecar(&image, ".json"), &written)?;
+        stela_engine::write_json(&sidecar(&image, ".json"), &written)?;
         assert_eq!(receipt(&image)?.unwrap().image, written.image);
         std::fs::write(&image, b"ipsw!")?;
         let error = receipt(&image).unwrap_err().to_string();
@@ -599,7 +599,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let out = dir.path().join("test.ipsw");
         std::fs::write(sidecar(&out, ".part"), b"01234")?;
-        stela_runtime::write_json(
+        stela_engine::write_json(
             &sidecar(&out, ".part.json"),
             &Partial {
                 image: image.clone(),
@@ -631,7 +631,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let out = dir.path().join("test.ipsw");
         std::fs::write(sidecar(&out, ".part"), b"complete")?;
-        stela_runtime::write_json(
+        stela_engine::write_json(
             &sidecar(&out, ".part.json"),
             &Partial {
                 image: image.clone(),
@@ -659,7 +659,7 @@ mod tests {
             let dir = tempfile::tempdir()?;
             let out = dir.path().join("test.ipsw");
             std::fs::write(sidecar(&out, ".part"), b"old")?;
-            stela_runtime::write_json(
+            stela_engine::write_json(
                 &sidecar(&out, ".part.json"),
                 &Partial {
                     image: image.clone(),

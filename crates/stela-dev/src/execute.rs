@@ -52,7 +52,8 @@ impl RunBlocks {
             memory: memory_path,
             read_memory,
         } = self;
-        use stela_runtime::blocks::{BlockRuntime, ThreadState};
+        use stela_engine::blocks::BlockRuntime;
+        use stela_engine::blocks::ThreadState;
         const ADDRESS_SPACE_ID: u64 = 1;
         ensure!(
             block_budget <= 1_000_000,

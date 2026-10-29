@@ -21,16 +21,21 @@
 use super::amcc::{BROADCAST, LOCK_REGISTERS, LockResource, MMIO_BYTES, Placement, STRIDE};
 use crate::platform::apple::pmp::native::cache::publisher;
 mod native;
+use crate::machine::soc::MemoryController;
+use crate::platform::apple::amcc::Locked;
 use alloc::{collections::BTreeMap, sync::Arc};
 pub use native::QuotaView;
-use {
-    crate::machine::engine::CanonicalDeviceMemory, crate::machine::soc::MemoryController,
-    crate::memory::CanonicalRamService, crate::memory::RegisteredSystemRam,
-    crate::platform::apple::amcc::Locked, stela_contracts::bus::Access,
-    stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
-    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
-    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
-};
+use stela_contracts::bus::Access;
+use stela_contracts::bus::Direction;
+use stela_contracts::bus::Lifecycle;
+use stela_contracts::bus::LifecycleState;
+use stela_contracts::bus::MmioDevice;
+use stela_contracts::bus::MmioError;
+use stela_contracts::bus::Width;
+use stela_contracts::bus::refuse;
+use stela_engine::machine::engine::CanonicalDeviceMemory;
+use stela_engine::memory::CanonicalRamService;
+use stela_engine::memory::RegisteredSystemRam;
 
 const PLANES: usize = 4;
 const STATUS: u64 = 0x424;

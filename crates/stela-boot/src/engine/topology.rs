@@ -9,17 +9,20 @@
 //! hashes/coordinates remain in the immutable j314s-single-core-topology audit.
 //! No source hash selects production behavior and no capacity is inferred here.
 use alloc::{format, string::String, vec::Vec};
+use stela_engine::machine::CpuProfile;
 use stela_loader::apple_device_tree::{
     DeviceTree,
     assigned::{Count, CountField, CpuIdRecipe, NodeBinding, Projection, Receipt, SourceBindings},
 };
-use stela_runtime::machine::{
-    CpuProfile,
-    soc::assigned::{
-        AssignedCore, Assignment, BspSource, Plan, PlanIdentity, RegisterRange, RetainedResources,
-        RetainedRoster, SourceIdentity,
-    },
-};
+use stela_runtime::machine::soc::assigned::AssignedCore;
+use stela_runtime::machine::soc::assigned::Assignment;
+use stela_runtime::machine::soc::assigned::BspSource;
+use stela_runtime::machine::soc::assigned::Plan;
+use stela_runtime::machine::soc::assigned::PlanIdentity;
+use stela_runtime::machine::soc::assigned::RegisterRange;
+use stela_runtime::machine::soc::assigned::RetainedResources;
+use stela_runtime::machine::soc::assigned::RetainedRoster;
+use stela_runtime::machine::soc::assigned::SourceIdentity;
 
 #[cfg(not(test))]
 use super::bundle::live_tree::LiveTree;
@@ -584,8 +587,9 @@ impl Prepared<'_> {
     /// worker identity independently of the projected guest logical index.
     pub(crate) fn worker_bindings(
         &self,
-    ) -> Result<Vec<stela_runtime::machine::engine::publication::WorkerBinding>, String> {
-        use stela_runtime::machine::engine::publication::{WorkerBinding, WorkerId};
+    ) -> Result<Vec<stela_engine::machine::engine::publication::WorkerBinding>, String> {
+        use stela_engine::machine::engine::publication::WorkerBinding;
+        use stela_engine::machine::engine::publication::WorkerId;
         self.plan
             .revalidate()
             .map_err(|e| format!("assigned worker route is stale: {e:?}"))?;

@@ -378,7 +378,7 @@ pub(super) fn plan(
     let host = environment.host;
     let esp = locate_esp(host, &command.usb)?;
     if esp.join(RECORD).exists() {
-        let interrupted = stela_runtime::read_json::<Record>(&esp.join(RECORD))
+        let interrupted = stela_engine::read_json::<Record>(&esp.join(RECORD))
             .is_ok_and(|record| !record.complete);
         bail!(
             "{} was already set up{} ({}); run `stela setup uninstall --usb {}` first, or \

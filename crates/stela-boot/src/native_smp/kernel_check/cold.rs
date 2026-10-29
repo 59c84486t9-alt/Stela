@@ -1,7 +1,9 @@
 //! Actual cold checked entry and consuming device reads on one physical BSP.
 //! No ARM warmup/legacy V1 instruction runs before canonical conversion.
 use super::*;
-use machine::engine::{CanonicalDeviceMemory, ConsumedPair, ConsumedScalar, DeviceReadShape};
+use stela_engine::machine::engine::{
+    CanonicalDeviceMemory, ConsumedPair, ConsumedScalar, DeviceReadShape,
+};
 mod mcc;
 mod tree;
 const STR_X0_X1: u32 = 0xf9000020;

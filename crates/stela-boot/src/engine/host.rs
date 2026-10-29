@@ -27,17 +27,24 @@ use crate::{
 use alloc::{sync::Arc, vec::Vec};
 use core::arch::{asm, global_asm};
 use stela_compiler::{GuestState, block::BlockExit};
-use stela_runtime::machine::engine::installed_code::InstalledCodeCache;
-use stela_runtime::machine::{
-    FaultCause, Host, InstallError, NativeCode, NativeExit, NativeFault, Regime,
-    mmu::{
-        self, Access, Outcome,
-        placement::Placement,
-        shadow::{self, Extents, Kept},
-        tlbi::{Everywhere, Reach},
-        translated::Tlb,
-    },
-};
+use stela_engine::machine::FaultCause;
+use stela_engine::machine::Host;
+use stela_engine::machine::InstallError;
+use stela_engine::machine::NativeCode;
+use stela_engine::machine::NativeExit;
+use stela_engine::machine::NativeFault;
+use stela_engine::machine::Regime;
+use stela_engine::machine::engine::installed_code::InstalledCodeCache;
+use stela_engine::machine::mmu;
+use stela_engine::machine::mmu::Access;
+use stela_engine::machine::mmu::Outcome;
+use stela_engine::machine::mmu::placement::Placement;
+use stela_engine::machine::mmu::shadow;
+use stela_engine::machine::mmu::shadow::Extents;
+use stela_engine::machine::mmu::shadow::Kept;
+use stela_engine::machine::mmu::tlbi::Everywhere;
+use stela_engine::machine::mmu::tlbi::Reach;
+use stela_engine::machine::mmu::translated::Tlb;
 
 #[cfg(feature = "diagnostics")]
 pub(crate) mod fp_diagnostic;
@@ -230,8 +237,8 @@ fn counter_at_tsc(state: &State, tsc: u64) -> u64 {
 
 /// Convert an absolute BSP TSC deadline using the very same installed fixed
 /// point ratio/base as fresh_counter; no guest-clock or nominal-Hz conversion.
-pub(crate) fn counter_deadline(tsc: u64) -> stela_runtime::machine::engine::NativeEpochDeadline {
-    stela_runtime::machine::engine::NativeEpochDeadline(counter_at_tsc(state(), tsc))
+pub(crate) fn counter_deadline(tsc: u64) -> stela_engine::machine::engine::NativeEpochDeadline {
+    stela_engine::machine::engine::NativeEpochDeadline(counter_at_tsc(state(), tsc))
 }
 
 #[derive(Clone, Copy)]
@@ -246,7 +253,7 @@ struct Recorded {
 
 pub struct State {
     ram: Vec<RamRange>,
-    registered_ram: Option<alloc::sync::Arc<stela_runtime::memory::RegisteredSystemRam>>,
+    registered_ram: Option<alloc::sync::Arc<stela_engine::memory::RegisteredSystemRam>>,
     pool: Pool,
     /// Engine root without any guest mapping.
     host_root: u64,
@@ -635,7 +642,7 @@ pub(crate) fn profile_snapshot() -> profile::Snapshot {
 #[cfg(feature = "native-profile")]
 pub(crate) fn profile_work_report() {
     let snapshot = profile_snapshot();
-    for work in stela_runtime::machine::engine::NativeTimingWork::ALL {
+    for work in stela_engine::machine::engine::NativeTimingWork::ALL {
         let count = snapshot.work[work as usize];
         crate::output::arguments(format_args!(
             "NATIVE WORK sampled_bsp category={work:?} calls={} sampled_calls={} ticks={} phase_ticks={:?}\n",
@@ -1366,14 +1373,14 @@ impl Host for BareHost<'_> {
     #[cfg(feature = "native-profile")]
     fn native_timing_work_start(
         &mut self,
-        work: stela_runtime::machine::engine::NativeTimingWork,
+        work: stela_engine::machine::engine::NativeTimingWork,
     ) -> Option<u64> {
         state().native_profile.work_start(work, profile_timestamp)
     }
     #[cfg(feature = "native-profile")]
     fn native_timing_work_end(
         &mut self,
-        work: stela_runtime::machine::engine::NativeTimingWork,
+        work: stela_engine::machine::engine::NativeTimingWork,
         started: u64,
     ) {
         state()
@@ -1381,9 +1388,9 @@ impl Host for BareHost<'_> {
             .work_end(work, started, profile_timestamp());
     }
     #[cfg(feature = "native-profile")]
-    fn native_timing(&mut self, phase: stela_runtime::machine::engine::NativeTimingPhase) {
+    fn native_timing(&mut self, phase: stela_engine::machine::engine::NativeTimingPhase) {
         let profile = &mut state().native_profile;
-        if phase == stela_runtime::machine::engine::NativeTimingPhase::Begin
+        if phase == stela_engine::machine::engine::NativeTimingPhase::Begin
             && profile.needs_calibration()
         {
             profile.calibrate(profile_timestamp);
@@ -1393,15 +1400,15 @@ impl Host for BareHost<'_> {
     #[cfg(feature = "native-profile")]
     fn native_instruction_sample(
         &mut self,
-        sample: stela_runtime::machine::engine::NativeInstructionSample<'_>,
+        sample: stela_engine::machine::engine::NativeInstructionSample<'_>,
     ) {
         state().native_profile.instructions(sample);
     }
-    fn native_worker(&self) -> Option<stela_runtime::machine::engine::publication::WorkerId> {
+    fn native_worker(&self) -> Option<stela_engine::machine::engine::publication::WorkerId> {
         local::native_worker()
     }
 
-    fn native_cpu_lease(&self) -> Option<stela_runtime::NativeCpuLease> {
+    fn native_cpu_lease(&self) -> Option<stela_engine::NativeCpuLease> {
         local::native_cpu_lease()
     }
 
@@ -1456,33 +1463,33 @@ impl Host for BareHost<'_> {
         physical: u64,
         bytes: usize,
         write: bool,
-    ) -> Result<(), stela_runtime::machine::engine::DmaError> {
+    ) -> Result<(), stela_engine::machine::engine::DmaError> {
         let ram = state().registered_ram.as_ref().ok_or(
-            stela_runtime::machine::engine::DmaError::Unsupported(
+            stela_engine::machine::engine::DmaError::Unsupported(
                 "canonical DMA RAM owner is not installed",
             ),
         )?;
         ram.check_dma_range(physical, bytes, write)
-            .map_err(|_| stela_runtime::machine::engine::DmaError::Memory)
+            .map_err(|_| stela_engine::machine::engine::DmaError::Memory)
     }
     fn read_ram_progress(
         &mut self,
         physical: u64,
         buffer: &mut [u8],
-    ) -> Result<(), stela_runtime::machine::engine::TransferFault> {
+    ) -> Result<(), stela_engine::machine::engine::TransferFault> {
         super::speculation::fence();
         let Some(ram) = &state().registered_ram else {
             return self.read_ram(physical, buffer).then_some(()).ok_or(
-                stela_runtime::machine::engine::TransferFault {
-                    error: stela_runtime::machine::engine::DmaError::Memory,
+                stela_engine::machine::engine::TransferFault {
+                    error: stela_engine::machine::engine::DmaError::Memory,
                     completed: 0,
                 },
             );
         };
         // SAFETY: private DMA staging, same canonical reader/owner contract.
         unsafe { ram.read_physical_progress(physical, buffer) }.map_err(|fault| {
-            stela_runtime::machine::engine::TransferFault {
-                error: stela_runtime::machine::engine::DmaError::Memory,
+            stela_engine::machine::engine::TransferFault {
+                error: stela_engine::machine::engine::DmaError::Memory,
                 completed: fault.completed,
             }
         })
@@ -1491,19 +1498,19 @@ impl Host for BareHost<'_> {
         &mut self,
         physical: u64,
         data: &[u8],
-    ) -> Result<(), stela_runtime::machine::engine::TransferFault> {
+    ) -> Result<(), stela_engine::machine::engine::TransferFault> {
         let Some(ram) = &state().registered_ram else {
             return self.write_ram(physical, data).then_some(()).ok_or(
-                stela_runtime::machine::engine::TransferFault {
-                    error: stela_runtime::machine::engine::DmaError::Memory,
+                stela_engine::machine::engine::TransferFault {
+                    error: stela_engine::machine::engine::DmaError::Memory,
                     completed: 0,
                 },
             );
         };
         // SAFETY: private staging, every writer participates in this same domain.
         unsafe { ram.publish_physical(physical, data) }.map_err(|fault| {
-            stela_runtime::machine::engine::TransferFault {
-                error: stela_runtime::machine::engine::DmaError::Memory,
+            stela_engine::machine::engine::TransferFault {
+                error: stela_engine::machine::engine::DmaError::Memory,
                 completed: fault.completed,
             }
         })
@@ -1602,7 +1609,7 @@ impl Host for BareHost<'_> {
         assert!(!state().native, "nested native context entry");
         #[cfg(feature = "native-profile")]
         let measured = state().native_profile.work_start(
-            stela_runtime::machine::engine::NativeTimingWork::NativeCall,
+            stela_engine::machine::engine::NativeTimingWork::NativeCall,
             profile_timestamp,
         );
         state().native = true;
@@ -1614,7 +1621,7 @@ impl Host for BareHost<'_> {
         #[cfg(feature = "native-profile")]
         if let Some(started) = measured {
             state().native_profile.work_end(
-                stela_runtime::machine::engine::NativeTimingWork::NativeCall,
+                stela_engine::machine::engine::NativeTimingWork::NativeCall,
                 started,
                 profile_timestamp(),
             );
@@ -1839,7 +1846,7 @@ impl Host for BareHost<'_> {
         unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
     }
 
-    fn report(&mut self, event: &stela_runtime::machine::Event) {
+    fn report(&mut self, event: &stela_engine::machine::Event) {
         super::report(event);
     }
 
@@ -1851,8 +1858,8 @@ impl Host for BareHost<'_> {
         state().bounce.as_ref().map(|_| translated::slot())
     }
 
-    fn translations(&mut self) -> Option<&mut dyn stela_runtime::machine::Translations> {
+    fn translations(&mut self) -> Option<&mut dyn stela_engine::machine::Translations> {
         super::translations::store()
-            .map(|store| store as &mut dyn stela_runtime::machine::Translations)
+            .map(|store| store as &mut dyn stela_engine::machine::Translations)
     }
 }

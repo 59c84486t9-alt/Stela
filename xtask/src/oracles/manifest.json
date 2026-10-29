@@ -3325,17 +3325,17 @@
     "reason": "requires unchanged original J314s ADT via STELA_T6000_MCC_DEVICE_TREE"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-engine",
     "test": "benchmark_native_llsc_serialized_and_parallel",
-    "source": "crates/stela-runtime/src/execution/checked_memory.rs",
+    "source": "crates/stela-engine/src/execution/checked_memory.rs",
     "kind": "manual",
     "inputs": [],
     "reason": "bounded native timing; run explicitly on an otherwise measured host"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-engine",
     "test": "benchmark_native_lse_serialized_and_parallel",
-    "source": "crates/stela-runtime/src/execution/checked_memory.rs",
+    "source": "crates/stela-engine/src/execution/checked_memory.rs",
     "kind": "manual",
     "inputs": [],
     "reason": "bounded native timing; run explicitly with source/load evidence"
@@ -3537,9 +3537,9 @@
     "reason": "requires pinned J314s LLB; source capacity and already-complete branches"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-engine",
     "test": "original_t6000_llb_writes_all_five_typed_pairs_with_ordering",
-    "source": "crates/stela-runtime/src/machine/pointer_keys.rs",
+    "source": "crates/stela-engine/src/machine/pointer_keys.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PAUTH_LLB"
@@ -3547,9 +3547,9 @@
     "reason": "requires original T6000 LLB through STELA_TEST_PAUTH_LLB"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-engine",
     "test": "el0_apple_control_original_runtime_pins_the_user_afpcr_accesses",
-    "source": "crates/stela-runtime/src/machine/registers.rs",
+    "source": "crates/stela-engine/src/machine/registers.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_EL0_OS_FILES"
@@ -3801,17 +3801,17 @@
     "reason": "requires original 26A434 J314s DT through STELA_TEST_ANS_DT"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-engine",
     "test": "benchmark_locked_recipes_with_identical_writer_gates",
-    "source": "crates/stela-runtime/src/memory/domain/shared.rs",
+    "source": "crates/stela-engine/src/memory/domain/shared.rs",
     "kind": "manual",
     "inputs": [],
     "reason": "bounded recipe timing; run explicitly with release native evidence"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-engine",
     "test": "timing",
-    "source": "crates/stela-runtime/src/pauth/qarma.rs",
+    "source": "crates/stela-engine/src/pauth/qarma.rs",
     "kind": "manual",
     "inputs": [],
     "reason": "timing, not a check"

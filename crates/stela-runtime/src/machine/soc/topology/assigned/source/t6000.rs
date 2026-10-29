@@ -3,7 +3,7 @@
 //! the first two in original source order; the caller binds the actual BSP to
 //! its real worker independently. No PS state or interrupt delivery is granted.
 use super::*;
-use crate::machine::engine::ProcessorTarget;
+use stela_engine::machine::engine::ProcessorTarget;
 
 const EVIDENCE: &str = "26A434 mac13j mode1 source-prefix membership; complex file2b16e08/core2b190e4/skip2b19918; no lifecycle, AIC delivery or native execution admission";
 

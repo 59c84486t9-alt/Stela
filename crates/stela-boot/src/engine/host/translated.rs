@@ -17,7 +17,7 @@
 //! keeps every other register, XMM registers and MXCSR included.
 use super::{FaultCause, Recorded, State, invlpg, layout, resolve, state, tables};
 use core::arch::global_asm;
-use stela_runtime::machine::mmu::translated::Lookup;
+use stela_engine::machine::mmu::translated::Lookup;
 
 /// The access's flags after its size.
 const WRITE: u8 = 1 << 0;

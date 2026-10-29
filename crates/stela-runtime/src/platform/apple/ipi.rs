@@ -22,7 +22,8 @@
 //!
 //! These registers are EL1-accessible; the engine decides EL0 traps before
 //! calling [`FastIpi::access`].
-use crate::system::access::{AccessKind, Encoding};
+use stela_engine::system::access::AccessKind;
+
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use {
@@ -30,33 +31,7 @@ use {
     stela_contracts::interrupt::InterruptSink, stela_contracts::interrupt::Wire,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Register {
-    RequestLocal,
-    RequestGlobal,
-    Status,
-    Countdown,
-}
-impl Register {
-    pub const fn encoding(self) -> Encoding {
-        match self {
-            Self::RequestLocal => Encoding::new(3, 5, 15, 0, 0),
-            Self::RequestGlobal => Encoding::new(3, 5, 15, 0, 1),
-            Self::Status => Encoding::new(3, 5, 15, 1, 1),
-            Self::Countdown => Encoding::new(3, 5, 15, 3, 1),
-        }
-    }
-    pub fn decode(encoding: Encoding) -> Option<Self> {
-        [
-            Self::RequestLocal,
-            Self::RequestGlobal,
-            Self::Status,
-            Self::Countdown,
-        ]
-        .into_iter()
-        .find(|register| register.encoding() == encoding)
-    }
-}
+use stela_engine::machine::fast_ipi::Register;
 
 const RR_CPU: u64 = 0xff;
 const RR_CLUSTER_SHIFT: u32 = 16;
@@ -204,6 +179,7 @@ impl FastIpi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stela_compiler::aarch64::system::registers::Encoding;
     use stela_contracts::interrupt::InterruptLatch;
 
     /// T8112: four E-cores in cluster 0, four P-cores in cluster 1.

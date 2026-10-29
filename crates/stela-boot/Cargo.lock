@@ -649,6 +649,7 @@ dependencies = [
  "stela-contracts",
  "stela-crypto",
  "stela-drivers",
+ "stela-engine",
  "stela-formats",
  "stela-loader",
  "stela-runtime",
@@ -662,6 +663,7 @@ dependencies = [
  "stela-compiler",
  "stela-crypto",
  "stela-drivers",
+ "stela-engine",
  "stela-loader",
  "stela-runtime",
 ]
@@ -714,6 +716,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "stela-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "stela-compiler",
+ "stela-contracts",
+ "stela-crypto",
+ "stela-fingerprint",
+ "stela-formats",
+ "tempfile",
+]
+
+[[package]]
 name = "stela-fingerprint"
 version = "0.1.0"
 dependencies = [
@@ -746,6 +766,7 @@ dependencies = [
  "sha2",
  "stela-contracts",
  "stela-drivers",
+ "stela-engine",
  "stela-formats",
  "stela-runtime",
 ]
@@ -772,7 +793,7 @@ dependencies = [
  "stela-contracts",
  "stela-crypto",
  "stela-drivers",
- "stela-fingerprint",
+ "stela-engine",
  "stela-formats",
  "tempfile",
  "zeroize",

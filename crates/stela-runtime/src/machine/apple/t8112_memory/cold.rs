@@ -6,18 +6,24 @@ use super::super::{
     AppleDevices,
     memory_resources::{amcc, t8112},
 };
+use crate::machine::soc::Board;
+use crate::machine::soc::MemoryCache;
+use crate::machine::soc::MemoryController;
+use crate::machine::soc::PowerOwner;
+use crate::machine::soc::PowerStates;
+use crate::platform::apple::pmgr;
+use crate::platform::apple::pmgr::Pmgr;
+use crate::platform::apple::pmgr::coverage;
+use crate::platform::apple::pmgr::coverage::Consumer;
+use crate::platform::apple::pmgr::coverage::LifecycleSinks;
+use crate::platform::apple::ptd;
+use crate::platform::apple::ptd::Geometry;
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
+use stela_contracts::Chip;
+use stela_contracts::bus::LifecycleState;
+use stela_contracts::bus::Width;
+use stela_engine::memory::RegisteredSystemRam;
 use t8112::cache::{EmptyResource, SoftwareImage, ZeroWayConfiguration};
-use {
-    crate::machine::soc::Board, crate::machine::soc::MemoryCache,
-    crate::machine::soc::MemoryController, crate::machine::soc::PowerOwner,
-    crate::machine::soc::PowerStates, crate::memory::RegisteredSystemRam,
-    crate::platform::apple::pmgr, crate::platform::apple::pmgr::Pmgr,
-    crate::platform::apple::pmgr::coverage, crate::platform::apple::pmgr::coverage::Consumer,
-    crate::platform::apple::pmgr::coverage::LifecycleSinks, crate::platform::apple::ptd,
-    crate::platform::apple::ptd::Geometry, stela_contracts::Chip,
-    stela_contracts::bus::LifecycleState, stela_contracts::bus::Width,
-};
 
 const SHARED: (u64, u64) = (0x100000, 0x80000);
 const BROADCAST: u64 = 0xf00000;
@@ -380,7 +386,6 @@ impl UnswitchedApFrontend {
             }
         }
         let generation = ram
-            .domain()
             .generation()
             .map_err(|status| format!("unswitched AP frontend RAM is not live: {status:?}"))?;
         Ok(Self {
@@ -402,7 +407,6 @@ impl UnswitchedApFrontend {
             return Err("unswitched AP frontend differs from its certified backing".into());
         }
         if ram
-            .domain()
             .generation()
             .map_err(|status| format!("unswitched AP frontend RAM is not live: {status:?}"))?
             != self.generation
@@ -511,16 +515,18 @@ fn geometry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::soc::ClockRole;
+    use crate::machine::soc::PowerResource;
+    use crate::platform::apple::pmgr::DomainState;
+    use crate::platform::apple::pmgr::PowerState;
+    use crate::platform::apple::pmgr::coverage::Admission;
+    use crate::platform::apple::pmgr::coverage::Domain;
+    use crate::platform::apple::pmgr::coverage::DomainId;
     use alloc::boxed::Box;
-    use {
-        crate::machine::Devices, crate::machine::soc::ClockRole,
-        crate::machine::soc::PowerResource, crate::platform::apple::pmgr::DomainState,
-        crate::platform::apple::pmgr::PowerState,
-        crate::platform::apple::pmgr::coverage::Admission,
-        crate::platform::apple::pmgr::coverage::Domain,
-        crate::platform::apple::pmgr::coverage::DomainId, stela_contracts::bus::Access,
-        stela_contracts::bus::MmioDevice, stela_contracts::interrupt::InterruptLatch,
-    };
+    use stela_contracts::bus::Access;
+    use stela_contracts::bus::MmioDevice;
+    use stela_contracts::interrupt::InterruptLatch;
+    use stela_engine::machine::Devices;
 
     const SUPPLY: u64 = 0x1000;
     fn id(device: u16) -> DomainId {

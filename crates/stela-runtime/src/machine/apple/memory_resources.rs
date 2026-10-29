@@ -45,7 +45,7 @@ pub struct Prepared {
     ptd: Ptd,
     local: Option<LocalNotifications>,
     descriptor: DirectMemoryCache,
-    ram: Option<alloc::sync::Arc<crate::memory::RegisteredSystemRam>>,
+    ram: Option<alloc::sync::Arc<stela_engine::memory::RegisteredSystemRam>>,
 }
 impl Prepared {
     pub fn new(
@@ -134,7 +134,9 @@ impl Prepared {
     pub fn local_notifications(&self) -> Option<&LocalNotifications> {
         self.local.as_ref()
     }
-    pub fn registered_ram(&self) -> Option<&alloc::sync::Arc<crate::memory::RegisteredSystemRam>> {
+    pub fn registered_ram(
+        &self,
+    ) -> Option<&alloc::sync::Arc<stela_engine::memory::RegisteredSystemRam>> {
         self.ram.as_ref()
     }
     pub fn descriptor(&self) -> &DirectMemoryCache {
@@ -706,7 +708,7 @@ mod tests {
 
     #[test]
     fn paired_read_consumes_only_the_actual_complete_publication_entry() {
-        use crate::machine::Devices;
+        use stela_engine::machine::Devices;
         let owner = prepared();
         let offset = owner.ptd_offset();
         assert_eq!(owner.paired_entry(offset, 8), Some(0));
@@ -803,9 +805,9 @@ mod tests {
 
     #[test]
     fn paired_read_keeps_data_and_pending_service_after_wire_forwarding_refusal() {
-        use crate::machine::Devices;
         use stela_contracts::interrupt::AicInput;
         use stela_contracts::interrupt::InterruptSink;
+        use stela_engine::machine::Devices;
         let owner = prepared();
         let publication = owner.publication_bank().clone();
         let bindings = owner.bindings();
@@ -834,7 +836,8 @@ mod tests {
 
     #[test]
     fn status_pairs_snapshot_one_pending_bank_without_consuming_publications() {
-        use crate::{machine::Devices, platform::apple::ptd::transport::IRQ_STATUS};
+        use crate::platform::apple::ptd::transport::IRQ_STATUS;
+        use stela_engine::machine::Devices;
         let owner = prepared();
         let bindings = owner.bindings();
         let mut board = super::super::AppleDevices::new();

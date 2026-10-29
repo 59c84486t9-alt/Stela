@@ -1,7 +1,9 @@
 //! Consumed scalar writes retain peripheral prefixes and settlement separately.
 //! A bus error never proves that an earlier RTC/lifecycle/device effect vanished.
 use super::*;
-use crate::machine::engine::{CanonicalDeviceMemory, ConsumedWrite, DeviceReadShape};
+use stela_engine::machine::engine::CanonicalDeviceMemory;
+use stela_engine::machine::engine::ConsumedWrite;
+use stela_engine::machine::engine::DeviceReadShape;
 
 impl AppleDevices {
     pub(super) fn consume_scalar_write(

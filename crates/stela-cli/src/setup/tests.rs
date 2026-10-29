@@ -425,7 +425,7 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 }
 
 fn record(f: &Fixture) -> Record {
-    stela_runtime::read_json(&f.esp.join(RECORD)).unwrap()
+    stela_engine::read_json(&f.esp.join(RECORD)).unwrap()
 }
 
 /// The active build's restore bundle of `ecid`'s machine.
@@ -669,7 +669,7 @@ fn older_setups_are_still_read_and_undone() {
         "options": "--install-mode verify\n",
         "complete": true,
     });
-    stela_runtime::write_json(&f.esp.join(RECORD), &record).unwrap();
+    stela_engine::write_json(&f.esp.join(RECORD), &record).unwrap();
     uninstall(&environment(&f.host), &f.esp, false).unwrap();
     assert_eq!(snapshot(&f.esp), before);
 
@@ -716,7 +716,7 @@ fn older_setups_are_still_read_and_undone() {
              "kind": "restore", "personalized": true},
         ],
     });
-    stela_runtime::write_json(&f.esp.join(RECORD), &record).unwrap();
+    stela_engine::write_json(&f.esp.join(RECORD), &record).unwrap();
     let error = read_record(&environment(&f.host), &f.esp)
         .unwrap_err()
         .to_string();
@@ -778,7 +778,7 @@ fn older_setups_are_still_read_and_undone() {
         ],
         "translations": {"volume": volume, "pack_bytes": translations::MIN_PACK_BYTES},
     });
-    stela_runtime::write_json(&f.esp.join(RECORD), &record).unwrap();
+    stela_engine::write_json(&f.esp.join(RECORD), &record).unwrap();
     let error = read_record(&environment(&f.host), &f.esp)
         .unwrap_err()
         .to_string();
@@ -2035,12 +2035,12 @@ fn revision_update_rebuilds_bundles_and_rolls_back() {
     let old = environment_at(&f.host, &older, 0);
     setup(&old, installed_command(&f)).unwrap();
     let path = f.esp.join(RECORD);
-    let mut json: serde_json::Value = stela_runtime::read_json(&path).unwrap();
+    let mut json: serde_json::Value = stela_engine::read_json(&path).unwrap();
     json.as_object_mut().unwrap().remove("bundle_revision");
     for kept in json["bundles"].as_array_mut().unwrap() {
         kept.as_object_mut().unwrap().remove("revision");
     }
-    stela_runtime::write_json(&path, &json).unwrap();
+    stela_engine::write_json(&path, &json).unwrap();
     let first = record(&f);
     assert_eq!(first.bundle_revision, 0);
     let ecid = first.installs[0].ecid;

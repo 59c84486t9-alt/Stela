@@ -1,5 +1,5 @@
 //! `cargo xtask sysregs --aarchmrs DIR` writes
-//! `crates/stela-runtime/src/machine/system/generated.rs`: every AArch64
+//! `crates/stela-engine/src/machine/system/generated.rs`: every AArch64
 //! System register and System instruction accessor the Apple CPU profiles
 //! have, from Arm's machine-readable specification (AARCHMRS) and its System
 //! register XML, both release 2026-06. Arm publishes both on

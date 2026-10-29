@@ -36,15 +36,15 @@ pub(crate) struct PauthKeyInput {
 pub(crate) fn pauth_context(
     path: &std::path::Path,
     address_space: u64,
-) -> Result<stela_runtime::pauth::Context> {
-    pauth_context_version(path, address_space, stela_runtime::pauth::Version::Classic)
+) -> Result<stela_engine::pauth::Context> {
+    pauth_context_version(path, address_space, stela_engine::pauth::Version::Classic)
 }
 
 pub(crate) fn pauth_context_version(
     path: &std::path::Path,
     address_space: u64,
-    version: stela_runtime::pauth::Version,
-) -> Result<stela_runtime::pauth::Context> {
+    version: stela_engine::pauth::Version,
+) -> Result<stela_engine::pauth::Context> {
     use std::io::Read;
     let mut bytes = Vec::new();
     File::open(path)?.take(4097).read_to_end(&mut bytes)?;
@@ -53,9 +53,9 @@ pub(crate) fn pauth_context_version(
         "software PAuth key input exceeds 4096 bytes"
     );
     let keys: PauthKeyInput = serde_json::from_slice(&bytes)?;
-    Ok(stela_runtime::pauth::Context::new_with_version(
+    Ok(stela_engine::pauth::Context::new_with_version(
         address_space,
-        stela_runtime::pauth::Keys::from_ib_words(keys.low, keys.high),
+        stela_engine::pauth::Keys::from_ib_words(keys.low, keys.high),
         version,
     ))
 }
@@ -72,7 +72,7 @@ pub(crate) struct PauthKeysInput {
 pub(crate) fn pauth_all_keys_context(
     path: &std::path::Path,
     address_space: u64,
-) -> Result<stela_runtime::pauth::Context> {
+) -> Result<stela_engine::pauth::Context> {
     use std::io::Read;
     let mut bytes = Vec::new();
     File::open(path)?.take(4097).read_to_end(&mut bytes)?;
@@ -81,9 +81,9 @@ pub(crate) fn pauth_all_keys_context(
         "software PAuth keys input exceeds 4096 bytes"
     );
     let keys: PauthKeysInput = serde_json::from_slice(&bytes)?;
-    Ok(stela_runtime::pauth::Context::new(
+    Ok(stela_engine::pauth::Context::new(
         address_space,
-        stela_runtime::pauth::Keys::from_words(
+        stela_engine::pauth::Keys::from_words(
             [keys.ia.low, keys.ia.high],
             [keys.ib.low, keys.ib.high],
             [keys.da.low, keys.da.high],
@@ -133,7 +133,7 @@ pub(crate) fn raw_initial_bytes(
     if let Some(source) = &region.initial_file {
         ensure!(
             source.bytes <= region.virtual_bytes
-                && source.bytes <= stela_runtime::memory::MAX_IMAGE_MEMORY_BYTES,
+                && source.bytes <= stela_engine::memory::MAX_IMAGE_MEMORY_BYTES,
             "raw memory file bytes exceed region or input bound"
         );
         let end = source
@@ -169,10 +169,10 @@ pub(crate) fn raw_initial_bytes(
 
 pub(crate) fn raw_memory(
     path: Option<&std::path::Path>,
-) -> Result<stela_runtime::memory::OwnedMemory> {
+) -> Result<stela_engine::memory::OwnedMemory> {
     use std::io::Read;
     let Some(path) = path else {
-        return stela_runtime::memory::OwnedMemory::map(vec![]);
+        return stela_engine::memory::OwnedMemory::map(vec![]);
     };
     let mut bytes = Vec::new();
     File::open(path)?
@@ -195,7 +195,7 @@ pub(crate) fn raw_memory(
             .checked_add(r.virtual_bytes)
             .context("raw memory extent overflow")?;
         ensure!(
-            total <= stela_runtime::memory::MAX_IMAGE_MEMORY_BYTES,
+            total <= stela_engine::memory::MAX_IMAGE_MEMORY_BYTES,
             "raw memory exceeds input bound"
         );
         let initial_bytes = raw_initial_bytes(
@@ -203,13 +203,13 @@ pub(crate) fn raw_memory(
             path.parent().unwrap_or_else(|| std::path::Path::new(".")),
         )?;
         if r.maximum_readable.is_some() || r.maximum_writable.is_some() {
-            limits.push(stela_runtime::memory::DataProtectionLimit {
+            limits.push(stela_engine::memory::DataProtectionLimit {
                 guest_address: r.guest_address,
                 readable: r.maximum_readable.unwrap_or(r.readable),
                 writable: r.maximum_writable.unwrap_or(r.writable),
             });
         }
-        specs.push(stela_runtime::memory::MemoryRegionSpec {
+        specs.push(stela_engine::memory::MemoryRegionSpec {
             guest_address: r.guest_address,
             virtual_bytes: r.virtual_bytes,
             initial_bytes,
@@ -218,11 +218,11 @@ pub(crate) fn raw_memory(
             executable: false,
         });
     }
-    stela_runtime::memory::OwnedMemory::map_with_data_limits(specs, limits)
+    stela_engine::memory::OwnedMemory::map_with_data_limits(specs, limits)
 }
 
 pub(crate) fn memory_hashes(
-    memory: &stela_runtime::memory::OwnedMemory,
+    memory: &stela_engine::memory::OwnedMemory,
 ) -> Result<Vec<serde_json::Value>> {
     memory.regions().iter().filter(|r| r.readable).map(|r| Ok(serde_json::json!({
         "address":r.guest_address,"bytes":r.virtual_bytes,

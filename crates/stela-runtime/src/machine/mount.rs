@@ -9,11 +9,11 @@ use super::apple::{
     memory_resources::{amcc, t6000_cold, t8112},
     sep_state, typec,
 };
-use super::ctrr;
 use super::soc::{Board, PmgrBankRefusal};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::fmt;
 use stela_drivers::block::BlockDevice;
+use stela_engine::machine::ctrr;
 
 /// Already constructed native owners, consumed by the board mount. Descriptor
 /// equality is checked before any host input or bus placement is consumed.

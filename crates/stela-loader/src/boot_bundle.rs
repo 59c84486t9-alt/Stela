@@ -30,8 +30,10 @@ use crate::soc_variant;
 use crate::trust_cache;
 use anyhow::{Context, Result, bail, ensure};
 use stela_contracts::tag_storage;
+use stela_engine::machine::ctrr;
+use stela_engine::machine::identification;
 use stela_formats::sha256;
-use stela_runtime::machine::{ctrr, identification, soc};
+use stela_runtime::machine::soc;
 
 pub use {
     stela_formats::boot_bundle::schema::BootCpu,
@@ -1442,7 +1444,7 @@ fn sources(inputs: &Inputs, ramdisk_source: Option<Source>) -> Vec<Source> {
 
 /// TAG_OFFSET_EL2 as iBoot locks it on a chip with memory tagging, 0
 /// elsewhere: the tag storage at the top of the managed range
-/// (`stela_runtime::machine::tag_storage`), which must lie above every
+/// (`stela_engine::machine::tag_storage`), which must lie above every
 /// placed region.
 fn tag_offset(
     chip: Option<stela_contracts::Chip>,

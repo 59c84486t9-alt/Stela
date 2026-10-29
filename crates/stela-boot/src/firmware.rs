@@ -10,7 +10,7 @@ use core::{
     sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering},
     time::Duration,
 };
-use stela_runtime::freestanding::BootArena;
+use stela_engine::freestanding::BootArena;
 use uefi::{
     CStr16, Event,
     boot::{self, AllocateType, EventType, MemoryType, TimerTrigger, Tpl},
