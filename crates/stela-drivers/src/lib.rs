@@ -27,9 +27,10 @@
 //! [`firmware`] holds the device firmware catalog drivers load from.
 //! [`gpu`] inventories display controllers; its feature-gated vendor ports
 //! are support libraries that initialize no GPU. [`audio`] drives HD Audio
-//! for the mount's audio check only. The Wi-Fi libraries in [`net::wifi`],
-//! USB4/Thunderbolt and SMBus in [`bus`] and Type-C in [`usb::typec`] are
-//! not attached by `probe` yet.
+//! for the mount's audio check only. Intel Wi-Fi has a `probe` attachment
+//! route; connection, carrier operation and end-to-end acceptance remain in
+//! progress. Other Wi-Fi libraries in [`net::wifi`], USB4/Thunderbolt and
+//! SMBus in [`bus`] and Type-C in [`usb::typec`] are not attached by `probe` yet.
 #![no_std]
 #![cfg_attr(not(test), warn(clippy::undocumented_unsafe_blocks))]
 #[macro_use]
