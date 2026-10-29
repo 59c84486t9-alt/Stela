@@ -787,7 +787,7 @@ fn seeded_mixed_transactions_match_the_wire_peer_across_fifo_sizes_and_delays() 
 }
 
 #[test]
-fn a_wedged_abort_and_disable_remain_bounded_and_require_platform_reset() {
+fn wedged_controller_requires_platform_reset() {
     let (mut controller, state) = controller(2, 2);
     {
         let mut state = state.borrow_mut();

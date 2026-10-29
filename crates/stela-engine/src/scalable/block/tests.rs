@@ -858,8 +858,7 @@ mod numerical22 {
     }
 
     #[test]
-    fn entry_and_completion_reject_current_length_mode_pc_and_header_without_mutation() -> Result<()>
-    {
+    fn entry_and_completion_reject_mismatches_without_mutation() -> Result<()> {
         let prepared = prepare(16, FADD_Z0_H_P0_Z0_Z1, NumericalFeatures::default())?;
         enum EntryMismatch {
             Length,

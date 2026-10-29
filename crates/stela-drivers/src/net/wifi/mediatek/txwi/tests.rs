@@ -295,7 +295,7 @@ fn block_ack_action_body_selects_source_request_or_normal_management_tid() {
     }
 }
 #[test]
-fn protected_sa_query_requires_exact_body_and_both_wire_and_descriptor_protection() {
+fn protected_sa_query_requires_full_protection() {
     for action in 0..=1u8 {
         let mut bytes = [0; 28];
         bytes[..2].copy_from_slice(&0x40d0u16.to_le_bytes());

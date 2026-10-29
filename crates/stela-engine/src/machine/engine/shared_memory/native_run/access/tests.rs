@@ -361,7 +361,7 @@ fn pending_at(word: u32, fail: bool, base: u64) -> (TestMachine, Arc<RegisteredS
     (machine, ram)
 }
 #[test]
-fn scalar_and_pair_retire_once_and_preserve_consumed_data_on_settlement_failure() {
+fn settlement_failure_keeps_consumed_data() {
     for word in [LDR, LDP_POST] {
         for fail in [false, true] {
             let (mut machine, ram) = pending(word, fail);
@@ -391,7 +391,7 @@ fn scalar_and_pair_retire_once_and_preserve_consumed_data_on_settlement_failure(
     }
 }
 #[test]
-fn original_scalar_pair_address_and_sign_modes_keep_full_state_and_exact_writeback() {
+fn every_addressing_mode_keeps_writeback() {
     // Unchanged source encodings through the shared decoder; closed model
     // only. The QEMU cold fixture separately executes the real pair path.
     for (word, base, first, second, writeback) in [
@@ -644,7 +644,7 @@ fn altered_source_frame_or_controls_refuse_before_store_effects() {
     }
 }
 #[test]
-fn store_zero_register_and_preindexed_sp_use_original_values_and_success_writeback() {
+fn zero_register_and_preindexed_sp_stores_use_old_values() {
     let (mut zero, _) = pending(0xf900003f, false);
     let before = zero.cpu.state.clone();
     // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA, device

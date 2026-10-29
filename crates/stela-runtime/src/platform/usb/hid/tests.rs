@@ -119,7 +119,7 @@ fn configuration_needs_an_address_and_unconfigured_endpoints_stall() {
 }
 
 #[test]
-fn keys_and_pointer_motion_queue_boot_and_absolute_reports() {
+fn keys_and_motion_queue_reports() {
     let mut p = Peripheral::new();
     enumerate(&mut p);
     p.input(Input::Key {

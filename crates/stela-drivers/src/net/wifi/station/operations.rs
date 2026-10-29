@@ -560,7 +560,7 @@ mod tests {
         }
     }
     #[test]
-    fn six_ghz_he_and_eht_center_puncture_and_raw_parameters() {
+    fn six_ghz_operation_parameters_decode() {
         let mut bytes = ext(36, &[3, 0x20, 2, 0x2a, 0xff, 0xff, 1, 3, 7, 15, 6]);
         bytes.extend_from_slice(&ext(106, &[3, 1, 1, 1, 1, 3, 7, 15, 0x80, 0]));
         let ops = Operations::parse(&bytes).unwrap();

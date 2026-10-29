@@ -431,7 +431,7 @@ mod tests {
         );
     }
     #[test]
-    fn report_and_application_identity_are_never_combined_and_latest_scan_is_not_replayed() {
+    fn touch_frames_require_matching_identity_and_a_new_scan() {
         let (d, mut decoder, mut a) = fixture();
         let frame = d.decode(&raw(1, 1, 2, 7)).unwrap();
         let event = decoder.update(&d, &frame).remove(0);

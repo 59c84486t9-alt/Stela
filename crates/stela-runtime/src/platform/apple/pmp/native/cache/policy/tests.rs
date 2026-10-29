@@ -265,7 +265,7 @@ fn op1_floor_low32_and_defaults_intermediate_are_separate_phases() {
 }
 
 #[test]
-fn defaults_and_hardware_scaling_preserve_w32_wrap_and_udiv_zero() {
+fn hardware_scaling_keeps_w32_wrap_and_udiv_zero() {
     let mut r = row(0, 1, 3);
     r[10] = 1;
     let mut source = inputs();

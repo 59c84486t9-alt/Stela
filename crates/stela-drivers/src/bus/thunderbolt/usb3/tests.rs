@@ -1411,7 +1411,7 @@ fn teardown_cancel_clock_null_storage_hotplug_and_revoked_constructor_keep_chain
 }
 
 #[test]
-fn teardown_live_guard_also_blocks_old_bandwidth_and_activation_admission_and_late_replies() {
+fn teardown_guard_blocks_old_admissions_and_late_replies() {
     use super::super::{
         path::LaneCredits,
         usb3::{ActivateTunnel, Allocate, Error, Rates, ReleaseUnused},

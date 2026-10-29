@@ -446,7 +446,7 @@ pub(in crate::machine::apple) mod tests {
         );
     }
     #[test]
-    fn initialized_limits_and_reached_lock_effects_survive_pause_and_refuse_reprogramming() {
+    fn lock_effects_survive_pause() {
         let owner = frontend(ram());
         let programmed = [Some((RAM + 0x4000, 0x4000)), None, None, None];
         let mut lock = owner

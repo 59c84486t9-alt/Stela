@@ -434,7 +434,7 @@ fn images_execute_kept_clc_domain_power_chain_past_provider_lifetime() {
 }
 
 #[test]
-fn clc_reply_resolves_domain_and_power_without_replay_and_failed_resolution_keeps_owner() {
+fn clc_reply_resolves_domain_and_power_once() {
     for chip in [Chip::Mt7921, Chip::Mt7922] {
         for returned_flags in [0u8, 1] {
             for fail_plan in [false, true] {

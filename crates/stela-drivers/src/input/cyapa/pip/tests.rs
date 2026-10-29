@@ -734,7 +734,7 @@ fn gen5_failed_status_timeout_boot_exit_and_irq_do_not_become_successful_transit
     assert_eq!(h.borrow().effects.len(), before);
 }
 #[test]
-fn gen5_late_report_and_power_writes_keep_consumed_state_and_preceding_packets() {
+fn gen5_late_writes_keep_consumed_packets() {
     let h = hardware(false, 2);
     let mut d = device(&h);
     d.initialize().unwrap();
@@ -882,7 +882,7 @@ fn gen5_full_sixteen_bit_coordinate_boundaries_use_queried_origin_and_geometry()
 }
 
 #[test]
-fn gen5_late_matching_reply_peek_and_body_preserve_observed_bytes_and_stop_commands() {
+fn gen5_late_replies_keep_observed_bytes_and_stop_commands() {
     for index in [8, 9] {
         let h = hardware(false, 2);
         h.borrow_mut().jump = Some((index, 300_000));
@@ -1244,7 +1244,7 @@ mod gen6_tests {
         }
     }
     #[test]
-    fn gen6_real_buttons_deep_wake_and_stop_preserve_current_identity_and_intervals() {
+    fn gen6_power_transitions_keep_identity_and_intervals() {
         for buttons in [false, true] {
             let h = hardware6(false, 2);
             let mut d = device6(&h);

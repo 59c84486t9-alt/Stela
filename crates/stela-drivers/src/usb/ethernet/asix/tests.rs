@@ -582,7 +582,7 @@ fn ax88772_native_all_candidates_revisions_split_rx_and_quarantine() {
 }
 
 #[test]
-fn ax179_native_all_aliases_and_speeds_use_shared_dma_and_quarantine() {
+fn ax179_aliases_use_shared_dma_and_quarantine() {
     use crate::net::Link;
     for (vid, pid) in ethernet::asix_ids() {
         for (speed, packet) in [

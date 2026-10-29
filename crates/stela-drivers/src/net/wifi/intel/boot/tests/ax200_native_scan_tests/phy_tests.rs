@@ -83,7 +83,7 @@ fn emitted(phy: &Ax200Phy<'_, Model, ClockBios, ScanOs>, native: &Native) -> Vec
     bytes
 }
 #[test]
-fn phy_add_rlc_and_remove_require_original_dma_ack_reclaim_and_held_policy() {
+fn phy_commands_reclaim_on_ack() {
     for version in [3, 4] {
         for rlc in [None, Some(1), Some(2), Some(3)] {
             let bytes = phy_bytes(version, rlc);
@@ -458,7 +458,7 @@ fn phy_partial_rlc_failure_quarantines_original_owners_until_independent_stop() 
 }
 
 #[test]
-fn phy_rearm_visibility_and_producer_failures_preserve_first_error_and_original_owners() {
+fn phy_rearm_failures_keep_first_error() {
     for producer in [false, true] {
         let bytes = phy_bytes(4, Some(2));
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

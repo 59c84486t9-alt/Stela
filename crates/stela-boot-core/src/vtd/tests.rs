@@ -1277,7 +1277,7 @@ fn failed_translation_disable_keeps_tables_until_acknowledgement() {
 }
 
 #[test]
-fn busy_firmware_unit_is_refused_and_failed_map_keeps_pins_and_hardware_tables() {
+fn busy_firmware_unit_is_refused_without_writes() {
     let registers = ModelRegisters::new();
     registers
         .0
@@ -1293,6 +1293,12 @@ fn busy_firmware_unit_is_refused_and_failed_map_keeps_pins_and_hardware_tables()
     ));
     assert_eq!(source.next.load(Ordering::Relaxed), 0x100000);
     assert!(registers.0.lock().unwrap().writes.is_empty());
+}
+
+#[test]
+fn failed_map_quarantines_the_domain_and_keeps_pins() {
+    let registers = ModelRegisters::new();
+    let source = source();
     registers.0.lock().unwrap().values.insert(GSTS, 0);
     // SAFETY: exclusively owned model unit, all DMA stopped.
     let unit = unsafe { Unit::take_over(registers.clone(), source, &[8], 48, &[]) }.unwrap();

@@ -478,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_fault_and_deferred_prefixes_and_unordered_maps_are_rejected() {
+    fn capture_rejects_faulting_deferred_or_unordered_samples() {
         let source = [0; 8];
         let map = [(GuestAddress(0x4000), 3), (GuestAddress(0x4004), 7)];
         let base = NativeInstructionSample {

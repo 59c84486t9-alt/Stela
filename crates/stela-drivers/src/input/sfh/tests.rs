@@ -577,7 +577,7 @@ fn late_successful_publication_and_response_reads_do_not_grant_completion() {
     }
 }
 #[test]
-fn control_feature_and_input_reports_reflect_programmed_state_and_poll_event() {
+fn reports_reflect_programmed_state() {
     let (mut controller, _, _, pages) = fixture(&[Sensor::Gyroscope]);
     controller.initialize(&pages).unwrap();
     let mut feature = [0; 21];

@@ -358,7 +358,7 @@ fn whole_free_batch_is_validated_before_any_token_changes() {
     }
 }
 #[test]
-fn ring_and_token_pressure_are_separate_and_bad_submissions_publish_nothing() {
+fn token_pressure_refuses_without_new_mappings() {
     let chip = Chip::Mt7925;
     let (mut ring, mut model) = setup(chip, 4);
     for n in 0..8192 {
@@ -388,7 +388,11 @@ fn ring_and_token_pressure_are_separate_and_bad_submissions_publish_nothing() {
     assert!(!ring.is_poisoned());
     drop(quiesce(&mut ring, &mut model));
     assert_eq!(model.drops.load(Ordering::Relaxed), 8193);
+}
 
+#[test]
+fn ring_pressure_and_bad_frames_publish_nothing() {
+    let chip = Chip::Mt7925;
     let (mut ring, mut model) = setup(chip, 4);
     for n in 0..2 {
         ring.submit(

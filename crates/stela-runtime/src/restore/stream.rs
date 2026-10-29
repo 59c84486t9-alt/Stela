@@ -312,7 +312,7 @@ pub(crate) mod tests {
         panic!("receive did not terminate")
     }
     #[test]
-    fn fragmented_and_coalesced_frames_and_short_writes() {
+    fn stream_framing_survives_fragmentation_and_short_writes() {
         for endian in [Endian::Big, Endian::Little] {
             for binary in [false, true] {
                 let value = Value::dict([("Request", Value::from("QueryType"))]);

@@ -394,8 +394,7 @@ fn recovery_capability_refuses_an_independent_same_slot_hub_without_mutation() {
 }
 
 #[test]
-fn public_resume_rejects_stale_snapshot_before_controller_restore_and_keeps_current_suspend_owner()
-{
+fn resume_rejects_stale_snapshot_before_restore() {
     let mut old_memory = vec![0u64; 512 * 1024];
     let mut new_memory = vec![0u64; 512 * 1024];
     let start = old_memory.as_mut_ptr() as u64;

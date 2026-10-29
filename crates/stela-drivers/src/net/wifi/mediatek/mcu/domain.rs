@@ -299,7 +299,7 @@ mod tests {
     }
     #[test]
     #[ignore = "oracle: STELA_MT792X_DOMAIN_ORACLE"]
-    fn complete_linux_domain_helpers_and_writers_match_all_channels_flags_and_bytes() {
+    fn domain_helpers_match_linux_for_every_channel() {
         let root = std::path::PathBuf::from(std::env::var("STELA_MT792X_DOMAIN_ORACLE").unwrap());
         for (chip, number) in [
             (Chip::Mt7921, 7921),

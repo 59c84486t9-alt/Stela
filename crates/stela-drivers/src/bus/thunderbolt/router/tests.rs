@@ -229,7 +229,7 @@ fn router_policy_conflicts_changed_identity_and_upstream_never_enumerate() {
 }
 
 #[test]
-fn router_ready_and_configured_deadlines_start_at_write_ack_and_never_extend() {
+fn router_deadlines_start_at_write_ack() {
     use super::super::router::{Error, Setup};
     for configured_wait in [false, true] {
         let (_source, domain, model, mut channel) = channel();

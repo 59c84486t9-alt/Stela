@@ -17,7 +17,7 @@ fn parts_for(chip: u32) -> (Hardware<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<
 }
 
 #[test]
-fn all_asic_modes_match_source_and_keep_plain_transmit_and_receive_descriptors() {
+fn rdma_modes_match_source_for_every_asic() {
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
         let (hardware, pages, domain, peer) = parts_for(chip);
         // These are firmware-observed control bits, with RESET/ENABLE clear.

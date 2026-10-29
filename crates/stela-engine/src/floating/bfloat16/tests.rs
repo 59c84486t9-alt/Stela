@@ -134,7 +134,7 @@ fn narrowing_aliases_preserve_the_correct_half_and_union_fresh_status() {
 }
 
 #[test]
-fn dot_pair_and_index_routes_ignore_nep_enables_and_inactive_lanes() {
+fn dot_routes_ignore_nep_and_inactive_lanes() {
     for shape in [Shape::Vector64, Shape::Vector128] {
         for index in [None, Some(0), Some(1), Some(2), Some(3)] {
             for ah in [0, FPCR_AH] {

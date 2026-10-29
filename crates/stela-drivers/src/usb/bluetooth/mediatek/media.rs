@@ -663,7 +663,7 @@ pub(in crate::usb::bluetooth) mod tests {
         assert!(s.resume().is_err());
     }
     #[test]
-    fn output_loss_preserves_exact_status_and_counts_and_cannot_credit_delivery() {
+    fn output_loss_never_credits_delivery() {
         use crate::usb::xhci::IsoStatus;
         let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();
         s.set_voice(

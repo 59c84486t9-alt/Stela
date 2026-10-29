@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn mcc_rejected_responses_and_missing_bios_service_keep_original_evidence_and_owner() {
+fn mcc_failures_keep_evidence_and_owner() {
     for case in 0..5 {
         let bytes = setup_bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

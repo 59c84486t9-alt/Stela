@@ -170,7 +170,7 @@ fn duplicate_unsubmitted_wrong_queue_failed_alive_and_bad_producer_never_release
 }
 
 #[test]
-fn failed_stop_ack_and_partial_invalidation_keep_owner_and_allow_retry() {
+fn failed_retirement_keeps_owner_for_retry() {
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     for fail in 0..42 {

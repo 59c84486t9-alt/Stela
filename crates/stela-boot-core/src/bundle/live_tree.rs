@@ -391,7 +391,7 @@ mod tests {
         }
     }
     #[test]
-    fn shrink_updates_only_data_length_and_keeps_full_allocation_and_clears_old_tail() {
+    fn publish_after_shrink_zeroes_the_old_tail() {
         let (mut ram, regions, mut tree) = fixture();
         let live = LiveTree::capture(&mut ram, &regions, ARGS).unwrap();
         let old_length = live.bytes().len();

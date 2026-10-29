@@ -210,7 +210,7 @@ fn real_queried_identity_bounds_capabilities_and_mode_precede_reporting() {
     }
 }
 #[test]
-fn old_and_new_absolute_records_keep_pressure_width_buttons_and_signed_edge_coordinates() {
+fn absolute_records_decode_every_field_in_both_formats() {
     for new in [false, true] {
         let (mut c, h) = ready_synaptics(new);
         for (x, y) in [
@@ -286,7 +286,7 @@ fn incompatible_profiles_and_bad_query_identity_never_arm_absolute_mode() {
     }
 }
 #[test]
-fn incomplete_queries_and_late_mode_ack_keep_observations_and_never_replay() {
+fn incomplete_queries_are_not_replayed() {
     for query in [0, 3, 10, 1, 16, 2, 9, 12, 8, 13, 15] {
         for count in 0..3 {
             let (mut c, h) = target(true, true);
@@ -318,7 +318,7 @@ fn incomplete_queries_and_late_mode_ack_keep_observations_and_never_replay() {
     assert!(c.needs_reset());
 }
 #[test]
-fn sibling_input_and_same_port_fa_coordinates_survive_stop_and_fresh_restart() {
+fn fa_coordinates_survive_restart() {
     let (mut c, h) = ready_synaptics(true);
     let packet = new_packet(0x0ffa, 0x0ffe, 0xfa, 5, 3);
     // Keyboard command consumes the first mouse prefix into its pending lane.
@@ -1196,7 +1196,7 @@ fn child_failures_keep_real_reply_or_late_effect_without_synthetic_ack_or_replay
     }
 }
 #[test]
-fn child_resend_retries_only_explicitly_rejected_byte_and_uncertain_parent_mode_never_activates() {
+fn child_resend_retries_only_the_rejected_byte() {
     let (mut c, h) = child_target(true, true);
     c.initialize().unwrap();
     h.borrow_mut()
@@ -1232,6 +1232,10 @@ fn child_resend_retries_only_explicitly_rejected_byte_and_uncertain_parent_mode_
             .count(),
         1
     );
+}
+
+#[test]
+fn uncertain_parent_mode_never_activates_the_child() {
     let (mut c, h) = child_target(true, true);
     c.initialize().unwrap();
     h.borrow_mut().synaptics.as_mut().unwrap().late_mode_ack = true;
@@ -1501,7 +1505,7 @@ fn child_ack_and_data_may_precede_the_later_parent_outer_ack() {
     }
 }
 #[test]
-fn child_backpressure_and_malformed_packets_keep_raw_and_explicit_release() {
+fn child_backpressure_keeps_raw_packets() {
     let (mut c, h) = child_target(false, false);
     c.initialize().unwrap();
     c.initialize_synaptics_mouse().unwrap();
@@ -1583,7 +1587,7 @@ fn bound_child_extra_buttons_are_reported_and_kept_across_physical_packets() {
     );
 }
 #[test]
-fn explorer_scroll_requires_magic_acks_and_preserves_modes_buttons_and_restart() {
+fn explorer_scroll_requires_magic_acks() {
     let (mut c, h) = child_target(true, true);
     c.initialize().unwrap();
     c.initialize_synaptics_mouse().unwrap();
@@ -1856,7 +1860,7 @@ fn cleanup_acknowledges_relative_mode_and_child_stop_before_retiring_held_input(
     assert_eq!(c.synaptics_child_protocol(), None);
 }
 #[test]
-fn cleanup_late_mode_and_later_port_failure_preserve_effects_and_held_state() {
+fn cleanup_failures_keep_held_state() {
     for late_mode in [false, true] {
         let (mut c, h) = ready_synaptics(true);
         emit(&h, Port::Mouse, &new_packet(2000, 2500, 50, 5, 1));
@@ -2209,7 +2213,7 @@ fn client_format_changes_require_all_acks_and_preserve_uncertain_raw_record_form
     assert!(c.drain_synaptics_passthrough().is_empty());
 }
 #[test]
-fn failed_child_write_and_passthrough_backpressure_keep_real_effects_and_ownership() {
+fn passthrough_failures_keep_ownership() {
     let (mut c, h) = passthrough_target();
     c.initialize().unwrap();
     h.borrow_mut().synaptics.as_mut().unwrap().late_client_ack = true;

@@ -223,7 +223,7 @@ fn catalog(bytes: Vec<u8>, hardware: u8) -> Catalog {
 }
 
 #[test]
-fn supported_silicon_initializes_and_observes_pd_identity_and_connection_state() {
+fn supported_silicon_reports_pd_identity_and_connection() {
     for hardware in [0, 0xf7, 0xf9] {
         let (controller, model) = initialized(hardware);
         assert!(controller.ready());
@@ -404,7 +404,7 @@ fn event_width_w1c_and_detach_publish_only_after_complete_observation() {
     }
 }
 #[test]
-fn every_event_read_and_ack_failure_preserves_old_public_snapshot_and_blocks_replay() {
+fn event_failures_keep_the_old_snapshot() {
     let (mut baseline, model) = initialized(0xf7);
     model.borrow_mut().registers[0x14][0] = 8;
     let first = model.borrow().calls + 1;

@@ -632,7 +632,7 @@ fn qos_packet(sequence: u16) -> Vec<u8> {
 }
 
 #[test]
-fn ba_ack_and_response_enable_sequence_then_one_parent_replay_and_timeout() {
+fn ba_enable_sequence_replays_parent_once() {
     use wifi::regulatory::AssociationUse;
     let (mut driver, model, mut authority, state) = secure_modern();
     let parameters: u16 = 1 | 2 | (6 << 2) | (8 << 6);
@@ -766,7 +766,7 @@ fn ba_ack_and_response_enable_sequence_then_one_parent_replay_and_timeout() {
 }
 
 #[test]
-fn negotiated_ccmp_and_gcmp_ciphers_bind_real_key_bytes_and_receive_layouts() {
+fn ccmp_and_gcmp_keys_bind_receive_layouts() {
     use wifi::regulatory::AssociationUse;
     for (suite, firmware, length) in [(4, 4u32, 16), (10, 10, 32), (8, 11, 16), (9, 12, 32)] {
         let (mut driver, model, _) = awaiting_cipher(suite);

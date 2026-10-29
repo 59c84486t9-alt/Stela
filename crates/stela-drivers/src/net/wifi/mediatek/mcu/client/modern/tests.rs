@@ -214,7 +214,7 @@ fn field(bytes: &[u8], mut at: usize, wanted: u16) -> &[u8] {
     panic!("missing tag{wanted}")
 }
 #[test]
-fn full_modern_family_records_keep_peer_and_local_directions_and_source_order() {
+fn modern_records_keep_direction_and_source_order() {
     for band in [Band::Ghz2, Band::Ghz5, Band::Ghz6] {
         for mode in [Mode::Ht, Mode::Vht, Mode::He, Mode::Eht] {
             if (band == Band::Ghz2 && mode == Mode::Vht)

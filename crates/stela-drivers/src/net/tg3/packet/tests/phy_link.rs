@@ -11,7 +11,7 @@ fn attached(bcm5762: bool) -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex
 }
 
 #[test]
-fn negotiated_half_and_full_duplex_modes_transfer_and_restore_mac() {
+fn negotiated_duplex_modes_transfer_and_restore_mac() {
     for bcm5762 in [false, true] {
         let (mut packet, pages, domain, peer) = attached(bcm5762);
         assert_eq!(peer.lock().unwrap().phy[&4], 0x1e1);

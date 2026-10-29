@@ -18,7 +18,7 @@ const ALTERNATIVES: &[u8] = &[
 ];
 
 #[test]
-fn selected_keyboard_and_consumer_branches_keep_report_bits_and_control_metadata() {
+fn keyboard_and_consumer_reports_keep_their_bits() {
     let descriptor = Descriptor::parse(ALTERNATIVES).unwrap();
     let legacy = report::parse(ALTERNATIVES).unwrap();
     assert_eq!(descriptor.input_bytes(), 2);

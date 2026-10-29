@@ -819,7 +819,7 @@ fn source_configure_keeps_registration_prefix_and_does_not_register_thresholds_a
 }
 
 #[test]
-fn auxiliary_callback_binds_same_control_and_preserves_busy_reset_and_replay() {
+fn auxiliary_callback_binds_the_same_control() {
     use super::super::super::super::super::interrupts as irq;
     use alloc::boxed::Box;
     use core::cell::RefCell;

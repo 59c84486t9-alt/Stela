@@ -30,7 +30,7 @@ fn current(interrupt: bool) -> (Controller, Arc<Mutex<Shared>>, DeviceId, Transf
 }
 
 #[test]
-fn controller_recovery_retires_ordinary_and_periodic_dma_and_requires_fresh_root_enumeration() {
+fn controller_recovery_requires_fresh_enumeration() {
     for interrupt in [false, true] {
         let (mut c, m, id, old) = current(interrupt);
         let serial = c.next_transfer;
@@ -196,7 +196,7 @@ fn recovery_cannot_steal_a_private_suspended_root_or_reset_it_on_resume() {
 }
 
 #[test]
-fn recovery_uses_original_two_millisecond_halt_and_quarter_second_reset_bounds_and_clears_iaad() {
+fn recovery_uses_source_halt_and_reset_bounds() {
     for (halt_delay, reset_delay, succeeds) in
         [(500, 100_000, true), (5_000, 0, false), (0, 300_000, false)]
     {

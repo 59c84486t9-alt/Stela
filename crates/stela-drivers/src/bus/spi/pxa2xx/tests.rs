@@ -469,7 +469,7 @@ fn multi_transfer_cs_hold_changes_delay_and_zero_length_have_pin_effects() {
     assert_eq!(hw.borrow().drops, 1);
 }
 #[test]
-fn every_message_access_failure_and_late_access_fences_output_and_original_owner() {
+fn message_access_failures_fence_output() {
     for profile in [Profile::LynxPoint, Profile::CannonLake] {
         let (mut base, hw) = host(profile);
         base.initialize().unwrap();
@@ -527,7 +527,7 @@ fn every_message_access_failure_and_late_access_fences_output_and_original_owner
     }
 }
 #[test]
-fn geometry_and_clock_refusals_precede_effects_and_hardware_cs_caps_narrow_board_grant() {
+fn message_refusals_precede_effects_within_hardware_chip_selects() {
     let (mut h, hw) = host(Profile::CannonLake);
     hw.borrow_mut().registers[(0x200 + 0xfc) / 4] = 3 << 9;
     h.initialize().unwrap();
@@ -580,6 +580,10 @@ fn geometry_and_clock_refusals_precede_effects_and_hardware_cs_caps_narrow_board
     assert!(hw.borrow().log.is_empty());
     assert!(h.failure().is_none());
     drop(h.release().ok().unwrap());
+}
+
+#[test]
+fn zero_clock_refuses_controller_construction() {
     let (h, hw) = host(Profile::LynxPoint);
     let (r, t) = h.release().ok().unwrap();
     drop(t);

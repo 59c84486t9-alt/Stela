@@ -496,7 +496,7 @@ fn smbus_every_initialization_late_effect_preserves_original_error_without_repla
     }
 }
 #[test]
-fn smbus_sleep_buttons_off_stop_and_wake_late_faults_keep_capabilities_and_real_effects() {
+fn smbus_late_power_faults_keep_capabilities() {
     for action in 0..4 {
         let sample = hardware([0x0c, 8, 0], 0xfc);
         let mut baseline = device(&sample);

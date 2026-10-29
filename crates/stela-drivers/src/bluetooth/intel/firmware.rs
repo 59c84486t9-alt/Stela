@@ -203,7 +203,7 @@ pub(super) fn ddc(bytes: &[u8]) -> Result<Vec<&[u8]>> {
 mod tests {
     use super::*;
     #[test]
-    fn hybrid_ranges_and_complete_payload_require_known_hardware_and_engine() {
+    fn hybrid_image_parses_only_for_known_hardware_and_engine() {
         let valid = super::super::tests::hybrid_image();
         for variant in [0x20, 0x21, 0x22] {
             for engine in 0..=3 {

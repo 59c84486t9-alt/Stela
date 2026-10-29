@@ -212,7 +212,7 @@ fn reentry_stale_results_and_wrong_access_results_cannot_retire_owned_effects() 
 }
 
 #[test]
-fn exact_word_and_double_masking_skips_only_unchanged_bits_and_disabled_rows() {
+fn masking_skips_only_unchanged_bits() {
     let mut program = load(
         &table(&[
             (u32::MAX, 0, u64::MAX, u64::MAX),

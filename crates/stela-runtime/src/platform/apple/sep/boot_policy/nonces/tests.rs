@@ -152,7 +152,7 @@ fn recovered_recovery_commands_bind_the_durable_nonce_and_exact_reply_lengths() 
 }
 
 #[test]
-fn duplicate_begin_and_bad_bodies_leave_the_proposal_and_durable_state_unchanged() {
+fn bad_requests_leave_state_unchanged() {
     let mut policy = BootPolicy::default();
     let mut store = store();
     success(&mut policy, &mut store, BEGIN);

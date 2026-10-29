@@ -302,7 +302,7 @@ fn explicit_whole_zero_policy_never_supplies_other_device_status_or_accepts_unkn
 }
 
 #[test]
-fn frozen_sram_effects_route_stores_and_polls_through_the_same_controller_and_pause() {
+fn frozen_sram_routes_effects_through_the_controller() {
     use crate::platform::apple::pmgr::sequencer::{self, AddressFormat, RouteOutcome, poll};
     let owner = owner(Handoff::StelaEmpty {
         sram: SramInitialization::Unknown,

@@ -424,7 +424,7 @@ fn pin(drops: Arc<AtomicUsize>) -> PinnedPages {
 }
 
 #[test]
-fn real_bridge_path_and_posted_command_order_precede_payload_drain_and_unmap() {
+fn posted_commands_complete_before_payload_unmap() {
     let model = Model::new();
     let state = model.state.clone();
     let drops = model.drops.clone();
@@ -905,7 +905,7 @@ fn mapping_platform(owner: Arc<()>) -> (Authority, Arc<Platform>) {
 }
 
 #[test]
-fn original_resource_identity_and_epoch_gate_real_registry_maps_and_platform_retirement() {
+fn resource_identity_and_epoch_gate_registry_maps() {
     let (_host, bar) = fixture(Model::new());
     let owner = bar
         .resource

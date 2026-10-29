@@ -509,7 +509,7 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    fn patch_and_ram_keep_endianness_security_and_non_download_regions() {
+    fn firmware_sections_keep_their_attributes() {
         let p = patch_bytes();
         let parsed = Patch::parse(&p).unwrap();
         assert_eq!(parsed.regions()[0].mode, 0x8000_000f);

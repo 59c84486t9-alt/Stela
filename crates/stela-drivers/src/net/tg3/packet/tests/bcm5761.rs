@@ -254,7 +254,7 @@ fn actual_5761_unsupported_board_media_management_clock_or_nvram_never_publish_d
 }
 
 #[test]
-fn actual_5761_restart_drains_old_writes_and_retains_original_geometry_and_mapping() {
+fn bcm5761_restart_drains_old_writes_before_reuse() {
     let (mut packet, pages, domain, peer) = attach_5761();
     let addresses = packet.memory.as_ref().unwrap().addresses().unwrap();
     assert!(packet.carrier());

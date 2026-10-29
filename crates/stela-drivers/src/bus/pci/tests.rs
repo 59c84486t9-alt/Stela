@@ -187,7 +187,7 @@ fn fake() -> Fake {
 }
 
 #[test]
-fn bars_decode_and_size_memory_wide_and_io() {
+fn bars_decode_and_size_every_kind() {
     let mut config = fake();
     // BAR0: 16 KiB 32-bit memory; BAR1: 256-byte I/O; BAR2+3: 64-bit
     // prefetchable 1 MiB above 4 GiB; BAR4 unimplemented; BAR5 4 KiB.

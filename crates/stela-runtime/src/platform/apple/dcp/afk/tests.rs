@@ -626,7 +626,7 @@ fn read_word(memory: &mut Memory, at: u64) -> u32 {
 }
 
 #[test]
-fn lifecycle_requests_and_completions_drain_and_reply_over_the_real_ring() {
+fn lifecycle_messages_drain_over_the_ring() {
     let mut memory = Memory::default();
     let mut afk = started(&mut memory);
     let mut pointer = 0;

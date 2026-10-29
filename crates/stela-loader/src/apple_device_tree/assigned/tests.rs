@@ -321,7 +321,7 @@ impl Fixture {
     }
 }
 #[test]
-fn exact_enumeration_roundtrips_with_one_boot_and_original_ids_and_recipes() {
+fn enumeration_roundtrips_ids_and_recipes() {
     let f = Fixture::new();
     let plan = f.plan();
     let mut tree = f.tree.clone();

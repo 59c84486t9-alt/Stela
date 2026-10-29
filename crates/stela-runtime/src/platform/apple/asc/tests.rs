@@ -426,7 +426,7 @@ fn kept_halt_keeps_mailboxes_state_and_cpu_work_until_resume() {
 }
 
 #[test]
-fn refused_halt_and_resume_leave_control_and_mailboxes_unchanged() {
+fn refused_power_changes_leave_state_unchanged() {
     let mut latch = InterruptLatch::new();
     let mut access = Access::new(0, 0, &mut latch);
     let mut asc = Asc::new(
@@ -594,7 +594,7 @@ impl super::super::rtkit::Endpoint for AsyncEndpoint {
 }
 
 #[test]
-fn rtkit_poll_preserves_both_prior_and_failing_endpoint_events_and_irqs() {
+fn rtkit_poll_keeps_prior_and_failing_events() {
     use super::super::rtkit::{Endpoint, RtKit};
     let endpoints = (0x20..=0x22)
         .map(|number| {

@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn leaf_pat_and_pa_are_checked_for_every_page_and_root_depth() {
+    fn mapping_check_rejects_wrong_pat_or_address_on_any_page() {
         for levels in [4, 5] {
             let cpu = if levels == 5 {
                 0x0040_0000_0040_0000

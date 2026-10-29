@@ -420,7 +420,7 @@ fn constrained_alignment_and_ordinary_pages_coalesce_together() {
 }
 
 #[test]
-fn core_caches_refill_and_flush_in_batches_and_count_live_bytes() {
+fn core_caches_move_blocks_between_cores_in_batches() {
     let heap = Heap::new();
     let mut ram = backing();
     let layout = Layout::from_size_align(24, 8).unwrap();

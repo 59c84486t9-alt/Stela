@@ -318,7 +318,7 @@ fn fault_owner_requires_complete_initial_history_and_disjoint_semantics() {
 }
 
 #[test]
-fn source_fault_counts_and_eight_byte_transport_keep_exact_partial_progress_and_retries() {
+fn transport_faults_keep_partial_progress() {
     for count in [1u16, 8, 9, 10, 16, 255] {
         let initial: Vec<_> = (0..count).map(|index| index as u8 | 0x80).collect();
         let config = Configuration::new(Vec::new(), None, 0)

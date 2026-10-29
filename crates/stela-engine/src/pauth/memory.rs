@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn read_failure_preserves_destination_and_base_including_sp_and_xzr() {
+    fn read_failure_keeps_destination_and_base() {
         for base in [0, ZERO_REGISTER_INDEX] {
             for destination in [1, ZERO_REGISTER_INDEX] {
                 let mut state = GuestState::default();

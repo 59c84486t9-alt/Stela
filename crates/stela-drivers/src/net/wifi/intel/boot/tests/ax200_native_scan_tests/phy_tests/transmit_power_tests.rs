@@ -243,7 +243,7 @@ fn power_denial_and_unknown_abi_have_no_command_effects() {
     }
 }
 #[test]
-fn power_uncertain_publication_wrong_response_and_deadline_preserve_owners_and_first_error() {
+fn power_command_failures_keep_first_error() {
     for case in 0..3 {
         let bytes = power_bytes(5, true, false);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

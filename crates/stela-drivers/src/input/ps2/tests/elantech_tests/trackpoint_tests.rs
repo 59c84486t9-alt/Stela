@@ -20,8 +20,7 @@ fn configured(firmware: u32) -> (Controller<Model, Time>, Rc<RefCell<Hardware>>)
 }
 
 #[test]
-fn default_attachment_admits_queried_child_without_predicted_presence_and_requeries_same_identity()
-{
+fn trackpoint_attaches_only_after_query() {
     for firmware in [0x050001, 0x060001, 0x064001, 0x0f0001] {
         for present in [false, true] {
             let (mut c, h) = target(firmware);
@@ -90,7 +89,7 @@ fn packet(prefix: u32, x: u8, y: u8, buttons: u8) -> [u8; 6] {
 }
 
 #[test]
-fn integrated_profile_matches_presence_and_report_id_verification_precedes_mode_and_ready() {
+fn integrated_trackpoint_verifies_report_id_before_mode() {
     for firmware in [0x050001, 0x060001, 0x064001, 0x0f0001, 0x0f2002] {
         for product in [8, 9, 0x0d, 0x0e, 10, 0x74] {
             let (mut c, h) = target_point(firmware, product);
@@ -143,7 +142,7 @@ fn integrated_profile_matches_presence_and_report_id_verification_precedes_mode_
 }
 
 #[test]
-fn integrated_motion_and_touchpad_state_stay_distinct_through_interleaving_and_stop() {
+fn trackpoint_and_touchpad_state_stay_separate() {
     let (mut c, h) = configured(0x0f2002);
     let raw = packet(0x06000030, 255, 255, 5);
     emit(&h, Port::Mouse, &raw);

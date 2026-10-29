@@ -171,7 +171,7 @@ fn aliases_lifetimes_attributes_and_shapes_are_independent() {
 }
 
 #[test]
-fn clear_and_drop_remove_dead_metadata_and_keep_real_lifetimes() {
+fn clear_and_drop_remove_dead_metadata() {
     let (domain, backing, mapping) = fixture(TEST_ERG_BYTES, TEST_STRIPES);
     let weak_backing = Arc::downgrade(&backing);
     let weak_mapping_payload = Arc::downgrade(mapping.payload());

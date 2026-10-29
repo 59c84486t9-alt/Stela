@@ -120,7 +120,7 @@ fn native_voltage_pin_clock_and_enable_failures_power_off_before_fresh_identify(
 }
 
 #[test]
-fn native_uhs_failed_poweroff_keeps_primary_and_cleanup_and_quarantines_owner() {
+fn uhs_failed_poweroff_quarantines_owner() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: quarantined ownership keeps backing through every refused operation.

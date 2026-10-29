@@ -295,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_and_power_share_real_state_and_preserve_the_boot_default() {
+    fn capabilities_and_power_share_state() {
         let mut controller = controller();
         for (command, expected) in [(12, 1), (13, 1), (14, 0), (7, 1)] {
             assert_eq!(

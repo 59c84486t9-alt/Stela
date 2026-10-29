@@ -208,7 +208,7 @@ impl Fixture {
     }
 }
 #[test]
-fn native_clc_preserves_absent_zero_and_event_protocol_and_completed_owner() {
+fn clc_preserves_absent_and_zero_values() {
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         for flags in [None, Some(0), Some(1)] {
             let mut fixture = Fixture::new(chip, flags);

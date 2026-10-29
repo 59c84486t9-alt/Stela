@@ -327,7 +327,7 @@ unsafe extern "C" {
 }
 
 #[test]
-fn original_display_link_and_switch_copy_set_preserve_bytes_returns_and_native_lengths() {
+fn copy_helpers_match_native_results() {
     let mut source = [0u8; 4096 + 32];
     for (index, byte) in source.iter_mut().enumerate() {
         *byte = (index.wrapping_mul(53) + 0x81) as u8;

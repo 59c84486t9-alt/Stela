@@ -446,7 +446,7 @@ fn one_original_bar_maps_disjoint_checked_uc_wc_and_keeps_whole_owner() {
     assert_eq!(dropped.load(Ordering::Relaxed), 1);
 }
 #[test]
-fn device_permissions_cover_whole_pages_and_refuse_gaps_wrong_types_and_straddles() {
+fn device_permissions_cover_only_whole_typed_pages() {
     let (model, authority, _, _) = basic();
     let (resource, _) = make_device_resource(device_regions());
     for (offset, bytes, attribute) in [

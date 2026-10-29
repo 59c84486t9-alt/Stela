@@ -218,7 +218,7 @@ fn security_flags_never_synthesize_integrity_key_or_replay_success() {
     }
 }
 #[test]
-fn translated_fragment_and_error_profiles_remain_explicit_and_fcs_is_kept() {
+fn receive_profiles_stay_explicit_and_keep_fcs() {
     for chip in [Chip::Mt7921, Chip::Mt7925] {
         for (flag, error) in [
             (23, Error::AmsduError),

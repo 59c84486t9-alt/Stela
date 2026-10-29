@@ -373,7 +373,7 @@ fn authenticated_key_does_not_implicitly_authorize_data_but_allows_eapol() {
 }
 
 #[test]
-fn group_and_pairwise_scope_and_current_key_generation_are_not_interchangeable() {
+fn key_scope_and_generation_are_not_interchangeable() {
     let (mut station, mut keys) = station(PortPolicy::Controlled, false);
     let ptk = keys[0].installed().unwrap();
     let gtk = keys[1].installed().unwrap();
@@ -780,7 +780,7 @@ fn foreign_ap_receiver_fragment_and_monitor_frames_cannot_poison_replay() {
 }
 
 #[test]
-fn host_and_device_sequence_ownership_are_explicit_and_independent_of_air_status() {
+fn sequence_ownership_is_independent_of_air_status() {
     let (mut station, mut keys) = station(PortPolicy::Open, false);
     station.sequence = 0xfff;
     for (owner, expected, bytes) in [

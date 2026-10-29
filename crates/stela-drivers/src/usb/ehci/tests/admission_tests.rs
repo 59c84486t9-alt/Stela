@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn unowned_hub_port_and_reserved_controls_refuse_before_mmio_and_current_dma() {
+fn unowned_hub_controls_refuse_before_mmio() {
     let (mut c, m, id, pipes) = attached();
     let current = c.submit_bulk_in(input(&pipes), 3, 1_000_000).unwrap();
     let before = {

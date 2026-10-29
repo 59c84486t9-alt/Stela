@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn private_staging_and_requests_are_disjoint_and_stack_aligned() {
+    fn scratch_regions_are_disjoint_and_stack_aligned() {
         for bytes in LENGTHS {
             let length = VectorLength::from_bytes(bytes).unwrap();
             for registers in 2..=4 {

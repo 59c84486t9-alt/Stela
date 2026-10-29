@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn native_buffers_and_completions_preserve_short_in_and_out_requests() {
+    fn short_transfers_complete_in_both_directions() {
         let mut memory = vec![0u64; 512 * 1024];
         let start = memory.as_mut_ptr() as u64;
         // SAFETY: this model exclusively owns backing RAM until all owners drop.

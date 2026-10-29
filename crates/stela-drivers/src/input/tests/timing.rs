@@ -68,7 +68,7 @@ impl rmi::transport::Companion for Pin {
 }
 
 #[test]
-fn native_input_calibration_and_interval_failures_precede_transport_and_irq_effects() {
+fn clock_failures_precede_transport_effects() {
     for (rate, expected) in [
         (0, ClockError::Uncalibrated),
         (u64::MAX, ClockError::DurationOverflow),

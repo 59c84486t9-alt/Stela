@@ -772,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn wpa1_and_tkip_select_like_wpa_supplicant_and_limit_to_legacy_mode() {
+    fn wpa1_and_tkip_select_like_wpa_supplicant() {
         let wpa = [
             221, 22, 0, 0x50, 0xf2, 1, 1, 0, 0, 0x50, 0xf2, 2, 1, 0, 0, 0x50, 0xf2, 2, 1, 0, 0,
             0x50, 0xf2, 2,

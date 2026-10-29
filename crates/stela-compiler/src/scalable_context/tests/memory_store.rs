@@ -213,7 +213,7 @@ fn stores_preflight_write_caps_tags_and_original_sp_for_the_complete_body() {
 }
 
 #[test]
-fn scan_and_compile_share_reserved_mode_and_q_feature_declines() {
+fn scan_and_compile_decline_the_same_stores() {
     for (word, profile, reason) in [
         (
             RESERVED_ST1B_Z1_P0_X5_XZR,

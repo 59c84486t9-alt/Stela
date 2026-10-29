@@ -296,7 +296,7 @@ fn native_gl9763e_original_phy_idle_cqe_retirement_and_eight_pin_mmc_pio_are_rea
 }
 
 #[test]
-fn native_gl9763e_fixed_180_supply_and_wide_adma_use_card_and_controller_state() {
+fn gl9763e_supply_and_adma_follow_card_state() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: the model DMA engine consumes these descriptor/payload pages.

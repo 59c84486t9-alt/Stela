@@ -800,7 +800,7 @@ fn paused_timer_events_and_timeouts_remain_pending_without_idle_skip_spinning() 
 }
 
 #[test]
-fn kept_monitors_exclude_pause_time_and_preserve_fractional_cycles_and_pmi() {
+fn monitors_exclude_pause_time() {
     use crate::machine::{
         amu::Amu,
         pmu::{self, Context, Pmu},
@@ -1059,7 +1059,7 @@ fn every_pe_and_new_cluster_starts_from_the_core_lock_handoff() {
 }
 
 #[test]
-fn all_eight_pe_and_cluster_participants_preflight_and_settle_together() {
+fn all_participants_preflight_and_settle_together() {
     use super::super::tests::board_on;
     let identities = (0..8)
         .map(|pe| Identity {
@@ -1802,7 +1802,7 @@ fn ic_ivau_by_one_pe_makes_every_pe_compile_the_new_code() {
 }
 
 #[test]
-fn a_pes_interrupt_waits_for_its_turn_and_unmasking_and_preempts_where_it_stopped() {
+fn interrupt_preempts_where_the_pe_stopped() {
     const MSR_DAIFCLR_I: u32 = 0xd503_42ff;
     const IRQ_CURRENT_SPX: u64 = 0x280;
     const HCR_TGE: u64 = 1 << 27;

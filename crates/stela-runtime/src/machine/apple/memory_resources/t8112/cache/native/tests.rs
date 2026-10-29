@@ -205,7 +205,7 @@ fn construction_leaves_source_default_publication_and_allocation_explicit() {
     assert_eq!(quota(&mut cache, 0), 0x4012_0000);
 }
 #[test]
-fn words_and_ptd_preserve_interleaving_and_a_failed_fourth_store_prefix() {
+fn ptd_stores_keep_interleaving() {
     let (memory, mut cache) = components();
     let mut publisher = publisher(&memory, &mut cache, 4, 0);
     assert_eq!(publisher.policy().group(0).unwrap().ceiling, 64);
@@ -339,7 +339,7 @@ fn all_ones_source_target_remains_a_store_sentinel_across_default_passes() {
     assert_eq!(memory.publication_bank().requests().len(), 2);
 }
 #[test]
-fn bindings_modes_and_counts_refuse_before_any_publication_and_do_not_reopen() {
+fn invalid_bindings_refuse_before_publication() {
     for configuration in [
         Configuration {
             suppression: None,

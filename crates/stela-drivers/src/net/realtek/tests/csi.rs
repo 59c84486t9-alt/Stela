@@ -23,7 +23,7 @@ fn csi_failed_data_read_does_not_publish_a_invented_config_value() {
 }
 
 #[test]
-fn csi_rmw_checks_address_and_function_and_preserves_other_bytes() {
+fn csi_rmw_preserves_other_bytes() {
     for function in [0, 2, 7] {
         let time = Time::default();
         let model = Model::nbase(&time);

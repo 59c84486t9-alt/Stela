@@ -1823,7 +1823,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "full_source_probe_ies_and_firmware_commands_match_all_bands_streams_and_widths",
+    "test": "probe_ies_and_commands_match_source",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/bootstrap/client/local/scan.rs",
     "kind": "oracle",
     "inputs": [
@@ -2087,7 +2087,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "complete_linux_domain_helpers_and_writers_match_all_channels_flags_and_bytes",
+    "test": "domain_helpers_match_linux_for_every_channel",
     "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu/domain.rs",
     "kind": "oracle",
     "inputs": [

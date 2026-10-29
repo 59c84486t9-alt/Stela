@@ -846,7 +846,7 @@ fn host_scheduling_delay_preserves_real_deadline_but_expiry_keeps_ownership() {
     }
 }
 #[test]
-fn boot_and_runtime_share_real_dma_sequence_and_return_runtime_ack_ownership() {
+fn boot_and_runtime_share_one_dma_sequence() {
     use super::super::{download::Downloader, mcu::runtime::Command as Uni};
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         let response = Arc::new(Mutex::new(Response::default()));
@@ -1759,7 +1759,7 @@ fn source_already_inactive_applies_only_to_bss_deactivation() {
     }
 }
 #[test]
-fn initial_owner_private_receipt_and_resource_survive_wrong_controller_and_drop() {
+fn owner_receipt_survives_wrong_controller() {
     use device::{Error as Dev, Interface};
     let (mut a, awm, _, _) = setup(Chip::Mt7921, true, false, 0);
     let (mut b, bwm, _, _) = setup(Chip::Mt7921, true, false, 0);

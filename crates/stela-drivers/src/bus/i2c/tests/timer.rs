@@ -113,7 +113,7 @@ fn clock(rate: u64) -> Clock {
 const BUDGET: u64 = 1000;
 
 #[test]
-fn native_unavailable_overflow_and_half_period_clocks_refuse_designware_and_smbus_before_io() {
+fn unusable_clocks_refuse_before_io() {
     for rate in [0, u64::MAX, u64::MAX / 2 / BUDGET + 1] {
         let (r, d) = no_io();
         let config = Config {

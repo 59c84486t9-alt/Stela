@@ -507,8 +507,7 @@ fn native_gl9755_single_ocp_latch_at_w1c_boundary_cannot_be_lost_before_command(
 }
 
 #[test]
-fn native_gl9755_ocp_during_voltage_delay_and_tuning_keeps_first_failed_cleanup_without_mmio_retry()
-{
+fn gl9755_overcurrent_keeps_first_failure() {
     for tuning in [false, true] {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
@@ -551,8 +550,7 @@ fn native_gl9755_ocp_during_voltage_delay_and_tuning_keeps_first_failed_cleanup_
 }
 
 #[test]
-fn native_gl9755_engine_lost_pci_identity_power_decode_or_requester_permission_fences_without_mmio()
-{
+fn gl9755_lost_pci_state_fences_without_mmio() {
     for mutation in 0..5 {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;

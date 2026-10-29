@@ -61,8 +61,7 @@ mod tests {
         b
     }
     #[test]
-    fn empty_nontext_and_unterminated_embedded_bytes_keep_native_bounds_and_all_bytes() -> Result<()>
-    {
+    fn embedded_bytes_keep_native_bounds() -> Result<()> {
         for (prefix, expected) in [(&[][..], 0), (&[0xff, 0xfe, 0x81][..], 3)] {
             let mut b = original();
             b[0x1224..0x1624].fill(0);

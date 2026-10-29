@@ -569,7 +569,7 @@ fn wcn_debug_acl_is_reclassified_exactly_across_usb_fragment_boundaries() {
 }
 
 #[test]
-fn event_acl_and_truncated_dump_signatures_keep_first_fault_and_quarantine() {
+fn dump_signatures_keep_first_fault_and_quarantine() {
     use crate::usb::bluetooth::{ErrorKind, Packet};
     let event = vec![0xff, 9, 1, 8, 0, 0, 0, 0x20, 0, 0, 0];
     let short_event = vec![0xff, 2, 1, 8];

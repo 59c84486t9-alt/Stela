@@ -157,7 +157,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scalar_shifts_and_extract_validate_width_immediates_and_zero_roles() {
+    fn scalar_shift_and_extract_decoding_is_exhaustive() {
         for (sf, width) in [(0, Width::W32), (1u32 << 31, Width::X64)] {
             for (op, shift) in [Shift::Lsl, Shift::Lsr, Shift::Asr, Shift::Ror]
                 .into_iter()

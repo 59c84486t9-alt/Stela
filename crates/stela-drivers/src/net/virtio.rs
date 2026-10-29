@@ -346,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn runts_and_oversized_buffers_are_dropped_and_the_next_frame_read() {
+    fn bad_length_frames_are_dropped() {
         let mut fixture = Fixture::new();
         let net = &mut fixture.net;
         let mut produced = 0;

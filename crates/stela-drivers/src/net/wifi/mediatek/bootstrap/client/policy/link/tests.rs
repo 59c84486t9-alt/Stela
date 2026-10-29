@@ -1074,7 +1074,7 @@ fn shared_deferred_error_survives_explicit_service_and_prevents_next_tx_publicat
     assert_eq!(provider.load(Ordering::Relaxed), 1);
 }
 #[test]
-fn outbound_data_and_prekey_eapol_alternate_real_single_publication_and_error() {
+fn data_and_eapol_alternate_single_publication() {
     for control_port in [false, true] {
         let (mut link, model, join, bss, provider) = setup_link();
         associate(&mut link, &model, join, bss);

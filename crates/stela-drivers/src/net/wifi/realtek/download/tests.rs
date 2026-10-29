@@ -386,7 +386,7 @@ fn every_uncertain_operation_is_terminal_and_keeps_submitted_memory_quarantined(
     }
 }
 #[test]
-fn own_valid_checksum_ready_and_removed_device_failures_are_distinct_and_bounded() {
+fn descriptor_failures_are_distinct_and_bounded() {
     let c = catalog(super::super::firmware::tests::legacy_fixture());
     let staged = profile().stage(&c).unwrap();
     for mode in 0..7 {

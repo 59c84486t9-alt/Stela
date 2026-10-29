@@ -210,7 +210,7 @@ fn program_shared(pmu: &mut Pmu, seconds: u32, now: u64) -> u8 {
 }
 
 #[test]
-fn a_shared_control_and_event_byte_keeps_control_and_clears_written_events() {
+fn shared_byte_keeps_control_and_clears_events() {
     let rtc = chapel();
     for overlapping in [1, 0x40] {
         let bad = Rtc {
@@ -579,7 +579,7 @@ fn wall_time_follows_upcount_plus_offset_at_32768_hz() {
 }
 
 #[test]
-fn boot_keys_and_pm_setting_are_storage_and_unnamed_addresses_nack() {
+fn unnamed_addresses_nack() {
     let mut pmu = stowe(None);
     pmu.write(0xf701, &[0x30], 0).unwrap();
     let mut keys = [0xffu8; 0x20];

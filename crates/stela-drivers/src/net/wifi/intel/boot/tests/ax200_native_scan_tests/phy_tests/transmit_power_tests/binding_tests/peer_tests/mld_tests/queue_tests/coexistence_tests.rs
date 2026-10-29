@@ -101,7 +101,7 @@ fn ci_emitted(
     assert_eq!(actual, command.bytes());
 }
 #[test]
-fn bt_profile_survives_diagnostics_and_ci_cache_waits_for_ack_and_reclaim() {
+fn bt_profile_survives_diagnostics_and_ci_cache_waits_for_ack() {
     exercise(&coex_image(2));
 }
 fn exercise(bytes: &[u8]) {

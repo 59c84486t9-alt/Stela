@@ -124,7 +124,7 @@ fn parse_trie(bytes: &[u8]) -> Result<Vec<Export>> {
 }
 
 #[test]
-fn modern_and_legacy_exports_preserve_flags_and_apply_signed_slide() {
+fn exports_keep_flags_and_apply_signed_slide() {
     for legacy in [false, true] {
         let input = trie(&[
             (b"_regular", 0, 0x300),

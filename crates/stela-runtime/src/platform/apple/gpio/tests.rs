@@ -561,7 +561,7 @@ fn peripheral_functions_record_the_mux_without_a_gpio_level() {
     assert_eq!(bank.output(110), None);
 }
 #[test]
-fn cs_output_and_lock_and_unknown_registers_are_explicit() {
+fn cs_registers_are_explicit() {
     let mut bank = Gpio::new(213, lines(), &[49], vec![]).unwrap();
     let mut latch = InterruptLatch::new();
     let mut a = Access::new(0, 0, &mut latch);

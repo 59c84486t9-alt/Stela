@@ -258,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn gen3_and_gen4_counters_and_depths_follow_their_handler_tables() {
+    fn counters_follow_their_handler_tables() {
         // 37 counters each, the kernel tables' exact offsets.
         for (profile, base) in [(Profile::Gen3, BANK_B), (Profile::Gen4, BANK_B + 0x1000)] {
             let counters = (0..BANK_C)

@@ -262,7 +262,7 @@ fn revision_selects_extended_pad_ownership_and_word_stride() {
 }
 
 #[test]
-fn pull_and_debounce_encode_source_values_and_reject_invalid_before_effects() {
+fn pull_encodes_source_values_and_rejects_invalid_before_effects() {
     let (mut controller, state, _) = setup(&[0], 0x94);
     for (pull, expected) in [
         (Pull::Disabled, 0),
@@ -274,6 +274,18 @@ fn pull_and_debounce_encode_source_values_and_reject_invalid_before_effects() {
         controller.pull(0, pull).unwrap();
         assert_eq!(state.borrow().words[&(0, 0x1004)] & 0x3c00, expected);
     }
+    state.borrow_mut().trace.clear();
+    assert_eq!(controller.pull(0, Pull::Up(952)), Err(Error::InvalidPull));
+    assert!(writes(&state).is_empty());
+    let (mut old, state, _) = setup(&[0], 0x91);
+    state.borrow_mut().trace.clear();
+    assert_eq!(old.pull(0, Pull::Down(1000)), Err(Error::InvalidPull));
+    assert!(writes(&state).is_empty());
+}
+
+#[test]
+fn debounce_encodes_source_values_and_rejects_invalid_before_effects() {
+    let (mut controller, state, _) = setup(&[0], 0x94);
     for micros in [0, 157, 250, 1000, 100_000, 1_000_000] {
         controller.debounce(0, micros).unwrap();
         let state = state.borrow();
@@ -286,12 +298,10 @@ fn pull_and_debounce_encode_source_values_and_reject_invalid_before_effects() {
         controller.debounce(0, u32::MAX),
         Err(Error::InvalidDebounce)
     );
-    assert_eq!(controller.pull(0, Pull::Up(952)), Err(Error::InvalidPull));
     assert!(writes(&state).is_empty());
     let (mut old, state, _) = setup(&[0], 0x91);
     state.borrow_mut().trace.clear();
     assert_eq!(old.debounce(0, 1000), Err(Error::Unsupported));
-    assert_eq!(old.pull(0, Pull::Down(1000)), Err(Error::InvalidPull));
     assert!(writes(&state).is_empty());
 }
 
@@ -326,7 +336,7 @@ fn irq_hostown_mask_type_and_w1c_touch_only_selected_pad() {
 }
 
 #[test]
-fn edge_ack_precedes_consumer_and_preserves_second_edge_and_unowned_causes() {
+fn edge_is_acknowledged_before_its_consumer_runs() {
     let (mut controller, state, _) = setup(&[0], 0x94);
     controller.interrupt_type(0, Interrupt::Rising).unwrap();
     controller.interrupt_mask(0, false).unwrap();

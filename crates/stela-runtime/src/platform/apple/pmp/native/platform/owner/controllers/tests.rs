@@ -244,7 +244,7 @@ fn uncertain_mmio_failure_keeps_prefix_and_never_replays_the_write() {
     assert_eq!(m.saved, [Some(0), None]);
 }
 #[test]
-fn callback_pairs_use_current_packet_bucket_and_preserve_busy_and_refusal_prefixes() {
+fn callback_pairs_use_the_current_packet_bucket() {
     let rows = [record(0x16, 17, 0), record(4, 28, 16)].concat();
     let mut states = vec![4; 17];
     states[0] = 2;

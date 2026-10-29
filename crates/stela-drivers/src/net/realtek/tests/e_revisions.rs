@@ -49,7 +49,7 @@ fn e_phy_programs_exact_analogue_state_with_observable_unsupported_optional_clea
 }
 
 #[test]
-fn e_mac_start_and_receive_modes_clear_inherited_jumbo_and_pulse_fifo_reset() {
+fn e_mac_start_clears_inherited_jumbo() {
     use crate::bus::dma::RegionAllocator;
     for version in [32, 33] {
         let mut backing = vec![0u64; 200_000];

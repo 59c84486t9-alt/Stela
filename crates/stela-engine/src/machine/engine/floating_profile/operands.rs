@@ -527,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn pairwise_indexed_and_scalar_capture_only_logical_inputs_and_outputs() {
+    fn captures_hold_only_logical_operands() {
         let state = half_state();
         let make = |shape, inputs| {
             FloatingPointOperation::Binary(arithmetic::Operand {

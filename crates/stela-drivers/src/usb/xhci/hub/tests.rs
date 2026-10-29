@@ -976,7 +976,7 @@ fn bus_powered_hub(ports: usize) -> Node {
 }
 
 #[test]
-fn bus_powered_hub_charges_controller_and_ports_once_and_commits_configuration() {
+fn bus_powered_hub_charges_each_budget_once() {
     let mut nodes = BTreeMap::from([(0, bus_powered_hub(4))]);
     for port in 1..=4 {
         let mut leaf = Node::leaf(SUPER_SPEED);

@@ -805,7 +805,7 @@ fn a_visible_client_keeps_the_gpio_bank_its_interrupt_names() {
 }
 
 #[test]
-fn keeps_the_board_cpus_fabric_and_modeled_devices_and_hides_the_rest() {
+fn keeps_only_modeled_devices() {
     let mut tree = DeviceTree {
         root: secure_root(node(
             "device-tree",

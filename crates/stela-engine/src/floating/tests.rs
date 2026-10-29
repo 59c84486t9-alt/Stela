@@ -217,7 +217,7 @@ fn unsupported_controls_leave_complete_state_unchanged() {
 }
 
 #[test]
-fn vector_lanes_snapshot_aliases_and_ignore_nep_and_inactive_upper_bits() {
+fn vector_lanes_snapshot_aliases() {
     for (shape, format) in VECTOR_ARRANGEMENTS {
         let (_, one, two, ..) = FORMATS.iter().copied().find(|row| row.0 == format).unwrap();
         let exponent_unit = two - one;
@@ -473,7 +473,7 @@ fn scalar_fused_merges_addend_and_snapshots_all_four_register_roles() {
 }
 
 #[test]
-fn vector_fused_snapshots_accumulator_and_ignores_nep_and_inactive_lanes() {
+fn fused_lanes_snapshot_the_accumulator() {
     for (shape, format) in VECTOR_ARRANGEMENTS {
         for operation in [FusedOperation::Add, FusedOperation::Subtract] {
             for nep in [false, true] {

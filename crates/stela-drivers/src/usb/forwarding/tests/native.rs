@@ -480,7 +480,7 @@ fn queued_packet_lists_keep_individual_payloads_residuals_misses_and_original_sc
 }
 
 #[test]
-fn cancellation_and_configuration_preserve_collected_packets_and_end_old_identities() {
+fn cancellation_keeps_collected_packets() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
     // SAFETY: exclusive live fixture DMA.

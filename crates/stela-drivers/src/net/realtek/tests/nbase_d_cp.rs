@@ -173,7 +173,7 @@ fn nbase_d_cp_required_command_failures_abort_before_enable_or_dma() {
 }
 
 #[test]
-fn nbase_d_cp_bp_mac_has_no_ephy_table_and_publishes_source_rx_and_legacy_dma() {
+fn nbase_d_cp_bp_mac_skips_ephy_table() {
     use crate::bus::dma::RegionAllocator;
     for xid in [0x688, 0x689, 0x68a, 0x68b, 0x708, 0x681] {
         let revision = revision::detect(xid << 20).unwrap();

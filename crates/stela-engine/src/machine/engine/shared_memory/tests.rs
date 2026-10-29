@@ -186,7 +186,7 @@ fn failed_memory_owner_refuses_eret_before_any_cpu_or_event_effect() {
     assert!(!machine.cpu.event_is_set());
 }
 #[test]
-fn source_clrex_sevl_and_wfe_use_the_cpu_owned_endpoint_and_monitor() {
+fn clrex_sevl_and_wfe_use_the_cpu_monitor() {
     let (mut machine, ram, events) = machine();
     machine
         .install_shared_memory_for_processors(ram, &events)

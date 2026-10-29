@@ -250,7 +250,7 @@ mod tests {
         assert!(Script::parse(&image(&[])).is_err());
     }
     #[test]
-    fn backward_loops_delays_and_bus_failures_have_budgets_and_restore_state() {
+    fn firmware_loops_and_failures_are_bounded() {
         let time = Time::default();
         let mut io = Io::default();
         let bytes = raw(&[0x30000000]);

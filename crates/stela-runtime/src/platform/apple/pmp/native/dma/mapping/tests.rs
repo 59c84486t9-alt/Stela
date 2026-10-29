@@ -282,7 +282,7 @@ fn trace_write_keeps_later_page_and_within_page_prefixes_without_replay() {
     }
 }
 #[test]
-fn sync_and_lifecycle_wait_for_real_coherence_and_reads_rewalk_changed_dart() {
+fn sync_waits_for_coherence_and_reads_rewalk_dart() {
     let (broker, mut service, owners, mut ram, mut dart, mut sync) = setup();
     let mut client = mapped(
         &broker,

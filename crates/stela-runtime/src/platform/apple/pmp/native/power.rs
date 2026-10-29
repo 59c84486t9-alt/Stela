@@ -147,7 +147,7 @@ mod tests {
             .collect()
     }
     #[test]
-    fn ordinal_source_and_domain_id_are_distinct_and_opaque_words_survive() {
+    fn ordinal_source_and_domain_ids_are_distinct() {
         let table = DeviceTable::from_properties(
             &records(&[1, 2, 16, 17, 3, 4, 5]),
             &0x70u64.to_le_bytes(),

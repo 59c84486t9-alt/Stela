@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn sleep_control_sets_the_type_and_enable_and_keeps_other_bits() {
+    fn sleep_control_keeps_other_bits() {
         assert_eq!(
             sleep_control(SCI_ENABLE | 0x1c00, 5),
             SCI_ENABLE | 5 << 10 | 1 << 13

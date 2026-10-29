@@ -593,7 +593,7 @@ fn tlv_fixture_variant(engine: u8, variant: u8) -> (Device, Catalog, Script) {
     (device, catalog, Script { steps })
 }
 #[test]
-fn tlv_rsa_and_ecdsa_use_identified_engine_and_exact_cnvi_cnvr_files() {
+fn tlv_controllers_load_the_identified_engine_files() {
     for engine in [0, 1] {
         let (device, catalog, script) = tlv_fixture(engine);
         let mut hci = transport(device, script);
@@ -1393,7 +1393,7 @@ mod iml_tests {
         }
     }
     #[test]
-    fn hybrid_lms_and_combined_engines_use_iml_security_and_per_fragment_events() {
+    fn hybrid_engines_boot_through_iml_with_per_fragment_events() {
         for variant in [0x20, 0x21, 0x22] {
             for engine in [2, 3] {
                 let (device, catalog, script) = fixture_iml(variant, engine, true);

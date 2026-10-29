@@ -546,7 +546,7 @@ mod tests {
         }
     }
     #[test]
-    fn locked_add_and_compare_exchange_keep_width_results_and_exact_neighbor_bytes() {
+    fn locked_operations_leave_neighbor_bytes_unchanged() {
         let target = TargetCpu::detect();
         for bytes in [1, 2, 4, 8, 16] {
             if bytes == 16 && !target.supports(TargetCpu::Cx16) {

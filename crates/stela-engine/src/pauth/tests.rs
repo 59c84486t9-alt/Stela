@@ -447,7 +447,7 @@ fn generic_domains_match_original_canonical_sign_auth_and_xpac_vectors() -> Resu
 }
 
 #[test]
-fn tagged_data_matches_original_and_keeps_tag_on_auth_and_strip() -> Result<()> {
+fn auth_and_strip_keep_the_tag() -> Result<()> {
     let context = Context::new(73, all_keys());
     let vectors = [
         (0x8000000000001400, 0x0000000000000000, 0x805d800000001400),

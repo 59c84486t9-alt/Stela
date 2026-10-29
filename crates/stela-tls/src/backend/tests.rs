@@ -427,7 +427,7 @@ fn verification_rejects_noncanonical_keys_signatures_and_allocation_failure() {
 }
 
 #[test]
-fn digest_and_hmac_match_independent_vectors_and_wipe_all_backend_allocations() {
+fn digests_match_vectors_and_wipe_every_allocation() {
     let _serial = SERIAL.lock().unwrap();
     initialize();
     CHECK_ALL_FREES.store(true, Ordering::Release);

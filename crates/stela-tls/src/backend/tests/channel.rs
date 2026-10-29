@@ -223,7 +223,7 @@ fn exchange(case: Case<'_>) -> Result<Vec<u8>, ChannelError> {
 }
 #[cfg(feature = "native-reference-peer")]
 #[test]
-fn tls12_and_tls13_interoperate_with_independent_ring_for_all_suites_groups_and_signatures() {
+fn tls_interoperates_with_ring_for_every_suite() {
     let _serial = SERIAL.lock().unwrap();
     initialize();
     for suite in owner().provider().cipher_suites {

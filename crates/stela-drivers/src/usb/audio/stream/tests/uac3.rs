@@ -525,7 +525,7 @@ fn graph_units() -> Vec<u8> {
     c
 }
 #[test]
-fn uac3_mixer_signal_and_clock_selectors_and_multiplier_use_discovered_layouts() {
+fn uac3_controls_use_discovered_layouts() {
     run(graph_units(), |a| {
         assert_eq!(a.binding.graph.signal_cluster(8), Ok((2, 3)));
         assert!(a.binding.entity_clusters.contains(&(8, 101)));

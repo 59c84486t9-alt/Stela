@@ -2306,7 +2306,7 @@ fn the_vgic_signals_a_virtual_irq_that_el1_acknowledges_through_icc_iar1() {
 }
 
 #[test]
-fn sctlr_endianness_bits_are_res0_and_alignment_checks_follow_a_and_naa() {
+fn sctlr_endianness_bits_are_res0_and_alignment_follows_a_naa() {
     let mut machine = machine(&[]);
     // SCTLR_EL1.EE and E0E are RES0 without FEAT_MixedEnd.
     machine.cpu.state.x[0] = 3 << 24;

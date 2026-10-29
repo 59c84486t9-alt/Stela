@@ -202,7 +202,7 @@ fn read_poll(engine: &mut Engine, bus: &mut Bus, access: &mut Access<'_>) {
 }
 
 #[test]
-fn all_four_mounted_requests_execute_shared_sram_and_retire_only_after_action_and_end() {
+fn mounted_requests_retire_only_after_end() {
     for port in 0..4 {
         let (owner, mut bus, requests) = fixture(None, true);
         let mut pins = InterruptLatch::new();
@@ -700,8 +700,7 @@ fn action_before_later_effects_keeps_in_flight_generation_and_cannot_publish_com
 }
 
 #[test]
-fn unknown_instruction_early_end_missing_action_and_unactivated_request_preserve_real_pending_state()
- {
+fn invalid_programs_keep_pending_state() {
     for (words, expected) in [
         (
             vec![0x10, 0],
@@ -734,7 +733,7 @@ fn unknown_instruction_early_end_missing_action_and_unactivated_request_preserve
 }
 
 #[test]
-fn kept_clock_power_and_quiesce_keep_the_job_and_distinct_delay_progress() {
+fn quiesce_keeps_the_job_and_delay_progress() {
     for pause in 0..3 {
         let (owner, mut bus, requests) = fixture(None, true);
         let mut pins = InterruptLatch::new();

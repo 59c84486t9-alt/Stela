@@ -152,7 +152,7 @@ fn payload(kind: PeerCommandKind, flush: bool) -> Vec<u8> {
     }
 }
 #[test]
-fn original_peer_add_tlc_and_drain_flush_undrain_remove_have_real_ack_and_wrapped_rx() {
+fn peer_commands_complete_on_ack() {
     for (tlc, flush) in [(1, 0), (3, 1), (4, 1)] {
         exercise(&image(tlc, flush), tlc, flush);
     }

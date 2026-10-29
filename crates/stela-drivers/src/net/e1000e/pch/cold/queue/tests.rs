@@ -551,7 +551,7 @@ fn lpt_exact_devices_honor_shra_locks_ecc_and_packet_lifecycle() {
     }
 }
 #[test]
-fn lpt_link_speeds_and_same_speed_events_update_pll_emi_and_platform_ltr() {
+fn lpt_link_events_update_pll_emi_and_ltr() {
     let mut memory = Memory::new();
     let (state, _, controller) = setup_lpt(0x15a0, 0);
     let mut net = open(controller, &mut memory);
@@ -1304,7 +1304,7 @@ fn source_nvm_outcomes_compose_through_every_cold_reset_packet_and_stop() {
     }
 }
 #[test]
-fn all_fourteen_mtp_ptp_ids_and_both_real_board_policies_complete_packets_and_live_stop() {
+fn every_mtp_device_completes_packets() {
     use super::super::mtp;
     let devices: Vec<_> = (0..=u16::MAX)
         .filter(|id| mtp::Family::from_device(*id).is_some())

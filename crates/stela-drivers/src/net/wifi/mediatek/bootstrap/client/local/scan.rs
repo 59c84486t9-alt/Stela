@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     #[ignore = "oracle: STELA_MT7925_PROBE_ORACLE"]
-    fn full_source_probe_ies_and_firmware_commands_match_all_bands_streams_and_widths() {
+    fn probe_ies_and_commands_match_source() {
         let root = std::path::PathBuf::from(std::env::var_os("STELA_MT7925_PROBE_ORACLE").unwrap());
         let trace = std::fs::read(root.join("client.trace")).unwrap();
         let mut at = 0;

@@ -1369,7 +1369,7 @@ fn native_haimr_fault_after_effect_and_removed_pci_permanently_fence_public_io()
     assert_eq!(chip.borrow().accesses, before);
 }
 #[test]
-fn native_card_power_and_clock_timeline_precedes_cmd0_and_delayed_card_completion() {
+fn card_power_and_clock_precede_cmd0() {
     let chip = Chip::new(false, true);
     chip.borrow_mut().transfer_polls = 3;
     let mut host = make_host(&chip, true).unwrap();

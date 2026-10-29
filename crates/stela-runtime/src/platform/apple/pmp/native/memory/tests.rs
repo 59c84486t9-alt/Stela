@@ -115,7 +115,7 @@ fn allocated(c: &mut Client<Backing>, bus: u64) -> Allocation {
     }
 }
 #[test]
-fn shared_slot_reply_and_outgoing_prefix_survive_busy_and_refusal() {
+fn shared_slot_reply_survives_busy_and_refusal() {
     let mut backend = Backing::new();
     backend.map_steps = VecDeque::from([Outcome::Busy, Outcome::Refuse, Outcome::RetireRefuse]);
     let mut c = client(backend);
@@ -276,7 +276,7 @@ fn static_table_is_actual_read_prefix_not_mapping_permission_or_dynamic_allocati
     );
 }
 #[test]
-fn zero_reply_and_read_empty_table_are_distinct_and_abandonment_does_not_cleanup() {
+fn zero_reply_and_empty_table_are_distinct() {
     for bus in [0, 0x1000] {
         let mut c = client(Backing::new());
         c.begin_init().unwrap();
@@ -301,6 +301,11 @@ fn zero_reply_and_read_empty_table_are_distinct_and_abandonment_does_not_cleanup
         Some(Completion::Allocated(None))
     ));
     assert!(c.backend.maps.is_empty());
+}
+
+#[test]
+fn abandoned_client_does_not_clean_up() {
+    let mut c = client(Backing::new());
     let allocation = allocated(&mut c, 0x4000);
     c.claim.alive.set(false);
     assert!(c.begin_free(&allocation).is_err());

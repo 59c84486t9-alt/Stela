@@ -343,7 +343,7 @@ fn every_event_field_is_checked_before_caller_output_and_old_events_are_not_reus
     }
 }
 #[test]
-fn before_and_after_every_register_effect_fail_closed_for_both_buses_and_dma() {
+fn every_register_fault_fails_closed() {
     for length in [17, 33] {
         let (mut baseline, model, _) = fixture();
         baseline.enable(bus(0)).unwrap();
@@ -547,7 +547,7 @@ fn unchanged_linux_source_commands_and_events() {
 }
 
 #[test]
-fn write_and_power_faults_fence_both_buses_and_never_replay_a_command() {
+fn write_and_power_faults_fence_both_buses() {
     fn setup(case: usize) -> (Host, Model, Rc<Cell<usize>>) {
         let (mut h, m, drops) = fixture();
         h.enable(bus(1)).unwrap();

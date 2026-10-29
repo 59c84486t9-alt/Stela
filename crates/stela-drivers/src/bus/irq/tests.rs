@@ -532,7 +532,7 @@ fn failed_pending_read_and_timeout_keep_for_retry_without_vector_reuse() {
 }
 
 #[test]
-fn abandoned_failed_teardown_and_arming_keep_source_handler_and_tombstone() {
+fn failed_teardown_or_arming_quarantines_the_source() {
     let model = Model::new();
     let registry = registry(model.clone());
     let registration = request(registry, &model);

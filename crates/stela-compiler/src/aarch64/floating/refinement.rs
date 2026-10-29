@@ -261,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn nan_sign_and_priority_precede_suppression_and_default_selection() {
+    fn nan_operands_take_priority_over_default_selection() {
         for format in FORMATS {
             let first = format.infinity(false) | format.quiet_bit() | 3;
             let second = format.infinity(false) | 5;

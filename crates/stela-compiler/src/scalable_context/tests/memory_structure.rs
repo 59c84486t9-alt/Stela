@@ -130,7 +130,7 @@ fn all_structure_forms_dispatch_exact_bodies_and_source_maps_at_every_length() {
 }
 
 #[test]
-fn structure_scan_and_compile_share_reserved_mode_and_feature_declines() {
+fn scan_and_compile_decline_the_same_structure_accesses() {
     for class in CLASSES {
         let word = class | DESTINATION_Z31 | PREDICATE_P7 | BASE_X5;
         let operand = memory_structure::decode(word).unwrap().unwrap();

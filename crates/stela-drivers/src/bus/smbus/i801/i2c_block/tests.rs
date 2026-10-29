@@ -396,7 +396,7 @@ fn invalid_lengths_and_unsupported_old_reads_touch_neither_controller_nor_config
     assert_eq!(f.state.borrow().config_count, 0);
 }
 #[test]
-fn before_and_after_each_config_access_preserve_caller_outputs_and_owners() {
+fn config_access_faults_keep_caller_outputs_and_owners() {
     for write in [false, true] {
         let total = if write { 5 } else { 2 };
         for index in 1..=total {

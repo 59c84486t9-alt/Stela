@@ -455,7 +455,7 @@ mod tests {
         );
     }
     #[test]
-    fn validates_complete_owner_and_refuses_reservations_unknowns_and_other_routes() {
+    fn single_flat_owner_accepts_only_one_complete_unit() {
         let table = fixture();
         assert_eq!(
             single_flat_owner(&table, 0, &[8, 16]),

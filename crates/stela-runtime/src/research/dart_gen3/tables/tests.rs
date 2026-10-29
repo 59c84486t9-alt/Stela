@@ -129,7 +129,7 @@ fn checked_handoffs_execute_both_native_roots_without_rebinding_an_encoding() {
 }
 
 #[test]
-fn explicit_encodings_walk_both_geometries_and_preserve_partial_dma_and_faults() {
+fn encodings_walk_both_geometries() {
     for encoding in [Encoding::Shift4, Encoding::Shift8] {
         let entry = |address: u64| {
             address

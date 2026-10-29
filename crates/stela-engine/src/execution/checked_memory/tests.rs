@@ -223,7 +223,7 @@ impl Worker {
     }
 }
 #[test]
-fn checked_prefetch_preserves_state_and_memory_for_unmapped_and_tagged_addresses() {
+fn checked_prefetch_has_no_effect_on_bad_addresses() {
     let domain = domain();
     let mut worker = Worker::qualified(&domain, 2, 2, false);
     let writer = block(&[STR, RET]);
@@ -1375,7 +1375,7 @@ fn concurrent_native_casp_publication_is_atomic_to_ordinary_pair_readers() {
     assert_eq!(reader.read(), ITERATIONS);
 }
 #[test]
-fn native_lse_and_ordered_same_value_writers_invalidate_alias_exclusives_and_old_abis_refuse() {
+fn same_value_writers_invalidate_alias_exclusives() {
     let domain = domain();
     let mut reserved = Worker::new(&domain);
     let mut writer = Worker::qualified(&domain, 2, 2, false);
@@ -1390,6 +1390,12 @@ fn native_lse_and_ordered_same_value_writers_invalidate_alias_exclusives_and_old
         assert_eq!(registers.x[2], 1);
         assert_eq!(writer.read(), 0);
     }
+}
+
+#[test]
+fn old_context_versions_refuse_without_effects() {
+    let domain = domain();
+    let mut writer = Worker::qualified(&domain, 2, 2, false);
     for version in [0, 1, 3, u32::MAX] {
         let mut old = block(&[rmw_word(3, 0, 0, 2), RET]);
         old.requirements.context_version = version;

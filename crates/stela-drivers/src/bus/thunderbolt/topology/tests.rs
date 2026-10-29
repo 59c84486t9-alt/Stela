@@ -7,7 +7,7 @@ use crate::bus::thunderbolt::ring::{Direction, TX_DESCRIPTOR, model::*};
 use core::sync::atomic::Ordering;
 
 #[test]
-fn physical_routes_validate_each_adapter_and_usb4_and_tb_depth_limits() {
+fn routes_enforce_adapter_and_depth_limits() {
     for raw in [0x100, 0x010002, 64, 255, 1 << 48] {
         assert!(Path::new(Route::new(raw).unwrap()).is_err());
     }

@@ -475,7 +475,7 @@ fn realtek_all_initialized_profiles_select_source_cvsd_alternates_without_vendor
     }
 }
 #[test]
-fn realtek_split_coalesced_sco_and_loss_keep_hci_and_retire_partials() {
+fn realtek_sco_reassembly_retires_partials() {
     let mut s = session(Model::default());
     s.set_voice(voice(1, 0), &mut NoDma).unwrap();
     s.0.hci.io.events.push_back(vec![0xff, 1, 0x55]);

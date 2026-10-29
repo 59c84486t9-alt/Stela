@@ -474,11 +474,16 @@ mod tests {
         }
     }
     #[test]
-    fn aggregate_and_unique_file_limits_refuse_and_expected_mismatch_does_not_cache() {
+    fn unique_file_and_byte_limits_refuse_new_inputs() {
         let directory = tempfile::tempdir().unwrap(); for path in ["one", "two"] { fs::write(directory.path().join(path), b"data").unwrap(); }
         let mut inputs = Inputs::new(Limits { max_unique_bytes: 7, max_unique_files: 2, ..limits() }).unwrap(); let root = inputs.add_root(directory.path()).unwrap();
         let first = key(&mut inputs, root, "one", None, 4); let second = key(&mut inputs, root, "two", None, 4); inputs.verify(first).unwrap(); assert!(inputs.verify(second).is_err());
         assert!(inputs.prepare(&[Request { root, relative: Path::new("three"), expected_sha256: None, max_bytes: 1 }]).is_err());
+    }
+
+    #[test]
+    fn expected_hash_mismatch_is_not_cached() {
+        let directory = tempfile::tempdir().unwrap(); fs::write(directory.path().join("one"), b"data").unwrap();
         let mut inputs = Inputs::new(limits()).unwrap(); let root = inputs.add_root(directory.path()).unwrap(); let selected = key(&mut inputs, root, "one", Some(digest(b"else")), 4);
         assert!(inputs.verify(selected).is_err()); assert!(inputs.records[selected.0].observed.is_none());
     }

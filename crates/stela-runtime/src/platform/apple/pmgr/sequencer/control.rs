@@ -329,7 +329,7 @@ mod tests {
         );
     }
     #[test]
-    fn polls_and_both_copy_phases_carry_the_same_context_and_cannot_share_a_permit() {
+    fn copy_phases_share_context_but_not_permits() {
         let raw = encoded([2, 3, 4, 5, 6]);
         let mut cursor = cursor(&[
             raw,
@@ -387,7 +387,7 @@ mod tests {
         assert_eq!(cursor.control_context(), Some(context));
     }
     #[test]
-    fn malformed_context_generation_and_pause_preserve_unknownness_and_pc() {
+    fn malformed_context_keeps_unknown_state() {
         assert_eq!(Fields::new([16, 0, 0, 0, 0]), Err(Error::ControlEncoding));
         for raw in [TAG | 1 << 31, TAG | 1 << 29] {
             let mut cursor = cursor(&[raw, 0]);

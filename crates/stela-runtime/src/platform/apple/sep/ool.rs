@@ -158,7 +158,7 @@ mod tests {
         }
     }
     #[test]
-    fn registrations_are_ordered_per_owner_and_direction_and_refusals_preserve_state() {
+    fn registrations_are_ordered_per_owner_and_direction() {
         assert!(Buffers::new(0).is_err());
         assert!(Buffers::new(0x20).is_err());
         assert!(Buffers::new(0xfc).is_err());
@@ -228,7 +228,7 @@ mod tests {
         }
     }
     #[test]
-    fn input_reads_and_output_writes_use_dart_permissions_and_byte_bounds() {
+    fn io_uses_dart_permissions_and_byte_bounds() {
         let mut buffers = Buffers::new(7).unwrap();
         buffers.record(frame(4, 32)).unwrap();
         buffers.record(frame(2, 1)).unwrap();

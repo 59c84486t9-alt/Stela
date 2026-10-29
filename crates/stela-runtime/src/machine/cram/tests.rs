@@ -277,7 +277,7 @@ fn initial_register_and_aperture_must_agree_without_mutation() {
 }
 
 #[test]
-fn allocation_and_release_change_view_before_ready_and_preserve_data() {
+fn allocation_changes_view_before_ready() {
     let mut component = component(0);
     let base = component.geometry().base();
     let empty = component.read().unwrap();

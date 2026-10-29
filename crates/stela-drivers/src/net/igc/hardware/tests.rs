@@ -270,7 +270,7 @@ fn every_failed_register_read_refuses_initialization() {
 }
 
 #[test]
-fn every_mdio_error_and_missing_completion_aborts_and_releases_software_ownership() {
+fn mdio_failures_release_software_ownership() {
     let model = Model::ready(false);
     Hardware::new(&model, &model).unwrap().initialize().unwrap();
     for failure in 1..=model.mdio_count.get() {

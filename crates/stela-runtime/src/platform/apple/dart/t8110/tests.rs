@@ -41,7 +41,7 @@ fn setup_version(version: u16) -> (Dart, Ram, InterruptLatch) {
 }
 
 #[test]
-fn resume_saves_and_restores_transaction_limits_and_clamp_keeps_zero() {
+fn resume_restores_transaction_limits() {
     let mut d = Dart::new(16, None);
     let mut sink = InterruptLatch::new();
     let mut a = Access::new(0, 0, &mut sink);

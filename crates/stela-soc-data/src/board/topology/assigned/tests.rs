@@ -276,7 +276,7 @@ fn sparse_affinity_span_and_physical_cluster_boundaries_are_independent_of_count
     );
 }
 #[test]
-fn sixth_and_seventh_cluster_and_64_bit_mask_limits_do_not_alias() {
+fn cluster_mask_limits_do_not_alias() {
     for n in [6, 7] {
         let regs: Vec<_> = (0..n).map(|i| i << 8).collect();
         let (host, r, a) = fixture(&regs);

@@ -603,7 +603,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_census_gpu_is_named_once_and_m1_and_m2_are_admitted() {
+    fn every_census_gpu_is_named_once() {
         for (index, gpu) in GPUS.iter().enumerate() {
             assert!(gpu.compatible.starts_with("gpu,t"));
             assert!(
@@ -615,6 +615,10 @@ mod tests {
             assert!(gpu.firmware.starts_with("armfw_g"));
             assert!(gpu.family.kext.ends_with(gpu.family.name));
         }
+    }
+
+    #[test]
+    fn only_m1_and_m2_gpus_are_admitted() {
         let admitted: alloc::vec::Vec<_> = GPUS
             .iter()
             .filter(|gpu| gpu.admitted().is_ok())
@@ -643,6 +647,10 @@ mod tests {
         assert!(compatible_admitted("gpu,t6020"));
         assert!(!compatible_admitted("gpu,t8122"));
         assert!(!compatible_admitted("gpu,t9999"));
+    }
+
+    #[test]
+    fn only_g14g_and_g17g_send_dashboard_signals() {
         // Only the G14G and G17G kexts send dashboard signals.
         let dashboards: alloc::vec::Vec<_> = GPUS
             .iter()

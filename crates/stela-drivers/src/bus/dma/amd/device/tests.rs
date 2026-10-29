@@ -514,7 +514,7 @@ fn initial_policy_is_literal_complete_immutable_and_guarded() {
 }
 
 #[test]
-fn updates_preserve_policy_and_flush_observed_aliases_and_old_domain() {
+fn translation_updates_flush_aliases_and_old_domain() {
     let monitor = Monitor::new();
     let flags = policies();
     let Some(mut table) = construct(&monitor, &flags) else {

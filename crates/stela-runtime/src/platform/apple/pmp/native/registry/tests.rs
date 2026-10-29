@@ -364,7 +364,7 @@ fn cold_init_keeps_static_result_two_real_buffers_and_frees_only_temporary_after
     assert!(owner.initialized);
 }
 #[test]
-fn full_remote_add_set_remove_and_slot_reuse_keep_descriptor_and_object_identity() {
+fn slot_reuse_keeps_descriptor_identity() {
     let (mut owner, lab) = initialized();
     let entry = added(&mut owner, &lab, &[1, 2, 3, 4], None);
     let header = lab.borrow().headers[0];
@@ -658,7 +658,7 @@ fn publish_until(owner: &mut Owner<Backing>, lab: &Rc<RefCell<Lab>>, kind: u64) 
 }
 
 #[test]
-fn ap_zero_results_and_bad_replies_preserve_source_cleanup_and_local_prefix() {
+fn bad_replies_keep_source_cleanup() {
     let (mut owner, lab) = initialized();
     owner
         .begin_add(configuration(1), &[1, 2, 3, 4], None)

@@ -101,7 +101,7 @@ fn replenish_prefix_for_receive(
     }
 }
 #[test]
-fn completed_scan_retires_and_second_scan_uses_new_ticket_real_dma_and_completion() {
+fn second_scan_uses_a_new_ticket() {
     let bytes = bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();

@@ -721,7 +721,7 @@ mod tests {
         assert_eq!(raised.raise(), Err(WorkError::Closed));
     }
     #[test]
-    fn timer_minimum_and_pending_work_refuse_idle_and_retirement() {
+    fn pending_work_refuses_idle_and_retirement() {
         let (_, events, mut deadlines) = manual();
         deadlines.start_irq_ticks().unwrap();
         deadlines.set_timer(Some(17)).unwrap();

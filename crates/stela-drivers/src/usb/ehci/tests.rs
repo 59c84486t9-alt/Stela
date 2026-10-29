@@ -928,7 +928,7 @@ fn control_short_data_follows_status_and_qh_overlay_supersedes_stale_qtd() {
     // remain mandatory; untouched later DATA is ACTIVE and is skipped.
 }
 #[test]
-fn stale_device_pipe_and_transfer_refuse_before_io_and_preserve_current_completion() {
+fn stale_handles_refuse_before_io() {
     let (mut c, m, old, pipes) = attached();
     let first = c.submit_bulk_in(input(&pipes), 33, 1_000_000).unwrap();
     c.poll(&first).unwrap().unwrap();

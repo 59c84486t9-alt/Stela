@@ -20,7 +20,7 @@ fn power_writes(peer: &Arc<Mutex<Device>>, from: usize) -> Vec<(u8, u16)> {
 }
 
 #[test]
-fn phy_low_power_and_resume_keep_dma_and_restore_packet_traffic() {
+fn phy_low_power_resume_restores_traffic() {
     for bcm5762 in [false, true] {
         let (mut packet, pages, domain, peer) = attached(bcm5762);
         let addresses = packet.memory.as_ref().unwrap().addresses().unwrap();

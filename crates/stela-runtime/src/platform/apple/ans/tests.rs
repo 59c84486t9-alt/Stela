@@ -590,10 +590,14 @@ fn a_host_write_cache_is_reported_and_flushed_only_when_the_guest_asks() {
 }
 
 #[test]
-fn encryption_and_unknown_commands_never_complete_and_queues_bypass_the_sart() {
+fn unknown_admin_opcode_never_completes() {
     let mut rig = Rig::new();
     assert!(rig.submit(0, 0, 0xff, 0, 0, [0; 6]).is_err());
     assert_eq!(rig.bytes(CQ, 16), vec![0; 16]);
+}
+
+#[test]
+fn protected_tcb_commands_never_complete() {
     let mut rig = Rig::new();
     assert!(rig.ram.write(TCB + 64, &[1]));
     // Install an ordinary identify first, then change its protected TCB
@@ -621,6 +625,10 @@ fn encryption_and_unknown_commands_never_complete_and_queues_bypass_the_sart() {
     rig.write(ADMIN_SUBMIT, 0).unwrap();
     assert!(rig.run().is_err());
     assert_eq!(rig.bytes(CQ, 16), vec![0; 16]);
+}
+
+#[test]
+fn queues_and_tcbs_bypass_the_sart() {
     // Queues, TCBs and PRP data are physical: an Identify completes
     // with every SART entry disabled.
     let mut rig = Rig::new();

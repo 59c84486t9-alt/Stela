@@ -501,8 +501,7 @@ fn inject_write_failure(
 }
 
 #[test]
-fn each_dp_activation_write_handles_ack_loss_controller_rejection_and_observable_readback_or_handshake_timeout()
- {
+fn dp_activation_fails_closed_on_each_write_fault() {
     for target in 1..=18 {
         for fault in 0..3 {
             let f = fixture(
@@ -589,8 +588,7 @@ fn each_dp_stop_write_keeps_entire_payload_link_and_accounting_chain_on_uncertai
 }
 
 #[test]
-fn unsupported_bandwidth_mode_and_invalid_observed_dp_caps_never_publish_handshake_or_invent_caps()
-{
+fn invalid_dp_caps_are_never_published() {
     for fault in 0..3 {
         let f = fixture(Credits::LegacyBonded, 0);
         let mut peer = Peer::new(&f, false);

@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn parent_and_leaf_words_keep_exact_direction_and_address_bits() {
+    fn entry_words_encode_direction_and_address_bits() {
         let physical = 0x000a_bcde_1234_5000;
         // These literal wire words are independent of the codec's bit names.
         for (direction, expected) in [

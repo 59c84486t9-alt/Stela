@@ -59,7 +59,7 @@ fn v3_fast_queries_rw_mode_and_every_readback_byte_are_source_admitted() {
     }
 }
 #[test]
-fn v3_head_tail_and_early_tail_keep_head_provenance_and_clickpad_effects() {
+fn v3_tail_packets_keep_head_provenance() {
     for firmware in [0x050001, 0x051001, 0x054001, 0x055001] {
         let (mut c, h) = configured(firmware);
         let crc = firmware & 0x4000 != 0;

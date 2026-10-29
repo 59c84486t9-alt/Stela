@@ -137,7 +137,7 @@ fn relative_redirect_rebuilds_host_path_and_pins_the_final_range() {
     assert_eq!(sockets(&stack), 0);
 }
 #[test]
-fn proxy_and_network_authentication_have_explicit_failures_and_retire_sockets() {
+fn authentication_failures_are_explicit() {
     for (status, expected) in [
         (407, NetError::ProxyAuthentication),
         (511, NetError::NetworkAuthentication),

@@ -341,7 +341,7 @@ fn missing_quota_schema_refuses_before_binding_and_quota_fault_never_advances_re
     }
 }
 #[test]
-fn cold_binding_checks_every_rate_and_limit_through_real_ack_power_and_unbind() {
+fn cold_binding_checks_every_rate_and_limit() {
     for layout in [false, true] {
         exercise(&binding_bytes(layout), layout);
     }

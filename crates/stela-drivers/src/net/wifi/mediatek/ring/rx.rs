@@ -441,7 +441,7 @@ pub(crate) mod tests {
         device_receive(&state, &[0xa5; 100], true, 0);
     }
     #[test]
-    fn assembly_keeps_fragment_boundaries_and_drop_and_bounds_entire_chain() {
+    fn fragment_assembly_bounds_the_whole_chain() {
         let fragment = |more, drop| Fragment {
             bytes: vec![0x71; 2048],
             more,

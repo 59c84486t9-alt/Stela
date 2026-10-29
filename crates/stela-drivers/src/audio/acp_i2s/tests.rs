@@ -445,7 +445,7 @@ fn exact_generation_admission_and_active_drop_do_not_invent_native_completion() 
     device.lock().unwrap().advance(1, 128, 4);
 }
 #[test]
-fn coherent_capability_and_failed_resume_preserve_published_and_unpublished_leases() {
+fn coherent_and_resume_failures_keep_ring_leases() {
     let (mut controller, device, source) = fixture(0x50);
     controller.initialize().unwrap();
     device.lock().unwrap().coherent_fail = true;

@@ -115,7 +115,7 @@ fn retired(result: Completion<Outcome>) -> Outcome {
     }
 }
 #[test]
-fn initialization_uses_count_and_enable_reads_and_keeps_no_reset_image() {
+fn initialization_reads_count_and_enable() {
     let (mut o, s) = owner(0xf234);
     let mut l = InterruptLatch::new();
     let mut a = Access::new(0, 1, &mut l);
@@ -228,7 +228,7 @@ impl Handler for Callback {
     }
 }
 #[test]
-fn pending_read_and_registry_flag_clear_precede_busy_callback_and_disable() {
+fn pending_read_clears_before_busy_callback() {
     let (mut o, s) = owner(512);
     let mut l = InterruptLatch::new();
     let mut a = Access::new(0, 4, &mut l);

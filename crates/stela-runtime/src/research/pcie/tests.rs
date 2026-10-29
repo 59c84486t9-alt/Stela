@@ -430,7 +430,7 @@ fn map_memory(root: &mut RootComplex, access: &mut Access<'_>) {
     root.write(0x20, Width::Word, 0xc000_c000, access).unwrap();
 }
 #[test]
-fn bar_bank_and_service_receive_effects_and_preserve_native_errors() {
+fn services_receive_effects_and_keep_native_errors() {
     let mut root = machine();
     let mut latch = InterruptLatch::new();
     let mut access = Access::new(0, 120, &mut latch);

@@ -242,7 +242,7 @@ fn intel_bulk_iso_matches_source_capability_handle_flags_and_preserves_bulk_fram
 }
 
 #[test]
-fn intel_bulk_iso_validation_has_no_effects_and_delivery_failure_keeps_debit_and_bytes() {
+fn invalid_iso_submissions_have_no_effects() {
     let mut owner = session(0x18);
     let good = vec![0, 9, 1, 0, 0xaa];
     for (packet, mut credits) in [
@@ -263,6 +263,13 @@ fn intel_bulk_iso_validation_has_no_effects_and_delivery_failure_keeps_debit_and
     assert!(owner.submit_acl(&good).is_err());
     assert!(owner.hci.io.sent.is_empty());
     assert_eq!(credits, 3);
+}
+
+#[test]
+fn iso_delivery_failure_keeps_debit_and_bytes() {
+    let mut owner = session(0x18);
+    let good = vec![0, 9, 1, 0, 0xaa];
+    let mut credits = 3;
     owner.hci.io.output_error = true;
     owner.hci.io.close_error = true;
     let Error::Output { cause, packet } = owner.submit_iso(&good, &mut credits).unwrap_err() else {

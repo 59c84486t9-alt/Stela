@@ -21,7 +21,7 @@ fn commands(h: &Rc<RefCell<Hardware>>, first: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 #[test]
-fn both_generations_acknowledge_scan_intervals_and_keep_reporting_wake_and_stop() {
+fn scan_interval_changes_keep_reporting() {
     for generation in [Generation::Gen5, Generation::Gen6] {
         for interval in [20, 30, 50, 51, 80, 255, 256, 1000] {
             let (h, mut d) = target(generation);
@@ -231,7 +231,7 @@ fn calibration_uses_both_sensing_modes_and_preserves_reports_around_scan_command
     }
 }
 #[test]
-fn calibration_rejection_resumes_once_and_keeps_primary_and_cleanup_failures() {
+fn calibration_rejection_resumes_once() {
     for generation in [Generation::Gen5, Generation::Gen6] {
         for mode in [0, 2] {
             for reject_resume in [false, true] {

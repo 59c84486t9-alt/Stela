@@ -516,8 +516,7 @@ fn native_gl9767_delayed_pci_ahb_reset_ack_precedes_sdhci_reset_and_timeout_refu
 }
 
 #[test]
-fn native_gl9767_pio_flush_and_reset_reject_express_or_lost_power_decode_without_controller_access()
-{
+fn gl9767_refuses_express_or_lost_power_without_access() {
     for mutation in 0..4 {
         for reset in [false, true] {
             let mut backing = vec![0u64; 128 * 1024];

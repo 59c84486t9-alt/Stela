@@ -25,7 +25,7 @@ fn frame(poll: &InputPoll) -> &f03::Frame {
     }
 }
 #[test]
-fn f03_drains_stale_announcements_and_preserves_every_status_and_data_byte() {
+fn f03_drains_stale_announcements_and_keeps_bytes() {
     let h = hardware();
     install(&h, 0x21, 15);
     h.borrow_mut().memory[0x112] = 0x5a;

@@ -502,7 +502,7 @@ fn fifo_boundary_and_lane_or_argument_refusals_never_truncate_or_touch_hardware(
 }
 
 #[test]
-fn every_uncertain_access_and_late_readback_keeps_owners_and_unpublished_rx() {
+fn uncertain_accesses_keep_rx_unpublished() {
     let (mut successful, state) = fixture(Profile::V2);
     read(&mut successful, &mut [0; 9]).unwrap();
     let accesses = state.borrow().accesses.len();

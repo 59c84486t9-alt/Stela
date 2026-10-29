@@ -311,7 +311,7 @@ fn a_narrowed_page_address_is_not_relocatable() {
 }
 
 #[test]
-fn records_round_trip_and_refuse_every_damaged_byte_of_their_header_and_trailer() {
+fn records_refuse_any_damaged_framing_byte() {
     let source = words(&[0x9000_0020, 0x9400_0002]);
     let entry = proved(&source, 0x10).unwrap();
     let (translator, key) = (translator_id(), Digest::of(&[7; PAGE_BYTES]));

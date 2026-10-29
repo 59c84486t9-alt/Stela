@@ -340,7 +340,7 @@ fn every_supported_copper_phy_branch_initializes_without_publishing_dma() {
 }
 
 #[test]
-fn old_and_new_reset_paths_stop_all_queues_and_do_not_request_device_reset() {
+fn reset_stops_queues_without_device_reset() {
     for chip in [
         Chip::I82575,
         Chip::I82576,
@@ -404,7 +404,7 @@ fn master_reset_and_queue_disable_timeouts_stop_before_nvm_or_phy_access() {
 }
 
 #[test]
-fn firmware_locks_and_mdio_failures_are_bounded_and_released() {
+fn lock_and_mdio_failures_are_bounded() {
     for fault in [
         Fault::Firmware,
         Fault::Semaphore,
@@ -519,7 +519,7 @@ fn alternate_mac_uses_the_lan_function_and_nvm_pointer() {
 }
 
 #[test]
-fn invm_parser_skips_csr_and_rsa_payloads_and_stops_at_uninitialized_record() {
+fn invm_parser_stops_at_uninitialized_record() {
     let io = Model::new(Chip::I211, PHY_I210, false);
     for index in 0..INVM_WORDS {
         io.set(INVM + 4 * index, 0);
@@ -541,7 +541,7 @@ fn invm_parser_skips_csr_and_rsa_payloads_and_stops_at_uninitialized_record() {
 }
 
 #[test]
-fn flashless_pll_recovery_uses_d3_d0_and_restores_state_and_w1c_status() {
+fn flashless_pll_recovery_cycles_d3_and_restores_state() {
     let io = Model::new(Chip::I211, PHY_I210, false);
     io.lock_after.set(1);
     let clock = ModelClock::default();

@@ -715,7 +715,7 @@ fn abort_lockdown_halt_and_mailbox_fault_observations_survive_cleanup() {
     }
 }
 #[test]
-fn silent_tx_and_failed_physical_retirement_keep_first_fault_live_bytes_and_platform() {
+fn silent_tx_with_failed_retirement_keeps_first_fault() {
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0xa876, &mut dma);
@@ -825,7 +825,7 @@ fn mmio_start_read_and_effect_then_write_errors_cannot_reopen_or_rewrite_dma() {
 }
 
 #[test]
-fn active_tx_rx_and_cause_errors_keep_first_fault_and_failed_cleanup_owner() {
+fn active_transfer_errors_keep_first_fault() {
     for operation in 0..7 {
         for cleanup_fails in [false, true] {
             let mut backing = vec![0u64; 1024 * 1024];
@@ -1905,7 +1905,7 @@ mod native_models {
         t.close().unwrap();
     }
     #[test]
-    fn native_failed_msix_program_and_callback_mask_keep_raw_fault_and_terminal_owner() {
+    fn msix_failures_keep_raw_fault_and_terminal_owner() {
         for failed_arm in [false, true] {
             let mut backing = vec![0u64; 1024 * 1024];
             let mut dma = allocator(&mut backing);

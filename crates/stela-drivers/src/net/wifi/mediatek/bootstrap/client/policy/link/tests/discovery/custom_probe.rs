@@ -178,7 +178,7 @@ fn custom_metadata_reaches_all_three_native_band_commands_without_phy_substituti
 }
 
 #[test]
-fn custom_probe_budget_and_phy_refusals_precede_native_publication_and_allow_retry() {
+fn custom_probe_refusals_precede_publication() {
     let (mut link, model) = setup(true, true, 0);
     let before = model.response.lock().unwrap().client_commands.len();
     let heads = queue_heads(&model);

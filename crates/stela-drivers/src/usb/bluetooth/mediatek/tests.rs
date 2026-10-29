@@ -721,7 +721,7 @@ fn donor_own_vendor_match_requires_hci_class_and_observed_silicon_not_a_guessed_
     assert!(!is_candidate(hci.binding.device()));
 }
 #[test]
-fn failed_control_read_and_failed_cleanup_preserve_typed_errors_and_terminal_state() {
+fn failed_control_read_keeps_typed_errors() {
     for read in [1, 5] {
         let (mut hci, catalog, trace) = fixture(Chip::Mt7922, Fault::None);
         hci.io.fail_read = Some(read);

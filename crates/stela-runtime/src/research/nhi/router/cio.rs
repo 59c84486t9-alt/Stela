@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_and_sleep_events_follow_original_word_and_edge_order() {
+    fn events_follow_source_word_and_edge_order() {
         let mut h = Header::new(state());
         let mut events = Vec::new();
         h.write(4, &[!0, 0x101], |batch| {

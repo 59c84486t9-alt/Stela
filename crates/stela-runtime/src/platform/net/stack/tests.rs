@@ -356,7 +356,7 @@ fn ipv6_only_ra_rdnss_aaaa_and_tcp_range_are_usable_without_ipv4() {
 }
 
 #[test]
-fn a_range_arrives_whole_and_in_order_through_loss_and_reordering() {
+fn range_arrives_whole_through_loss_and_reordering() {
     let clock = TestClock::default();
     let mut lan = Lan::new(1 << 40, clock.clone());
     lan.drop_every = 97;

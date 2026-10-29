@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn cold_and_warm_resolution_preserve_identity_and_instruction_map() -> Result<()> {
+    fn resolution_keeps_identity_and_instruction_map() -> Result<()> {
         let root = tempfile::tempdir()?;
         let mut registry = LeafDispatcher::new(9, root.path().into());
         let entry = GuestAddress(0x1000);

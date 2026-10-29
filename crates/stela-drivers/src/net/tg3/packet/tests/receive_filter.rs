@@ -272,7 +272,7 @@ fn requested_filter_survives_real_rebuild_and_phy_resume_before_receive_engine_p
 }
 
 #[test]
-fn all_hash_bits_and_source_unused_alias_and_previously_completed_frame_semantics_are_real() {
+fn receive_filter_hash_matches_source() {
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
         let mut f = fixture(chip);
         let groups = (0..=255)
@@ -333,7 +333,7 @@ fn all_hash_bits_and_source_unused_alias_and_previously_completed_frame_semantic
 }
 
 #[test]
-fn ignored_table_alias_mode_or_settling_wait_cannot_publish_a_policy_or_release_original_owners() {
+fn unconfirmed_filter_updates_publish_nothing() {
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
         for fault in 0..4 {
             let mut f = fixture(chip);

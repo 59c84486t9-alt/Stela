@@ -40,7 +40,7 @@ fn ep_cmac_stop_acknowledges_w1c_before_shared_fifo_and_is_bounded_on_failure() 
 }
 
 #[test]
-fn ep_oob_namespace_fp_base_masks_and_conditional_ack_are_real_and_fallible() {
+fn ep_oob_access_uses_fp_masks_and_conditional_ack() {
     for version in [51, 52] {
         for enabled in [false, true] {
             let time = Time::default();
@@ -82,7 +82,7 @@ fn ep_oob_namespace_fp_base_masks_and_conditional_ack_are_real_and_fallible() {
 }
 
 #[test]
-fn ep_and_fp_phy_masks_and_pwm_paths_are_distinct_without_early_mac_firmware() {
+fn ep_and_fp_phy_paths_are_distinct() {
     for version in [51, 52] {
         let time = Time::default();
         let model = Model::ep(&time, version, false);

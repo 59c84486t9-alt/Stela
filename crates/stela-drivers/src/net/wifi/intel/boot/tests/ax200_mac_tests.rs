@@ -151,7 +151,7 @@ pub(super) fn country_ready_with_os<'a, O: CountryIo>(
     (country, sequence, entry)
 }
 #[test]
-fn unbound_mac_power_filter_and_remove_use_original_owner_and_real_ack_reclaim() {
+fn unbound_mac_commands_reclaim_on_ack() {
     exercise(false);
 }
 #[test]

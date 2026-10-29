@@ -328,7 +328,7 @@ fn protected_tx_keeps_session_until_descriptor_free_and_unmap_before_peer_remova
 }
 
 #[test]
-fn deferred_management_and_os_reply_are_revoked_before_mmio_after_disconnect_and_reconnect() {
+fn deferred_replies_are_revoked_on_disconnect() {
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);

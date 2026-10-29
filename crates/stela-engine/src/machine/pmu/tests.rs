@@ -456,7 +456,7 @@ fn programmed_cycle_pmis_cover_all_enable_fields_and_clear_after_full_wrap() {
 }
 
 #[test]
-fn enabled_selector_and_affinity_refusals_are_atomic_and_never_inherit_generations() {
+fn affinity_refusals_are_atomic() {
     for chip in [Chip::AppleM1, Chip::AppleM2] {
         let mut pmu = programmed(chip, CLOCK, [2, 0], 4, 1 << 18);
         // Unsupported INST_ALL on PMC2 cannot replace active cycles.

@@ -357,7 +357,7 @@ mod tests {
     use core::sync::atomic::Ordering;
 
     #[test]
-    fn configuration_channel_owns_ring_dma_and_wraps_sequence_and_rings() {
+    fn configuration_channel_wraps_sequence_and_rings() {
         use super::super::{
             channel::{Error as ChannelError, Event},
             config::{Reply, Route},

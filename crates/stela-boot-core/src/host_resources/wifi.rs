@@ -249,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn only_not_found_is_absence_and_probe_failures_keep_status_and_size() {
+    fn probe_failures_record_status_and_reported_size() {
         for status in [
             Status::NOT_FOUND,
             Status::DEVICE_ERROR,
@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn read_failures_growth_and_disappearance_preserve_status_and_never_retry() {
+    fn read_failures_record_status_without_retry() {
         for (status, bytes) in [
             (Status::NOT_FOUND, 19),
             (Status::DEVICE_ERROR, 17),

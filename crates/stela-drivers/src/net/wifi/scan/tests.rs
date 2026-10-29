@@ -372,7 +372,7 @@ fn success_requires_submission_terminal_event_and_retirement() {
 }
 
 #[test]
-fn timeout_and_cancel_keep_resources_until_real_completion_and_drain() {
+fn timeout_and_cancel_keep_resources_until_drain() {
     let (mut scanner, ticket) = scanner();
     assert!(!scanner.poll(ticket, 1099).unwrap());
     assert!(scanner.poll(ticket, 1100).unwrap());

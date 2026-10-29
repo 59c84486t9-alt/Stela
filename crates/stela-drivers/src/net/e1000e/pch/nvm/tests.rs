@@ -328,7 +328,7 @@ fn invalid_bank_checksum_marker_and_descriptor_never_get_fallback_success() {
     }
 }
 #[test]
-fn retry_count_and_hung_completion_are_finite_and_do_not_program_flash() {
+fn nvm_retries_are_bounded_without_flash_writes() {
     for layout in [Layout::Pch2, Layout::Spt] {
         let (mut nvm, state, _) = fixture(layout, 0);
         state.borrow_mut().errors = 2;

@@ -352,14 +352,12 @@ fn kept_mt7925_media_generation_refuses_before_mmio_and_preserves_current_comple
     media_generation_peer(1);
 }
 #[test]
-fn kept_hci_generation_refuses_cached_partial_timeout_and_close_before_mmio_and_preserves_current_completion()
- {
+fn stale_hci_generation_refuses_before_mmio() {
     media_generation_peer(4);
 }
 
 #[test]
-fn kept_mt7925_session_generation_refuses_cached_state_before_mmio_and_preserves_current_completion()
- {
+fn stale_mt7925_session_refuses_before_mmio() {
     media_generation_peer(3);
 }
 

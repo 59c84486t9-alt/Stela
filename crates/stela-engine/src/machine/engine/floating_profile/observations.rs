@@ -750,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn integer_kind_totals_and_pooled_length_histograms_cover_every_width_and_sign() {
+    fn integer_histograms_cover_every_width_and_sign() {
         let mut role = Role::default();
         let mut saturated = false;
         for (width, bits) in [16, 32, 64].into_iter().enumerate() {

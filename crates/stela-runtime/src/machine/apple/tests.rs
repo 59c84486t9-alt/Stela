@@ -2740,7 +2740,7 @@ fn lockdown_maps_only_its_registers_beside_the_energy_accumulators() {
 }
 
 #[test]
-fn routes_the_console_and_refuses_unmapped_and_unknown_registers() {
+fn routes_the_console_and_refuses_other_registers() {
     let console = Console::default();
     let mut devices = AppleDevices::new();
     devices

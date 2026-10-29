@@ -1036,8 +1036,7 @@ fn native_late_same_client_firmware_reset_invalidates_old_descriptors_and_credit
     retained(&f);
 }
 #[test]
-fn native_corrupt_aggregate_nested_length_and_unsolicited_dma_are_terminal_without_host_memory_access()
- {
+fn corrupt_or_unsolicited_messages_are_terminal() {
     for dma in [false, true] {
         let mut f = running();
         if dma {
@@ -1197,8 +1196,7 @@ fn large_feature_transfer() {
 }
 
 #[test]
-fn native_large_descriptor_declared_feature_fragments_once_per_credit_without_busy_mailbox_overwrite()
- {
+fn large_feature_fragments_once_per_credit() {
     large_feature_transfer();
 }
 

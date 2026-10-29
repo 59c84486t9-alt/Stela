@@ -376,7 +376,7 @@ fn crystal_selection_syscfg_always_loads_and_normal_mode_is_not_resubmitted() {
     }
 }
 #[test]
-fn every_operation_failure_is_terminal_and_keeps_pending_bytes_and_first_error() {
+fn operation_failures_are_terminal_and_keep_first_error() {
     for kind in [Kind::Ar3011, Kind::Ar3012] {
         let (owner, _, _) = model(kind, 0, false, 0, 4097);
         let operations = owner.io.steps.len();
@@ -514,7 +514,7 @@ fn real_bind_configures_only_raw_output_and_keeps_the_completed_uploader() {
 }
 
 #[test]
-fn native_body_timeout_and_failed_stop_preserve_bytes_and_terminal_raw_owner() {
+fn body_timeout_keeps_bytes_and_terminal_owner() {
     use crate::bus::dma::RegionAllocator;
     let mut backing = vec![0u64; 64 * 1024];
     let start = backing.as_mut_ptr() as u64;

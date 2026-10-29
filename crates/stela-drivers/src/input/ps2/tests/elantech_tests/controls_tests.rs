@@ -103,7 +103,7 @@ fn mutable_register_bad_attribute_and_full_retention_queue_refuse_before_effects
 }
 
 #[test]
-fn pending_bad_packet_before_live_control_keeps_fragment_without_stale_response_or_new_command() {
+fn bad_packet_before_control_keeps_its_fragment() {
     for write in [false, true] {
         let (mut c, h) = configured(4);
         let raw = [8, 0x21, 0x43, 0x11, 0x65, 0x87];
@@ -135,7 +135,7 @@ fn pending_bad_packet_before_live_control_keeps_fragment_without_stale_response_
 }
 
 #[test]
-fn mutable_register_quiesce_write_and_resume_failures_keep_acknowledged_effects_without_replay() {
+fn register_write_failures_are_not_replayed() {
     for hardware in 1..=4 {
         for stage in 0..3 {
             let (mut c, h) = configured(hardware);

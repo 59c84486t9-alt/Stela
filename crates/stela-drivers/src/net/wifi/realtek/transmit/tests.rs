@@ -123,7 +123,7 @@ fn install_profile(
     }
 }
 #[test]
-fn phydm_and_initial_iqk_use_real_dma_packets_and_fresh_status_not_consumer_release() {
+fn phydm_and_iqk_complete_on_fresh_status() {
     use super::super::firmware_control::{Control, tests::bus};
     let (phy, report) = super::super::phy::control_fixture();
     let (io, fw, _, _) = bus(report.profile());
@@ -457,7 +457,7 @@ fn native_bases_and_real_dma_consumer_control_firmware_packet_lifetime() {
     assert_eq!(device.lock().unwrap().drops, 1);
 }
 #[test]
-fn uncertain_initialization_and_completed_unmap_keep_pins_and_claim() {
+fn uncertain_initialization_keeps_pins_and_claim() {
     for operation in 1..=7 {
         let memory = Arc::new(Mutex::new(Model::default()));
         let device = Arc::new(Mutex::new(Device {

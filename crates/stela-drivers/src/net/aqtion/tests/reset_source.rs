@@ -55,7 +55,7 @@ fn reset(flb: bool, gsr: u32, spi: bool, seed: bool) -> Vec<(u32, u32, u32)> {
     boundary.effects.take()
 }
 #[test]
-fn flb_and_rbl_reset_preserve_exact_source_control_bits_and_fixed_settling() {
+fn reset_keeps_source_control_bits() {
     for flb in [false, true] {
         for gsr in [0, 0x55aa1234, 0x00ff4444, 0xdeadbeef] {
             let effects = reset(flb, gsr, true, true);

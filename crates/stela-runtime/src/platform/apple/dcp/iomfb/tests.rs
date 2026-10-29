@@ -445,7 +445,7 @@ fn power_and_parameters_follow_asahis_power_on() {
 }
 
 #[test]
-fn ioav_power_and_sleep_gate_real_scanout_and_its_completion() {
+fn power_and_sleep_gate_scanout() {
     use super::super::avipc::{COMMAND_PACKET_TYPE, Controller};
     let display = Rc::new(RefCell::new(DisplayState::new(true)));
     let screen = TestScreen(Rc::default(), Some(MODE));
@@ -581,7 +581,7 @@ fn refused_submit_reply_preflight_preserves_started_swap() {
 }
 
 #[test]
-fn surface_and_sink_faults_keep_swap_order_and_abort_cancels_without_completion() {
+fn failed_presents_keep_swap_order_until_abort() {
     struct Sink {
         attempts: Rc<RefCell<usize>>,
         frames: Rc<RefCell<Vec<Vec<u8>>>>,

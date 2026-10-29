@@ -117,7 +117,7 @@ fn unchanged_linux_adapter_controls_and_nfc_register_effects_match() {
 }
 
 #[test]
-fn adapter_lane_configured_and_credit_changes_use_dma_ack_and_readback() {
+fn adapter_changes_use_dma_ack_and_readback() {
     use super::super::adapter::{Control, Event, Operation};
     let before = 0x86454007;
     for (operation, offset, after) in [

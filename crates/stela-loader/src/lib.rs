@@ -219,7 +219,7 @@ mod tests {
         data
     }
     #[test]
-    fn reads_arm64e_and_fat_slices_and_rejects_bad_ranges() -> Result<()> {
+    fn reads_slices_and_rejects_bad_ranges() -> Result<()> {
         let arm = thin(0x0100000c, 0x80000002);
         assert_eq!(inspect(&arm, "arm")?[0].architecture, "arm64e");
         let intel = thin(0x01000007, 3);

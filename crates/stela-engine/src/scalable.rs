@@ -542,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn clone_and_scoped_view_keep_storage_independent_and_stable() -> Result<()> {
+    fn clones_and_views_keep_storage_independent() -> Result<()> {
         let mut state = ScalableState::new(length(32), true);
         let mut registers = GuestState::default();
         state.apply_mode(&mut registers, ScalableMode::new(true, true))?;

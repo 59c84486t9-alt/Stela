@@ -600,7 +600,7 @@ fn complete_source_bootstrap_owns_all_queues_and_real_runtime_transition() {
     }
 }
 #[test]
-fn partial_mac_and_initial_publication_failures_keep_guard_and_context() {
+fn publication_failures_keep_guard_and_context() {
     for chip in [Chip::Mt7921, Chip::Mt7925] {
         for fail in [0, 1] {
             let mut f = NativeFixture::new(chip);

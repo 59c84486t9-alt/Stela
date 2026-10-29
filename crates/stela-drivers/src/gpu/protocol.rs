@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn negotiation_and_response_connection_rules_and_failure_atomicity() {
+    fn header_encoding_enforces_connection_rules_atomically() {
         let mut initial = header();
         initial.operation = Operation::Negotiate;
         initial.connection = None;

@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn streams_queue_status_and_data_before_command_and_cycle_only_allocated_tags() {
+fn uas_streams_queue_status_and_data_before_command() {
     for input in [false, true] {
         for fault in [Fault::None, Fault::StatusBeforeData, Fault::CommandLast] {
             let mut memory = vec![0u64; 32 * 1024];
@@ -132,7 +132,7 @@ fn stream_errors_drain_all_contributors_or_quarantine_without_dma_reuse() {
 }
 
 #[test]
-fn streamed_discovery_block_io_and_required_flush_use_reported_lun_and_streams() {
+fn uas_io_uses_reported_lun_and_streams() {
     use crate::block::BlockDevice;
     let sparse = Lun::from_bytes([0x40, 7, 0, 3, 0, 0, 0, 0]);
     let mut target = Target::new(vec![

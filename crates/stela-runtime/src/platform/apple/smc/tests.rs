@@ -205,7 +205,7 @@ fn write_observations_preserve_zero_replies_and_request_id_wrap() {
 }
 
 #[test]
-fn write_observations_bound_storage_and_report_losses_and_refusals() {
+fn write_observations_report_losses() {
     let (mut smc, sram) = smc();
     sram.put(&[0]);
     for number in 0..WRITE_LOG_LIMIT + 3 {

@@ -230,7 +230,7 @@ fn the_uncore_monitor_takes_xnus_initialization_and_shares_a_cluster() {
 /// and SPTM's own context (bit 0 cleared) need nothing more; an enabled
 /// box's enforcement is reported as unmodeled.
 #[test]
-fn the_jit_box_holds_its_mode_and_range_and_reports_enforcement() {
+fn jit_box_holds_mode_and_range() {
     let mut registers = Registers::default();
     let mode = lookup(JIT_BOX_MODE).unwrap();
     let range = lookup(JIT_RANGE).unwrap();

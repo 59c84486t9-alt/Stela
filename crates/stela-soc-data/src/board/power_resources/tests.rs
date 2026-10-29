@@ -753,7 +753,7 @@ fn usb_port_ownership_requires_valid_number_and_no_register_range() {
 }
 
 #[test]
-fn parsing_preserves_physical_aliases_and_parents_and_rejects_broken_complete_graphs() {
+fn parsing_rejects_broken_graphs() {
     let records = [
         (1, Some(0), [0, 0]),
         (2, Some(1), [0, 0]),

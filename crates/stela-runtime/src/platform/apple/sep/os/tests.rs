@@ -615,7 +615,7 @@ impl Payload for UnusedPayload {
 }
 
 #[test]
-fn native_and_observed_services_are_advertised_and_journaled() {
+fn services_are_advertised_and_journaled() {
     let mut os = SepOs::new(None).with_services(store(), true).unwrap();
     let advertised = map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
     // OS active, then xarm, xars, sks, pnon and the observed scrd.

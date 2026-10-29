@@ -385,7 +385,7 @@ fn stale_done_cannot_complete_a_new_silent_transaction_and_busy_is_never_killed(
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 #[test]
-fn every_native_status_and_every_before_after_effect_fault_preserves_permission_and_output() {
+fn every_fault_keeps_permission_and_output() {
     for status in 0..=255u8 {
         let (mut host, state, _) = fixture();
         state.lock().unwrap().completion = status;

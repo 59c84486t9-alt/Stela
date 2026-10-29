@@ -388,7 +388,7 @@ fn dp_resource_roundtrip_preserves_real_router_and_busy_query_state() {
     channel_release(&mut channel);
 }
 #[test]
-fn each_operation_write_uncertainty_readback_and_busy_timeout_poison_and_keep() {
+fn operation_write_faults_poison_the_operation() {
     for target in 1..=2 {
         for fault in 0..3 {
             let f = fixture(Operation::AllocateDp { port: 6 });

@@ -511,7 +511,7 @@ fn native_continuation_refusals_keep_identity_without_false_completion_or_reexec
 }
 
 #[test]
-fn earlier_ack_stays_committed_when_a_later_input_faults_and_invalid_native_size_keeps_ownership() {
+fn rpc_faults_keep_committed_acks_and_ownership() {
     let mut memory = Memory::mapped();
     let mut link = effects_up(&mut memory);
     let ap1 = Stream {

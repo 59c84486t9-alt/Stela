@@ -300,7 +300,7 @@ fn extended_long_write_then_read_round_trips_with_ack_parity_and_vector() {
 }
 
 #[test]
-fn absent_slaves_and_slave_refusals_nack_and_reads_fail_parity() {
+fn refused_transfers_nack_or_fail_parity() {
     let mut latch = InterruptLatch::new();
     let mut a = Access::new(0, 0, &mut latch);
     let mut c = controller();
@@ -1284,7 +1284,7 @@ fn gen1_only_zero_control_reset_is_checked_and_kept_pauses_keep_owners() {
 }
 
 #[test]
-fn gen3_keeps_the_gen2_queue_bank_and_moves_its_fault_latches_and_counters() {
+fn gen3_moves_fault_latches_and_counters() {
     let mut c = configured(Profile::Gen3, 0x100, 256);
     let mut latch = InterruptLatch::new();
     let mut a = Access::new(0, 0, &mut latch);

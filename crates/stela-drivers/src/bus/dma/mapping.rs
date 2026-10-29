@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn abandoning_active_dma_keeps_real_backing_and_domain_and_reports_quarantine() {
+    fn abandoned_active_dma_is_quarantined_with_its_backing() {
         let released = Arc::new(AtomicUsize::new(0));
         let layout = Layout::from_size_align(4096, 4096).unwrap();
         // SAFETY: uniquely owned model RAM, released only by backing.

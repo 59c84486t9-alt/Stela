@@ -166,7 +166,7 @@ fn v4_five_contacts_oldest_pointer_middle_buttons_and_invalid_ids_follow_source(
 }
 
 #[test]
-fn v4_every_query_loss_and_late_byte_keeps_progress_and_never_replays_or_enables() {
+fn v4_query_byte_faults_never_replay() {
     for query in 1..=8 {
         for byte in 0..3 {
             for late in [false, true] {

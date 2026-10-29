@@ -6,7 +6,7 @@ fn disk(block: u32) -> RamDisk {
 }
 
 #[test]
-fn alternates_and_reopens_with_both_sector_sizes_and_payload_bounds() {
+fn reopens_with_both_sector_sizes() {
     let initial = initial_image(b"seed").unwrap();
     assert_eq!(read_image(&initial).unwrap(), Some(b"seed".to_vec()));
     assert!(initial_image(&[]).is_err());
@@ -237,7 +237,7 @@ impl BlockDevice for PowerDisk {
 }
 
 #[test]
-fn loss_before_and_after_every_write_and_flush_keeps_a_complete_generation() {
+fn power_loss_keeps_a_complete_generation() {
     for block in [512, 4096] {
         for phase in 0..4 {
             for fault in [Fault::Before(phase), Fault::After(phase)] {

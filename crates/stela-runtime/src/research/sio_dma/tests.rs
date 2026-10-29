@@ -79,7 +79,7 @@ fn original_scatter_gather_reports_only_after_peripheral_delivery() {
 }
 
 #[test]
-fn kept_clock_and_quiesce_pause_dma_and_fifo_without_completing_work() {
+fn quiesce_pauses_dma_without_completing_work() {
     let mut ram = Ram::new(RAM, 0x8000);
     ram.bytes[0x2000..0x2004].copy_from_slice(b"data");
     descriptor(&mut ram, 1, &[(BUFFER, 4)]);
@@ -184,7 +184,7 @@ fn later_dma_fault_preserves_committed_chunks_and_pinned_scatter_gather_ownershi
 }
 
 #[test]
-fn configure_and_issue_ack_real_effects_and_unknown_controls_never_ack() {
+fn commands_acknowledge_only_after_their_effects() {
     let mut ram = Ram::new(RAM, 0x8000);
     ram.bytes[0x2000..0x2004].copy_from_slice(b"word");
     descriptor(&mut ram, 8, &[(BUFFER, 4)]);

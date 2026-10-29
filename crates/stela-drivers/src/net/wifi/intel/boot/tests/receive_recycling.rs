@@ -61,7 +61,7 @@ fn rx_recycling_waits_for_target_slot_completion_when_payloads_complete_out_of_o
 }
 
 #[test]
-fn rx_recycling_visibility_and_producer_faults_keep_real_dma_and_requester() {
+fn rx_recycling_faults_keep_dma_and_requester() {
     for failure in 0..4 {
         let bytes = firmware_bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

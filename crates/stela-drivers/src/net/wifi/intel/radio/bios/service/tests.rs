@@ -324,7 +324,7 @@ unsafe impl BiosIo for ClockModel {
     }
 }
 #[test]
-fn clock_selection_requires_source_and_preserves_fallback_and_truncation() {
+fn clock_selection_requires_source() {
     for scenario in 0..8 {
         let mut session = Session::new(ClockModel(scenario));
         let result = session.external_clock();

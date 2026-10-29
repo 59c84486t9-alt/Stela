@@ -208,7 +208,7 @@ fn multi_requirements_fold_every_effect_and_preserve_four_argument_descriptor() 
 }
 
 #[test]
-fn multi_scan_and_compile_share_reserved_mode_and_feature_declines() {
+fn scan_and_compile_decline_the_same_multi_vector_loads() {
     let length = VectorLength::from_bytes(16).unwrap();
     let sme_without_sme2 = ScalableProfile::new_with_features(
         length,

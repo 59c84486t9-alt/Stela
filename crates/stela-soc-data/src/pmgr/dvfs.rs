@@ -224,7 +224,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn observations_keep_current_requested_and_busy_separate_and_unknowns_explicit() {
+    fn observations_keep_states_separate() {
         for descriptor in T8112 {
             for (current, &raw_current) in descriptor.codes().iter().enumerate() {
                 for (requested, &raw_requested) in descriptor.codes().iter().enumerate() {

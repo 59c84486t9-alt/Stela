@@ -70,7 +70,7 @@ fn started_transfers_finish_at_later_looks_like_waited_ones() {
 }
 
 #[test]
-fn native_sd_and_mmc_initialize_registers_and_complete_pio_and_adma_io() {
+fn cards_initialize_and_complete_io() {
     for kind in [Kind::Sd, Kind::Mmc] {
         for sector in [false, true] {
             for pio in [false, true] {

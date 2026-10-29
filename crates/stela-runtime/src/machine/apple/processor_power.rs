@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn clock_gate_and_release_settle_cpu_before_controller_and_client_ack() {
+    fn clock_gate_settles_cpu_before_client_ack() {
         let (roster, inventory) = projection::tests::fixture();
         let plan = projection::tests::plan(&roster, &inventory);
         let pmgr = projection::tests::model(ACTIVE);

@@ -262,8 +262,7 @@ fn decline_and_zero_buffer_stop_without_sending_delba_or_enabling_aggregation() 
 }
 
 #[test]
-fn non_strict_ht_requests_sixty_four_and_he_caps_request_at_two_fifty_six_before_response_hw_clamp()
-{
+fn ba_window_requests_follow_ht_and_he_limits() {
     for (mode, hardware_maximum, request_window, peer_window, final_window) in
         [(Mode::Ht, 32, 64, 512, 32), (Mode::He, 512, 256, 768, 512)]
     {
@@ -424,7 +423,7 @@ fn recipient_delba_cancels_pending_prepare_request_and_operational_completion() 
 }
 
 #[test]
-fn response_and_inactivity_deadlines_use_publication_and_cannot_extend_from_queueing() {
+fn deadlines_start_at_publication() {
     let mut s = station(1024);
     let session = request_sent(&mut s, 3);
     let due = s.next_tx_block_ack_deadline().unwrap();
@@ -461,7 +460,7 @@ fn response_and_inactivity_deadlines_use_publication_and_cannot_extend_from_queu
 }
 
 #[test]
-fn source_retry_burst_and_total_limits_count_wire_requests_and_reset_on_peer_acceptance() {
+fn retry_limits_count_wire_requests() {
     let mut s = station(1024);
     for attempt in 0..16 {
         if attempt >= 4 {
@@ -508,7 +507,7 @@ fn source_retry_burst_and_total_limits_count_wire_requests_and_reset_on_peer_acc
 }
 
 #[test]
-fn uncertain_prepare_and_rejected_stop_hold_identity_and_never_release_pending_tx() {
+fn uncertain_stop_never_releases_pending_tx() {
     let mut s = station(1024);
     let (ticket, session) = prepare(&mut s, 3, 0);
     assert!(matches!(

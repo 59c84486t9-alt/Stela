@@ -730,7 +730,7 @@ fn interleaved_ports_and_same_port_data_are_kept_during_led_ack() {
 }
 
 #[test]
-fn ordinary_and_wheel_mouse_packets_preserve_nine_bit_motion_and_all_detents() {
+fn mouse_packets_keep_nine_bit_motion_and_detents() {
     for wheel in [false, true] {
         let (mut c, h) = controller(Config {
             wheel,
@@ -1070,7 +1070,7 @@ fn idle_expiration_does_not_preempt_a_complete_kept_frame() {
 }
 
 #[test]
-fn explorer_negotiates_both_ids_and_keeps_five_buttons_and_wheel() {
+fn explorer_mouse_reports_five_buttons_and_wheel() {
     for no_ack in [false, true] {
         let (mut c, h) = controller(Config::default());
         h.borrow_mut().explorer_capable = true;

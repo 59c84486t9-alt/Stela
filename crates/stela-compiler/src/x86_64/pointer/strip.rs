@@ -85,7 +85,7 @@ mod tests {
 
     #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
     #[test]
-    fn native_strips_preserve_full_state_and_follow_live_masks_and_closure() {
+    fn native_pointer_strip_changes_only_its_destination() {
         use crate::GuestState;
         use core::ffi::c_void;
         unsafe extern "C" {

@@ -218,7 +218,7 @@ fn completed_address_echo_rejects_wrong_or_all_ones_control_with_valid_identity(
     assert_eq!(m.control as u8, 0xff);
 }
 #[test]
-fn each_uncertain_read_trigger_identity_and_timeout_is_explicit_and_quarantined() {
+fn uncertain_reads_are_quarantined() {
     let normal = Arc::new(Mutex::new(Model::new(0)));
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.

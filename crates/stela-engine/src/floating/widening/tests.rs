@@ -268,7 +268,7 @@ fn indexed_right_alias_preserves_high_lane_until_every_q0_output_is_complete() {
 }
 
 #[test]
-fn mixed_lanes_commit_exception_union_once_and_keep_qc_and_existing_flags() {
+fn mixed_lanes_commit_exceptions_once() {
     let mut actual = state();
     actual.fpcr |= FPCR_AH | FPCR_FZ | (ROUND_POSITIVE << FPCR_ROUNDING_SHIFT);
     actual.v[usize::from(LAST_VECTOR_REGISTER)] = singles(&[0, SINGLE_ONE, 1, SINGLE_MAXIMUM]);

@@ -67,7 +67,7 @@ fn unresolved_dependent_functions_never_publish_interior_assignments() {
     assert_eq!(parse(&template(vendor)).unwrap().len(), 2);
 }
 #[test]
-fn gpio_order_and_units_and_offset_bounds_survive_connection_decode() {
+fn gpio_connection_decode_keeps_order_units_and_bounds() {
     let raw = gpio_raw(0, 0x1b, &[31, 2, 255]);
     let gpio = parse_gpio_connection(&raw).unwrap();
     assert_eq!(gpio.pins, [31, 2, 255]);

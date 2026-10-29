@@ -107,7 +107,7 @@ mod tests {
     use std::{sync::Barrier, thread};
 
     #[test]
-    fn closure_and_claim_share_one_order_and_closed_pins_still_keep_owner() {
+    fn closure_and_claim_share_one_order() {
         for _ in 0..128 {
             let state = SupplierState::new();
             state.connected().unwrap();

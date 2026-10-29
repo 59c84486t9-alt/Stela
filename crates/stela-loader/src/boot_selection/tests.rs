@@ -57,7 +57,7 @@ fn no_variables_boot_the_only_macos() {
 }
 
 #[test]
-fn alt_boot_volume_and_one_time_commands_choose_one_boot_and_are_consumed() {
+fn one_time_boot_commands_are_consumed() {
     let other = format!("{}:{PARTITION}:{PARTITION}", VolumeType::Apfs.text()).into_bytes();
     let mut vars = variables(&[
         (Partition::System, BOOT_VOLUME, &volume(VolumeType::Apfs)),

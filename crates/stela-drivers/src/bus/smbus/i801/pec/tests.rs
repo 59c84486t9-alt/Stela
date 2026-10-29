@@ -900,7 +900,7 @@ fn byte_done_bad_packet_mid_transfer_errors_and_premature_completion_never_publi
 }
 
 #[test]
-fn byte_done_malformed_counts_and_failed_kill_bound_recovery_and_keep_owners() {
+fn malformed_block_counts_bound_recovery() {
     for length in [0, 33] {
         for stuck in [false, true] {
             let mut f = fixture(0x7e22, false);

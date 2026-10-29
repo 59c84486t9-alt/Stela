@@ -171,7 +171,7 @@ fn run(f: impl FnOnce(&mut AudioDevice<LegacyModel>)) {
     f(&mut audio);
 }
 #[test]
-fn uac1_collection_and_endpoint_rates_drive_duplex_pcm_and_controls() {
+fn uac1_rates_drive_duplex_pcm() {
     run(|a| {
         assert_eq!(a.binding.graph.protocol, UAC1);
         assert_eq!(a.binding.formats[0].channel_config, 3);

@@ -542,7 +542,7 @@ fn native_gl9750_ignored_dma_selection_cannot_publish_a_dma_command_or_output() 
 }
 
 #[test]
-fn native_gl9750_dma_error_and_failed_retirement_keep_primary_and_stale_output() {
+fn gl9750_dma_error_keeps_primary_failure() {
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: failed DMA retirement keeps every descriptor/payload backing live.

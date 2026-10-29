@@ -427,7 +427,7 @@ fn fail_actual_write(
 }
 
 #[test]
-fn every_pcie_activation_write_lost_ack_controller_error_and_readback_refusal_keeps_all_owners() {
+fn pcie_activation_write_faults_keep_all_owners() {
     for target in 1..=10 {
         for fault in 0..3 {
             let f = fixture(LaneCredits::RouterAllocated(6));

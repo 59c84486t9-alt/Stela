@@ -40,7 +40,7 @@ fn notice(raw: [u8; 2]) -> StatusEvent {
 }
 
 #[test]
-fn uac1_entity_and_memory_words_wrap_rearm_and_apply_backpressure() {
+fn uac1_streams_wrap_and_apply_backpressure() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer_configuration(&mut dma, &configuration(4));

@@ -4,7 +4,7 @@
 use super::*;
 
 #[test]
-fn link_speed_patch_uses_each_copper_speed_and_rejects_unknown_and_bus_faults() {
+fn link_speed_patch_covers_each_copper_speed() {
     for (speed, first, second) in [(0x10, 0x11, 5), (8, 0x1f, 5), (4, 0x1f, 0x3f)] {
         let time = Time::default();
         let model = Model::ready(&time);

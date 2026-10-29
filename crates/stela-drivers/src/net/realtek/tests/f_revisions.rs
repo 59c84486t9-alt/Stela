@@ -127,7 +127,7 @@ fn f_station_prefers_eri_with_validity_fallback_and_propagates_access_errors() {
 }
 
 #[test]
-fn f_and_8411_link_patches_have_distinct_100m_values_and_filter_reset_rules() {
+fn f_and_8411_link_patches_differ() {
     for version in [35, 36, 38] {
         for speed in [0x10, 8, 4] {
             let time = Time::default();

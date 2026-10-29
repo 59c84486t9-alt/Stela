@@ -261,7 +261,7 @@ fn lifecycle_unknown_tables_and_faulting_alternatives_never_create_captures() {
 }
 
 #[test]
-fn prior_bank_faults_and_shared_irq_survive_success_and_cohort_refusal() {
+fn bank_faults_survive_later_success() {
     let (mut banks, mut ram, mut sink) = setup();
     {
         let mut access = Access::new(0, 0, &mut sink);
@@ -296,7 +296,7 @@ fn prior_bank_faults_and_shared_irq_survive_success_and_cohort_refusal() {
 }
 
 #[test]
-fn assignment_and_binding_preserve_owners_geometry_and_bank_identity() {
+fn binding_keeps_owners_and_bank_identity() {
     let (banks, mut ram, mut sink) = setup();
     let refs = [&banks[0], &banks[1]];
     for (client, mapper, context) in [(0, 0xd3, 1), (0xd4, 0, 1), (1, 1, 1), (0xd4, 0xd3, 16)] {

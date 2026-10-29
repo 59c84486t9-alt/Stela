@@ -95,7 +95,7 @@ fn late_start_acknowledgement_stop_reset_and_unmap_failures_keep_owners() {
 }
 
 #[test]
-fn live_map_error_enable_clock_and_identity_loss_quarantine_old_pcm_and_shutdown_is_safe() {
+fn live_faults_quarantine_old_pcm_and_allow_shutdown() {
     for fault in 0..9 {
         let (mut controller, device, source) = ready(1, 4096);
         controller.start().unwrap();

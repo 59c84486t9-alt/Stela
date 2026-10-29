@@ -57,7 +57,7 @@ fn thread(flags: u32) -> ThreadState {
 }
 
 #[test]
-fn sign_authenticate_and_return_share_aot_hot_and_new_runtime_cache_without_keys() -> Result<()> {
+fn pointer_authentication_code_is_cached_without_keys() -> Result<()> {
     let cache = tempfile::tempdir()?;
     let program = [PACIBSP, ADD, AUTIBSP, RET];
     let mut vm = runtime(cache.path(), &program)?;
@@ -177,7 +177,7 @@ fn classic_aut_failure_writes_poison_and_continues_without_immediate_fpac_trap()
 }
 
 #[test]
-fn retab_keeps_signed_lr_and_failed_target_precedes_budget_and_stop_address() -> Result<()> {
+fn retab_failure_precedes_budget_and_stop() -> Result<()> {
     let cache = tempfile::tempdir()?;
     let mut vm = runtime(cache.path(), &[RETAB])?;
     let keys = context(1);

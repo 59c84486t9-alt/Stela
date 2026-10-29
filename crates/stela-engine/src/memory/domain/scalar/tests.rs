@@ -164,7 +164,7 @@ fn marked<P: DataPolicy>(thread: &mut MemoryThread<P>, access: &ReservationAcces
 }
 
 #[test]
-fn native_scalar_reads_zero_extend_and_preserve_ram_and_tags() {
+fn scalar_reads_zero_extend_without_writing() {
     let (_, backing, domain) = setup();
     let original = snapshot(&backing);
     let mut thread = domain.thread(controls(TagCheckFaultMode::Synchronous));
@@ -302,7 +302,7 @@ fn contiguous_views_and_cross_sca_reads_use_existing_native_service() {
 }
 
 #[test]
-fn permission_and_translation_faults_keep_guest_source_and_private_prefix() {
+fn faults_keep_guest_source_and_prefix() {
     let (system, backing, _) = setup();
     let no_read = AccessPermissions {
         readable: false,

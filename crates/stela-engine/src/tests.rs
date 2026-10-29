@@ -645,7 +645,7 @@ fn oversized_cache_files_are_rejected_before_reading_payloads() -> Result<()> {
     Ok(())
 }
 #[test]
-fn reuses_only_exact_input_and_context_and_rejects_corruption() -> Result<()> {
+fn reuses_only_matching_input_and_context() -> Result<()> {
     let root = tempfile::tempdir()?;
     let first = prepare_leaf(&source(40), GuestAddress(0x1000), root.path())?;
     assert!(!first.cache_hit);

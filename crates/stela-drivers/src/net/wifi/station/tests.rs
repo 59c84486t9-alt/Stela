@@ -417,7 +417,7 @@ fn a_lost_shared_key_exchange_restarts_at_transaction_one_like_ieee80211_auth() 
 }
 
 #[test]
-fn secured_port_needs_frontend_command_and_current_pairwise_and_group_keys() {
+fn secured_port_needs_frontend_command_and_current_keys() {
     let mut station = Station::new(LOCAL).unwrap();
     let config = configure(&mut station, PortPolicy::Controlled);
     station

@@ -506,7 +506,7 @@ fn cyapa_invalid_firmware_query_power_ack_timeout_and_irq_remain_explicit() {
 }
 
 #[test]
-fn cyapa_late_suspend_stop_and_wake_power_effects_keep_original_fault_and_caps() {
+fn late_power_faults_keep_first_fault_and_caps() {
     for target in [
         State::Sleeping,
         State::ButtonsOnly,

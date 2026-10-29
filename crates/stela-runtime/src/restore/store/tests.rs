@@ -278,7 +278,7 @@ fn verify_on_read_checks_recorded_hashes_as_reads_reach_them() {
 }
 
 #[test]
-fn random_reads_cover_stored_and_deflated_zip64_and_refuse_changed_bytes() {
+fn random_reads_refuse_changed_bytes() {
     let data: Vec<_> = (0..BLOCK_BYTES * 3 + 7).map(|i| i as u8).collect();
     for deflate in [false, true] {
         let mut s = fixture(&data, deflate);

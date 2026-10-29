@@ -186,7 +186,7 @@ fn requirements_cover_the_complete_body_and_explicit_pure_case() {
 }
 
 #[test]
-fn scan_and_compile_share_input_reserved_and_mode_declines() {
+fn scan_and_compile_decline_the_same_loads() {
     for (source, base, profile) in [
         (Vec::new(), GUEST_BASE, profile(16, true)),
         (

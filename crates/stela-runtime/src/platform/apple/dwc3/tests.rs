@@ -126,7 +126,7 @@ fn a_host_command_completion_raises_its_interrupters_shared_wire() {
 }
 
 #[test]
-fn lifecycle_keeps_partial_device_dma_on_clock_and_kept_power_and_cancels_reset_work() {
+fn power_loss_keeps_partial_dma_and_cancels_reset_work() {
     for retention in [false, true] {
         let (mut dwc, mut dart, mut ram, mut latch) = setup();
         let mut access = Access::new(0, 0, &mut latch);

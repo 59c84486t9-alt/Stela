@@ -762,7 +762,7 @@ fn exact_profiles_do_not_admit_usb_fiber_or_unimplemented_silicon_families() {
     }
 }
 #[test]
-fn native_b1_and_antigua_initialize_real_rings_transfer_and_wrap() {
+fn b1_and_antigua_rings_transfer_and_wrap() {
     for id in [0x07b1, 0x08b1, 0x11b1, 0x12b1, 0x04c0, 0x93c0] {
         let (mut net, peer, domain, dropped) = setup(id);
         net.start().unwrap();

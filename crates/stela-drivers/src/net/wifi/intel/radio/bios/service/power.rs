@@ -524,7 +524,7 @@ mod tests {
         assert_eq!(geo.profiles[0][3], EMPTY_GEO_BAND);
     }
     #[test]
-    fn ppag_and_tas_keep_raw_truncation_and_source_revision_selection() {
+    fn ppag_and_tas_follow_source_revision_selection() {
         for revision in 0..=5 {
             let bands = if revision == 0 {
                 5

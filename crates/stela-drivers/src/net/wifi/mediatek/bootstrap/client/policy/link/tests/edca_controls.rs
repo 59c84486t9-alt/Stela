@@ -32,7 +32,7 @@ fn beacon(link: &TestLink, count: u8) -> Vec<u8> {
 }
 
 #[test]
-fn owning_link_consumes_current_wmm_and_preserves_native_notice_and_association() {
+fn owning_link_consumes_current_wmm() {
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);

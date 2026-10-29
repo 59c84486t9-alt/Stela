@@ -17,7 +17,7 @@ fn chip(mmc: bool, present: bool, revision: u8) -> Rc<RefCell<Chip>> {
 }
 
 #[test]
-fn native_rts5229_revision_power_and_drive_profile_runs_changed_sd_and_mmc_io() {
+fn rts5229_profiles_run_sd_and_mmc_io() {
     let _virtual = crate::test_clock::virtualize();
     for revision in [0, 2, 15] {
         for mmc in [false, true] {
@@ -67,7 +67,7 @@ fn native_rts5229_revision_power_and_drive_profile_runs_changed_sd_and_mmc_io() 
 }
 
 #[test]
-fn native_rts5229_empty_socket_and_unknown_shared_ms_remain_owned_and_unpublished() {
+fn rts5229_empty_or_unknown_sockets_stay_unpublished() {
     let _virtual = crate::test_clock::virtualize();
     let chip = chip(false, false, 2);
     let mut host = make_host(&chip, false).unwrap();

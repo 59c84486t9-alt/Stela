@@ -218,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn extrema_group_alias_and_specials_ignore_flush_and_keep_sticky_status() {
+    fn extrema_ignore_flush_and_keep_sticky_status() {
         for format in [Format::Half, Format::Single, Format::Double] {
             for operation in [
                 AbsoluteMinMaxOperation::Minimum,

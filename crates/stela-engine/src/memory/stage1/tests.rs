@@ -462,7 +462,7 @@ fn mair_selection_shareability_and_guarded_metadata_are_preserved() {
 }
 
 #[test]
-fn config_rejects_unsupported_controls_and_keeps_asid_and_alignment() {
+fn config_rejects_unsupported_controls() {
     for inner in 0..4 {
         for outer in 0..4 {
             let mut controls = controls();

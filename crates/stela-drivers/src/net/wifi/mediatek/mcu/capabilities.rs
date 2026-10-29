@@ -414,7 +414,7 @@ mod tests {
         );
     }
     #[test]
-    fn capability_wire_sequence_shares_boot_and_station_owner_and_matches_real_response_kind() {
+    fn capability_query_matches_response_kind() {
         for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
             let mut encoder = Encoder::default();
             for _ in 0..20 {

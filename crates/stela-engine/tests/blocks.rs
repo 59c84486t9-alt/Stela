@@ -385,7 +385,7 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
 }
 
 #[test]
-fn simd_register_shifts_and_doubled_products_share_dispatch_and_persistent_code() -> Result<()> {
+fn simd_shifts_and_doubled_products_share_code() -> Result<()> {
     use stela_compiler::aarch64::simd::saturating::FPSR_QC;
     use stela_compiler::{TargetCpu, block::BlockProfile};
     let cache = tempfile::tempdir()?;
@@ -781,8 +781,7 @@ fn direct_ram_effects_survive_call_and_return_dispatch_boundaries() -> Result<()
 }
 
 #[test]
-fn discovery_follows_both_conditional_edges_calls_continuations_and_loops_without_linear_scanning()
--> Result<()> {
+fn discovery_follows_control_flow_edges() -> Result<()> {
     use stela_compiler::block::{DynamicEdgeKind, SuccessorKind};
     let cache = tempfile::tempdir()?;
     let mut runtime = BlockRuntime::new(91, cache.path().into());

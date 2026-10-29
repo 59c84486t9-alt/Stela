@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn indexed_widths_parts_and_all_lanes_registers_and_aliases_are_explicit() {
+    fn indexed_widening_decoding_is_exhaustive() {
         for (encoding, operation, part) in INDEXED_FORMS {
             for (q, shape) in SHAPES {
                 for lane in 0..=HALF_LANE_MASK {

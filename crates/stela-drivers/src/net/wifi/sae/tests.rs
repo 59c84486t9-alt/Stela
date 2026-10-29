@@ -29,7 +29,7 @@ fn counter() -> impl FnMut() -> [u8; 32] {
 }
 
 #[test]
-fn hunting_and_pecking_commits_and_derives_the_annex_j_keys() {
+fn hunting_and_pecking_derives_the_annex_j_keys() {
     let element = hunt_and_peck(PASSWORD, OWN, PEER).unwrap();
     let mask = scalar("9507a90f777a044d6a0830b91ea3d5dd70bece44e1acffb86983b5e1bf9fb322");
     let mut exchange = Exchange::with_secrets(
@@ -102,7 +102,7 @@ fn pair(derivation: Derivation) -> (Exchange, Exchange) {
 }
 
 #[test]
-fn both_derivations_agree_on_the_pmk_and_pmkid_between_station_and_ap() {
+fn derivations_agree_between_station_and_ap() {
     for derivation in [Derivation::HuntingAndPecking, Derivation::HashToElement] {
         let (mut station, mut ap) = pair(derivation);
         let (station_commit, ap_commit) = (station.commit(), ap.commit());

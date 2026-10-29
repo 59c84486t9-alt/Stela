@@ -1503,7 +1503,7 @@ fn stale_status_and_msi_request_alone_are_not_fatal_attention_causes() {
     assert!(packet.retire().is_ok());
 }
 #[test]
-fn attention_access_and_w1c_ack_failures_are_explicit_and_keep_owners() {
+fn attention_ack_failures_keep_owners() {
     // Cause reads, targeted W1C write, and ordering read after that write.
     for fault in 0..6 {
         let (mut packet, pages, domain, peer) = attach();

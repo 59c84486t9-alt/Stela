@@ -327,7 +327,7 @@ fn observer_parent_hysteresis_and_freshness_use_exact_branches() {
     assert_ne!(o.last_evaluation().unwrap().prior_pending & (1 << i), 0);
 }
 #[test]
-fn wrap_discard_and_retired_refusal_preserve_source_prefix_and_request_identity() {
+fn discards_keep_source_prefix_and_request_identity() {
     let mut o = owner();
     selection(&mut o, 1 << 8);
     o.profile.descriptors[4].selection =

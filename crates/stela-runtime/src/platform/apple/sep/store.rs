@@ -446,7 +446,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn nonces_and_commitments_survive_reopen_and_invalidation() {
+    fn nonces_and_commitments_survive_reopen() {
         let mut store = Nonces::provision(&roots(), Memory::default()).unwrap();
         assert!(store.read(0).is_err());
         let nonce = store.generate(7, &mut entropy).unwrap();

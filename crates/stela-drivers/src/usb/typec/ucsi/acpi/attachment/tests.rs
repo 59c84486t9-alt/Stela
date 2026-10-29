@@ -422,7 +422,7 @@ fn activation_bind_start_notify_suspend_resume_and_retire() {
 }
 
 #[test]
-fn resource_and_dependency_changes_refuse_commands_and_retirement() {
+fn resource_changes_refuse_commands_and_retirement() {
     let _serial = TEST_SERIAL.lock().unwrap();
     // SAFETY: fixture owns all ACPICA services; serialized singleton.
     let session = unsafe { Session::start(provider(), Mode::Hardware) }.unwrap();

@@ -152,7 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn all_four_forms_share_one_memory_plan_and_keep_feature_mode_and_source() {
+    fn pointer_forms_share_one_memory_plan() {
         for word in FORMS {
             for mode in MODES {
                 let bytes = source(&[LDR_X0_X9_8, word, STR_X0_X9_8, RET_X30]);
