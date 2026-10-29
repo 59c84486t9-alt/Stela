@@ -97,4 +97,3 @@ fn recycled_controller_dma_storage_does_not_revive_stream_or_graph_handles() {
         .unwrap();
     controller.start(fresh).unwrap();
 }
-
