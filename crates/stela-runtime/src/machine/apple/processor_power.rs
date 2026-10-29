@@ -5,8 +5,6 @@
 mod projection;
 
 use super::*;
-use crate::machine::soc::PowerStates;
-use crate::machine::soc::assigned::Plan;
 pub(super) use projection::AssignedPower;
 use projection::Request;
 use stela_contracts::adt::Node;
@@ -15,6 +13,8 @@ use stela_engine::machine::engine::CanonicalDeviceWrite;
 use stela_engine::machine::engine::ConsumedWrite;
 use stela_engine::machine::engine::ProcessorBinding;
 use stela_engine::machine::engine::ProcessorWrite;
+use stela_soc_data::board::PowerStates;
+use stela_soc_data::board::assigned::Plan;
 
 impl AppleDevices {
     /// Cold placement only. Retain `plan` and its source/roster owners through

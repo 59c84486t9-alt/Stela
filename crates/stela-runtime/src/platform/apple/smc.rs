@@ -152,7 +152,7 @@
 //! owns no second calendar offset and makes no Apple reset-epoch assumption.
 mod rtc;
 use rtc::RtcBinding;
-pub use rtc::RtcKeyProfile;
+use stela_soc_data::smc::RtcKeyProfile;
 
 use super::asc::TransitionRequest;
 use super::rtkit::Endpoint;
@@ -340,13 +340,7 @@ fn own_keys() -> [(u32, Key); 8] {
     ]
 }
 
-/// The `MBSW` bits of the wake sources the board models, from `smc-pmu`'s
-/// `event_name-bitN` names `pwrbtn` and `rtc`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct WakeBits {
-    pub power_button: Option<u8>,
-    pub rtc: Option<u8>,
-}
+use stela_soc_data::smc::WakeBits;
 
 /// What woke the SoC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -3,3 +3,5 @@
 pub mod coverage;
 
 pub mod t6000;
+
+pub mod dvfs;

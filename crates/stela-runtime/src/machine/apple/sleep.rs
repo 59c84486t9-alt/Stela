@@ -204,15 +204,11 @@ impl AppleDevices {
 mod tests {
     use super::super::{AicLayout, Range};
     use super::*;
-    use crate::machine::soc::SmcController;
-    use crate::platform::apple::{
-        rtkit::Endpoint,
-        smc::{self, WakeBits},
-        spmi::SpmiSlave,
-        wake,
-    };
+    use crate::platform::apple::{rtkit::Endpoint, smc, spmi::SpmiSlave, wake};
     use alloc::vec::Vec;
     use stela_engine::machine::engine::Devices;
+    use stela_soc_data::board::SmcController;
+    use stela_soc_data::smc::WakeBits;
 
     const REGION: u64 = 0x2_3fe0_0000;
     const MASKS: u64 = 0x2_3d00_4008;

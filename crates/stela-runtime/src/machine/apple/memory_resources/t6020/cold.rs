@@ -11,14 +11,14 @@ use super::Prepared;
 use super::T6020Memory;
 use super::validate_ram;
 use crate::machine::apple::AppleDevices;
-use crate::machine::soc::PowerOwner;
-use crate::machine::soc::PowerStates;
 use crate::platform::apple::pmgr;
 use crate::platform::apple::pmgr::Pmgr;
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 use stela_contracts::bus::LifecycleState;
 use stela_contracts::bus::Width;
 use stela_engine::memory::RegisteredSystemRam;
+use stela_soc_data::board::PowerOwner;
+use stela_soc_data::board::PowerStates;
 use stela_soc_data::pmgr::coverage;
 use stela_soc_data::pmgr::coverage::Consumer;
 use stela_soc_data::pmgr::coverage::LifecycleSinks;
@@ -331,12 +331,10 @@ fn resolved_input(power: &PowerStates, input: coverage::DomainId) -> bool {
     physical
 }
 fn contains(descriptor: &T6020Memory, address: u64) -> bool {
-    descriptor
-        .apertures
-        .iter()
-        .any(|&start| address >= start && address - start < super::t6020::APERTURE_BYTES)
-        || address >= descriptor.ptd.physical
-            && address - descriptor.ptd.physical < stela_soc_data::ptd::PTD_BYTES
+    descriptor.apertures.iter().any(|&start| {
+        address >= start && address - start < stela_soc_data::mcc::t6020::APERTURE_BYTES
+    }) || address >= descriptor.ptd.physical
+        && address - descriptor.ptd.physical < stela_soc_data::ptd::PTD_BYTES
         || address >= descriptor.auxiliary.0
             && address - descriptor.auxiliary.0 < descriptor.auxiliary.1
 }
@@ -346,9 +344,9 @@ mod tests {
     use super::*;
     use alloc::boxed::Box;
     use {
-        crate::machine::soc::ClockRole, crate::machine::soc::PowerResource,
         crate::platform::apple::pmgr::PowerState, stela_contracts::bus::Access,
-        stela_contracts::interrupt::InterruptLatch, stela_soc_data::pmgr::coverage::Admission,
+        stela_contracts::interrupt::InterruptLatch, stela_soc_data::board::ClockRole,
+        stela_soc_data::board::PowerResource, stela_soc_data::pmgr::coverage::Admission,
         stela_soc_data::pmgr::coverage::Domain, stela_soc_data::pmgr::coverage::DomainId,
     };
     const SUPPLY: u64 = 0x1000;
@@ -377,11 +375,11 @@ mod tests {
         let fixture = super::super::tests::fixture_owner(count);
         let descriptor = fixture.descriptor.clone();
         let configuration = Configuration::clear_software_controls(descriptor.layout().unwrap());
-        let power = PowerStates {
-            blocks: vec![(SUPPLY, 0x100)],
-            registers: vec![SUPPLY],
-            domains: vec![domain(1, Some(SUPPLY), [None; 4])],
-            resources: vec![PowerResource {
+        let power = stela_soc_data::board::fixture_support::power_states_fixture(
+            vec![(SUPPLY, 0x100)],
+            vec![SUPPLY],
+            vec![domain(1, Some(SUPPLY), [None; 4])],
+            vec![PowerResource {
                 name: "authored-source-mcc".into(),
                 clocks: vec![],
                 clock_role: ClockRole::Consumer,
@@ -389,8 +387,7 @@ mod tests {
                 owner: Some(PowerOwner::Mmio(descriptor.ptd.physical)),
                 admission: Admission::Required,
             }],
-            implicit: vec![],
-        };
+        );
         (
             fixture.source_locks.clone(),
             descriptor,
@@ -468,7 +465,7 @@ mod tests {
                 devices
                     .bus
                     .read(
-                        parts.1.apertures[0] + super::super::t6020::CACHE_SIZE,
+                        parts.1.apertures[0] + stela_soc_data::mcc::t6020::CACHE_SIZE,
                         Width::Word,
                         &mut access
                     )

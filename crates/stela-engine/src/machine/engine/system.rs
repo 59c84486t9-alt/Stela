@@ -1535,9 +1535,11 @@ mod tests {
         enabled: bool,
         execute_inside_only: bool,
     ) {
-        use crate::machine::ctrr::{self, Field, Generation, LockRegion};
-        match ctrr::generation(machine.profile.chip) {
-            Generation::A => {
+        use crate::machine::ctrr::{self, Field, LockRegion};
+        use stela_contracts::ctrr::Generation;
+        match stela_contracts::ctrr::generation(machine.profile.chip) {
+            None => panic!("fixture requires an Apple CTRR model"),
+            Some(Generation::A) => {
                 let mut cluster = machine.cpu.ctrr.borrow_mut();
                 let level = usize::from(el == 2);
                 cluster.write(level, Field::Lower, first).unwrap();
@@ -1551,7 +1553,7 @@ mod tests {
                 };
                 cluster.write(level, Field::Control, control).unwrap();
             }
-            Generation::Ctrr3 => {
+            Some(Generation::Ctrr3) => {
                 assert!(
                     !execute_inside_only,
                     "CTXR execution fields remain unqualified"

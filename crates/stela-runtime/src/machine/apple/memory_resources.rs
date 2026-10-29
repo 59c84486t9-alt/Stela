@@ -1,7 +1,5 @@
 //! Prepared direct MCC/AMCC/PTD resources. No native RAM/DSB authority is
 //! manufactured here and no engine mount is enabled by constructing this object.
-use crate::machine::soc::DirectMemoryCache;
-use crate::machine::soc::MemoryController;
 use crate::platform::apple::amcc::Amcc;
 use crate::platform::apple::mcc::Configuration;
 use crate::platform::apple::mcc::Controller;
@@ -18,6 +16,8 @@ use stela_contracts::bus::refuse;
 use stela_contracts::interrupt::Wire;
 use stela_soc_data::amcc::Layout;
 use stela_soc_data::amcc::Register;
+use stela_soc_data::board::DirectMemoryCache;
+use stela_soc_data::board::MemoryController;
 
 // The mount configures these actual resources; it must be able to name their
 // typed configuration, lifecycle and original register/publication geometry.
@@ -446,8 +446,8 @@ impl MmioDevice for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::soc::PtdBank;
     use crate::platform::apple::mcc::RequestKind;
+    use stela_soc_data::board::PtdBank;
 
     use alloc::{boxed::Box, vec};
     use stela_contracts::bus::Bus;

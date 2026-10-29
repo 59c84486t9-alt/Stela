@@ -29,6 +29,7 @@ amd-commands = ["dep:cc"]
 metal = []
 
 [dependencies]
+stela-driver-core = { path = "../stela-driver-core" }
 stela-crypto = { path = "../stela-crypto", optional = true }
 # BIP-CMAC uses the shared checked AES backend; expanded keys clear on retirement.
 aes = { version = "0.8", default-features = false, features = ["zeroize"] }

@@ -25,7 +25,6 @@ use {
     stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire,
 };
 
-pub const BYTES: u64 = 0x4000;
 const NAME: &str = "Apple I2C";
 const TX: u64 = 0x00;
 const RX: u64 = 0x04;

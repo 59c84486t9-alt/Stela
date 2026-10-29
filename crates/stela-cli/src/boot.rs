@@ -112,7 +112,7 @@ impl Check {
                 .join(stela_loader::boot_bundle::DEVICE_TREE_FILE),
         )
         .with_context(|| format!("{} has no DeviceTree", self.bundle.display()))?;
-        let mut board = stela_runtime::machine::soc::board(&tree)
+        let mut board = stela_soc_data::board::board(&tree)
             .map_err(|reason| anyhow::anyhow!("the engine refuses this board: {reason}"))?;
         let mount = mount(&self.bundle, &tree, &mut board).map_err(|reason| {
             anyhow::anyhow!("the engine refuses to mount this board: {reason}")
@@ -158,7 +158,7 @@ impl Check {
 fn mount(
     bundle: &std::path::Path,
     tree: &[u8],
-    board: &mut stela_runtime::machine::soc::Board,
+    board: &mut stela_soc_data::board::Board,
 ) -> std::result::Result<serde_json::Value, String> {
     use stela_runtime::machine::{
         apple::{ConsoleBusy, ConsoleSink, Scanout, ScanoutFormat, ScanoutMode, UsbCables},

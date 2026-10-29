@@ -62,14 +62,7 @@ impl<F: FnMut(&mut [u8]) -> Result<(), &'static str>> Entropy for F {
     }
 }
 
-/// The SEP's effective production status and security mode. The SEP shares
-/// the AP's fuses, so Stela's SEP reports what the boot chain set for the AP
-/// (`/chosen` `effective-production-status-ap`, `effective-security-mode-ap`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SecurityMode {
-    pub production: bool,
-    pub secure: bool,
-}
+use stela_soc_data::sep::SecurityMode;
 
 pub struct Sep {
     mailbox: Asc,

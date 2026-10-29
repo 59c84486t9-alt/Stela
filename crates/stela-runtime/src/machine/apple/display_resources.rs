@@ -187,7 +187,7 @@ mod tests {
                 [873; 4],
                 false,
                 "DCPEXT0",
-                dcp::ExternalIdentity::Numbered(0),
+                stela_soc_data::dcp::ExternalIdentity::Numbered(0),
                 Box::new(Screen),
                 (owners[1], 5),
                 None,
@@ -290,13 +290,13 @@ mod tests {
         assert!(devices.bus.route(SHARED, Width::Word).is_err());
     }
     use {
-        crate::machine::soc::DirectMemoryCache, crate::machine::soc::MemoryController,
-        crate::machine::soc::PtdBank, crate::platform::apple::mcc,
-        crate::platform::apple::mcc::Configuration, crate::platform::apple::ptd,
-        stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState,
-        stela_contracts::bus::MmioError, stela_contracts::interrupt::InterruptLatch,
-        stela_soc_data::amcc::Layout, stela_soc_data::amcc::LockGroup,
-        stela_soc_data::amcc::Register,
+        crate::platform::apple::mcc, crate::platform::apple::mcc::Configuration,
+        crate::platform::apple::ptd, stela_contracts::bus::Lifecycle,
+        stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioError,
+        stela_contracts::interrupt::InterruptLatch, stela_soc_data::amcc::Layout,
+        stela_soc_data::amcc::LockGroup, stela_soc_data::amcc::Register,
+        stela_soc_data::board::DirectMemoryCache, stela_soc_data::board::MemoryController,
+        stela_soc_data::board::PtdBank,
     };
     fn prepared() -> memory_resources::Prepared {
         let reg = |offset, mask, value| Register {

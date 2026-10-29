@@ -9,10 +9,10 @@
 //! native PMP services, DVFS completion or an AP AIC wire. The PMP's PTD duties
 //! the drivers wait for are modeled behaviorally (`pmp::duties`).
 use super::dcs::NativeDcs;
-use crate::machine::soc::MemoryCache;
 use crate::platform::apple::dcs::native::ChannelProgress;
 pub use crate::platform::apple::dcs::native::{CHANNEL_STRIDE, CHANNELS, ChannelConfiguration};
 use crate::platform::apple::pmp::duties::Duties;
+use stela_soc_data::board::MemoryCache;
 
 use crate::platform::apple::ptd::Ptd;
 #[cfg(test)]
@@ -123,7 +123,7 @@ impl Prepared {
     /// Cache status/capacity/quota/flush effects remain explicitly unavailable.
     pub fn initialize_amcc_locks(
         &self,
-        controller: crate::machine::soc::MemoryController,
+        controller: stela_soc_data::board::MemoryController,
         programmed: stela_soc_data::amcc::Programmed,
         lifecycle: LifecycleState,
     ) -> Result<amcc::LockResource, &'static str> {
@@ -337,7 +337,7 @@ impl crate::machine::apple::AppleDevices {
 mod tests {
     use super::*;
     use crate::machine::apple::AppleDevices;
-    use crate::machine::soc::PtdBank;
+    use stela_soc_data::board::PtdBank;
 
     use alloc::{boxed::Box, vec};
     use core::{cell::UnsafeCell, ptr::NonNull};

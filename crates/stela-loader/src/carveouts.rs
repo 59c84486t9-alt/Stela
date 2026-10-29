@@ -26,7 +26,7 @@
 //!
 //! The panic region, carveout 98, is XNU's panic buffer, and every SoC with
 //! hand-off facts gets it ([`PANIC`]; LLB sizes it alike on every SoC,
-//! `machine::soc::PANIC_REGION_BYTES`). iBoot writes it as `/pram reg` (base,
+//! `machine::board::PANIC_REGION_BYTES`). iBoot writes it as `/pram reg` (base,
 //! size; 26A434 J473 iBoot 0x23028 calling 0x24d70, only when `/pram`
 //! exists) and its size as the u32 `/chosen embedded-panic-log-size`
 //! (0x24420). 26A434 XNU's `check_for_panic_log` (kernel 0xfffffe000c4d8790,
@@ -52,7 +52,7 @@ use crate::kernel_collection::PAGE_BYTES;
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
 pub use stela_formats::boot_bundle::schema::Placed;
-use stela_runtime::machine::soc;
+use stela_soc_data::board;
 
 pub const MEMORY_MAP: &str = "/chosen/carveout-memory-map";
 const SGX: &str = "/arm-io/sgx";
@@ -76,7 +76,7 @@ const fn carveout(id: u16, bytes: u64) -> Carveout {
 }
 
 /// Carveout 98, the panic region, at the size LLB gives it on every SoC.
-pub const PANIC: Carveout = carveout(soc::PANIC_REGION_ID, soc::PANIC_REGION_BYTES);
+pub const PANIC: Carveout = carveout(board::PANIC_REGION_ID, board::PANIC_REGION_BYTES);
 
 /// `id: bytes` pairs as ordinary fixed-size [`Carveout`]s, in table order.
 macro_rules! table {
@@ -324,7 +324,7 @@ pub fn table(chip_id: u32) -> Option<&'static [Carveout]> {
 /// table when read, then the panic region on every SoC with hand-off facts.
 pub fn for_chip(chip_id: u32) -> Vec<Carveout> {
     let fixed = table(chip_id).unwrap_or_default();
-    let panic = soc::handoff(chip_id).map(|_| PANIC);
+    let panic = board::handoff(chip_id).map(|_| PANIC);
     fixed.iter().copied().chain(panic).collect()
 }
 
@@ -480,7 +480,7 @@ pub fn gaps(tree: &DeviceTree, chip_id: Option<u32>) -> Vec<String> {
              absent"
         )),
     }
-    if chip_id.and_then(soc::handoff).is_none() {
+    if chip_id.and_then(board::handoff).is_none() {
         gaps.push(format!(
             "{PRAM} reg, /chosen {PANIC_LOG_SIZE}: no hand-off facts for this SoC; the kernel \
              keeps no panic buffer"

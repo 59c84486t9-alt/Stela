@@ -88,7 +88,7 @@ struct Services {
 
 /// The SEP page that scales discovery capacities: 16 KiB, since
 /// `AppleSEPManager::start` 0x2d67308 selects it from the SEP node's `aarch64`
-/// property, which `soc::sep_device` requires.
+/// property, which `stela_soc_data::board::sep_device` requires.
 pub const SEP_PAGE_BYTES: u32 = 0x4000;
 /// Native implementation resource bound, not a firmware protocol constant.
 const MAX_PENDING_REQUESTS: usize = 256;

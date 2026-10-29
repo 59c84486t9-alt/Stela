@@ -5,7 +5,7 @@
 //! through their DART's `compatible`) and the kernel's drivers bind to a
 //! device through its `compatible`, and would then program hardware the
 //! machine does not have. A node whose `compatible` names no modeled device
-//! (`stela_runtime::machine::soc::models`) loses that property and keeps the
+//! (`stela_soc_data::board::models`) loses that property and keeps the
 //! rest, so its `reg`, phandle and children stay where software that only
 //! reads them expects them. The root, `/arm-io` and each `/cpus` child keep
 //! theirs: they describe the board, its I/O fabric and the PEs the engine
@@ -51,8 +51,8 @@
 //! watchdog gets an empty `no-pmu`, the board fact the kernel tests for.
 //!
 //! A role-claimed coprocessor node, and each child its model owns, also gets
-//! the boot-chain facts that model declares (`soc::model_boot_properties`,
-//! `soc::ChildModel`), such as a native RTKit's preloaded state or ANS2's
+//! the boot-chain facts that model declares (`board::model_boot_properties`,
+//! `board::ChildModel`), such as a native RTKit's preloaded state or ANS2's
 //! empty register tuning lists.
 //!
 //! Some peripherals bind by `name`/`device_type` without a `compatible`.
@@ -76,7 +76,7 @@
 //! explicitly refuses their overlapping ownership rather than choosing one.
 use crate::apple_device_tree::{DeviceTree, Node};
 use alloc::{format, string::String, vec::Vec};
-use stela_runtime::machine::soc;
+use stela_soc_data::board;
 
 const COMPATIBLE: &str = "compatible";
 const DEFAULTS: &str = "/defaults";
@@ -149,7 +149,7 @@ fn modeled_dart(node: &Node) -> bool {
         return false;
     };
     if !compatibles(node)
-        .any(|name| soc::models(name, |key| node.property(key).map(|p| p.value.as_slice())))
+        .any(|name| board::models(name, |key| node.property(key).map(|p| p.value.as_slice())))
     {
         return false;
     }
@@ -170,7 +170,7 @@ fn modeled_dart(node: &Node) -> bool {
     let mut mappers = node
         .children
         .iter()
-        .filter(|child| named(child, soc::IOMMU_MAPPER));
+        .filter(|child| named(child, board::IOMMU_MAPPER));
     if translations != 1 && mappers.clone().next().is_some() {
         return false;
     }
@@ -207,13 +207,13 @@ fn modeled_dart(node: &Node) -> bool {
 fn modeled_client(node: &Node) -> bool {
     // Only NOR-backed controllers have a modeled SPI slave. Other SPI
     // controllers must not bind drivers for absent peripherals.
-    if named(node, soc::SPI) && !node.children.iter().any(|child| named(child, soc::NOR)) {
+    if named(node, board::SPI) && !node.children.iter().any(|child| named(child, board::NOR)) {
         return false;
     }
     !is_dart(node)
-        && !named(node, soc::IOMMU_MAPPER)
+        && !named(node, board::IOMMU_MAPPER)
         && compatibles(node)
-            .any(|name| soc::models(name, |key| node.property(key).map(|p| p.value.as_slice())))
+            .any(|name| board::models(name, |key| node.property(key).map(|p| p.value.as_slice())))
 }
 
 /// The IOMMU, GPIO and interrupt-controller phandles that visible clients
@@ -225,7 +225,7 @@ fn client_providers(node: &Node, parents: &mut Vec<u32>) {
         parents.push(parent);
     }
     if modeled_client(node)
-        && named(node, soc::SPI)
+        && named(node, board::SPI)
         && let Some(phandle) = node
             .property("function-spi_cs0")
             .and_then(|p| p.value.get(..4))
@@ -244,7 +244,7 @@ fn client_providers(node: &Node, parents: &mut Vec<u32>) {
 }
 
 fn kept_mapper(node: &Node, parents: &[u32]) -> bool {
-    named(node, soc::IOMMU_MAPPER)
+    named(node, board::IOMMU_MAPPER)
         && node
             .property(PHANDLE)
             .and_then(|property| property.as_u32())
@@ -253,7 +253,7 @@ fn kept_mapper(node: &Node, parents: &[u32]) -> bool {
 
 /// Whether the machine models `node` and it serves a visible device.
 fn modeled(node: &Node, parents: &[u32]) -> bool {
-    if named(node, soc::GPIO) {
+    if named(node, board::GPIO) {
         node.property(PHANDLE)
             .and_then(|p| p.as_u32())
             .is_some_and(|p| parents.contains(&p))
@@ -263,11 +263,11 @@ fn modeled(node: &Node, parents: &[u32]) -> bool {
                 .children
                 .iter()
                 .any(|child| kept_mapper(child, parents))
-    } else if named(node, soc::SART) {
+    } else if named(node, board::SART) {
         node.property(PHANDLE)
             .and_then(|p| p.as_u32())
             .is_some_and(|p| parents.contains(&p))
-    } else if named(node, soc::IOMMU_MAPPER) {
+    } else if named(node, board::IOMMU_MAPPER) {
         kept_mapper(node, parents)
     } else {
         modeled_client(node)
@@ -279,7 +279,7 @@ fn modeled(node: &Node, parents: &[u32]) -> bool {
 fn unmodeled_mappers(node: &Node, mappers: &mut Vec<u32>) {
     for child in &node.children {
         if !modeled_dart(node)
-            && named(child, soc::IOMMU_MAPPER)
+            && named(child, board::IOMMU_MAPPER)
             && let Some(phandle) = child.property(PHANDLE).and_then(|p| p.as_u32())
         {
             mappers.push(phandle);
@@ -352,7 +352,7 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
         visible_paths(
             &tree.root,
             "",
-            &|node| named(node, soc::WATCHDOG),
+            &|node| named(node, board::WATCHDOG),
             &mut watchdogs,
         );
         for path in watchdogs {
@@ -407,7 +407,7 @@ fn hide_unused_spmi(tree: &mut DeviceTree, hidden: &mut Vec<String>) {
     }
 
     let mut buses = Vec::new();
-    visible_paths(&tree.root, "", &|node| named(node, soc::SPMI), &mut buses);
+    visible_paths(&tree.root, "", &|node| named(node, board::SPMI), &mut buses);
     for path in buses {
         let bus = tree.node(&path).expect("visited SPMI path");
         if bus.children.iter().any(target)
@@ -430,7 +430,7 @@ fn hide_unused_spmi(tree: &mut DeviceTree, hidden: &mut Vec<String>) {
 /// a service for a controller that was removed. The final retirement pass also
 /// removes raw display-subsystem advertisements for a hidden pipe.
 fn hide_incomplete_external_outputs(tree: &mut DeviceTree, hidden: &mut Vec<String>) {
-    for profile in soc::EXTERNAL_OUTPUTS {
+    for profile in board::EXTERNAL_OUTPUTS {
         let paths = [profile.controller, profile.expert, profile.pipe]
             .map(|name| format!("/arm-io/{name}"));
         if tree.node(&paths[0]).is_none()
@@ -446,13 +446,17 @@ fn hide_incomplete_external_outputs(tree: &mut DeviceTree, hidden: &mut Vec<Stri
         let pipe = tree.node(&paths[2]);
         let qualified = profile.admitted
             && controller.is_some_and(|n| {
-                named(n, soc::ASC)
+                named(n, board::ASC)
                     && n.property("role")
                         .is_some_and(|p| p.value == profile.role_property)
-                    && n.children.iter().filter(|c| named(c, soc::RTBUDDY)).count() == 1
                     && n.children
                         .iter()
-                        .find(|c| named(c, soc::RTBUDDY))
+                        .filter(|c| named(c, board::RTBUDDY))
+                        .count()
+                        == 1
+                    && n.children
+                        .iter()
+                        .find(|c| named(c, board::RTBUDDY))
                         .is_some_and(|nub| {
                             profile.external_index.is_none_or(|index| {
                                 nub.property("external-index").and_then(|p| p.as_u32())
@@ -461,12 +465,12 @@ fn hide_incomplete_external_outputs(tree: &mut DeviceTree, hidden: &mut Vec<Stri
                         })
             })
             && expert.is_some_and(|n| {
-                named(n, soc::DCP_EXPERT)
+                named(n, board::DCP_EXPERT)
                     && n.property("role")
                         .is_some_and(|p| p.value == profile.role_property)
                     && n.property("join-power-plane").and_then(|p| p.as_u32()) == Some(1)
                     && n.property("reg").is_none()
-                    && soc::DCP_EXPERT_HARDWARE_FEATURES
+                    && board::DCP_EXPERT_HARDWARE_FEATURES
                         .iter()
                         .all(|key| n.property(key).is_none())
             })
@@ -645,7 +649,7 @@ fn hide_unprovided_buttons(tree: &mut DeviceTree, hidden: &mut Vec<String>) {
     visible_paths(
         &tree.root,
         "",
-        &|node| named(node, soc::BUTTONS),
+        &|node| named(node, board::BUTTONS),
         &mut buttons,
     );
     for path in buttons {
@@ -681,7 +685,7 @@ fn publish_gpu_ttbat(tree: &mut DeviceTree, notes: &mut Vec<String>) {
     visible_paths(
         &tree.root,
         "",
-        &|node| compatibles(node).any(soc::admitted_gpu),
+        &|node| compatibles(node).any(board::admitted_gpu),
         &mut gpus,
     );
     for path in gpus {
@@ -749,7 +753,7 @@ fn visit(
     node: &mut Node,
     path: &str,
     parents: &[u32],
-    inherited: &[&soc::ChildModel],
+    inherited: &[&board::ChildModel],
     hidden: &mut Vec<String>,
 ) {
     let inherited_model = inherited
@@ -764,7 +768,7 @@ fn visit(
     }
     let own: Vec<(&str, &[u8])> = compatibles(node)
         .flat_map(|name| {
-            soc::model_boot_properties(name, |key| node.property(key).map(|p| p.value.as_slice()))
+            board::model_boot_properties(name, |key| node.property(key).map(|p| p.value.as_slice()))
                 .iter()
                 .copied()
         })
@@ -773,9 +777,9 @@ fn visit(
         node.set_property(key, value.to_vec())
             .expect("static native boot property");
     }
-    let owned: Vec<&soc::ChildModel> = compatibles(node)
+    let owned: Vec<&board::ChildModel> = compatibles(node)
         .flat_map(|name| {
-            soc::model_children(name, |key| node.property(key).map(|p| p.value.as_slice())).iter()
+            board::model_children(name, |key| node.property(key).map(|p| p.value.as_slice())).iter()
         })
         .chain(inherited_model.into_iter().flat_map(|model| model.children))
         .collect();
@@ -1044,7 +1048,7 @@ mod tests {
                 vec![
                     original.clone(),
                     typed(
-                        node("admitted", Some(soc::DISPEXT.as_bytes()), vec![]),
+                        node("admitted", Some(board::DISPEXT.as_bytes()), vec![]),
                         b"ext-display-subsystem\0",
                     ),
                     typed(
@@ -1228,14 +1232,14 @@ mod tests {
     #[test]
     fn spmi_targets_and_external_providers_keep_colliding_buses_explicit() {
         let pmu = || node("pmu", Some(b"pmu,spmi\0"), vec![]);
-        let mut provider_client = node("provider-client", Some(soc::UART.as_bytes()), vec![]);
+        let mut provider_client = node("provider-client", Some(board::UART.as_bytes()), vec![]);
         provider_client
             .set_property(
                 "function-spmi_access",
                 [20u32.to_le_bytes(), 1u32.to_le_bytes()].concat(),
             )
             .unwrap();
-        let mut interrupt_client = node("interrupt-client", Some(soc::UART.as_bytes()), vec![]);
+        let mut interrupt_client = node("interrupt-client", Some(board::UART.as_bytes()), vec![]);
         interrupt_client
             .set_property(
                 "interrupt-parent",
@@ -1268,7 +1272,7 @@ mod tests {
         unavailable
             .set_property("function-spmi_access", 10u32.to_le_bytes().to_vec())
             .unwrap();
-        let mut ignored = node("ignored", Some(soc::UART.as_bytes()), vec![]);
+        let mut ignored = node("ignored", Some(board::UART.as_bytes()), vec![]);
         ignored.set_property(IGNORE, vec![]).unwrap();
         ignored
             .set_property("interrupt-parent", 10u32.to_le_bytes().to_vec())
@@ -1344,19 +1348,19 @@ mod tests {
     fn role_claim_retains_only_its_nub_and_referenced_provider() {
         let mut ans = node(
             "ans",
-            Some(soc::ASC.as_bytes()),
-            vec![node("iop-ans-nub", Some(soc::RTBUDDY.as_bytes()), vec![])],
+            Some(board::ASC.as_bytes()),
+            vec![node("iop-ans-nub", Some(board::RTBUDDY.as_bytes()), vec![])],
         );
         ans.set_property("role", b"ANS2\0".to_vec()).unwrap();
         ans.set_property(IOMMU_PARENT, 142u32.to_le_bytes().to_vec())
             .unwrap();
-        let mut sart = node("sart-ans", Some(soc::SART.as_bytes()), vec![]);
+        let mut sart = node("sart-ans", Some(board::SART.as_bytes()), vec![]);
         sart.set_property(PHANDLE, 142u32.to_le_bytes().to_vec())
             .unwrap();
         let other = node(
             "other",
-            Some(soc::ASC.as_bytes()),
-            vec![node("nub", Some(soc::RTBUDDY.as_bytes()), vec![])],
+            Some(board::ASC.as_bytes()),
+            vec![node("nub", Some(board::RTBUDDY.as_bytes()), vec![])],
         );
         let mut tree = DeviceTree {
             root: node(
@@ -1369,7 +1373,7 @@ mod tests {
                         ans,
                         sart,
                         other,
-                        node("unused-sart", Some(soc::SART.as_bytes()), vec![]),
+                        node("unused-sart", Some(board::SART.as_bytes()), vec![]),
                     ],
                 )],
             ),
@@ -1429,10 +1433,10 @@ mod tests {
                 .unwrap();
             let mut smc = node(
                 "smc",
-                Some(soc::ASC.as_bytes()),
+                Some(board::ASC.as_bytes()),
                 vec![node(
                     "iop-smc-nub",
-                    Some(soc::RTBUDDY.as_bytes()),
+                    Some(board::RTBUDDY.as_bytes()),
                     vec![pmu, node("smc-socd", Some(b"smc-socd\0"), vec![])],
                 )],
             );
@@ -1531,30 +1535,30 @@ mod tests {
         hide_unmodeled(&mut hidden);
         assert_eq!(
             hidden.property("/arm-io/sgx", GPTBAT_READY).is_some(),
-            soc::GPU_ADMITTED
+            board::GPU_ADMITTED
         );
     }
 
     #[test]
     fn spi_requires_a_nor_slave_and_retains_its_gpio_provider() {
-        let mut gpio = node("gpio", Some(soc::GPIO.as_bytes()), vec![]);
+        let mut gpio = node("gpio", Some(board::GPIO.as_bytes()), vec![]);
         gpio.set_property(PHANDLE, 106u32.to_le_bytes().to_vec())
             .unwrap();
         let mut spi = node(
             "spi1",
-            Some(soc::SPI.as_bytes()),
+            Some(board::SPI.as_bytes()),
             vec![node(
                 "spinor",
-                Some(soc::NOR.as_bytes()),
+                Some(board::NOR.as_bytes()),
                 vec![
-                    node("firmware", Some(soc::BOOT_FIRMWARE.as_bytes()), vec![]),
-                    node("anvram", Some(soc::NVRAM.as_bytes()), vec![]),
+                    node("firmware", Some(board::BOOT_FIRMWARE.as_bytes()), vec![]),
+                    node("anvram", Some(board::NVRAM.as_bytes()), vec![]),
                 ],
             )],
         );
         spi.set_property(
             "function-spi_cs0",
-            [106u32, soc::GPIO_FUNCTION, 49, 0x10001]
+            [106u32, board::GPIO_FUNCTION, 49, 0x10001]
                 .into_iter()
                 .flat_map(u32::to_le_bytes)
                 .collect(),
@@ -1567,7 +1571,7 @@ mod tests {
                 vec![node(
                     "arm-io",
                     None,
-                    vec![gpio, spi, node("spi0", Some(soc::SPI.as_bytes()), vec![])],
+                    vec![gpio, spi, node("spi0", Some(board::SPI.as_bytes()), vec![])],
                 )],
             ),
         };
@@ -1583,7 +1587,7 @@ mod tests {
 
     #[test]
     fn a_visible_client_retains_the_gpio_bank_its_interrupt_names() {
-        let mut gpio = node("gpio", Some(soc::GPIO.as_bytes()), vec![]);
+        let mut gpio = node("gpio", Some(board::GPIO.as_bytes()), vec![]);
         gpio.set_property(PHANDLE, 106u32.to_le_bytes().to_vec())
             .unwrap();
         let mut manager = node("hpmBusManager", Some(b"usbc,manager\0"), vec![]);
@@ -1964,9 +1968,9 @@ mod tests {
         ] {
             mcc.set_property(key, bytes).unwrap();
         }
-        let mut nub = node("iop-pmp-nub", Some(soc::RTBUDDY.as_bytes()), vec![]);
+        let mut nub = node("iop-pmp-nub", Some(board::RTBUDDY.as_bytes()), vec![]);
         nub.set_property("ptd-range", vec![0x5a; 40]).unwrap();
-        let mut pmp = node("pmp", Some(soc::ASC.as_bytes()), vec![nub]);
+        let mut pmp = node("pmp", Some(board::ASC.as_bytes()), vec![nub]);
         pmp.set_property("role", b"PMP\0".to_vec()).unwrap();
         pmp.set_property(IOMMU_PARENT, 0xa9u32.to_le_bytes().to_vec())
             .unwrap();

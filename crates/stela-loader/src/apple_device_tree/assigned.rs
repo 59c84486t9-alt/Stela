@@ -24,7 +24,7 @@ use super::{DeviceTree, Node};
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
-use stela_runtime::machine::soc::assigned::{
+use stela_soc_data::board::assigned::{
     CacheId, GuestSlotId, InterruptId, Plan, PlanIdentity, StartId,
 };
 use stela_soc_data::pmgr::coverage::DomainId;
@@ -580,24 +580,19 @@ mod tests {
     use core::cell::Cell;
     use {
         stela_contracts::Chip, stela_contracts::caches::Cache,
-        stela_runtime::machine::soc::assigned::AssignedCore,
-        stela_runtime::machine::soc::assigned::Assignment,
-        stela_runtime::machine::soc::assigned::Capacity,
-        stela_runtime::machine::soc::assigned::CapacityKind,
-        stela_runtime::machine::soc::assigned::ClusterId,
-        stela_runtime::machine::soc::assigned::ClusterSlot,
-        stela_runtime::machine::soc::assigned::CoreKind,
-        stela_runtime::machine::soc::assigned::InterruptTarget,
-        stela_runtime::machine::soc::assigned::KindId,
-        stela_runtime::machine::soc::assigned::PeSlot,
-        stela_runtime::machine::soc::assigned::PowerResource,
-        stela_runtime::machine::soc::assigned::RegisterRange,
-        stela_runtime::machine::soc::assigned::ResourceProfile,
-        stela_runtime::machine::soc::assigned::Resources,
-        stela_runtime::machine::soc::assigned::RetainedResources,
-        stela_runtime::machine::soc::assigned::RetainedRoster,
-        stela_runtime::machine::soc::assigned::SharedCache,
-        stela_runtime::machine::soc::assigned::StartResource,
+        stela_soc_data::board::assigned::AssignedCore, stela_soc_data::board::assigned::Assignment,
+        stela_soc_data::board::assigned::Capacity, stela_soc_data::board::assigned::CapacityKind,
+        stela_soc_data::board::assigned::ClusterId, stela_soc_data::board::assigned::ClusterSlot,
+        stela_soc_data::board::assigned::CoreKind,
+        stela_soc_data::board::assigned::InterruptTarget, stela_soc_data::board::assigned::KindId,
+        stela_soc_data::board::assigned::PeSlot, stela_soc_data::board::assigned::PowerResource,
+        stela_soc_data::board::assigned::RegisterRange,
+        stela_soc_data::board::assigned::ResourceProfile,
+        stela_soc_data::board::assigned::Resources,
+        stela_soc_data::board::assigned::RetainedResources,
+        stela_soc_data::board::assigned::RetainedRoster,
+        stela_soc_data::board::assigned::SharedCache,
+        stela_soc_data::board::assigned::StartResource,
     };
     struct Roster {
         cores: Vec<AssignedCore>,
@@ -1450,7 +1445,7 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]
     fn original_j473_first_p_projection_keeps_source_fields_and_absent_coordinates() {
-        use stela_runtime::machine::soc::assigned::{BspSource, SourceIdentity};
+        use stela_soc_data::board::assigned::{BspSource, SourceIdentity};
         let file = std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap())
             .join("DeviceTree.j473ap.adt");
         let original = std::fs::read(file).unwrap();
@@ -1600,7 +1595,7 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_TEST_ASSIGNED_DT"]
     fn original_j314s_subsets_roundtrip_without_firmware_id_or_resource_extrapolation() {
-        use stela_runtime::machine::soc;
+        use stela_soc_data::board;
         let path = std::env::var("STELA_TEST_ASSIGNED_DT").unwrap();
         let raw = std::fs::read(path).unwrap();
         let expected = "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad";
@@ -1610,13 +1605,13 @@ mod tests {
         let nodes = &tree.node(CPUS).unwrap().children;
         let processors: Vec<_> = nodes
             .iter()
-            .map(|n| soc::Processor {
+            .map(|n| board::Processor {
                 cluster_type: bytes(n, "cluster-type").unwrap()[0],
                 reg: word(n, "reg").unwrap(),
                 l2_bytes: Some(word(n, "l2-cache-size").unwrap()),
             })
             .collect();
-        let identities = soc::cpus(
+        let identities = board::cpus(
             0x6000,
             tree.property("/product", "product-soc-name")
                 .unwrap()
@@ -1650,7 +1645,7 @@ mod tests {
             let cluster = ClusterId(reg >> 8);
             let identity = identities[i];
             if !inventory.kinds.iter().any(|v| v.id == kind) {
-                let (instruction, data) = soc::level1_caches(0x6000, kind_letter).unwrap();
+                let (instruction, data) = board::level1_caches(0x6000, kind_letter).unwrap();
                 inventory.kinds.push(CoreKind {
                     id: kind,
                     cluster_type: kind_letter,

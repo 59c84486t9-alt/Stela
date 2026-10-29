@@ -8,7 +8,7 @@ use crate::{apple_device_tree::DeviceTree, boot_policy::Decision};
 use alloc::{format, string::String, vec, vec::Vec};
 use anyhow::{Result, ensure};
 pub use stela_formats::boot_bundle::schema::BootCommand;
-use stela_runtime::machine::soc;
+use stela_soc_data::board;
 
 const ROOT: &str = "/";
 const CPUS: &str = "/cpus";
@@ -184,7 +184,7 @@ fn core_counts(
 /// (absent, it records no L2). A template that gives a CPU node one size per
 /// core variant instead (J700AP's P cores: `l2-cache-size-h17p` and
 /// `l2-cache-size-h17a`) takes its SoC's own variant's
-/// (`machine::soc::template_variant`); a node with no size of its SoC's
+/// (`machine::board::template_variant`); a node with no size of its SoC's
 /// variant keeps none, reported.
 fn l2_cache_sizes(
     tree: &mut DeviceTree,
@@ -196,7 +196,7 @@ fn l2_cache_sizes(
     let Some(cpus) = tree.node(CPUS) else {
         return Ok(());
     };
-    let variant = chip_id.and_then(soc::template_variant);
+    let variant = chip_id.and_then(board::template_variant);
     let mut sizes = vec![];
     for cpu in &cpus.children {
         let per_variant = cpu

@@ -26,7 +26,7 @@ const BANKS: u64 = 2;
 /// One bank. Holds the store's largest record (`store::MAX_BYTES`, ~5.4 KiB)
 /// with room to spare; a whole bank is written each commit so updates are
 /// block-aligned and torn writes fail the bank checksum.
-pub const BANK_BYTES: usize = 0x2000;
+use stela_formats::machine_state::SEP_BANK_BYTES as BANK_BYTES;
 const MAX_RECORD: usize = BANK_BYTES - RECORD;
 
 /// The checksum guards a bank against torn writes; the record inside carries

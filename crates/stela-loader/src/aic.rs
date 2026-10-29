@@ -11,7 +11,7 @@
 //! as the AIC's second `reg`).
 use crate::apple_device_tree::DeviceTree;
 use anyhow::{Result, ensure};
-use stela_runtime::machine::soc;
+use stela_soc_data::board;
 
 const AIC: &str = "/arm-io/aic";
 const COMPATIBLE: &str = "compatible";
@@ -23,7 +23,7 @@ const AIC1: &str = "aic,1";
 /// separate event block, when the tree's `aic` lacks it; returns whether it
 /// did.
 pub fn publish(tree: &mut DeviceTree, chip_id: u32) -> Result<bool> {
-    let Some((compatible, event)) = soc::aic(chip_id) else {
+    let Some((compatible, event)) = board::aic(chip_id) else {
         return Ok(false);
     };
     if compatible == AIC1 || tree.property(AIC, IACK_OFFSET).is_some() {

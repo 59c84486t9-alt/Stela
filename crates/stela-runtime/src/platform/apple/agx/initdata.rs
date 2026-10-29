@@ -157,8 +157,8 @@ impl Root {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    pub(crate) use crate::platform::apple::agx::generation::MAGIC_G13_G14G as MAGIC;
     use crate::platform::apple::agx::ring::tests::Flat;
+    pub(crate) use stela_soc_data::agx::generation::MAGIC_G13_G14G as MAGIC;
 
     pub(crate) const BASE: u64 = 0xffff_ffa0_0000_0000;
     pub(crate) const ROOT: u64 = BASE;

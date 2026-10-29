@@ -24,3 +24,36 @@ pub mod ptd;
 pub mod spmi;
 
 pub mod bridge;
+
+pub mod sart;
+
+pub mod smc;
+
+pub mod sep;
+
+pub mod dcp;
+
+pub mod asc;
+
+pub mod atc_phy;
+
+pub mod coresight;
+
+pub mod energy;
+
+pub mod fuse;
+
+pub mod i2c;
+
+pub mod spi;
+
+pub mod wake;
+
+pub mod agx;
+pub mod cluster;
+
+pub mod board;
+
+pub mod lockdown;
+pub mod mcc;
+pub mod perf;

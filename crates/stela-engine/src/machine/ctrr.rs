@@ -99,7 +99,10 @@
 //! enabled on secondary cores at power-on, not modeled).
 use super::mmu;
 use super::registers::encodings::Encoding;
-use stela_contracts::Chip;
+use stela_contracts::{
+    Chip,
+    ctrr::{Generation, generation},
+};
 pub use {
     stela_formats::boot_bundle::schema::CoreLocks, stela_formats::boot_bundle::schema::LockRegion,
     stela_formats::boot_bundle::schema::Locked,
@@ -107,22 +110,6 @@ pub use {
 
 const fn sys(op1: u8, crn: u8, crm: u8, op2: u8) -> Encoding {
     Encoding::new(3, op1, crn, crm, op2)
-}
-
-/// The register set a chip implements.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Generation {
-    /// M1 to M3: the A group, at EL1 and per cluster at EL2.
-    A,
-    /// M4 and later: CTRR-C/D and CTXR-A..D per core and per cluster.
-    Ctrr3,
-}
-
-pub const fn generation(chip: Chip) -> Generation {
-    match chip {
-        Chip::AppleM1 | Chip::AppleM2 | Chip::AppleM3 => Generation::A,
-        Chip::AppleM4 | Chip::AppleM5 | Chip::AppleM6 => Generation::Ctrr3,
-    }
 }
 
 const LOCK_EL1: Encoding = sys(4, 15, 2, 2);
@@ -169,7 +156,8 @@ pub enum Register {
 /// The register an encoding names on `chip`.
 pub fn decode(chip: Chip, encoding: Encoding) -> Option<Register> {
     match generation(chip) {
-        Generation::A => {
+        None => None,
+        Some(Generation::A) => {
             let (level, field) = match encoding {
                 LOWER_EL1 => (0, Field::Lower),
                 UPPER_EL1 => (0, Field::Upper),
@@ -183,7 +171,7 @@ pub fn decode(chip: Chip, encoding: Encoding) -> Option<Register> {
             };
             Some(Register::A { level, field })
         }
-        Generation::Ctrr3 => {
+        Some(Generation::Ctrr3) => {
             let legacy = |cluster, index| Some(Register::Legacy { cluster, index });
             match encoding {
                 CONTROL_EL1 => return legacy(false, 0),
@@ -583,9 +571,10 @@ pub fn protection(
     mmu_on: bool,
 ) -> [Option<mmu::CtrrRegion>; 2] {
     match generation(chip) {
-        Generation::A => [cluster.levels[usize::from(el2)].region(mmu_on), None],
-        Generation::Ctrr3 if el2 => core.el2.protection(),
-        Generation::Ctrr3 => core.el1.protection(),
+        None => [None, None],
+        Some(Generation::A) => [cluster.levels[usize::from(el2)].region(mmu_on), None],
+        Some(Generation::Ctrr3) if el2 => core.el2.protection(),
+        Some(Generation::Ctrr3) => core.el1.protection(),
     }
 }
 

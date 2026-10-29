@@ -8,7 +8,7 @@ use serde::{
     Deserialize, Deserializer,
     de::{self, SeqAccess, Visitor},
 };
-use stela_drivers::firmware::{Catalog, Provenance, Resource, Target};
+use stela_driver_core::firmware::{Catalog, Provenance, Resource, Target};
 
 /// Native host capability, independent of the guest bundle/options schema.
 /// Revision 1 permits 16 MiB per image, revision 2 permits 64 MiB. Both keep
@@ -355,7 +355,7 @@ mod tests {
     use super::*;
     use alloc::{boxed::Box, vec};
     use serde_json::{Value, json};
-    use stela_drivers::firmware::{Provider, Requirement};
+    use stela_driver_core::firmware::{Provider, Requirement};
 
     fn image() -> Value {
         json!({"name":"Vendor/FW.bin", "path":"vendor/fw.bin",

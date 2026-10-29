@@ -11,12 +11,12 @@ use super::DeviceError;
 use super::DeviceId;
 use super::Memory;
 use super::Port;
-use crate::machine::soc;
 use crate::platform::apple::pmp::native::dma;
 use crate::platform::apple::pmp::native::platform::owner::Completion;
 use alloc::{collections::BTreeMap, rc::Rc, string::String, sync::Arc};
 use core::sync::atomic::{Ordering, fence};
 use stela_engine::memory::RegisteredSystemRam;
+use stela_soc_data::board;
 
 /// Exact static source inputs, not runtime IORegistry observations. Native
 /// startup admits no later mapper-index or asc-dram-mask overlay. Hashes retain
@@ -25,7 +25,7 @@ use stela_engine::memory::RegisteredSystemRam;
 pub struct SourceProvenance {
     original_tree_sha256: String,
     prepared_tree_sha256: String,
-    pmp: soc::PmpController,
+    pmp: board::PmpController,
     mapper_index_property: Option<u32>,
     asc_dram_mask_property: Option<u64>,
 }
@@ -33,7 +33,7 @@ impl SourceProvenance {
     pub fn from_trees(
         original: &[u8],
         prepared: &[u8],
-        pmp: &soc::PmpController,
+        pmp: &board::PmpController,
     ) -> Result<Self, String> {
         let original_configuration = pmp.native_dma_configuration(original)?;
         let prepared_configuration = pmp.native_dma_configuration(prepared)?;
@@ -148,7 +148,7 @@ impl AppleDevices {
     /// static source properties have no runtime IORegistry/startup overrides.
     pub unsafe fn bind_native_pmp_dma(
         &mut self,
-        board: &soc::Board,
+        board: &board::Board,
         ram: Arc<RegisteredSystemRam>,
         configuration: ExplicitRuntimeConfiguration,
     ) -> Result<dma::Broker, String> {
@@ -481,8 +481,8 @@ mod tests {
     use stela_contracts::adt::encode;
     use stela_engine::memory::ReservedSystemRamRange;
 
-    fn pmp() -> soc::PmpController {
-        soc::PmpController {
+    fn pmp() -> board::PmpController {
+        board::PmpController {
             wrapper: (0x2_3bc0_0000, 0x6c000),
             interrupts: [0x275, 0x274, 0x277, 0x276],
             quiesced: false,
@@ -721,7 +721,7 @@ mod tests {
             stela_formats::sha256(&bytes),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
-        let pmp = soc::board(&bytes).unwrap().pmp.unwrap();
+        let pmp = board::board(&bytes).unwrap().pmp.unwrap();
         assert_eq!(pmp.mapper, Some(0x7d));
         let source = SourceProvenance::from_trees(&bytes, &bytes, &pmp).unwrap();
         assert_eq!(

@@ -36,7 +36,7 @@ pub mod channel;
 pub mod event;
 pub mod firmware;
 pub mod firmware_image;
-pub mod generation;
+use stela_soc_data::agx::generation;
 pub mod initdata;
 pub mod ring;
 pub mod sgx;

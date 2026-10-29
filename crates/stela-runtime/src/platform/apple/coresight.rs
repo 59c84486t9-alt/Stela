@@ -24,7 +24,6 @@ pub const ACCESS: u64 = 0xfb0;
 /// Offset of the read-only external debug lock-status register.
 pub const STATUS: u64 = 0xfb4;
 /// Size and alignment of an architectural CoreSight component map.
-pub const BYTES: u64 = 0x1000;
 const KEY: u64 = 0xc5acce55;
 const IMPLEMENTED: u64 = 1;
 const LOCKED: u64 = 1 << 1;
@@ -92,7 +91,6 @@ impl MmioDevice for SoftwareLock {
 
 /// Apple UTTDBG is the fourth 64 KiB region of a CPU's CoreSight map
 /// (XNU `osfmk/arm64/proc_reg.h`, `CORESIGHT_UTT`).
-pub const UTT_OFFSET: u64 = 0x3_0000;
 /// The UTTDBG PC sample register, relative to its own region.
 pub const PC_SAMPLE: u64 = 0x90;
 

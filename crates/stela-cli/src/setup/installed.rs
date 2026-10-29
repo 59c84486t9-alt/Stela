@@ -568,7 +568,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
         }
         (None, None) => unreachable!("a split without --nor"),
     };
-    let state_bytes = CAPACITY + sep_state::BYTES as usize;
+    let state_bytes = CAPACITY + stela_formats::machine_state::SEP_BYTES as usize;
     ensure!(
         area.bytes >= state_bytes as u64,
         "{} is smaller than the {state_bytes:#x} bytes of the 8 MiB NOR image and the SEP's \
@@ -616,7 +616,9 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
         ),
     };
     let mut sep_provisioned = false;
-    let sep_foreign = match sep_state::blank(&sep_area[..sep_state::ROOTS_BYTES]) {
+    let sep_foreign = match sep_state::blank(
+        &sep_area[..stela_formats::machine_state::SEP_ROOTS_BYTES],
+    ) {
         Ok(true) => false,
         Ok(false) => {
             sep_provisioned = true;

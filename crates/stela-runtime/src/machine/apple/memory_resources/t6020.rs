@@ -4,13 +4,12 @@
 //! their service/interrupt state is not inferred from the original ADT's
 //! physical capacity. Construction is not native PMP admission, a cache grant
 //! or a source-supported initial CPU/PMGR handoff. Root owns those joins.
-use crate::machine::soc::MemoryController;
-use crate::machine::soc::T6020Memory;
 use crate::platform::apple::amcc::Amcc;
-use crate::platform::apple::mcc::t6020;
 use crate::platform::apple::mcc::t6020::Configuration;
 use crate::platform::apple::mcc::t6020::Controller;
 use crate::platform::apple::mcc::t6020::View;
+use stela_soc_data::board::MemoryController;
+use stela_soc_data::board::T6020Memory;
 
 use alloc::{string::String, sync::Arc, vec::Vec};
 use stela_contracts::bus::Access;
@@ -27,7 +26,8 @@ use stela_engine::memory::RegisteredSystemRam;
 pub mod cold;
 
 const NAME: &str = "t6020-mcc-amcc";
-const PTD_OFFSET: u64 = t6020::MAX_APERTURES as u64 * t6020::APERTURE_BYTES;
+const PTD_OFFSET: u64 =
+    stela_soc_data::mcc::t6020::MAX_APERTURES as u64 * stela_soc_data::mcc::t6020::APERTURE_BYTES;
 const AUXILIARY_OFFSET: u64 = PTD_OFFSET + stela_soc_data::ptd::PTD_BYTES;
 
 /// One actual RAM owner and one shared controller/lock state. Numeric geometry
@@ -60,7 +60,7 @@ impl Prepared {
         validate_ram(&descriptor, &source_locks, programmed, &ram).map_err(String::from)?;
         if source_locks.layout.cache_status
             != Some(stela_soc_data::amcc::Register {
-                offset: t6020::CACHE_STATUS,
+                offset: stela_soc_data::mcc::t6020::CACHE_STATUS,
                 mask: 1,
                 value: 0,
             })
@@ -141,7 +141,13 @@ impl Prepared {
             .apertures
             .iter()
             .enumerate()
-            .map(|(i, &pa)| (pa, t6020::APERTURE_BYTES, i as u64 * t6020::APERTURE_BYTES))
+            .map(|(i, &pa)| {
+                (
+                    pa,
+                    stela_soc_data::mcc::t6020::APERTURE_BYTES,
+                    i as u64 * stela_soc_data::mcc::t6020::APERTURE_BYTES,
+                )
+            })
             .collect::<Vec<_>>();
         bindings.push(self.publication_footprint());
         bindings.push((
@@ -181,18 +187,18 @@ impl Prepared {
     }
     fn target(&self, offset: u64) -> Result<(usize, u64), &'static str> {
         self.live()?;
-        let index = usize::try_from(offset / t6020::APERTURE_BYTES)
+        let index = usize::try_from(offset / stela_soc_data::mcc::t6020::APERTURE_BYTES)
             .map_err(|_| "T602x aperture index overflows")?;
         if index >= self.views.len() {
             return Err("T602x access is outside its actual controller apertures");
         }
-        Ok((index, offset % t6020::APERTURE_BYTES))
+        Ok((index, offset % stela_soc_data::mcc::t6020::APERTURE_BYTES))
     }
     pub fn requires_ram_read(&self, offset: u64, width: Width) -> bool {
-        offset / t6020::APERTURE_BYTES < self.views.len() as u64
+        offset / stela_soc_data::mcc::t6020::APERTURE_BYTES < self.views.len() as u64
             && self
                 .controller
-                .requires_ram_read(offset % t6020::APERTURE_BYTES, width)
+                .requires_ram_read(offset % stela_soc_data::mcc::t6020::APERTURE_BYTES, width)
     }
     /// # Safety
     /// Actual native workers/jobs are stopped and fenced, and the same actual
@@ -260,7 +266,7 @@ fn validate_ram(
     let mut mmio = descriptor
         .apertures
         .iter()
-        .map(|&pa| (pa, t6020::APERTURE_BYTES))
+        .map(|&pa| (pa, stela_soc_data::mcc::t6020::APERTURE_BYTES))
         .collect::<Vec<_>>();
     mmio.extend([
         (descriptor.ptd.physical, stela_soc_data::ptd::PTD_BYTES),
@@ -409,7 +415,6 @@ impl crate::machine::apple::AppleDevices {
 pub(in crate::machine::apple) mod tests {
     use super::*;
     use crate::machine::apple::AppleDevices;
-    use crate::machine::soc::PtdBank;
     use core::{cell::UnsafeCell, ptr::NonNull};
     use stela_contracts::interrupt::InterruptLatch;
     use stela_engine::machine::Devices;
@@ -419,6 +424,7 @@ pub(in crate::machine::apple) mod tests {
     use stela_soc_data::amcc::Layout;
     use stela_soc_data::amcc::LockGroup;
     use stela_soc_data::amcc::Register;
+    use stela_soc_data::board::PtdBank;
     const RAM: u64 = 0x10000000000;
     #[repr(C, align(16))]
     struct Storage(UnsafeCell<[u8; 0x10000]>);
@@ -450,9 +456,9 @@ pub(in crate::machine::apple) mod tests {
         let apertures = (0..count)
             .map(|index| {
                 if index < 8 {
-                    0x200000000 + index as u64 * t6020::APERTURE_BYTES
+                    0x200000000 + index as u64 * stela_soc_data::mcc::t6020::APERTURE_BYTES
                 } else {
-                    0x2200000000 + (index - 8) as u64 * t6020::APERTURE_BYTES
+                    0x2200000000 + (index - 8) as u64 * stela_soc_data::mcc::t6020::APERTURE_BYTES
                 }
             })
             .collect::<Vec<_>>();
@@ -549,8 +555,8 @@ pub(in crate::machine::apple) mod tests {
                     bindings[8],
                     (
                         0x2200000000,
-                        t6020::APERTURE_BYTES,
-                        8 * t6020::APERTURE_BYTES
+                        stela_soc_data::mcc::t6020::APERTURE_BYTES,
+                        8 * stela_soc_data::mcc::t6020::APERTURE_BYTES
                     )
                 );
             }
@@ -560,8 +566,10 @@ pub(in crate::machine::apple) mod tests {
     fn foreign_ram_and_ordinary_mmio_cannot_supply_a_drain_completion() {
         let ram = ram(RAM);
         let mut owner = prepared(16, Arc::clone(&ram));
-        let offset =
-            15 * t6020::APERTURE_BYTES + t6020::DCS_BASE + 3 * t6020::DCS_STRIDE + t6020::DRAIN;
+        let offset = 15 * stela_soc_data::mcc::t6020::APERTURE_BYTES
+            + stela_soc_data::mcc::t6020::DCS_BASE
+            + 3 * stela_soc_data::mcc::t6020::DCS_STRIDE
+            + stela_soc_data::mcc::t6020::DRAIN;
         let other = self::ram(RAM);
         let foreign = other.try_service().unwrap().unwrap();
         // SAFETY: complete single-thread fixture producer set is stopped.
@@ -583,7 +591,8 @@ pub(in crate::machine::apple) mod tests {
         assert!(owner.read(offset, Width::Word, &mut access).is_err());
         owner
             .write(
-                t6020::DCS_BASE + t6020::DRAM_CONFIGURATION,
+                stela_soc_data::mcc::t6020::DCS_BASE
+                    + stela_soc_data::mcc::t6020::DRAM_CONFIGURATION,
                 Width::Word,
                 0x133,
                 &mut access,
@@ -627,7 +636,7 @@ pub(in crate::machine::apple) mod tests {
         for offset in [
             0x1c00,
             0x41c00,
-            t6020::CACHE_SIZE,
+            stela_soc_data::mcc::t6020::CACHE_SIZE,
             PTD_OFFSET,
             AUXILIARY_OFFSET,
         ] {
@@ -693,7 +702,10 @@ pub(in crate::machine::apple) mod tests {
                 Ok((id, offset + bytes - 4))
             );
         }
-        let drain = bindings[15].0 + t6020::DCS_BASE + 3 * t6020::DCS_STRIDE + t6020::DRAIN;
+        let drain = bindings[15].0
+            + stela_soc_data::mcc::t6020::DCS_BASE
+            + 3 * stela_soc_data::mcc::t6020::DCS_STRIDE
+            + stela_soc_data::mcc::t6020::DRAIN;
         assert!(devices.read_needs_ram(drain, DeviceReadShape::Scalar { bytes: 4 }));
         assert!(!devices.read_needs_ram(drain, DeviceReadShape::Scalar { bytes: 8 }));
         let (_, offset) = devices.bus.route(drain, Width::Word).unwrap();

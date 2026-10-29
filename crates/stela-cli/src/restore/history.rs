@@ -34,7 +34,7 @@ pub(super) struct Releases {
 }
 
 fn device_name(device: &Device) -> String {
-    if let Some(chip) = device.cpid.and_then(stela_runtime::machine::soc::name) {
+    if let Some(chip) = device.cpid.and_then(stela_soc_data::board::name) {
         let chip = chip.strip_prefix("Apple ").unwrap_or(chip);
         if !device.name.contains(chip) {
             return format!("{} · {chip}", device.name);

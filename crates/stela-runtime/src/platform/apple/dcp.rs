@@ -61,35 +61,7 @@ pub const DPTX_ENDPOINT: u8 = 0x2a;
 use super::scanout::Mode;
 pub use link::IOMFB_ENDPOINT;
 
-/// Identity of the one backed external output. The unnumbered DCPEXT and
-/// numbered DCPEXT0/1 use the same original firmware protocol, but publish
-/// distinct AFKEPV2 interface names. This does not model an internal panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ExternalIdentity {
-    #[default]
-    Unnumbered,
-    /// The external pipe ordinal, not the AFKEPV2 interface ID or unit.
-    Numbered(u8),
-}
-
-impl ExternalIdentity {
-    fn interface_name(self) -> Result<alloc::string::String, &'static str> {
-        // t600xdcp_restore 0xf9434..0xf944c formats %s%c:%s:%u. Its external
-        // instance byte 0 yields E; 1..10 yield 0..9. Each model has one
-        // controller (unit 0) and an independently allocated interface ID.
-        let suffix = match self {
-            Self::Unnumbered => 'E',
-            Self::Numbered(index @ 0..=9) => char::from(b'0' + index),
-            Self::Numbered(_) => {
-                return Err(
-                    "DCP external pipe ordinal exceeds the native single-character identity",
-                );
-            }
-        };
-        Ok(alloc::format!("dispext{suffix}:{}:0", avipc::SERVICE_NAME))
-    }
-}
-
+use stela_soc_data::dcp::ExternalIdentity;
 const AFK_ENDPOINTS: [(u8, &str); 3] = [
     (SYSTEM_ENDPOINT, "system"),
     (DPAV_ENDPOINT, "DP AV"),

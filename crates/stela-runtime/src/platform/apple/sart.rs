@@ -41,9 +41,6 @@ use {
 use {stela_contracts::dma::DmaError, stela_contracts::dma::Iommu, stela_contracts::dma::Memory};
 
 const NAME: &str = "sart";
-/// The most entries a layout has, v4's.
-const MAX_ENTRIES: usize = 24;
-pub const PAGE: u64 = 4096;
 /// SPTM sart_sanity_check_throttles, VA 0xfffffff0270cb7bc..270cb838,
 /// with version-3 layout at 0xfffffff027019ac0: three nonzero boot
 /// configuration words, snapshotted before mappings can be installed.
@@ -52,7 +49,9 @@ pub const PAGE: u64 = 4096;
 /// while it changes entries and then restores the snapshot; the model
 /// stores 0 and refuses translated DMA until every word is restored,
 /// since what 0 does to traffic is not recovered. Other values refuse.
-const THROTTLES: [u64; 3] = [0x8014, 0x801c, 0x8024];
+#[cfg(test)]
+use stela_soc_data::sart::THROTTLES;
+use stela_soc_data::sart::{Bounds, Layout, MAX_ENTRIES, PAGE};
 const SYNCHRONOUS_CHANNEL: u32 = 1;
 /// The channel status words beside the throttles, from the same layout.
 /// SPTM's entry-change quiesce (0x270ca7a0..0x270ca944) zeroes every
@@ -61,163 +60,18 @@ const SYNCHRONOUS_CHANNEL: u32 = 1;
 /// throttle snapshot. DMA here completes within the access that starts it,
 /// so no channel ever has outstanding work and each word reads 0. Bits 16
 /// and 24 are not recovered and only matter while a channel is busy.
-const STATUS: [u64; 3] = [0x8010, 0x8018, 0x8020];
+#[cfg(test)]
+use stela_soc_data::sart::STATUS;
 /// Bus-local offset used to map the separate, DT-placed idle word.
 pub const IDLE: u64 = 0x1000;
 /// Bus-local offset used to map the `power-canary-offset` word.
 pub const CANARY: u64 = 0x2000;
+#[cfg(test)]
 const BASE: u64 = 0x40;
+#[cfg(test)]
 const SIZE: u64 = 0x80;
-/// Versions 3 and 4: 30-bit PADDR and SIZE fields.
-const WIDE: u32 = (1 << 30) - 1;
-/// Versions 1 and 2: 24-bit PADDR fields.
-const NARROW: u32 = (1 << 24) - 1;
-/// The version 3 and 4 read-write CONFIG value.
-const ALLOW: u32 = read_write([0, 2, 4, 6, 7]);
-
-/// The read-write CONFIG value of a layout whose permission fields start at
-/// `bits`. Each row of SPTM's entry-layout table (44 bytes: magic `SRT<n>`,
-/// entry count, CONFIG offset and stride, five permission bit positions,
-/// SIZE offset, stride, shift and mask, PADDR offset, stride, shift and
-/// mask) names three 2-bit fields and two 1-bit fields. The T8103 SPTM's
-/// map path (0xfffffff0270cb3dc..0xfffffff0270cb420) puts 3 in each 2-bit
-/// field for a read-write mapping (2 otherwise) and sets both single bits.
-const fn read_write(bits: [u32; 5]) -> u32 {
-    3 << bits[0] | 3 << bits[1] | 3 << bits[2] | 1 << bits[3] | 1 << bits[4]
-}
-
-/// Where a SART's entry and throttle registers sit in `reg[0]`, and how an
-/// entry's fields pack into them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Layout {
-    entries: usize,
-    base: u64,
-    /// The SIZE words' offset, or `None` when SIZE is CONFIG's low bits.
-    size: Option<u64>,
-    size_mask: u32,
-    base_mask: u32,
-    allow: u32,
-    channels: usize,
-    throttles: [u64; 4],
-    status: [u64; 4],
-}
-
-impl Layout {
-    /// `sart-version` 3 with its own throttle layout and no offset.
-    pub const V3: Self = Self {
-        entries: 16,
-        base: BASE,
-        size: Some(SIZE),
-        size_mask: WIDE,
-        base_mask: WIDE,
-        allow: ALLOW,
-        channels: 3,
-        throttles: [THROTTLES[0], THROTTLES[1], THROTTLES[2], 0],
-        status: [STATUS[0], STATUS[1], STATUS[2], 0],
-    };
-
-    /// The layout SPTM's tables give `sart-version`, `sart-throttle-version`
-    /// and `sart-throttle-offset`. Every version has CONFIG words from 0 and
-    /// unshifted PADDR words, each 4 bytes apart. Versions 3 and 4 have 16
-    /// and 24 entries, PADDR words from 0x40 and 0x60, SIZE words from 0x80
-    /// and 0xc0, 30-bit PADDR and SIZE fields, and permissions at CONFIG
-    /// bits 0, 2, 4, 6 and 7. Versions 1 and 2 have 16 entries, PADDR words
-    /// from 0x40 and 24-bit PADDR fields, but no SIZE words: SIZE is
-    /// CONFIG's low 19 or 24 bits, and the permissions sit at bits 22, 24,
-    /// 26, 29 and 30 or 24, 26, 28, 30 and 31. Their entry write (T8103
-    /// 0xfffffff0270cb6b0) stores CONFIG with the permissions alone, then
-    /// PADDR, then CONFIG again with SIZE in its low bits.
-    pub fn new(version: u32, throttle_version: u32, offset: u32) -> Result<Self, &'static str> {
-        let (entries, base, size, size_mask, base_mask, allow) = match version {
-            1 => (
-                16,
-                BASE,
-                None,
-                (1 << 19) - 1,
-                NARROW,
-                read_write([22, 24, 26, 29, 30]),
-            ),
-            2 => (
-                16,
-                BASE,
-                None,
-                NARROW,
-                NARROW,
-                read_write([24, 26, 28, 30, 31]),
-            ),
-            3 => (16, BASE, Some(SIZE), WIDE, WIDE, ALLOW),
-            4 => (24, 0x60, Some(0xc0), WIDE, WIDE, ALLOW),
-            _ => return Err("SART entry layout other than versions 1 to 4"),
-        };
-        let (channels, throttles, status) = match throttle_version {
-            1 => (3, [0x4014, 0x401c, 0x4024, 0], [0x4010, 0x4018, 0x4020, 0]),
-            2 | 3 => (3, [0x8014, 0x801c, 0x8024, 0], [0x8010, 0x8018, 0x8020, 0]),
-            4 => (
-                4,
-                [0x8008, 0x800c, 0x8014, 0x801c],
-                [0x8000, 0x8004, 0x8010, 0x8018],
-            ),
-            _ => return Err("SART throttle layout other than versions 1 to 4"),
-        };
-        if !offset.is_multiple_of(4) {
-            return Err("SART throttle offset is not word aligned");
-        }
-        let at = |words: [u64; 4]| words.map(|word| word + u64::from(offset));
-        Ok(Self {
-            entries,
-            base,
-            size,
-            size_mask,
-            base_mask,
-            allow,
-            channels,
-            throttles: at(throttles),
-            status: at(status),
-        })
-    }
-
-    /// The bytes of `reg[0]` the registers need.
-    pub fn register_bytes(&self) -> u64 {
-        self.throttles[..self.channels]
-            .iter()
-            .chain(&self.status[..self.channels])
-            .map(|&word| word + 4)
-            .chain([self.size.unwrap_or(self.base) + 4 * self.entries as u64])
-            .max()
-            .expect("a layout has registers")
-    }
-
-    fn throttle(&self, offset: u64) -> Option<usize> {
-        self.throttles[..self.channels]
-            .iter()
-            .position(|&word| word == offset)
-    }
-
-    /// The entry and field (0 CONFIG, 1 PADDR, 2 SIZE) at `offset`.
-    fn entry(&self, offset: u64) -> Option<(usize, usize)> {
-        if !offset.is_multiple_of(4) {
-            return None;
-        }
-        [Some(0), Some(self.base), self.size]
-            .iter()
-            .enumerate()
-            .find_map(|(field, &start)| {
-                let index = offset.checked_sub(start?)? / 4;
-                (index < self.entries as u64).then_some((index as usize, field))
-            })
-    }
-
-    /// An entry's permission bits and SIZE.
-    fn decode(&self, entry: Entry) -> (u32, u32) {
-        match self.size {
-            Some(_) => (entry.config, entry.size),
-            None => (
-                entry.config & !self.size_mask,
-                entry.config & self.size_mask,
-            ),
-        }
-    }
-}
+#[cfg(test)]
+const ALLOW: u32 = 0xff;
 
 /// One entry's registers as written.
 #[derive(Clone, Copy, Default)]
@@ -225,15 +79,6 @@ struct Entry {
     config: u32,
     base: u32,
     size: u32,
-}
-
-/// How an entry's SIZE counts its pages.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Bounds {
-    /// SIZE is the last page's index: SIZE + 1 pages.
-    Inclusive,
-    /// SIZE is the page count (`exclusive-bounds`).
-    Exclusive,
 }
 
 pub struct Sart {
@@ -275,12 +120,12 @@ impl Sart {
     pub fn allows(&self, first: u64, last: u64) -> bool {
         self.executing()
             && first <= last
-            && self.entries[..self.layout.entries].iter().any(|&entry| {
-                let (flags, size) = self.layout.decode(entry);
+            && self.entries[..self.layout.entries()].iter().any(|&entry| {
+                let (flags, size) = self.layout.decode(entry.config, entry.size);
                 let pages = u64::from(size) + u64::from(self.bounds == Bounds::Inclusive);
                 let base = u64::from(entry.base) * PAGE;
                 let end = base + pages * PAGE;
-                flags == self.layout.allow && first >= base && last < end
+                flags == self.layout.permission_mask() && first >= base && last < end
             })
     }
 
@@ -333,7 +178,7 @@ impl Iommu for Sart {
         if stream != 0 {
             return Err(DmaError::Unsupported("SART has no stream selector"));
         }
-        if self.throttles[..self.layout.channels].contains(&0) {
+        if self.throttles[..self.layout.throttle_offsets().len()].contains(&0) {
             return Err(DmaError::Unsupported(
                 "SART DMA while a throttle word is 0 is not modeled",
             ));
@@ -380,7 +225,7 @@ impl MmioDevice for Sart {
             if let Some(channel) = self.layout.throttle(offset) {
                 return Ok(u64::from(self.throttles[channel]));
             }
-            if self.layout.status[..self.layout.channels].contains(&offset) {
+            if self.layout.status_offsets().contains(&offset) {
                 return Ok(0);
             }
             if offset == IDLE {
@@ -442,18 +287,15 @@ impl MmioDevice for Sart {
         let entry = &mut self.entries[index];
         match field {
             0 => {
-                let (flags, _) = layout.decode(Entry {
-                    config: value,
-                    ..*entry
-                });
-                if flags != 0 && flags != layout.allow {
+                let (flags, _) = layout.decode(value, entry.size);
+                if flags != 0 && flags != layout.permission_mask() {
                     return Err(fail("SART permission bits without known semantics"));
                 }
                 entry.config = value;
             }
-            1 if value & !layout.base_mask == 0 => entry.base = value,
+            1 if value & !layout.base_mask() == 0 => entry.base = value,
             1 => return Err(fail("SART address exceeds its field")),
-            2 if value & !layout.size_mask == 0 => entry.size = value,
+            2 if value & !layout.size_mask() == 0 => entry.size = value,
             2 => return Err(fail("SART size exceeds its field")),
             _ => unreachable!(),
         }
@@ -639,18 +481,18 @@ mod tests {
         assert_eq!(v4.entry(0x120), None);
         // T8142: version 3 entries with the version 4 throttles 0x10 up.
         let m5 = Layout::new(3, 4, 0x10).unwrap();
-        assert_eq!(m5.throttles, [0x8018, 0x801c, 0x8024, 0x802c]);
-        assert_eq!(m5.status, [0x8010, 0x8014, 0x8020, 0x8028]);
+        assert_eq!(m5.throttle_offsets(), &[0x8018, 0x801c, 0x8024, 0x802c]);
+        assert_eq!(m5.status_offsets(), &[0x8010, 0x8014, 0x8020, 0x8028]);
         assert_eq!(m5.register_bytes(), 0x8030);
         assert_eq!(m5.entry(0x40), Some((0, 1)));
         // T8103: version 2 entries, whose SIZE is in CONFIG, and throttles.
         let m1 = Layout::new(2, 2, 0).unwrap();
         assert_eq!(m1.register_bytes(), 0x8028);
-        assert_eq!(m1.allow, 0xff00_0000);
+        assert_eq!(m1.permission_mask(), 0xff00_0000);
         assert_eq!(m1.entry(0x3c), Some((15, 0)));
         assert_eq!(m1.entry(0x40), Some((0, 1)));
         assert_eq!(m1.entry(0x80), None);
-        assert_eq!(Layout::new(1, 1, 0).unwrap().allow, 0x6fc0_0000);
+        assert_eq!(Layout::new(1, 1, 0).unwrap().permission_mask(), 0x6fc0_0000);
         assert_eq!(ALLOW, 0xff);
         for (version, throttle, offset) in [(0, 2, 0), (5, 4, 0), (3, 5, 0), (3, 4, 2)] {
             assert!(Layout::new(version, throttle, offset).is_err());
@@ -694,7 +536,7 @@ mod tests {
             }
             sart.write(entry, Width::Word, 2, &mut access).unwrap();
             assert!(!sart.allows(address, address));
-            let throttle = sart.layout.throttles[0];
+            let throttle = sart.layout.throttle_offsets()[0];
             assert_eq!(sart.read(throttle, Width::Word, &mut access), Ok(1));
         }
     }

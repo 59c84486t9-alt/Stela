@@ -1598,7 +1598,7 @@ fn provision_sep(f: &Fixture, nor: &str) {
     assert_eq!(
         stela_runtime::machine::apple::sep_state::blank(
             &partition_bytes(f, nor)
-                [capacity..capacity + stela_runtime::machine::apple::sep_state::ROOTS_BYTES]
+                [capacity..capacity + stela_formats::machine_state::SEP_ROOTS_BYTES]
         ),
         Ok(false)
     );
@@ -2790,8 +2790,7 @@ fn split_command(f: &Fixture) -> Request {
 
 /// The region's machine state: its NOR image and SEP area.
 fn state_of(f: &Fixture, identifier: &str) -> Vec<u8> {
-    let bytes =
-        stela_soc_data::nor::CAPACITY + stela_runtime::machine::apple::sep_state::BYTES as usize;
+    let bytes = stela_soc_data::nor::CAPACITY + stela_formats::machine_state::SEP_BYTES as usize;
     f.host.read(identifier, tail(), bytes).unwrap()
 }
 

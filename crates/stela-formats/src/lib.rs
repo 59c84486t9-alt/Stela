@@ -11,6 +11,7 @@ pub mod der;
 mod hash;
 pub mod img4;
 pub mod lzfse;
+pub mod machine_state;
 pub mod payload;
 pub mod preboot;
 pub mod rsa;

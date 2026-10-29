@@ -64,7 +64,7 @@
 //! - The model has one performance state (0), no GPC power transitions and
 //!   so no GPC host interrupts; none of the `sgx` interrupt lines is raised.
 //!   Enables and dynamic gating are held as written.
-use super::generation::{Family, Gpu, Identification, MMU_ENABLE, Mmu, Model};
+use super::generation::{Family, Gpu, MMU_ENABLE, Mmu, Model};
 use super::uat::{self, Uat};
 use alloc::rc::Rc;
 use alloc::vec;
@@ -156,50 +156,7 @@ pub fn covers(family: &Family, banks: &[(u64, u64, u64)]) -> Result<(), &'static
     }
 }
 
-/// A GPU's identification registers ([`super::generation`] states each
-/// SoC's values and their sources).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Identity {
-    pub generation: u8,
-    pub variant: u8,
-    pub revision: u8,
-    /// Dies the clusters span; only [`Identification::Dies`] reports them.
-    pub dies: u8,
-    /// Clusters over every die.
-    pub clusters: u8,
-    pub cores: u8,
-    pub frags: u8,
-    pub gps: u8,
-    /// Enabled cores, cluster 0 first, packed `cores` bits per cluster, one
-    /// word per core-mask register of the family.
-    pub core_mask: [u32; 3],
-}
-
-impl Identity {
-    fn version(&self) -> u32 {
-        u32::from(self.generation) << 24
-            | u32::from(self.variant) << 16
-            | u32::from(self.revision) << 8
-    }
-    fn counts_1(&self, identification: Identification) -> u32 {
-        let middle = match identification {
-            Identification::Clusters => u32::from(self.frags) << 8,
-            Identification::Dies => {
-                u32::from(self.dies) << 16 | u32::from(self.clusters / self.dies) << 8
-            }
-        };
-        middle | u32::from(self.cores)
-    }
-    fn counts_2(&self) -> u32 {
-        u32::from(self.gps) << 16
-    }
-    fn clusters(&self, identification: Identification) -> u32 {
-        match identification {
-            Identification::Clusters => u32::from(self.clusters) << 12,
-            Identification::Dies => 0,
-        }
-    }
-}
+use stela_soc_data::agx::Identity;
 
 /// Registers shared by the AP aperture and the native firmware callbacks.
 #[derive(Debug)]

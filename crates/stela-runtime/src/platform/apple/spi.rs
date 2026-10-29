@@ -29,7 +29,6 @@ use {
     stela_contracts::interrupt::Wire, stela_soc_data::nor::Image,
 };
 
-pub const BYTES: u64 = 0x4000;
 const NAME: &str = "Apple SPI v1";
 const CTRL: u64 = 0x00;
 const CFG: u64 = 0x04;

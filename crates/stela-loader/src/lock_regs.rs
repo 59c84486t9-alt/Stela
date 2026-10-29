@@ -60,7 +60,7 @@
 //!
 //! On the M4 and later iBoot also locks the cores' per-cluster CTRR-C/D and
 //! CTXR-A..D copies, and CTRR-A/B's controls, before SPTM starts
-//! ([`core_handoff`]; the contract is in `stela_engine::machine::ctrr`).
+//! ([`core_handoff`]; the shared record contract is in `stela_formats::boot_bundle::schema`).
 //! M5 iBoot (`iBoot.j813`) writes each region's per-core and per-cluster
 //! copies together (`0x31588`, `0x316e0`) and locks them (`0x31658`,
 //! `0x317b0`); SPTM 26A434 derives the same six regions from
@@ -72,9 +72,9 @@ use crate::apple_device_tree::DeviceTree;
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use core::ops::Range;
-use stela_engine::machine::ctrr::CoreLocks;
-use stela_engine::machine::ctrr::LockRegion;
-use stela_engine::machine::ctrr::Locked;
+use stela_formats::boot_bundle::schema::CoreLocks;
+use stela_formats::boot_bundle::schema::LockRegion;
+use stela_formats::boot_bundle::schema::Locked;
 pub use stela_formats::boot_bundle::schema::Programmed;
 
 pub const AMCC: &str = "/chosen/lock-regs/amcc";

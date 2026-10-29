@@ -29,11 +29,11 @@ use crate::root_selection;
 use crate::soc_variant;
 use crate::trust_cache;
 use anyhow::{Context, Result, bail, ensure};
+use stela_contracts::ctrr;
 use stela_contracts::tag_storage;
-use stela_engine::machine::ctrr;
-use stela_engine::machine::identification;
+
 use stela_formats::sha256;
-use stela_runtime::machine::soc;
+use stela_soc_data::board;
 
 pub use {
     stela_formats::boot_bundle::schema::BootCpu,
@@ -121,12 +121,12 @@ pub struct Inputs<'a> {
 
 impl Inputs<'_> {
     /// The guest DRAM base of the target board, from its DeviceTree or its
-    /// SoC (`soc::board_dram_base`); `None` when the target names no chip.
+    /// SoC (`board::board_dram_base`); `None` when the target names no chip.
     pub fn dram_base(&self) -> Result<Option<u64>> {
         self.target
             .chip_id
             .map(|chip_id| {
-                stela_runtime::machine::soc::board_dram_base(self.device_tree.bytes, chip_id)
+                stela_soc_data::board::board_dram_base(self.device_tree.bytes, chip_id)
                     .map_err(anyhow::Error::msg)
             })
             .transpose()
@@ -590,9 +590,9 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     } = Placement::new(inputs, options)?;
     let options = &options;
     // The M4 and later lock their CTRR-C/D and CTXR-A..D copies at handoff.
-    let chip = inputs.target.chip_id.and_then(soc::chip);
+    let chip = inputs.target.chip_id.and_then(board::chip);
     let core_locks_handed_off =
-        chip.is_some_and(|chip| ctrr::generation(chip) == ctrr::Generation::Ctrr3);
+        chip.is_some_and(|chip| ctrr::generation(chip) == Some(ctrr::Generation::Ctrr3));
     let images = Images::load(inputs)?;
     let modules: Vec<&[u8]> = core::iter::once(inputs.static_trust_cache.bytes)
         .chain(inputs.extra_trust_caches.iter().map(|input| input.bytes))
@@ -1452,7 +1452,7 @@ fn tag_offset(
     dram_end: u64,
     top_of_kernel_data: u64,
 ) -> Result<u64> {
-    if !chip.is_some_and(identification::memory_tagging) {
+    if !chip.is_some_and(|chip| stela_contracts::Feature::FEAT_MTE.on(chip)) {
         return Ok(0);
     }
     let value = tag_storage::hand_off(
@@ -1964,7 +1964,7 @@ fn device_tree_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>>
     // (original mac13j VA 0xfffffe000ad95600..ad95638).
     // The same runtime Framebuffer supplies Video and these scalar slots;
     // never retain the physical board's 4096x2160 capacity for another GOP.
-    for profile in stela_runtime::machine::soc::EXTERNAL_OUTPUTS
+    for profile in stela_soc_data::board::EXTERNAL_OUTPUTS
         .iter()
         .filter(|p| p.admitted)
     {
@@ -3279,7 +3279,7 @@ mod tests {
         let ctxr_b = core_locks
             .locked
             .iter()
-            .find(|locked| locked.region == ctrr::LockRegion::CtxrB)
+            .find(|locked| locked.region == stela_formats::boot_bundle::schema::LockRegion::CtxrB)
             .unwrap();
         assert_eq!(
             (ctxr_b.first, ctxr_b.last),
@@ -3353,3 +3353,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod metadata_tests;

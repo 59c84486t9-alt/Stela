@@ -8,6 +8,7 @@ pub mod bus;
 pub mod caches;
 pub mod chip;
 pub mod cpu_features;
+pub mod ctrr;
 pub mod dma;
 pub mod identity;
 pub mod interrupt;

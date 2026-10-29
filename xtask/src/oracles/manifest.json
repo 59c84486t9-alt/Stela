@@ -3557,9 +3557,9 @@
     "reason": "requires original 26A434 OS files via STELA_TEST_EL0_OS_FILES"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_j314s_descriptor_preserves_all_physical_slots_and_irq_words",
-    "source": "crates/stela-runtime/src/machine/soc/memory_resources.rs",
+    "source": "crates/stela-soc-data/src/board/memory_resources.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_T6000_MCC_DEVICE_TREE"
@@ -3567,9 +3567,9 @@
     "reason": "requires the pinned original J314s ADT via STELA_T6000_MCC_DEVICE_TREE"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_j473_uses_its_actual_2048_slot_update_alias",
-    "source": "crates/stela-runtime/src/machine/soc/memory_topology.rs",
+    "source": "crates/stela-soc-data/src/board/memory_topology.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_MCC_J473_DT"
@@ -3577,9 +3577,9 @@
     "reason": "requires pinned original 26A434 J473 DeviceTree via STELA_TEST_MCC_J473_DT"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_pmp_retains_its_dart_mapper_instead_of_assuming_physical_buffers",
-    "source": "crates/stela-runtime/src/machine/soc/pmp_topology.rs",
+    "source": "crates/stela-soc-data/src/board/pmp_topology.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_CPU_DT_DIR"
@@ -3587,9 +3587,9 @@
     "reason": "requires pinned original J473 ADT in STELA_TEST_CPU_DT_DIR"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_j314s_pmgr_publishes_self_indices_without_activating_a_self_clock",
-    "source": "crates/stela-runtime/src/machine/soc/power_resources/clock_role.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/clock_role.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_T6000_MCC_DEVICE_TREE"
@@ -3597,9 +3597,9 @@
     "reason": "requires unchanged original26A434J314sDeviceTree"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_m1_m2_pro_max_provider_start_uses_the_io_service_superclass",
-    "source": "crates/stela-runtime/src/machine/soc/power_resources/clock_role.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/clock_role.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_KERNELCACHE",
@@ -3608,9 +3608,9 @@
     "reason": "requires pinned 26A434 mac13j and mac14j kernel collections"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_provider_start_and_clock_receiver_source_is_pinned",
-    "source": "crates/stela-runtime/src/machine/soc/power_resources/clock_role.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/clock_role.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_KERNELCACHE"
@@ -3618,9 +3618,9 @@
     "reason": "requires unchanged original26A434J314sKernelCollection"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_j473_views_resolve_all_ten_source_constructed_owners",
-    "source": "crates/stela-runtime/src/machine/soc/power_resources/cpu.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/cpu.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_CPU_PMGR_ADT",
@@ -3629,9 +3629,9 @@
     "reason": "requires pinned original 26A434 J473 DeviceTree and kernelcache"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_j473_supplies_match_all_three_physical_owners",
-    "source": "crates/stela-runtime/src/machine/soc/power_resources/implicit.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/implicit.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_ADT"
@@ -3639,9 +3639,9 @@
     "reason": "requires pinned original J473 ADT; no Apple image is committed"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_family_helpers_use_raw_source_die_offset_and_ordinal",
-    "source": "crates/stela-runtime/src/machine/soc/power_resources/pmp.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/pmp.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_KERNELCACHES"
@@ -3649,9 +3649,9 @@
     "reason": "requires original 26A434 kernelcaches through STELA_TEST_PMGR_KERNELCACHES"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_kernel_proves_id_parent_group_and_index_selection",
-    "source": "crates/stela-runtime/src/machine/soc/power_resources/records.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/records.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_KERNEL"
@@ -3659,9 +3659,9 @@
     "reason": "requires pinned original 26A434 kernelcache; no Apple image is committed"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_m6_device_configs_keep_the_shared_record_envelope",
-    "source": "crates/stela-runtime/src/machine/soc/power_resources/records.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/records.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M6_KERNELCACHE"
@@ -3669,9 +3669,9 @@
     "reason": "requires pinned original 26A434 mac18g kernel through STELA_TEST_PMGR_M6_KERNELCACHE"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_v2_board_graphs_preserve_all_parents_and_physical_locations",
-    "source": "crates/stela-runtime/src/machine/soc/power_resources.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_ADTS"
@@ -3679,9 +3679,9 @@
     "reason": "requires pinned original 26A434 board DeviceTrees; no Apple image is committed"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "prepared_j473_admission_keeps_complete_graph_and_names_all_remaining_sinks",
-    "source": "crates/stela-runtime/src/machine/soc/power_resources.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_BUNDLE"
@@ -3689,9 +3689,9 @@
     "reason": "requires the pinned prepared r8 J473 bundle; no Apple input is committed"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_j473_resource_graph_keeps_shared_hardware_and_clock_only_usb_darts",
-    "source": "crates/stela-runtime/src/machine/soc/power_resources.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_ADT"
@@ -3701,7 +3701,7 @@
   {
     "package": "stela-runtime",
     "test": "original_complete_descriptor_and_sparse_ownership_have_no_fabricated_state",
-    "source": "crates/stela-runtime/src/machine/soc/t6000_pmgr.rs",
+    "source": "crates/stela-runtime/src/machine/apple/data_integration_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_ADT"
@@ -3709,9 +3709,9 @@
     "reason": "requires pinned original J314s ADT through STELA_TEST_PMGR_M1_ADT"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_descriptor_rejects_incomplete_or_crossed_resource_owners",
-    "source": "crates/stela-runtime/src/machine/soc/t6000_pmgr.rs",
+    "source": "crates/stela-soc-data/src/board/t6000_pmgr.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_ADT"
@@ -3719,9 +3719,9 @@
     "reason": "requires pinned original J314s ADT through STELA_TEST_PMGR_M1_ADT"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_t6000_assigned_prefix_preserves_all_source_coordinates_and_full_power_graph",
-    "source": "crates/stela-runtime/src/machine/soc/topology/assigned/source/t6000.rs",
+    "source": "crates/stela-soc-data/src/board/topology/assigned/source/t6000.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_ASSIGNED_DT",
@@ -3730,9 +3730,9 @@
     "reason": "requires unchanged original26A434J314s and source-retaining prepared tree with first P running"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_mode1_bsp_uses_canonical_dynamic_domain_ids_without_granting_ps_state",
-    "source": "crates/stela-runtime/src/machine/soc/topology/assigned/source.rs",
+    "source": "crates/stela-soc-data/src/board/topology/assigned/source.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_ASSIGNED_DT",
@@ -3743,7 +3743,7 @@
   {
     "package": "stela-runtime",
     "test": "original_j314s_watchdog_mounts_one_shared_panic_flags_word",
-    "source": "crates/stela-runtime/src/machine/soc.rs",
+    "source": "crates/stela-runtime/src/machine/apple/data_integration_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_DART_DT"
@@ -3751,9 +3751,9 @@
     "reason": "requires original 26A434 J314s DT through STELA_TEST_DART_DT"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_j314s_ap_gpio_qualifies_without_auxiliary_or_lifecycle_claims",
-    "source": "crates/stela-runtime/src/machine/soc.rs",
+    "source": "crates/stela-soc-data/src/board.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_GPIO_DT"
@@ -3763,7 +3763,7 @@
   {
     "package": "stela-runtime",
     "test": "original_j314s_spmi_parent_qualifies_all_seven_independent_resource_owners",
-    "source": "crates/stela-runtime/src/machine/soc.rs",
+    "source": "crates/stela-runtime/src/machine/apple/data_integration_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_SPMI_DT"
@@ -3771,9 +3771,9 @@
     "reason": "requires original 26A434 J314s DT through STELA_TEST_SPMI_DT"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_j314s_sep_preserves_sole_trad_with_sixteen_sid_capacity",
-    "source": "crates/stela-runtime/src/machine/soc.rs",
+    "source": "crates/stela-soc-data/src/board.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_DART_DT"
@@ -3783,7 +3783,7 @@
   {
     "package": "stela-runtime",
     "test": "original_j314s_external_output_preserves_native_routes_and_identity",
-    "source": "crates/stela-runtime/src/machine/soc.rs",
+    "source": "crates/stela-runtime/src/machine/apple/data_integration_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_DART_DT"
@@ -3791,9 +3791,9 @@
     "reason": "requires original 26A434 J314s DT through STELA_TEST_DART_DT"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_j314s_ans_geometry_and_handoff_qualify_independently_of_whole_board",
-    "source": "crates/stela-runtime/src/machine/soc.rs",
+    "source": "crates/stela-soc-data/src/board.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_ANS_DT"
@@ -3908,9 +3908,9 @@
     "reason": "requires STELA_PCIE_KERNELCACHE naming the pinned original 26A434 Mach-O"
   },
   {
-    "package": "stela-runtime",
+    "package": "stela-soc-data",
     "test": "original_native_protocol_keeps_hardware_identity_and_request_settlement_distinct",
-    "source": "crates/stela-runtime/src/platform/apple/pmgr/dvfs.rs",
+    "source": "crates/stela-soc-data/src/pmgr/dvfs.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_PMP"

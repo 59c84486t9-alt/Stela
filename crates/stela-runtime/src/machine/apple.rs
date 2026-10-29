@@ -5,7 +5,6 @@
 //! and time, and turns each `MmioError` into an explicit refusal.
 pub mod t6000_pmgr;
 
-use super::soc::PowerOwner;
 pub use crate::platform::apple::pmu::RtcEpoch;
 use crate::platform::usb::{
     Function, Speed,
@@ -34,6 +33,7 @@ use stela_engine::machine::engine::Start;
 use stela_engine::machine::engine::Transition;
 use stela_engine::machine::registers::Lines;
 use stela_engine::system::access::AccessKind;
+use stela_soc_data::board::PowerOwner;
 
 use crate::platform::apple::aes;
 use crate::platform::apple::aes::Aes;
@@ -416,7 +416,7 @@ struct SepMaster {
 /// AP's effective security mode (shared fuses), the ECID (`/chosen`
 /// `unique-chip-id`), and where its durable state lives.
 pub struct SepProvisioning {
-    pub security: Option<sep::SecurityMode>,
+    pub security: Option<stela_soc_data::sep::SecurityMode>,
     pub ecid: u64,
     /// Observe (`--sep-observe`): advertise and log `sks`/`pnon`/`scrd`.
     pub observe: bool,
@@ -658,7 +658,7 @@ impl AppleDevices {
     /// pulled-up net on each I2C line and on each client interrupt pin.
     pub fn add_gpio(
         &mut self,
-        bank: &super::soc::GpioBank,
+        bank: &stela_soc_data::board::GpioBank,
         selects: &[u32],
         interrupts: &[u32],
     ) -> Result<(), String> {
@@ -690,7 +690,7 @@ impl AppleDevices {
     /// its pull-up; the board model that drives one, such as the HDMI
     /// converter's hot-plug output, attaches through [`Self::gpio_line`]
     /// before the guest runs.
-    pub fn add_aux_gpio(&mut self, aux: &super::soc::AuxGpioBank) -> Result<(), String> {
+    pub fn add_aux_gpio(&mut self, aux: &stela_soc_data::board::AuxGpioBank) -> Result<(), String> {
         if self
             .aux_gpios
             .iter()
@@ -757,7 +757,7 @@ impl AppleDevices {
     /// Installs the DT-derived SPI controller, one NOR die and
     /// its external GPIO CS wire (or the internal PIN.CS connection). An
     /// external CS requires the placed GPIO bank.
-    pub fn add_spi_nor(&mut self, placement: &super::soc::SpiNor) -> Result<(), String> {
+    pub fn add_spi_nor(&mut self, placement: &stela_soc_data::board::SpiNor) -> Result<(), String> {
         let device = placement.device;
         let spi = self.bus.add(Box::new(Spi::new(
             placement.image.clone(),
@@ -1057,7 +1057,7 @@ impl AppleDevices {
     /// to SPTM.
     pub fn add_ans(
         &mut self,
-        placement: &super::soc::AnsController,
+        placement: &stela_soc_data::board::AnsController,
         backing: Box<dyn stela_drivers::block::BlockDevice>,
         build: &stela_formats::builds::Build,
     ) -> Result<(), String> {
@@ -1088,9 +1088,9 @@ impl AppleDevices {
             .map(asc, placement.wrapper.0, placement.wrapper.1, 0)
             .map_err(|e| format!("ANS ASC placement: {e:?}"))?;
         let bounds = if placement.sart_exclusive_bounds {
-            sart::Bounds::Exclusive
+            stela_soc_data::sart::Bounds::Exclusive
         } else {
-            sart::Bounds::Inclusive
+            stela_soc_data::sart::Bounds::Inclusive
         };
         let sart = self
             .bus
@@ -1148,7 +1148,7 @@ impl AppleDevices {
     /// rest of the nub region, the coprocessor's own memory, stays unmapped.
     pub fn add_smc(
         &mut self,
-        placement: &super::soc::SmcController,
+        placement: &stela_soc_data::board::SmcController,
         build: &stela_formats::builds::Build,
     ) -> Result<(), String> {
         let sram = smc::Sram::default();
@@ -1196,7 +1196,7 @@ impl AppleDevices {
     /// the memory cache's ([`Self::add_memory_channels`]).
     pub fn add_pmp(
         &mut self,
-        placement: &super::soc::PmpController,
+        placement: &stela_soc_data::board::PmpController,
         build: &stela_formats::builds::Build,
     ) -> Result<(), String> {
         let mut rtkit = RtKit::new(
@@ -1226,7 +1226,7 @@ impl AppleDevices {
     /// masters memory through.
     pub fn add_gfx(
         &mut self,
-        placement: &super::soc::GfxController,
+        placement: &stela_soc_data::board::GfxController,
         build: &stela_formats::builds::Build,
     ) -> Result<(), String> {
         let sgx_physical = placement
@@ -1289,7 +1289,7 @@ impl AppleDevices {
     /// (`dart-dispext0` stream 0 on J473AP), when it is placed. The DCPEXT
     /// nub is `quiesced`, so (like the SMC) the coprocessor acknowledges the
     /// AP's wake once RTKit enumeration completes behind the boot-chain
-    /// handoff. This does not admit DCPEXT in `soc::models` (see
+    /// handoff. This does not admit DCPEXT in `stela_soc_data::board::models` (see
     /// `platform::apple::dcp`).
     #[allow(clippy::too_many_arguments)]
     pub fn add_dcpext(
@@ -1298,7 +1298,7 @@ impl AppleDevices {
         interrupts: [u32; 4],
         quiesced: bool,
         role: &'static str,
-        identity: dcp::ExternalIdentity,
+        identity: stela_soc_data::dcp::ExternalIdentity,
         scanout: Box<dyn Scanout>,
         (dart, stream): (DartId, usize),
         window: Option<u64>,
@@ -1356,7 +1356,7 @@ impl AppleDevices {
     /// knows the host's time.
     pub fn add_spmi(
         &mut self,
-        placement: &super::soc::SpmiController,
+        placement: &stela_soc_data::board::SpmiController,
         wall: Option<stela_soc_data::pmu::WallClock>,
     ) -> Result<(), String> {
         if placement.pmus.iter().any(|pmu| pmu.rtc_helper.is_some()) {
@@ -1376,7 +1376,7 @@ impl AppleDevices {
     /// origin; it is not an Apple persisted/reset-state measurement.
     pub fn add_spmi_with_epoch(
         &mut self,
-        placement: &super::soc::SpmiController,
+        placement: &stela_soc_data::board::SpmiController,
         wall: Option<stela_soc_data::pmu::WallClock>,
         epoch: pmu::RtcEpoch,
     ) -> Result<(), String> {
@@ -1388,7 +1388,7 @@ impl AppleDevices {
     /// controller; entries are complete and unique.
     pub fn add_spmi_with_resources(
         &mut self,
-        placement: &super::soc::SpmiController,
+        placement: &stela_soc_data::board::SpmiController,
         wall: Option<stela_soc_data::pmu::WallClock>,
         epoch: pmu::RtcEpoch,
         history: &[(u8, stela_soc_data::pmu::Retained, Vec<u8>)],
@@ -1494,7 +1494,7 @@ impl AppleDevices {
     /// interrupt net, whose summary the manager's own address reports.
     pub fn add_i2c<'f>(
         &mut self,
-        placement: &super::soc::I2cController,
+        placement: &stela_soc_data::board::I2cController,
         firmware: &dyn Fn(&str) -> Option<&'f [u8]>,
     ) -> Result<(), String> {
         let device = placement.device;
@@ -1503,10 +1503,10 @@ impl AppleDevices {
         // manager's summary samples.
         let mut alerts = Vec::new();
         for target in &placement.targets {
-            if target.compatible != super::soc::HPM {
+            if target.compatible != stela_soc_data::board::HPM {
                 continue;
             }
-            let name = super::soc::hpm_firmware_file(
+            let name = stela_soc_data::board::hpm_firmware_file(
                 target.firmware.as_deref().ok_or("HPM names no firmware")?,
             );
             let image =
@@ -1523,8 +1523,8 @@ impl AppleDevices {
         }
         for target in &placement.targets {
             let reason = match target.compatible.as_str() {
-                super::soc::HPM => continue,
-                super::soc::HPM_MANAGER => {
+                stela_soc_data::board::HPM => continue,
+                stela_soc_data::board::HPM_MANAGER => {
                     let dies = alerts
                         .iter()
                         .filter(|(pin, ..)| Some(*pin) == target.interrupt)
@@ -1536,7 +1536,7 @@ impl AppleDevices {
                         .map_err(String::from)?;
                     continue;
                 }
-                super::soc::RETIMER => "ATC retimer register protocol is undetermined",
+                stela_soc_data::board::RETIMER => "ATC retimer register protocol is undetermined",
                 _ => "I2C target protocol is not modeled",
             };
             model
@@ -1552,7 +1552,10 @@ impl AppleDevices {
 
     /// Place canonical PHY regions once. ADT aliases inside the core resolve
     /// by physical address; no length concatenation or duplicate storage.
-    pub fn add_atc_phy(&mut self, placement: &super::soc::TypecPhy) -> Result<(), String> {
+    pub fn add_atc_phy(
+        &mut self,
+        placement: &stela_soc_data::board::TypecPhy,
+    ) -> Result<(), String> {
         if placement.phandle == 0
             || placement.port == 0
             || self.phys.iter().any(|phy| phy.phandle == placement.phandle)
@@ -1750,7 +1753,7 @@ impl AppleDevices {
     }
 
     /// SEP ROM prefix at DT wrapper/auxiliary ranges, on its four mailbox
-    /// lines and dart-sep stream. This does not admit SEP in `soc::models`.
+    /// lines and dart-sep stream. This does not admit SEP in `stela_soc_data::board::models`.
     pub fn add_sep(
         &mut self,
         [wrapper, auxiliary]: [Range; 2],
@@ -1806,7 +1809,7 @@ impl AppleDevices {
     /// at 0x4338e74 chooses four handlers. The fifth ADT IRQ is not an event ring.
     pub fn add_usb(
         &mut self,
-        placement: &super::soc::UsbController,
+        placement: &stela_soc_data::board::UsbController,
         dart: DartId,
     ) -> Result<UsbId, String> {
         self.validate_native_dart("USB", dart, placement.stream as usize)?;
@@ -2253,7 +2256,7 @@ impl AppleDevices {
     /// any register control.
     pub fn connect_power_resources(
         &mut self,
-        states: &super::soc::PowerStates,
+        states: &stela_soc_data::board::PowerStates,
         darts: &[Vec<DartId>],
         retention: &[bool],
     ) -> Result<(), String> {
@@ -2649,7 +2652,7 @@ impl AppleDevices {
     pub fn add_watchdog_with_side(
         &mut self,
         range: Range,
-        side: Option<&super::soc::WatchdogSide>,
+        side: Option<&stela_soc_data::board::WatchdogSide>,
         irq: Option<AicInput>,
         now: u64,
     ) -> Result<(), String> {
@@ -3912,22 +3915,21 @@ mod tests {
         resources: &[(&str, u64)],
         retained: bool,
     ) {
-        use super::super::soc::{PowerResource, PowerStates};
+        use stela_soc_data::board::PowerResource;
         let gate = coverage::DomainId { die: 0, device: 1 };
-        let states = PowerStates {
-            implicit: Vec::new(),
-            blocks: vec![(supply, 4)],
-            registers: vec![supply],
-            domains: vec![coverage::Domain {
+        let states = stela_soc_data::board::fixture_support::power_states_fixture(
+            vec![(supply, 4)],
+            vec![supply],
+            vec![coverage::Domain {
                 name: String::new(),
                 id: gate,
                 address: Some(supply),
                 parents: [None; 4],
             }],
-            resources: resources
+            resources
                 .iter()
                 .map(|&(name, physical)| PowerResource {
-                    clock_role: crate::machine::soc::ClockRole::Consumer,
+                    clock_role: stela_soc_data::board::ClockRole::Consumer,
                     name: name.into(),
                     clocks: vec![gate],
                     power: vec![],
@@ -3935,7 +3937,7 @@ mod tests {
                     admission: coverage::Admission::Required,
                 })
                 .collect(),
-        };
+        );
         for device in &mut d.power_devices {
             device.retention = retained;
         }
@@ -3954,10 +3956,10 @@ mod tests {
     fn powered_dart_with(
         retention: bool,
         supplies: usize,
-        edit: impl FnOnce(&mut super::super::soc::PowerStates),
+        edit: impl FnOnce(&mut stela_soc_data::board::PowerStates),
     ) -> (AppleDevices, DartId, u64, u64) {
-        use super::super::soc::{PowerResource, PowerStates};
         use coverage::{Domain, DomainId};
+        use stela_soc_data::board::PowerResource;
         let mut d = AppleDevices::new();
         let supply = 0x2_3b70_0100;
         let base = 0x2_3500_4000;
@@ -3970,11 +3972,10 @@ mod tests {
                 device: index as u16 + 1,
             })
             .collect::<Vec<_>>();
-        let mut states = PowerStates {
-            implicit: Vec::new(),
-            blocks: vec![(supply, supplies as u64 * 8)],
-            registers: registers.clone(),
-            domains: registers
+        let mut states = stela_soc_data::board::fixture_support::power_states_fixture(
+            vec![(supply, supplies as u64 * 8)],
+            registers.clone(),
+            registers
                 .iter()
                 .zip(&ids)
                 .map(|(&address, &id)| Domain {
@@ -3984,15 +3985,15 @@ mod tests {
                     parents: [None; 4],
                 })
                 .collect(),
-            resources: vec![PowerResource {
-                clock_role: crate::machine::soc::ClockRole::Consumer,
+            vec![PowerResource {
+                clock_role: stela_soc_data::board::ClockRole::Consumer,
                 name: "/arm-io/dart".into(),
                 clocks: ids,
                 power: Vec::new(),
                 owner: Some(PowerOwner::Dart(0)),
                 admission: coverage::Admission::Required,
             }],
-        };
+        );
         edit(&mut states);
         d.add_power_states(
             &[Range {
@@ -4019,27 +4020,26 @@ mod tests {
     }
 
     fn powered_serial_controllers() -> (AppleDevices, Console, u64, [u64; 3]) {
-        use super::super::soc::{Device, I2cController, PowerResource, PowerStates, SpiNor};
         use coverage::{Admission, Domain, DomainId};
+        use stela_soc_data::board::{Device, I2cController, PowerResource, SpiNor};
         let mut d = AppleDevices::new();
         let supply = 0x2_3b70_0100;
         let bases = [UART, 0x2_3501_0000, 0x2_3510_4000];
         let id = DomainId { die: 0, device: 1 };
-        let states = PowerStates {
-            implicit: Vec::new(),
-            blocks: vec![(supply, 4)],
-            registers: vec![supply],
-            domains: vec![Domain {
+        let states = stela_soc_data::board::fixture_support::power_states_fixture(
+            vec![(supply, 4)],
+            vec![supply],
+            vec![Domain {
                 name: String::new(),
                 id,
                 address: Some(supply),
                 parents: [None; 4],
             }],
-            resources: bases
+            bases
                 .iter()
                 .zip(["uart", "i2c", "spi"])
                 .map(|(&physical, name)| PowerResource {
-                    clock_role: crate::machine::soc::ClockRole::Consumer,
+                    clock_role: stela_soc_data::board::ClockRole::Consumer,
                     name: name.into(),
                     clocks: vec![id],
                     power: vec![],
@@ -4047,7 +4047,7 @@ mod tests {
                     admission: Admission::Required,
                 })
                 .collect(),
-        };
+        );
         let console = Console::default();
         d.add_uart(
             console.clone(),
@@ -4191,18 +4191,17 @@ mod tests {
 
     #[test]
     fn repeated_resource_names_do_not_cross_connect_native_power_domains() {
-        use super::super::soc::{PowerResource, PowerStates};
         use coverage::{Admission, Domain, DomainId};
+        use stela_soc_data::board::PowerResource;
         let mut d = AppleDevices::new();
         let supply = 0x2_3b70_0100;
         let native = [0x2_3600_0000, 0x2_3601_0000];
         let registers = [supply, supply + 8];
         let ids = [1, 2].map(|device| DomainId { die: 0, device });
-        let states = PowerStates {
-            implicit: Vec::new(),
-            blocks: vec![(supply, 16)],
-            registers: registers.into(),
-            domains: registers
+        let states = stela_soc_data::board::fixture_support::power_states_fixture(
+            vec![(supply, 16)],
+            registers.into(),
+            registers
                 .into_iter()
                 .zip(ids)
                 .map(|(address, id)| Domain {
@@ -4212,11 +4211,11 @@ mod tests {
                     parents: [None; 4],
                 })
                 .collect(),
-            resources: native
+            native
                 .into_iter()
                 .zip(ids)
                 .map(|(physical, id)| PowerResource {
-                    clock_role: crate::machine::soc::ClockRole::Consumer,
+                    clock_role: stela_soc_data::board::ClockRole::Consumer,
                     name: "/arm-io/repeated".into(),
                     clocks: vec![id],
                     power: vec![],
@@ -4224,7 +4223,7 @@ mod tests {
                     admission: Admission::Required,
                 })
                 .collect(),
-        };
+        );
         d.add_power_states(
             &[Range {
                 physical: supply,
@@ -4256,29 +4255,28 @@ mod tests {
 
     #[test]
     fn pmgr_all_native_banks_preflight_before_register_or_actual_dart_effects() {
-        use super::super::soc::{PowerResource, PowerStates};
         use coverage::{Admission, Domain, DomainId};
+        use stela_soc_data::board::PowerResource;
         let mut d = AppleDevices::new();
         let supply = 0x2_3b70_0100;
         let base = 0x2_3500_4000;
         let canonical = 0x2_3600_0000;
         let gate = DomainId { die: 0, device: 1 };
-        let states = PowerStates {
-            implicit: Vec::new(),
-            blocks: vec![(supply, 4)],
-            registers: vec![supply],
-            domains: vec![Domain {
+        let states = stela_soc_data::board::fixture_support::power_states_fixture(
+            vec![(supply, 4)],
+            vec![supply],
+            vec![Domain {
                 name: String::new(),
                 id: gate,
                 address: Some(supply),
                 parents: [None; 4],
             }],
-            resources: [
+            [
                 ("/arm-io/dart", PowerOwner::Dart(0)),
                 ("/arm-io/checked-native", PowerOwner::Mmio(canonical)),
             ]
             .map(|(name, owner)| PowerResource {
-                clock_role: crate::machine::soc::ClockRole::Consumer,
+                clock_role: stela_soc_data::board::ClockRole::Consumer,
                 name: name.into(),
                 clocks: vec![gate],
                 power: vec![],
@@ -4286,7 +4284,7 @@ mod tests {
                 admission: Admission::Required,
             })
             .into(),
-        };
+        );
         d.add_power_states(
             &[Range {
                 physical: supply,
@@ -4626,11 +4624,11 @@ mod tests {
 
     #[test]
     fn pmgr_unavailable_shared_consumers_keep_actual_native_lifecycle_effects_in_all_directions() {
-        use super::super::soc::PowerResource;
+        use stela_soc_data::board::PowerResource;
         for retention in [false, true] {
             let (mut d, _, supply, base) = powered_dart_with(retention, 1, |states| {
                 states.resources.push(PowerResource {
-                    clock_role: crate::machine::soc::ClockRole::Consumer,
+                    clock_role: stela_soc_data::board::ClockRole::Consumer,
                     name: "/arm-io/unavailable".into(),
                     clocks: states.resources[0].clocks.clone(),
                     power: vec![],
@@ -4663,14 +4661,12 @@ mod tests {
 
     #[test]
     fn pmgr_domains_no_resource_names_complete_controller_state_with_no_client() {
-        use super::super::soc::PowerStates;
         // J473AP ISP_SYS: the board exposes no ISP, and XNU power-gates it.
         let supply = 0x2_3b70_0438;
-        let states = PowerStates {
-            implicit: Vec::new(),
-            blocks: vec![(supply, 4)],
-            registers: vec![supply],
-            domains: vec![coverage::Domain {
+        let states = stela_soc_data::board::fixture_support::power_states_fixture(
+            vec![(supply, 4)],
+            vec![supply],
+            vec![coverage::Domain {
                 name: "ISP_SYS".into(),
                 id: coverage::DomainId {
                     die: 0,
@@ -4679,8 +4675,8 @@ mod tests {
                 address: Some(supply),
                 parents: [None; 4],
             }],
-            resources: Vec::new(),
-        };
+            Vec::new(),
+        );
         let mut d = AppleDevices::new();
         d.add_power_states(
             &[Range {
@@ -4702,28 +4698,27 @@ mod tests {
 
     #[test]
     fn pmgr_unavailable_only_domains_model_controller_state_without_functional_device_credit() {
-        use super::super::soc::{PowerResource, PowerStates};
+        use stela_soc_data::board::PowerResource;
         let supply = 0x2_3b70_8020;
         let id = coverage::DomainId { die: 0, device: 1 };
-        let states = PowerStates {
-            implicit: Vec::new(),
-            blocks: vec![(supply, 4)],
-            registers: vec![supply],
-            domains: vec![coverage::Domain {
+        let states = stela_soc_data::board::fixture_support::power_states_fixture(
+            vec![(supply, 4)],
+            vec![supply],
+            vec![coverage::Domain {
                 name: String::new(),
                 id,
                 address: Some(supply),
                 parents: [None; 4],
             }],
-            resources: vec![PowerResource {
-                clock_role: crate::machine::soc::ClockRole::Consumer,
+            vec![PowerResource {
+                clock_role: stela_soc_data::board::ClockRole::Consumer,
                 name: "/arm-io/unavailable".into(),
                 clocks: vec![id],
                 power: vec![],
                 owner: None,
                 admission: coverage::Admission::Unavailable,
             }],
-        };
+        );
         let mut d = AppleDevices::new();
         d.add_power_states(
             &[Range {
@@ -4777,8 +4772,8 @@ mod tests {
 
     #[test]
     fn pmgr_shared_parents_and_aliases_refuse_only_the_uncovered_hardware_domains() {
-        use super::super::soc::PowerResource;
         use coverage::{Domain, DomainId};
+        use stela_soc_data::board::PowerResource;
         let id = |device| DomainId { die: 0, device };
         let (mut d, _, supply, base) = powered_dart_with(false, 3, |states| {
             states.domains[1].parents = [Some(id(1)), None, None, None];
@@ -4791,7 +4786,7 @@ mod tests {
             states.resources[0].clocks = vec![id(2)];
             for (name, device) in [("controller", 1), ("firmware-endpoint", 3)] {
                 states.resources.push(PowerResource {
-                    clock_role: crate::machine::soc::ClockRole::Consumer,
+                    clock_role: stela_soc_data::board::ClockRole::Consumer,
                     name: name.into(),
                     clocks: vec![],
                     power: vec![id(device)],
@@ -4861,7 +4856,7 @@ mod tests {
                 physical: base,
                 bytes: 0x4000,
             },
-            Some(&super::super::soc::WatchdogSide {
+            Some(&stela_soc_data::board::WatchdogSide {
                 words: side.to_vec(),
                 triggers: alloc::vec![(trigger, 0xf, 1)],
             }),
@@ -4894,7 +4889,7 @@ mod tests {
             physical: base,
             bytes: 0x4000,
         };
-        let side = super::super::soc::WatchdogSide {
+        let side = stela_soc_data::board::WatchdogSide {
             words: words.to_vec(),
             triggers: alloc::vec![(trigger, 0xf, 1), (trigger, 0xf, 1)],
         };
@@ -4990,7 +4985,7 @@ mod tests {
 
     #[test]
     fn external_gpio_cs_delimits_nor_commands_across_controller_transfers() {
-        use super::super::soc::{Device, GpioBank, SpiNor};
+        use stela_soc_data::board::{Device, GpioBank, SpiNor};
         const SPI: u64 = 0x10000;
         const GPIO: u64 = 0x20000;
         const PIN: u64 = GPIO + 49 * 4;
@@ -5058,10 +5053,10 @@ mod tests {
 
     #[test]
     fn ans_dma_and_sart_idle_share_the_nvme_aperture_without_aliasing() {
-        use crate::machine::soc::AnsController;
-        use crate::platform::apple::{ans, sart};
+        use crate::platform::apple::ans;
         use stela_contracts::dma::test_support::Ram;
         use stela_drivers::block::RamDisk;
+        use stela_soc_data::board::AnsController;
         const NVME: u64 = 0x2_7bcc_0000;
         const SART: u64 = 0x2_7bc5_0000;
         const WRAPPER: u64 = 0x2_7740_0000;
@@ -5074,7 +5069,7 @@ mod tests {
             nvme: (NVME, 0x60000),
             vdma: Some((VDMA, 0x44000)),
             sart: (SART, 0xc000),
-            sart_layout: sart::Layout::V3,
+            sart_layout: stela_soc_data::sart::Layout::V3,
             sart_idle: NVME + 0x13e8,
             sart_canary: None,
             sart_exclusive_bounds: false,
@@ -5140,7 +5135,7 @@ mod tests {
         assert_eq!(devices.read(0, NVME + 0x1300, 4, 0), Ok(0xde71_ce55));
         assert!(devices.read(0, NVME + 0x13ec, 4, 0).is_err());
         for (at, value) in [
-            (SART + 0x40, RAM / sart::PAGE),
+            (SART + 0x40, RAM / stela_soc_data::sart::PAGE),
             (SART + 0x80, 16),
             (SART, 0xff),
             (NVME + 0x24, 0x0001_0001),
@@ -5200,7 +5195,7 @@ mod tests {
 
     #[test]
     fn an_aux_gpio_bank_reads_the_lines_its_board_drives() {
-        use crate::machine::soc::{AuxGpioBank, GpioBank};
+        use stela_soc_data::board::{AuxGpioBank, GpioBank};
         const BANK: u64 = 0x2_4a82_0000;
         const HPD: u32 = 0x31;
         let aux = AuxGpioBank {
@@ -5279,7 +5274,7 @@ mod tests {
 
     #[test]
     fn pmp_places_a_running_user_managed_wrapper() {
-        use crate::machine::soc::PmpController;
+        use stela_soc_data::board::PmpController;
         const WRAPPER: u64 = 0x2_3bc0_0000;
         let mut devices = AppleDevices::new();
         devices
@@ -5315,8 +5310,8 @@ mod tests {
 
     #[test]
     fn gfx_native_control_cannot_bind_over_another_mounted_bank() {
-        use crate::machine::soc::GfxController;
-        use crate::platform::apple::agx::generation;
+        use stela_soc_data::agx::generation;
+        use stela_soc_data::board::GfxController;
         const WRAPPER: u64 = 0x2_0640_0000;
         const CONTROL: u64 = WRAPPER + 0x14_0120;
         let placement = GfxController {
@@ -5355,8 +5350,8 @@ mod tests {
 
     #[test]
     fn pro_max_and_ultra_gfx_keep_their_sparse_original_banks() {
-        use crate::machine::soc::GfxController;
-        use crate::platform::apple::agx::generation;
+        use stela_soc_data::agx::generation;
+        use stela_soc_data::board::GfxController;
         // 26A434 original ADTs: J314s/c, J375c/d, J414s/c and J180d.
         // arm-io/ranges translates the child bases by 0x2_0000_0000.
         // G13X/G14X use their own callback programs, not G14G's private
@@ -5400,9 +5395,10 @@ mod tests {
 
     #[test]
     fn gfx_firmware_reads_its_initdata_through_the_uat_the_sgx_mmu_roots() {
-        use crate::machine::soc::GfxController;
-        use crate::platform::apple::agx::{firmware, generation, uat as table};
+        use crate::platform::apple::agx::{firmware, uat as table};
         use stela_contracts::dma::test_support::Ram;
+        use stela_soc_data::agx::generation;
+        use stela_soc_data::board::GfxController;
         const WRAPPER: u64 = 0x2_0640_0000;
         const SGX: u64 = 0x2_0400_0000;
         const RAM: u64 = 0x8_0000_0000;
@@ -5539,7 +5535,7 @@ mod tests {
 
     #[test]
     fn smc_places_a_running_wrapper_its_shared_page_and_watchdog() {
-        use crate::machine::soc::SmcController;
+        use stela_soc_data::board::SmcController;
         const WRAPPER: u64 = 0x2_3e40_0000;
         const WATCHDOG: u64 = 0x2_3e81_0000;
         const REGION: u64 = 0x2_3fe0_0000;
@@ -5550,7 +5546,7 @@ mod tests {
             region: (REGION, 0x10_0000),
             gpio_keys: alloc::vec![smc::code(b"gP16")],
             quiesced: true,
-            wake_bits: smc::WakeBits::default(),
+            wake_bits: stela_soc_data::smc::WakeBits::default(),
         };
         let mut devices = AppleDevices::new();
         devices
@@ -5680,7 +5676,7 @@ mod tests {
                     [1, 2, 3, 4],
                     false,
                     "DCPEXT",
-                    dcp::ExternalIdentity::Unnumbered,
+                    stela_soc_data::dcp::ExternalIdentity::Unnumbered,
                     Box::new(UnusedScreen),
                     (dart, input),
                     None,
@@ -5744,7 +5740,7 @@ mod tests {
                     [1, 2, 3, 4],
                     false,
                     "DCPEXT",
-                    dcp::ExternalIdentity::Unnumbered,
+                    stela_soc_data::dcp::ExternalIdentity::Unnumbered,
                     Box::new(UnusedScreen),
                     (owner, 1),
                     None,
@@ -5884,7 +5880,7 @@ mod tests {
             [0x243, 0x242, 0x245, 0x244],
             false,
             "DCPEXT",
-            dcp::ExternalIdentity::Unnumbered,
+            stela_soc_data::dcp::ExternalIdentity::Unnumbered,
             Box::new(Screen(frames.clone())),
             (dart, 5),
             Some(RAM),
@@ -5994,7 +5990,7 @@ mod tests {
                 [0x242, 0x242, 0x245, 0x244],
                 true,
                 "DCPEXT",
-                dcp::ExternalIdentity::Unnumbered,
+                stela_soc_data::dcp::ExternalIdentity::Unnumbered,
                 Box::new(Screen),
                 (dart, 5),
                 Some(0x8_0000_0000),
@@ -6359,7 +6355,7 @@ mod tests {
             devices.add_lockdown(name, control, range, reset).unwrap();
         }
         devices
-            .add_cpu_energy(cpu + energy::CORE_OFFSET, false)
+            .add_cpu_energy(cpu + stela_soc_data::energy::CORE_OFFSET, false)
             .unwrap();
         devices.add_cpu_energy(cpm + 0x8000, true).unwrap();
         assert_eq!(devices.read(0, cpu, 8, 0), Ok(0x8_0300_c001));
@@ -6891,9 +6887,9 @@ mod tests {
             matches!(refusal, Err(DeviceError::TransferRefused(reason)) if reason.contains("payload type is malformed"))
         );
     }
-    fn usb_placement() -> super::super::soc::UsbController {
+    fn usb_placement() -> stela_soc_data::board::UsbController {
         const BASE: u64 = 0x382280000;
-        super::super::soc::UsbController {
+        stela_soc_data::board::UsbController {
             ranges: [
                 (BASE, 0x11800),
                 (0x382200000, 0x4000),
@@ -6917,22 +6913,22 @@ mod tests {
         }
     }
 
-    fn add_usb_phy(d: &mut AppleDevices) -> super::super::soc::TypecPhy {
-        let placement = super::super::soc::TypecPhy {
+    fn add_usb_phy(d: &mut AppleDevices) -> stela_soc_data::board::TypecPhy {
+        let placement = stela_soc_data::board::TypecPhy {
             phandle: 0xa2,
             port: 1,
             retention: true,
             views: Vec::new(),
-            usb2: (0x382a90000, atc_phy::WINDOW_BYTES),
-            core: (0x383000000, atc_phy::CORE_BYTES),
-            pipe: Some((0x382a84000, atc_phy::WINDOW_BYTES)),
-            events: (0x382800000, atc_phy::WINDOW_BYTES),
+            usb2: (0x382a90000, stela_soc_data::atc_phy::WINDOW_BYTES),
+            core: (0x383000000, stela_soc_data::atc_phy::CORE_BYTES),
+            pipe: Some((0x382a84000, stela_soc_data::atc_phy::WINDOW_BYTES)),
+            events: (0x382800000, stela_soc_data::atc_phy::WINDOW_BYTES),
         };
         d.add_atc_phy(&placement).unwrap();
         placement
     }
 
-    fn release_usb_phy(d: &mut AppleDevices, phy: &super::super::soc::TypecPhy) {
+    fn release_usb_phy(d: &mut AppleDevices, phy: &stela_soc_data::board::TypecPhy) {
         // Actual USB2 RUN, reset/SIDDQ release, core supply/reset release,
         // and pipehandler controller RESET_N without clamp.
         for (address, value) in [
@@ -6988,8 +6984,8 @@ mod tests {
 
     #[test]
     fn actual_phy_clock_and_retained_supply_freeze_usb_time_while_quiesce_does_not() {
-        use super::super::soc::{PowerResource, PowerStates};
         use coverage::{Domain, DomainId};
+        use stela_soc_data::board::PowerResource;
         let mut d = AppleDevices::new();
         let dart = d
             .add_dart(
@@ -7008,25 +7004,24 @@ mod tests {
         release_usb_phy(&mut d, &phy);
         let supply = 0x23d280100;
         let id = DomainId { die: 0, device: 1 };
-        let states = PowerStates {
-            implicit: Vec::new(),
-            registers: vec![supply],
-            blocks: vec![(supply, 4)],
-            domains: vec![Domain {
+        let states = stela_soc_data::board::fixture_support::power_states_fixture(
+            vec![(supply, 4)],
+            vec![supply],
+            vec![Domain {
                 name: String::new(),
                 id,
                 address: Some(supply),
                 parents: [None; 4],
             }],
-            resources: vec![PowerResource {
-                clock_role: crate::machine::soc::ClockRole::Consumer,
+            vec![PowerResource {
+                clock_role: stela_soc_data::board::ClockRole::Consumer,
                 name: "/arm-io/atc-phy0".into(),
                 clocks: vec![id],
                 power: vec![],
                 owner: Some(PowerOwner::Phy(0)),
                 admission: coverage::Admission::Required,
             }],
-        };
+        );
         d.add_power_states(
             &[Range {
                 physical: supply,
@@ -7108,8 +7103,8 @@ mod tests {
 
     #[test]
     fn usb_requires_actual_phy_binding_and_retained_phy_pauses_preserve_sessions() {
-        use super::super::soc::{PowerResource, PowerStates};
         use coverage::{Domain, DomainId};
+        use stela_soc_data::board::PowerResource;
         let mut d = AppleDevices::new();
         let base_dart = 0x382f00000;
         let dart = d
@@ -7145,25 +7140,24 @@ mod tests {
         release_usb_phy(&mut d, &phy);
         let supply = 0x23d280100;
         let id = DomainId { die: 0, device: 1 };
-        let states = PowerStates {
-            implicit: Vec::new(),
-            registers: vec![supply],
-            blocks: vec![(supply, 4)],
-            domains: vec![Domain {
+        let states = stela_soc_data::board::fixture_support::power_states_fixture(
+            vec![(supply, 4)],
+            vec![supply],
+            vec![Domain {
                 name: String::new(),
                 id,
                 address: Some(supply),
                 parents: [None; 4],
             }],
-            resources: vec![PowerResource {
-                clock_role: crate::machine::soc::ClockRole::Consumer,
+            vec![PowerResource {
+                clock_role: stela_soc_data::board::ClockRole::Consumer,
                 name: "/arm-io/atc-phy0".into(),
                 clocks: vec![id],
                 power: vec![],
                 owner: Some(PowerOwner::Phy(0)),
                 admission: coverage::Admission::Required,
             }],
-        };
+        );
         d.add_power_states(
             &[Range {
                 physical: supply,
@@ -7222,8 +7216,8 @@ mod tests {
 
     #[test]
     fn pmgr_shared_usb_leaf_pauses_both_clients_and_cancels_sessions_only_on_reset_or_detach() {
-        use super::super::soc::{PowerResource, PowerStates};
         use coverage::{Domain, DomainId};
+        use stela_soc_data::board::PowerResource;
         let id = |device| DomainId { die: 0, device };
         let mut d = AppleDevices::new();
         d.add_aic(0x3b0c0000, 1100, AicLayout::aic2(0x8000, 0))
@@ -7246,11 +7240,10 @@ mod tests {
         release_usb_phy(&mut d, &phy);
         let base = placement.ranges[0].0;
         let supply = 0x23d280098;
-        let states = PowerStates {
-            implicit: Vec::new(),
-            registers: vec![supply, supply + 8],
-            blocks: vec![(supply, 12)],
-            domains: vec![
+        let states = stela_soc_data::board::fixture_support::power_states_fixture(
+            vec![(supply, 12)],
+            vec![supply, supply + 8],
+            vec![
                 Domain {
                     name: String::new(),
                     id: id(0x210),
@@ -7270,9 +7263,9 @@ mod tests {
                     parents: [None; 4],
                 },
             ],
-            resources: vec![
+            vec![
                 PowerResource {
-                    clock_role: crate::machine::soc::ClockRole::Consumer,
+                    clock_role: stela_soc_data::board::ClockRole::Consumer,
                     name: "dart-usb0".into(),
                     clocks: vec![id(0x210)],
                     power: vec![],
@@ -7280,7 +7273,7 @@ mod tests {
                     admission: coverage::Admission::Required,
                 },
                 PowerResource {
-                    clock_role: crate::machine::soc::ClockRole::Consumer,
+                    clock_role: stela_soc_data::board::ClockRole::Consumer,
                     name: "usb-drd0".into(),
                     clocks: vec![id(0x108)],
                     power: vec![],
@@ -7288,7 +7281,7 @@ mod tests {
                     admission: coverage::Admission::Required,
                 },
                 PowerResource {
-                    clock_role: crate::machine::soc::ClockRole::Consumer,
+                    clock_role: stela_soc_data::board::ClockRole::Consumer,
                     name: "usb-drd0/port-hs".into(),
                     clocks: vec![id(0x108)],
                     power: vec![],
@@ -7296,7 +7289,7 @@ mod tests {
                     admission: coverage::Admission::Required,
                 },
                 PowerResource {
-                    clock_role: crate::machine::soc::ClockRole::Consumer,
+                    clock_role: stela_soc_data::board::ClockRole::Consumer,
                     name: "acio0".into(),
                     clocks: vec![id(2)],
                     power: vec![],
@@ -7304,7 +7297,7 @@ mod tests {
                     admission: coverage::Admission::Required,
                 },
                 PowerResource {
-                    clock_role: crate::machine::soc::ClockRole::Consumer,
+                    clock_role: stela_soc_data::board::ClockRole::Consumer,
                     name: "atc-phy0".into(),
                     clocks: vec![],
                     power: vec![],
@@ -7312,7 +7305,7 @@ mod tests {
                     admission: coverage::Admission::Required,
                 },
             ],
-        };
+        );
         d.add_power_states(
             &[Range {
                 physical: supply,
@@ -7446,3 +7439,6 @@ mod tests {
         assert_eq!(devices.dma_deadline(), None);
     }
 }
+
+#[cfg(test)]
+mod data_integration_tests;

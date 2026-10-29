@@ -215,7 +215,7 @@ fn profile(cores: usize) -> Result<CpuProfile, &'static str> {
     // The diagnostic declares the existing t8103 P-core interface. Variant1 /
     // revision0 have the same explicitly inferred status as soc::cpus; this is
     // not a physical x86 P/E classification or an Apple SKU/core-count claim.
-    let part = machine::soc::midr_part(0x8103, b'P')
+    let part = stela_soc_data::board::midr_part(0x8103, b'P')
         .ok_or("diagnostic M1 interface has no sourced MIDR part")?;
     let midr = (0x61 << 24) | (1 << 20) | (0xf << 16) | (u64::from(part) << 4);
     Ok(CpuProfile {

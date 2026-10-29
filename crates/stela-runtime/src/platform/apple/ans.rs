@@ -72,7 +72,6 @@ pub const TAGS: u16 = 64;
 /// [`TAGS`] (SPTM `MAP_PAGES` 0x270c8178).
 #[cfg(test)]
 pub const QUEUE_ENTRIES: u16 = 65;
-pub const REGISTER_BYTES: u64 = 0x28134;
 /// Where SPTM finds the VDMA translation cache in ANS2 `reg[13]` when the
 /// node carries `nvme-vdma-wa` (`nvme_bootstrap` 0x270c8cac..cdc maps the
 /// bank and keeps it + 0x20000), and the cache's span: one 32-byte entry
@@ -1045,9 +1044,9 @@ mod tests {
     use alloc::{vec, vec::Vec};
     use stela_drivers::block::{BlockError, RamDisk};
     use {
-        crate::platform::apple::sart::Bounds, crate::platform::apple::sart::Sart,
-        stela_contracts::dma::Memory, stela_contracts::dma::Physical,
-        stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::InterruptLatch,
+        crate::platform::apple::sart::Sart, stela_contracts::dma::Memory,
+        stela_contracts::dma::Physical, stela_contracts::dma::test_support::Ram,
+        stela_contracts::interrupt::InterruptLatch, stela_soc_data::sart::Bounds,
     };
     const RAM: u64 = 0x8_0000_0000;
     const SQ: u64 = RAM;

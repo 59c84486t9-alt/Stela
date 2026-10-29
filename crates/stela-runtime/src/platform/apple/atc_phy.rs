@@ -48,8 +48,6 @@ const EVENT_ENABLE: u32 = 1;
 const LOAD_COUNT: u32 = 1 << 3;
 const UTMI_CLOCK_EVENTS: u64 = EVENTS + 0x20;
 const REFCLK_GATE_OFF: u32 = 1 << 30;
-pub const CORE_BYTES: u64 = 0x4c000;
-pub const WINDOW_BYTES: u64 = 0x4000;
 const USBCTL: u64 = USB2;
 const CTL: u64 = USB2 + 4;
 const SIG: u64 = USB2 + 8;
@@ -344,6 +342,7 @@ impl MmioDevice for AtcPhy {
 mod tests {
     use super::*;
     use alloc::boxed::Box;
+    use stela_soc_data::atc_phy::CORE_BYTES;
     use {stela_contracts::bus::Bus, stela_contracts::interrupt::InterruptLatch};
     fn wr(p: &mut AtcPhy, a: &mut Access<'_>, o: u64, v: u32) {
         p.write(o, Width::Word, v.into(), a).unwrap();

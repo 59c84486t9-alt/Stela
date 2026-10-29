@@ -1,6 +1,5 @@
 //! Native system services joined to the actual cold PMP ASC and DMA owners.
 use super::{AppleDevices, ExplicitRuntimeConfiguration};
-use crate::machine::soc::Board;
 use crate::platform::apple::asc::Asc;
 use crate::platform::apple::pmp;
 use crate::platform::apple::pmp::native::services::Clock;
@@ -12,6 +11,7 @@ use stela_contracts::bus::DeviceId;
 use stela_contracts::bus::Width;
 use stela_engine::machine::engine::DeviceError;
 use stela_engine::memory::RegisteredSystemRam;
+use stela_soc_data::board::Board;
 
 pub(super) struct NativePmpServices {
     asc: DeviceId,

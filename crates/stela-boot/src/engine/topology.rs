@@ -14,15 +14,15 @@ use stela_loader::apple_device_tree::{
     DeviceTree,
     assigned::{Count, CountField, CpuIdRecipe, NodeBinding, Projection, Receipt, SourceBindings},
 };
-use stela_runtime::machine::soc::assigned::AssignedCore;
-use stela_runtime::machine::soc::assigned::Assignment;
-use stela_runtime::machine::soc::assigned::BspSource;
-use stela_runtime::machine::soc::assigned::Plan;
-use stela_runtime::machine::soc::assigned::PlanIdentity;
-use stela_runtime::machine::soc::assigned::RegisterRange;
-use stela_runtime::machine::soc::assigned::RetainedResources;
-use stela_runtime::machine::soc::assigned::RetainedRoster;
-use stela_runtime::machine::soc::assigned::SourceIdentity;
+use stela_soc_data::board::assigned::AssignedCore;
+use stela_soc_data::board::assigned::Assignment;
+use stela_soc_data::board::assigned::BspSource;
+use stela_soc_data::board::assigned::Plan;
+use stela_soc_data::board::assigned::PlanIdentity;
+use stela_soc_data::board::assigned::RegisterRange;
+use stela_soc_data::board::assigned::RetainedResources;
+use stela_soc_data::board::assigned::RetainedRoster;
+use stela_soc_data::board::assigned::SourceIdentity;
 
 #[cfg(not(test))]
 use super::bundle::live_tree::LiveTree;
@@ -30,7 +30,7 @@ use super::bundle::live_tree::LiveTree;
 use crate::boot_live_tree::LiveTree;
 use stela_boot_core::{record::Capture, topology as native};
 #[cfg(test)]
-use stela_runtime::machine::soc::assigned::GuestSlotId;
+use stela_soc_data::board::assigned::GuestSlotId;
 
 /// These count consumers are independently source-qualified for the retained
 /// Apple ARM CPU/AIC schema (original J314s audit). They all use the same Plan.
@@ -285,13 +285,13 @@ pub(crate) struct Join {
     pub worker: usize,
     pub apic: u32,
     pub reg: u32,
-    pub cluster: stela_runtime::machine::soc::assigned::ClusterId,
-    pub cache: stela_runtime::machine::soc::assigned::CacheId,
-    pub interrupt: stela_runtime::machine::soc::assigned::InterruptId,
+    pub cluster: stela_soc_data::board::assigned::ClusterId,
+    pub cache: stela_soc_data::board::assigned::CacheId,
+    pub interrupt: stela_soc_data::board::assigned::InterruptId,
     /// Original CPU error input, distinct from the PE/IPI routing owner above.
     pub error_interrupt_parent: u32,
     pub error_interrupt: u32,
-    pub start: stela_runtime::machine::soc::assigned::StartId,
+    pub start: stela_soc_data::board::assigned::StartId,
     pub enable_core: Function,
     pub core_power: stela_soc_data::pmgr::coverage::DomainId,
     pub cluster_power: stela_soc_data::pmgr::coverage::DomainId,
@@ -786,22 +786,15 @@ mod tests {
     use stela_loader::apple_device_tree::Node;
     use {
         stela_contracts::Chip, stela_contracts::caches::Cache, stela_contracts::caches::Caches,
-        stela_contracts::identity::Identity, stela_runtime::machine::soc::assigned::CacheId,
-        stela_runtime::machine::soc::assigned::Capacity,
-        stela_runtime::machine::soc::assigned::CapacityKind,
-        stela_runtime::machine::soc::assigned::ClusterId,
-        stela_runtime::machine::soc::assigned::ClusterSlot,
-        stela_runtime::machine::soc::assigned::CoreKind,
-        stela_runtime::machine::soc::assigned::InterruptId,
-        stela_runtime::machine::soc::assigned::InterruptTarget,
-        stela_runtime::machine::soc::assigned::KindId,
-        stela_runtime::machine::soc::assigned::PeSlot,
-        stela_runtime::machine::soc::assigned::PowerResource,
-        stela_runtime::machine::soc::assigned::ResourceProfile,
-        stela_runtime::machine::soc::assigned::Resources,
-        stela_runtime::machine::soc::assigned::SharedCache,
-        stela_runtime::machine::soc::assigned::StartId,
-        stela_runtime::machine::soc::assigned::StartResource,
+        stela_contracts::identity::Identity, stela_soc_data::board::assigned::CacheId,
+        stela_soc_data::board::assigned::Capacity, stela_soc_data::board::assigned::CapacityKind,
+        stela_soc_data::board::assigned::ClusterId, stela_soc_data::board::assigned::ClusterSlot,
+        stela_soc_data::board::assigned::CoreKind, stela_soc_data::board::assigned::InterruptId,
+        stela_soc_data::board::assigned::InterruptTarget, stela_soc_data::board::assigned::KindId,
+        stela_soc_data::board::assigned::PeSlot, stela_soc_data::board::assigned::PowerResource,
+        stela_soc_data::board::assigned::ResourceProfile,
+        stela_soc_data::board::assigned::Resources, stela_soc_data::board::assigned::SharedCache,
+        stela_soc_data::board::assigned::StartId, stela_soc_data::board::assigned::StartResource,
         stela_soc_data::pmgr::coverage::DomainId,
     };
 
@@ -1291,7 +1284,7 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]
     fn original_t8112_adapter_joins_dense_driver_ids_to_physical_first_p_resources() {
-        use stela_runtime::machine::soc;
+        use stela_soc_data::board;
         let file = std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap())
             .join("DeviceTree.j473ap.adt");
         let original = std::fs::read(file).unwrap();
@@ -1331,13 +1324,13 @@ mod tests {
             .unwrap()
             .children
             .iter()
-            .map(|cpu| soc::Processor {
+            .map(|cpu| board::Processor {
                 reg: cpu.property("reg").unwrap().as_u32().unwrap(),
                 cluster_type: cpu.property("cluster-type").unwrap().value[0],
                 l2_bytes: cpu.property("l2-cache-size").unwrap().as_u32(),
             })
             .collect::<Vec<_>>();
-        let actual = soc::cpus(0x8112, "Apple M2", &cpus).unwrap();
+        let actual = board::cpus(0x8112, "Apple M2", &cpus).unwrap();
         let profile = CpuProfile {
             name: "original component fixture",
             chip: actual.chip,
@@ -1395,7 +1388,7 @@ mod tests {
             let selected =
                 Source::t8112_assigned(&original, &live, identity, 0x100, count).unwrap();
             let prepared = selected.prepare(&roster, profile.clone()).unwrap();
-            let board = soc::board(&prepared.tree.serialize()).unwrap();
+            let board = board::board(&prepared.tree.serialize()).unwrap();
             assert_eq!(board.boot_processor.unwrap().cpu, 0);
             assert_eq!(board.cpus.processors, prepared.profile.processors);
             assert_eq!(prepared.worker_bindings().unwrap().len(), count);
@@ -1423,7 +1416,7 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_TEST_ASSIGNED_DT, STELA_TEST_ASSIGNED_PREPARED_DT"]
     fn original_mode1_factory_projects_actual_live_tree_without_public_pmgr_admission() {
-        use {stela_contracts::adt, stela_runtime::machine::soc};
+        use {stela_contracts::adt, stela_soc_data::board};
         let original = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_DT").unwrap()).unwrap();
         let raw = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_PREPARED_DT").unwrap()).unwrap();
         assert_eq!(
@@ -1436,7 +1429,7 @@ mod tests {
         );
         let identity = SourceIdentity {
             original_tree_sha256: Sha256::digest(&original).into(),
-            profile: soc::assigned::ResourceProfile {
+            profile: board::assigned::ResourceProfile {
                 chip: Chip::AppleM1,
                 soc: 0x6000,
                 board: 8,
@@ -1459,7 +1452,7 @@ mod tests {
             .unwrap()
             .children
             .iter()
-            .map(|cpu| soc::Processor {
+            .map(|cpu| board::Processor {
                 reg: cpu.property("reg").unwrap().as_u32().unwrap(),
                 cluster_type: cpu.property("cluster-type").unwrap().value[0],
                 l2_bytes: cpu.property("l2-cache-size").unwrap().as_u32(),
@@ -1473,7 +1466,7 @@ mod tests {
         let soc_name = core::str::from_utf8(soc_name)
             .unwrap()
             .trim_end_matches('\0');
-        let actual = soc::cpus(0x6000, soc_name, &cpus).unwrap();
+        let actual = board::cpus(0x6000, soc_name, &cpus).unwrap();
         let profile = CpuProfile {
             name: "source topology regression",
             chip: actual.chip,
@@ -1555,11 +1548,11 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_TEST_ASSIGNED_DT, STELA_TEST_ASSIGNED_PREPARED_DT"]
     fn original_mode1_keeps_discovery_order_with_nonzero_logical_boot_pe() {
-        use stela_runtime::machine::soc;
+        use stela_soc_data::board;
         let original = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_DT").unwrap()).unwrap();
         let raw = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_PREPARED_DT").unwrap()).unwrap();
         let tree = DeviceTree::parse(&raw).unwrap();
-        let board = soc::board(&raw).unwrap();
+        let board = board::board(&raw).unwrap();
         let boot = board.boot_processor.as_ref().unwrap();
         assert_ne!(boot.cpu, 0);
         assert!(stela_runtime::machine::apple::AppleDevices::native_pmp_system_endpoint_refusal(
@@ -1581,7 +1574,7 @@ mod tests {
         };
         let identity = SourceIdentity {
             original_tree_sha256: Sha256::digest(&original).into(),
-            profile: soc::assigned::ResourceProfile {
+            profile: board::assigned::ResourceProfile {
                 chip: profile.chip,
                 soc: word(&tree, "/chosen", "chip-id").unwrap(),
                 board: word(&tree, "/chosen", "board-id").unwrap(),
@@ -1623,7 +1616,7 @@ mod tests {
             let selected =
                 Source::t6000_assigned(&original, &live, identity, boot.affinity, count).unwrap();
             let prepared = selected.prepare(&roster, profile.clone()).unwrap();
-            let projected = soc::board(&prepared.tree.serialize()).unwrap();
+            let projected = board::board(&prepared.tree.serialize()).unwrap();
             assert_eq!(projected.boot_processor.unwrap().cpu, boot.cpu);
             assert_eq!(projected.cpus.processors, prepared.profile.processors);
             assert_eq!(

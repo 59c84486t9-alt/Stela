@@ -7,7 +7,6 @@
 //! windows and DCS/PTD. See docs/research/apple-mcc.md for the source contract
 //! and missing all-access cache accounting. No Apple firmware is executed.
 use super::Prepared;
-use crate::machine::soc::MemoryController;
 use crate::platform::apple::amcc::Amcc;
 use alloc::sync::Arc;
 use stela_contracts::bus::Access;
@@ -23,6 +22,7 @@ use stela_engine::memory::RegisteredSystemRam;
 use stela_soc_data::amcc::Locked;
 use stela_soc_data::amcc::Programmed;
 use stela_soc_data::amcc::Register;
+use stela_soc_data::board::MemoryController;
 
 const PLANES: u32 = 4;
 pub(super) const STRIDE: u64 = 0x40000;

@@ -1,5 +1,5 @@
 //! A board's whole machine: every device model its DeviceTree describes
-//! (`soc::board`), placed on one [`AppleDevices`] and connected to its PMGR
+//! (`stela_soc_data::board::board`), placed on one [`AppleDevices`] and connected to its PMGR
 //! lifecycle. The host's inputs (console, disks, cables, scanout, entropy and
 //! board firmware files) come from the caller, so `stela.efi` and
 //! `stela-dev boot check` mount the same machine.
@@ -18,11 +18,11 @@ use super::apple::memory_resources::t6000_cold;
 use super::apple::memory_resources::t8112;
 use super::apple::sep_state;
 use super::apple::typec;
-use super::soc::{Board, PmgrBankRefusal};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::fmt;
 use stela_drivers::block::BlockDevice;
 use stela_engine::machine::ctrr;
+use stela_soc_data::board::{Board, PmgrBankRefusal};
 use stela_soc_data::pmu::WallClock;
 
 /// Already constructed native owners, consumed by the board mount. Descriptor
@@ -48,9 +48,9 @@ pub enum MemoryResources {
 impl MemoryResources {
     fn validate(
         &self,
-        controller: Option<&super::soc::MemoryController>,
-        descriptor: Option<&super::soc::MemoryCache>,
-        direct: Option<&super::soc::DirectMemoryCache>,
+        controller: Option<&stela_soc_data::board::MemoryController>,
+        descriptor: Option<&stela_soc_data::board::MemoryCache>,
+        direct: Option<&stela_soc_data::board::DirectMemoryCache>,
     ) -> Result<(), String> {
         if direct.is_some() && !matches!(self, Self::T6000Cold(_)) {
             return Err("cache/quota native memory cannot adopt a direct MCC descriptor".into());
@@ -221,7 +221,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     } = inputs;
     let build =
         build.ok_or("the board's coprocessors need the boot bundle's supported macOS build")?;
-    let place = |device: super::soc::Device| {
+    let place = |device: stela_soc_data::board::Device| {
         (
             Range {
                 physical: device.physical,
@@ -547,7 +547,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     for (index, controller) in board.usbs.iter().enumerate() {
         // The controller's stream translates through the group's first TRAD
         // instance, as SEP and AES masters do; per-instance selection is the
-        // bus master's contract (`soc::Iommu`).
+        // bus master's contract (`stela_soc_data::board::Iommu`).
         let group = darts
             .get(controller.iommu)
             .ok_or("USB DART group is missing")?;
@@ -747,7 +747,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::soc::PmgrBank;
+    use stela_soc_data::board::PmgrBank;
 
     #[test]
     fn native_memory_preflight_matches_live_descriptors_and_actual_ram() {

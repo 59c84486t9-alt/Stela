@@ -74,10 +74,10 @@ use stela_runtime::machine::apple::ConsoleBusy;
 use stela_runtime::machine::apple::ConsoleSink;
 use stela_runtime::machine::apple::Range;
 use stela_runtime::machine::mount;
-use stela_runtime::machine::soc;
 use stela_runtime::pc::{gpt::Guid, storage::Target};
 use stela_runtime::restore::store::Verify;
 use stela_soc_data::aic::AicLayout;
+use stela_soc_data::board;
 use stela_soc_data::pmu::WallClock;
 
 /// The most of the engine heap (at least 512 MiB) `--storage-ram` may
@@ -346,12 +346,12 @@ fn test_profile(target: TargetCpu, speculation: Speculation) -> CpuProfile {
 }
 
 /// The profile of the board the bundle's DeviceTree describes
-/// (`machine::soc::board`), with the selected handoff PE running with EL2 as a VHE host. The
+/// (`machine::board::board`), with the selected handoff PE running with EL2 as a VHE host. The
 /// ID_AA64* and CTR_EL0 registers advertise what this engine implements,
 /// capped at the chip's features (`machine::identification`); MIDR, MPIDR and
 /// DCZID are the board's own values. Every other identification read refuses.
 /// The CSV fields disclose the host's `speculation` guarantees.
-fn board_profile(board: &soc::Board, target: TargetCpu, speculation: Speculation) -> CpuProfile {
+fn board_profile(board: &board::Board, target: TargetCpu, speculation: Speculation) -> CpuProfile {
     let chip = board.cpus.chip;
     let mut fixed = stela_engine::machine::identification::derive(chip, target, true, speculation);
     // 64-byte DC ZVA blocks, enabled: XNU `osfmk/arm64/bzero.s` zeroes with
@@ -420,7 +420,7 @@ const J473_AIC_TIMESTAMPS: u8 = 16;
 /// The board's devices ([`mount::devices`]), or without a DeviceTree (the
 /// test kernel) the J473AP console UART, watchdog and AIC2.
 fn devices(
-    board: Option<&soc::Board>,
+    board: Option<&board::Board>,
     inputs: mount::Inputs<'_>,
     memory: Option<mount::MemoryResources>,
 ) -> Result<(AppleDevices, Option<stela_runtime::machine::apple::UsbId>), String> {
@@ -1092,7 +1092,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         crate::status::begin("Setting up the Mac's hardware");
     }
     let mut board = source_tree.map(|tree| {
-        soc::board(tree).unwrap_or_else(|error| {
+        board::board(tree).unwrap_or_else(|error| {
             output::arguments(format_args!("board refusal: {error}\n"));
             output::fatal("the board could not be modeled")
         })
@@ -1218,7 +1218,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     .unwrap_or_else(|error| output::fatal(error));
     if let Some(assigned) = &assigned {
         let candidate = assigned.tree.serialize();
-        let parsed = soc::board(&candidate).unwrap_or_else(|error| output::fatal(&error));
+        let parsed = board::board(&candidate).unwrap_or_else(|error| output::fatal(&error));
         let boot = parsed
             .boot_processor
             .as_ref()

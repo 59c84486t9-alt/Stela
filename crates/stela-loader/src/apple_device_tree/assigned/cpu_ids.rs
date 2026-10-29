@@ -1,7 +1,7 @@
 //! Explicit CPU-ID/count and watchdog-record projection. The caller qualifies
 //! the original consumers; this recipe grants no hardware or execution owner.
 use super::*;
-use stela_runtime::machine::soc::assigned::RegisterRange;
+use stela_soc_data::board::assigned::RegisterRange;
 
 const TRIGGER: &str = "trigger-config";
 const RECORD: usize = 16;

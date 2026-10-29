@@ -4,13 +4,13 @@
 //! Neither case nor clear words certify Apple hardware/private PMP readiness.
 use super::super::AppleDevices;
 use super::super::memory_resources::t8112;
-use crate::machine::soc::Board;
-use crate::machine::soc::MemoryCache;
-use crate::machine::soc::MemoryController;
-use crate::machine::soc::PowerOwner;
-use crate::machine::soc::PowerStates;
 use crate::platform::apple::pmgr;
 use crate::platform::apple::pmgr::Pmgr;
+use stela_soc_data::board::Board;
+use stela_soc_data::board::MemoryCache;
+use stela_soc_data::board::MemoryController;
+use stela_soc_data::board::PowerOwner;
+use stela_soc_data::board::PowerStates;
 
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 use stela_contracts::Chip;
@@ -516,8 +516,6 @@ fn geometry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::soc::ClockRole;
-    use crate::machine::soc::PowerResource;
     use crate::platform::apple::pmgr::DomainState;
     use crate::platform::apple::pmgr::PowerState;
     use alloc::boxed::Box;
@@ -525,6 +523,8 @@ mod tests {
     use stela_contracts::bus::MmioDevice;
     use stela_contracts::interrupt::InterruptLatch;
     use stela_engine::machine::Devices;
+    use stela_soc_data::board::ClockRole;
+    use stela_soc_data::board::PowerResource;
     use stela_soc_data::pmgr::coverage::Admission;
     use stela_soc_data::pmgr::coverage::Domain;
     use stela_soc_data::pmgr::coverage::DomainId;
@@ -546,10 +546,10 @@ mod tests {
         let descriptor = memory.descriptor().clone();
         let ram = Arc::clone(memory.registered_ram());
         let physical = controller.apertures[0] + descriptor.cache.shared.0;
-        let states = PowerStates {
-            blocks: vec![(SUPPLY, 24)],
-            registers: vec![SUPPLY, SUPPLY + 8, SUPPLY + 16],
-            domains: vec![
+        let states = stela_soc_data::board::fixture_support::power_states_fixture(
+            vec![(SUPPLY, 24)],
+            vec![SUPPLY, SUPPLY + 8, SUPPLY + 16],
+            vec![
                 Domain {
                     name: "parent".into(),
                     id: id(1),
@@ -569,7 +569,7 @@ mod tests {
                     parents: [None; 4],
                 },
             ],
-            resources: vec![PowerResource {
+            vec![PowerResource {
                 name: "/arm-io/mcc".into(),
                 clocks: vec![id(2)],
                 clock_role: ClockRole::Consumer,
@@ -577,8 +577,7 @@ mod tests {
                 owner: Some(PowerOwner::Mmio(physical)),
                 admission: Admission::Required,
             }],
-            implicit: vec![],
-        };
+        );
         (controller, descriptor, ram, states)
     }
     fn configuration() -> Configuration {

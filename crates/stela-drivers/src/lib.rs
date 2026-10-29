@@ -33,7 +33,7 @@ pub mod bluetooth;
 pub mod bus;
 mod bytes;
 pub mod entropy;
-pub mod firmware;
+pub use stela_driver_core::firmware;
 pub mod gpu;
 pub mod input;
 pub mod net;

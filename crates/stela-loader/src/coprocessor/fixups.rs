@@ -8,6 +8,7 @@ use super::macho::{Layout, end, file_bytes};
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+#[cfg(test)]
 use stela_engine::pauth;
 use stela_formats::sha256;
 
@@ -187,11 +188,14 @@ pub(super) fn parse(data: &[u8], layout: &Layout, maximum: usize) -> Result<Fixu
     })
 }
 
-pub(super) fn resolve(
+pub(super) fn resolve<S: stela_contracts::pauth::Signer>(
     chains: &FixupChains,
     iop_base: u64,
-    context: &pauth::Context,
-) -> Result<Vec<(u64, u64)>> {
+    context: &S,
+) -> Result<Vec<(u64, u64)>>
+where
+    S::Error: Into<anyhow::Error>,
+{
     let mut output = Vec::with_capacity(chains.pointers.len());
     for p in &chains.pointers {
         let target = end(iop_base, p.target_offset)?;
@@ -213,7 +217,7 @@ pub(super) fn resolve(
                 };
                 // Format7 runtimeOffset zero denotes the image base, not an
                 // inferred null. Architectural PAC signs the resolved value.
-                context.sign(a.key, target, modifier)?
+                context.sign(a.key, target, modifier).map_err(Into::into)?
             }
             None => target | (u64::from(p.high8) << 56),
         };

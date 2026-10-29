@@ -12,12 +12,12 @@ use stela_runtime::machine::apple::memory_resources::t8112::Prepared;
 use stela_runtime::machine::apple::memory_resources::t8112::cache::EmptyResource;
 use stela_runtime::machine::apple::memory_resources::t8112::cache::SoftwareImage;
 use stela_runtime::machine::apple::memory_resources::t8112::cache::ZeroWayConfiguration;
-use stela_runtime::machine::soc::MemoryCache;
-use stela_runtime::machine::soc::MemoryController;
-use stela_runtime::machine::soc::PtdBank;
 use stela_soc_data::amcc::Layout;
 use stela_soc_data::amcc::LockGroup;
 use stela_soc_data::amcc::Register;
+use stela_soc_data::board::MemoryCache;
+use stela_soc_data::board::MemoryController;
+use stela_soc_data::board::PtdBank;
 
 const APERTURE: u64 = 0x200000000;
 const PUBLICATION: u64 = 0x300000000;

@@ -1141,9 +1141,9 @@ mod tests {
     use alloc::boxed::Box;
     use stela_drivers::block::{BlockDevice, RamDisk};
     use {
-        crate::platform::apple::sart::Bounds, crate::platform::apple::sart::Sart,
-        stela_contracts::bus::Access, stela_contracts::dma::Physical,
-        stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::InterruptLatch,
+        crate::platform::apple::sart::Sart, stela_contracts::bus::Access,
+        stela_contracts::dma::Physical, stela_contracts::dma::test_support::Ram,
+        stela_contracts::interrupt::InterruptLatch, stela_soc_data::sart::Bounds,
     };
 
     #[test]

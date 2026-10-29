@@ -8,6 +8,7 @@ use crate::{boot_bundle::Source, im4p, kernel_collection::Segment, thread_state:
 use alloc::{string::String, vec, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+#[cfg(test)]
 use stela_engine::pauth;
 use stela_formats::sha256;
 
@@ -296,12 +297,15 @@ impl Staged {
     /// an explicit TCR_EL1 and installs that regime on the supplied context.
     /// Do not use this output for a cold bootstrap that consumes encoded chains
     /// itself: original T6000 DCP does so at VA 0x115d4.
-    pub fn relocate(
+    pub fn relocate<S: stela_contracts::pauth::TranslationSigner>(
         mut self,
         iop_virtual_base: u64,
-        context: pauth::Context,
+        context: S,
         tcr_el1: u64,
-    ) -> Result<Relocated> {
+    ) -> Result<Relocated>
+    where
+        S::Error: Into<anyhow::Error>,
+    {
         ensure!(
             iop_virtual_base == self.plan().vm_base,
             "MH_PRELOAD virtual sliding is not qualified"

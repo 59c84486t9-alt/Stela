@@ -44,10 +44,10 @@ use core::{
 use sha2::Digest;
 use stela_crypto::Sha256;
 use stela_drivers::block::{BlockDevice, BlockError, Finished, Request};
-use {crate::machine::apple::sep_state, stela_soc_data::nor::CAPACITY};
+use stela_soc_data::nor::CAPACITY;
 
 /// Where the region starts in the machine-state partition.
-pub const OFFSET: u64 = CAPACITY as u64 + sep_state::BYTES;
+pub const OFFSET: u64 = CAPACITY as u64 + stela_formats::machine_state::SEP_BYTES;
 /// The region: the header and the ring.
 pub const LOG_BYTES: u64 = 4 << 20;
 /// The smallest machine-state partition that holds the log.

@@ -94,7 +94,7 @@ pub const CURRENT: Interface = Interface {
     bundle_schema: stela_formats::boot_bundle::SCHEMA_VERSION,
     options_revision: OPTIONS_REVISION,
     nor_bytes: stela_soc_data::nor::CAPACITY as u32,
-    sep_bytes: stela_runtime::machine::apple::sep_state::BYTES as u32,
+    sep_bytes: stela_formats::machine_state::SEP_BYTES as u32,
 };
 
 impl Interface {

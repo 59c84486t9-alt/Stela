@@ -33,11 +33,8 @@ pub const COUNTER_BYTES: u64 = 16;
 pub const CONTROL_OFFSET: u64 = CONTROL;
 /// CPM energy offset within a CPU cluster's ACC island (T8112 RegMap
 /// 0xa/0x16, DT reg[7]/reg[16], plus 0x8000).
-pub const CPM_OFFSET: u64 = 0x48000;
 /// Core energy offset within its per-core `reg` window (RegMap 0xe..0x11
 /// and 0x1a..0x1d, DT reg[10..13]/reg[19..22]).
-pub const CORE_OFFSET: u64 = 0x9000;
-pub const CORE_BYTES: u64 = 0x10000;
 
 #[derive(Debug, Clone)]
 pub struct Energy {

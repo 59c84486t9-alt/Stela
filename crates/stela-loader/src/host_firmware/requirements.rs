@@ -10,7 +10,7 @@ use serde::{
     Deserialize, Deserializer, Serialize,
     de::{self, SeqAccess, Visitor},
 };
-use stela_drivers::firmware::{self, Image, Provider, Requirement, Target};
+use stela_driver_core::firmware::{self, Image, Provider, Requirement, Target};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -211,7 +211,7 @@ impl Provider for RecordingProvider<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stela_drivers::firmware::{Catalog, ErrorKind};
+    use stela_driver_core::firmware::{Catalog, ErrorKind};
     fn request() -> Requirement<'static> {
         Requirement {
             name: "rtl_nic/rtl8168e-3.fw",

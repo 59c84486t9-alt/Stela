@@ -13,10 +13,7 @@
 use super::{
     Entropy,
     keys::{ROOT_BYTES, Roots},
-    store::{
-        Backend, Nonces, Volatile,
-        persist::{BANK_BYTES, HostStore},
-    },
+    store::{Backend, Nonces, Volatile, persist::HostStore},
 };
 use alloc::{boxed::Box, vec, vec::Vec};
 use sha2::Digest;
@@ -24,10 +21,9 @@ use stela_crypto::Sha256;
 use stela_drivers::block::{BlockDevice, Shared};
 use zeroize::Zeroizing;
 
-/// The SEP's area of the machine-state partition.
-pub const BYTES: u64 = 0x10000;
-/// The roots record's area at its start.
-pub const ROOTS_BYTES: usize = 0x1000;
+use stela_formats::machine_state::{
+    SEP_BANK_BYTES as BANK_BYTES, SEP_BYTES as BYTES, SEP_ROOTS_BYTES as ROOTS_BYTES,
+};
 const MAGIC: &[u8; 8] = b"STSEPR01";
 const RECORD_BYTES: usize = MAGIC.len() + 2 * ROOT_BYTES + 32;
 

@@ -25,6 +25,8 @@ fn main() {
             "Cargo.toml",
             "build.rs",
             "src",
+            "../stela-driver-core/Cargo.toml",
+            "../stela-driver-core/src",
             "../stela-contracts/Cargo.toml",
             "../stela-contracts/src",
             "../stela-formats/Cargo.toml",

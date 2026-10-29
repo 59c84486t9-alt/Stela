@@ -6,7 +6,7 @@
 //! silicon (`EFI/USBCUpdater` holds Intel Macs' images); the restore ramdisk
 //! carries it as `/usr/standalone/firmware/<name>` for restored to flash. So
 //! `stela-dev boot prepare` reads the board the bundle's DeviceTree describes
-//! ([`stela_runtime::machine::soc::board`], as the engine reads it), and takes
+//! ([`stela_soc_data::board::board`], as the engine reads it), and takes
 //! each image it names from the same IPSW's decoded restore ramdisk. The
 //! source map records the ramdisk member, its SHA-256 and the path inside
 //! it. `--board-firmware` replaces this with the user's own files.
@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use stela_loader::boot_bundle::{Bundle, DEVICE_TREE_FILE, Source};
 use {
     stela_formats::apfs, stela_formats::apfs::Container, stela_formats::payload::ReadAt,
-    stela_runtime::machine::soc,
+    stela_soc_data::board,
 };
 
 /// Where the restore ramdisk keeps the board's firmware images.
@@ -29,7 +29,7 @@ pub(super) fn needed(bundle: &Bundle) -> Result<Vec<String>, String> {
         .iter()
         .find(|(name, _)| name == DEVICE_TREE_FILE)
         .ok_or("the bundle has no DeviceTree")?;
-    Ok(soc::board(tree)?.firmware_files())
+    Ok(board::board(tree)?.firmware_files())
 }
 
 /// Decoded bytes as a reader source.

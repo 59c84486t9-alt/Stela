@@ -359,7 +359,7 @@ fn prepare_ramdisk(options: RamdiskOptions<'_>, update: bool) -> Result<()> {
     }
     boot::prepare(&line)?;
     let tree = fs::read(output.join("devicetree.adt"))?;
-    stela_runtime::machine::soc::board(&tree)
+    stela_soc_data::board::board(&tree)
         .map_err(|reason| anyhow::anyhow!("Stela cannot run {model} yet: {reason}"))?;
     Ok(())
 }

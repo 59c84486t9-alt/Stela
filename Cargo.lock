@@ -1982,6 +1982,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "stela-driver-core"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "stela-drivers"
 version = "0.1.0"
 dependencies = [
@@ -1994,6 +2001,7 @@ dependencies = [
  "sha1",
  "sha2",
  "stela-crypto",
+ "stela-driver-core",
  "subtle",
  "triomphe",
  "zeroize",
@@ -2052,10 +2060,9 @@ dependencies = [
  "serde_json",
  "sha2",
  "stela-contracts",
- "stela-drivers",
+ "stela-driver-core",
  "stela-engine",
  "stela-formats",
- "stela-runtime",
  "stela-soc-data",
  "tempfile",
 ]
@@ -2104,6 +2111,7 @@ dependencies = [
  "hex",
  "sha2",
  "stela-contracts",
+ "stela-crypto",
  "stela-formats",
 ]
 

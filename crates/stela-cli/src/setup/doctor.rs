@@ -31,8 +31,7 @@ use stela_loader::{boot_selection, mount_interface, recovery};
 use {
     stela_formats::apfs, stela_formats::apfs::Container,
     stela_formats::apfs::volume::APFS_VOL_ROLE_UPDATE, stela_formats::payload::ReadAt,
-    stela_formats::preboot, stela_runtime::machine::apple::sep_state,
-    stela_soc_data::nor::CAPACITY,
+    stela_formats::preboot, stela_soc_data::nor::CAPACITY,
 };
 
 /// A host partition as an APFS source.
@@ -400,7 +399,11 @@ fn install_status(
         ),
         None => report.line("NOR", disk.state_description()),
     }
-    let bytes = match area.read(host, 0, CAPACITY + sep_state::BYTES as usize) {
+    let bytes = match area.read(
+        host,
+        0,
+        CAPACITY + stela_formats::machine_state::SEP_BYTES as usize,
+    ) {
         Ok(bytes) => bytes,
         Err(error) => {
             report.problem(format!("{} cannot be read: {error:#}", area.describe()));
@@ -563,7 +566,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
             let area = installed::state_area(environment.host, &install.disk, None)?.read(
                 environment.host,
                 CAPACITY as u64,
-                sep_state::ROOTS_BYTES,
+                stela_formats::machine_state::SEP_ROOTS_BYTES,
             )?;
             let provisioned = state::sep(&area).unwrap_or(false);
             let ecid = machines::machine_ecid(

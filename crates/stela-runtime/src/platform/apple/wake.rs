@@ -24,7 +24,6 @@ use {
 
 const NAME: &str = "aop-wake-masks";
 pub const WORDS: usize = 8;
-pub const OFFSET: u64 = 8;
 pub const BYTES: u64 = WORDS as u64 * 4;
 
 #[derive(Debug, Clone)]

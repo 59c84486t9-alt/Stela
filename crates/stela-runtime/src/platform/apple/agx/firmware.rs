@@ -1190,11 +1190,11 @@ pub fn endpoints(family: &'static Family) -> (Vec<NumberedEndpoint>, Protocol) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::agx::generation::{G13G, G13X, G14G, G14X, G15G, MAGIC_G13_G14G};
     use crate::platform::apple::agx::initdata::tests::{BASE, RINGS, ROOT, kext_root};
     use crate::platform::apple::agx::ring::tests::Flat;
     use crate::platform::apple::agx::ring::{READ, WRITE};
     use core::ops::Range;
+    use stela_soc_data::agx::generation::{G13G, G13X, G14G, G14X, G15G, MAGIC_G13_G14G};
 
     fn doorbell_payload(kind: u64, low: u64) -> u64 {
         ((DOORBELL_FLAG | kind) << TYPE_SHIFT) | low
@@ -2065,7 +2065,7 @@ mod tests {
 
     #[test]
     fn each_family_reads_its_own_root_and_g13_refuses_dashboard_signals() {
-        use crate::platform::apple::agx::generation::{G14X, G16X};
+        use stela_soc_data::agx::generation::{G14X, G16X};
         // A G14X firmware refuses the G13G/G13X/G14G root.
         let mut memory = Flat::new(BASE, 0x20000);
         kext_root(&mut memory);
@@ -2098,7 +2098,7 @@ mod tests {
 
     #[test]
     fn g14x_device_control_writes_its_own_offsets() {
-        use crate::platform::apple::agx::generation::G14X;
+        use stela_soc_data::agx::generation::G14X;
         let mut mask = of_type(0x34);
         mask[4..8].copy_from_slice(&0x6u32.to_le_bytes());
         let (mut state, mut memory) = with_device_control_on(&G14X, &[]).unwrap();
@@ -2127,7 +2127,7 @@ mod tests {
 
     #[test]
     fn g15g_device_control_writes_its_own_offsets() {
-        use crate::platform::apple::agx::generation::G15G;
+        use stela_soc_data::agx::generation::G15G;
         let mut mask = of_type(0x34);
         mask[4..8].copy_from_slice(&0x6u32.to_le_bytes());
         let mut disabled = of_type(0x35);

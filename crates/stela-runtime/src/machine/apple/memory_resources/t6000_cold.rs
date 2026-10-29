@@ -12,11 +12,6 @@
 use super::Prepared;
 use super::mcc;
 use crate::machine::apple::AppleDevices;
-use crate::machine::soc::Board;
-use crate::machine::soc::DirectMemoryCache;
-use crate::machine::soc::MemoryController;
-use crate::machine::soc::PowerOwner;
-use crate::machine::soc::PowerStates;
 use crate::platform::apple::pmgr;
 use crate::platform::apple::pmgr::Pmgr;
 use crate::platform::apple::ptd;
@@ -25,6 +20,11 @@ use stela_contracts::Chip;
 use stela_contracts::bus::LifecycleState;
 use stela_contracts::bus::Width;
 use stela_engine::memory::RegisteredSystemRam;
+use stela_soc_data::board::Board;
+use stela_soc_data::board::DirectMemoryCache;
+use stela_soc_data::board::MemoryController;
+use stela_soc_data::board::PowerOwner;
+use stela_soc_data::board::PowerStates;
 use stela_soc_data::pmgr::coverage;
 use stela_soc_data::pmgr::coverage::Consumer;
 use stela_soc_data::pmgr::coverage::LifecycleSinks;
@@ -453,8 +453,6 @@ fn geometry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::soc::ClockRole;
-    use crate::machine::soc::PowerResource;
     use crate::platform::apple::pmgr::PowerState;
     use alloc::{boxed::Box, vec};
     use core::{cell::UnsafeCell, ptr::NonNull};
@@ -462,6 +460,8 @@ mod tests {
     use stela_contracts::interrupt::InterruptLatch;
     use stela_engine::memory::ReservedSystemRamRange;
     use stela_engine::memory::system_ram::fixture;
+    use stela_soc_data::board::ClockRole;
+    use stela_soc_data::board::PowerResource;
     use stela_soc_data::pmgr::coverage::Admission;
     use stela_soc_data::pmgr::coverage::Domain;
     use stela_soc_data::pmgr::coverage::DomainId;
@@ -510,16 +510,16 @@ mod tests {
             layout,
         };
         let direct = original.descriptor().clone();
-        let power = PowerStates {
-            blocks: vec![(SUPPLY, 8)],
-            registers: vec![SUPPLY],
-            domains: vec![Domain {
+        let power = stela_soc_data::board::fixture_support::power_states_fixture(
+            vec![(SUPPLY, 8)],
+            vec![SUPPLY],
+            vec![Domain {
                 name: "authored-separate-PMP-supply".into(),
                 id: id(),
                 address: Some(SUPPLY),
                 parents: [None; 4],
             }],
-            resources: vec![PowerResource {
+            vec![PowerResource {
                 name: "/arm-io/mcc".into(),
                 clocks: vec![],
                 clock_role: ClockRole::Consumer,
@@ -527,8 +527,7 @@ mod tests {
                 owner: Some(PowerOwner::Mmio(direct.apertures[0])),
                 admission: Admission::Required,
             }],
-            implicit: vec![],
-        };
+        );
         (controller, direct, ram_at(RAM), power)
     }
     fn configuration() -> Configuration {

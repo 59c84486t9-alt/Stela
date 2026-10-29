@@ -325,11 +325,11 @@ mod tests {
     /// and its ApChipID has a SoC row.
     #[test]
     fn every_registry_board_resolves_to_a_soc_row() {
-        use stela_runtime::machine::soc;
+        use stela_soc_data::board;
         for (model, chip_id, ..) in BOARDS {
             assert_eq!(BOARDS.iter().filter(|board| board.0 == model).count(), 1);
             assert_eq!(Profile::of(model).unwrap().chip_id, chip_id);
-            assert!(soc::chip(chip_id).is_some(), "{model}");
+            assert!(board::chip(chip_id).is_some(), "{model}");
         }
     }
 

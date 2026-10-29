@@ -54,7 +54,7 @@ impl HostNor {
     pub fn open(device: Box<dyn BlockDevice>) -> (Self, Image, Nvram, sep_state::Location) {
         let block = u64::from(device.identity().block_size);
         let available = device.identity().blocks.saturating_mul(block);
-        let needed = CAPACITY as u64 + sep_state::BYTES;
+        let needed = CAPACITY as u64 + stela_formats::machine_state::SEP_BYTES;
         if block == 0 || !(CAPACITY as u64).is_multiple_of(block) || available < needed {
             output::arguments(format_args!(
                 "NOR refusal: the partition holds {available:#x} bytes in {block}-byte blocks; the NOR image and SEP state need {needed:#x}\n"

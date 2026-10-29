@@ -326,6 +326,12 @@ mod two_modifier;
 
 pub(crate) mod conditional;
 
+impl stela_contracts::pauth::TranslationSigner for Context {
+    fn with_translation_regime(self, tcr_el1: u64) -> Self {
+        Self::with_translation_regime(self, tcr_el1)
+    }
+}
+
 impl stela_contracts::pauth::Signer for Context {
     type Error = anyhow::Error;
     fn address_space(&self) -> u64 {

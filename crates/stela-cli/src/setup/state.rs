@@ -38,7 +38,7 @@ use {
 };
 
 const MAGIC: &str = "STELA MACHINE STATE 1";
-const STATE_BYTES: usize = CAPACITY + sep_state::BYTES as usize;
+const STATE_BYTES: usize = CAPACITY + stela_formats::machine_state::SEP_BYTES as usize;
 
 /// What a backup file says of itself.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,7 +77,7 @@ pub(super) fn nvram(bytes: &[u8]) -> Nvram {
 
 /// What the SEP's area holds.
 pub(super) fn sep(area: &[u8]) -> Result<bool, &'static str> {
-    sep_state::blank(&area[..sep_state::ROOTS_BYTES]).map(|blank| !blank)
+    sep_state::blank(&area[..stela_formats::machine_state::SEP_ROOTS_BYTES]).map(|blank| !blank)
 }
 
 /// What the next boot of an NVRAM is, as `stela.efi` will choose it.
@@ -282,7 +282,7 @@ pub(super) fn backup(
         nor_serial: install.disk.nor_serial.clone(),
         nor_guid: install.disk.nor_guid.clone(),
         nor_bytes: CAPACITY,
-        sep_bytes: sep_state::BYTES as usize,
+        sep_bytes: stela_formats::machine_state::SEP_BYTES as usize,
         sha256: hex::encode(Sha256::digest(&bytes)),
     };
     let mut text = format!(
@@ -341,7 +341,7 @@ fn read_backup(path: &Path) -> Result<(Header, Vec<u8>)> {
     reader.read_to_end(&mut bytes)?;
     ensure!(
         header.nor_bytes == CAPACITY
-            && header.sep_bytes == sep_state::BYTES as usize
+            && header.sep_bytes == stela_formats::machine_state::SEP_BYTES as usize
             && bytes.len() == STATE_BYTES,
         "{} holds a machine-state layout this stela does not write",
         path.display()

@@ -12,8 +12,8 @@ use stela_loader::{apple_device_tree::DeviceTree, boot_bundle::ORIGINAL_DEVICE_T
 use {
     stela_contracts::Chip, stela_formats::boot_bundle::Manifest,
     stela_formats::boot_bundle::Source, stela_formats::boot_bundle::Target,
-    stela_formats::boot_bundle::Verified, stela_runtime::machine::soc::assigned::ResourceProfile,
-    stela_runtime::machine::soc::assigned::SourceIdentity,
+    stela_formats::boot_bundle::Verified, stela_soc_data::board::assigned::ResourceProfile,
+    stela_soc_data::board::assigned::SourceIdentity,
 };
 
 /// Retains the verified original and exact selected metadata. Original bytes
@@ -256,7 +256,7 @@ impl Intake {
     /// factory must cross-check it against these selected IDs and source/live
     /// geometry. This operation grants no lifecycle or native executor state.
     pub(crate) fn topology_identity(&self, chip: Chip) -> Result<SourceIdentity, String> {
-        if stela_runtime::machine::soc::chip(self.soc) != Some(chip) {
+        if stela_soc_data::board::chip(self.soc) != Some(chip) {
             return Err("selected restore chip differs from the actual runtime profile".into());
         }
         Ok(SourceIdentity {

@@ -34,3 +34,12 @@ pub trait Signer {
     fn profile_id(&self) -> &'static str;
     fn sign(&self, key: Key, pointer: u64, modifier: u64) -> Result<u64, Self::Error>;
 }
+
+/// A signing provider whose pointer layout can be bound to an explicit TCR_EL1.
+///
+/// The returned provider must use this regime for signing and preserve the
+/// original key ownership and address-space identity. Image readers validate
+/// their admitted virtual extent before requesting this binding.
+pub trait TranslationSigner: Signer + Sized {
+    fn with_translation_regime(self, tcr_el1: u64) -> Self;
+}

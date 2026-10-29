@@ -10,12 +10,14 @@ workspace = true
 [features]
 default = ["std"]
 std = ["stela-contracts/std", "stela-formats/std"]
-test-support = []
+test-support = ["stela-contracts/test-support"]
 
 [dependencies]
+stela-crypto = { path = "../stela-crypto" }
 stela-contracts = { path = "../stela-contracts", default-features = false }
 stela-formats = { path = "../stela-formats", default-features = false }
 
 [dev-dependencies]
+stela-contracts = { path = "../stela-contracts", default-features = false, features = ["test-support"] }
 sha2 = { version = "0.10", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }

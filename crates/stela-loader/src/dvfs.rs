@@ -16,7 +16,7 @@
 //!   that writes `voltage-states1`, `-sram` and `-extra`) stores the period as
 //!   65,536 × 10⁹ / the state's clock in Hz, and the driver reads the clock
 //!   back as 65,536,000 / period MHz. The states are the SoC's operating
-//!   points (`machine::soc::operating_points`);
+//!   points (`machine::board::operating_points`);
 //! - any other domain's table whose first state has voltage 0 is a list of
 //!   state numbers, `(0, 0), (1, 0), …`, and the domain has as many states as
 //!   the last number plus one. The IPSW DeviceTree ships `voltage-states0`,
@@ -37,7 +37,7 @@
 use crate::apple_device_tree::DeviceTree;
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Result, ensure};
-use stela_runtime::machine::soc;
+use stela_soc_data::board;
 
 const PMGR: &str = "/arm-io/pmgr";
 const PERF_DOMAINS: &str = "perf-domains";
@@ -84,7 +84,7 @@ fn cluster(domain: &str, chip_id: u32) -> Result<Option<Vec<u8>>> {
         suffix.bytes().all(|byte| byte.is_ascii_digit()),
         "CPU domain {domain} has an invalid cluster suffix"
     );
-    let Some(points) = soc::operating_points(chip_id)
+    let Some(points) = board::operating_points(chip_id)
         .and_then(|clusters| clusters.into_iter().find(|(kind, _)| *kind == cluster_type))
         .map(|(_, points)| points)
     else {

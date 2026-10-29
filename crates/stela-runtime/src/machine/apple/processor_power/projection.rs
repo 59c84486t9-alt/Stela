@@ -1,12 +1,12 @@
 //! Physical CPU-domain identities projected through one retained assigned Plan.
 use super::*;
-use crate::machine::soc::ProcessorAssociation;
-use crate::machine::soc::assigned::PlanIdentity;
-use crate::machine::soc::assigned::PlannedPe;
 use stela_contracts::identity::Identity;
 use stela_contracts::processor::ProcessorTarget;
 use stela_engine::machine::engine::ProcessorChange;
 use stela_engine::machine::engine::Processors;
+use stela_soc_data::board::ProcessorAssociation;
+use stela_soc_data::board::assigned::PlanIdentity;
+use stela_soc_data::board::assigned::PlannedPe;
 use {crate::platform::apple::pmgr::DomainTransition, stela_soc_data::pmgr::coverage::DomainId};
 
 struct Domain {
@@ -217,7 +217,9 @@ impl AssignedPower {
 pub(super) mod tests {
     use super::*;
     use alloc::vec;
-    use {crate::machine::soc::assigned::*, stela_contracts::Chip, stela_contracts::caches::Cache};
+    use {
+        stela_contracts::Chip, stela_contracts::caches::Cache, stela_soc_data::board::assigned::*,
+    };
 
     pub const BASE: u64 = 0x1000;
     pub const CORE: u64 = BASE + 8;
@@ -540,11 +542,8 @@ pub(super) mod tests {
     #[test]
     #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]
     fn original_j473_first_p_binds_only_actual_core_and_complex_from_placed_state() {
-        use crate::machine::soc::{
-            self,
-            assigned::{BspSource, SourceIdentity},
-        };
         use sha2::{Digest, Sha256};
+        use stela_soc_data::board::assigned::{BspSource, SourceIdentity};
         let directory = std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap());
         let raw = std::fs::read(directory.join("DeviceTree.j473ap.adt")).unwrap();
         assert_eq!(
@@ -612,7 +611,7 @@ pub(super) mod tests {
         let regs = nodes.iter().map(|n| word(n, "reg")).collect::<Vec<_>>();
         let cpus = nodes
             .iter()
-            .map(|node| soc::Processor {
+            .map(|node| stela_soc_data::board::Processor {
                 cluster_type: node.property("cluster-type").unwrap()[0],
                 reg: word(node, "reg"),
                 l2_bytes: Some(word(node, "l2-cache-size")),
@@ -621,7 +620,7 @@ pub(super) mod tests {
         let product = root.child("product").unwrap();
         let name = product.property("product-soc-name").unwrap();
         let name = core::str::from_utf8(name.strip_suffix(&[0]).unwrap_or(name)).unwrap();
-        let full = soc::cpus(0x8112, name, &cpus).unwrap();
+        let full = stela_soc_data::board::cpus(0x8112, name, &cpus).unwrap();
         let associations = owner
             .graph()
             .processor_associations(Chip::AppleM2, &root, &full.processors, 0)
