@@ -132,23 +132,31 @@ impl Sizes {
     /// the guest gets everything left. The pool scales with the guest DRAM
     /// each of the `cores` executors maps, of which `free` is the bound, and
     /// the code arena with the executors that run PEs: every one with
-    /// `parallel`, else the BSP alone. Each other executor that runs PEs
-    /// adds an eighth of the heap's share, for its machine's translation
-    /// metadata.
+    /// `parallel`, else the BSP alone, which the idle workers' serialized
+    /// reserves are added to. Each other executor that runs PEs adds an
+    /// eighth of the heap's share, for its machine's translation metadata.
     fn for_host(free: u64, cores: usize, parallel: bool) -> Self {
         let running = if parallel { cores as u64 } else { 1 };
         let heap = free / HEAP_SHARE + (running - 1) * (free / HEAP_SHARE / 8);
         let clamp = |bytes: u64, bounds: RangeInclusive<u64>, alignment: u64| {
             (bytes / alignment * alignment).clamp(*bounds.start(), *bounds.end())
         };
+        // Serialized, the BSP keeps a whole share and each idle worker its
+        // reserve besides.
+        let (code_reserve, pool_reserve) = if parallel {
+            (0, 0)
+        } else {
+            crate::native_smp::resources::serialized_reserve(cores)
+        };
         Self {
             heap: clamp(heap, HEAP_BYTES, LARGE),
-            code: clamp(free / CODE_SHARE, CODE_BYTES, CODE_ALIGNMENT) * running,
+            code: clamp(free / CODE_SHARE, CODE_BYTES, CODE_ALIGNMENT) * running
+                + code_reserve.next_multiple_of(CODE_ALIGNMENT),
             pool: clamp(
                 (free / POOL_SHARE).saturating_mul(cores as u64),
                 POOL_BYTES,
                 LARGE,
-            ),
+            ) + pool_reserve,
         }
     }
 }

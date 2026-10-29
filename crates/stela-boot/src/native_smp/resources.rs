@@ -99,6 +99,13 @@ pub(crate) struct Partition {
 const WORKER_CODE: u64 = 4 * 1024 * 1024;
 const WORKER_POOL: u64 = 4 * 1024 * 1024;
 
+/// The code and pool bytes the `cores - 1` workers keep while the BSP runs
+/// every PE serialized. The loader adds them to the BSP's own share.
+pub(crate) const fn serialized_reserve(cores: usize) -> (u64, u64) {
+    let workers = cores.saturating_sub(1) as u64;
+    (workers * WORKER_CODE, workers * WORKER_POOL)
+}
+
 /// Divide only whole frames/code ring units; unused tail bytes remain owned
 /// by the allocation and cannot be lent to a second executor. Executors
 /// share alike while each runs PEs; `serialized`, the BSP takes all but the
@@ -189,17 +196,17 @@ mod tests {
     fn private_arenas_have_no_overlap_or_fractional_ring_units() {
         for (cores, serialized) in (1..=MAX_CORES).flat_map(|cores| [(cores, false), (cores, true)])
         {
+            let (code_reserve, pool_reserve) = if serialized {
+                serialized_reserve(cores)
+            } else {
+                (0, 0)
+            };
+            let code = 128 * 1024 * 1024 + 127 + code_reserve;
+            let pool = 64 * 1024 * 1024 + PAGE - 1 + pool_reserve;
             let mut previous_code = 0;
             let mut previous_pool = 0;
             for slot in 0..cores {
-                let part = partition(
-                    cores,
-                    slot,
-                    128 * 1024 * 1024 + 127,
-                    64 * 1024 * 1024 + PAGE - 1,
-                    serialized,
-                )
-                .unwrap();
+                let part = partition(cores, slot, code, pool, serialized).unwrap();
                 assert_eq!(part.code_offset, previous_code);
                 assert_eq!(part.pool_offset, previous_pool);
                 assert_eq!(part.code_bytes % 128, 0);
@@ -207,8 +214,8 @@ mod tests {
                 previous_code += part.code_bytes;
                 previous_pool += part.pool_bytes;
             }
-            assert!(previous_code <= 128 * 1024 * 1024 + 127);
-            assert!(previous_pool <= 64 * 1024 * 1024 + PAGE - 1);
+            assert!(previous_code <= code);
+            assert!(previous_pool <= pool);
         }
     }
 

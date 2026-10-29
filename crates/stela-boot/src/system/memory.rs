@@ -161,7 +161,15 @@ pub(super) fn reserve(
     };
     let code = allocate(sizes.code)?;
     let pool = allocate(sizes.pool)?;
-    crate::native_smp::resources::partition(cores, cores - 1, code.bytes, pool.bytes, false)?;
+    // The engine splits both evenly, or serialized when this loader sized
+    // them for the BSP alone; check the BSP's and the last worker's part.
+    for serialized in [false, !system.parallel] {
+        for slot in [0, cores - 1] {
+            crate::native_smp::resources::partition(
+                cores, slot, code.bytes, pool.bytes, serialized,
+            )?;
+        }
+    }
     let handoff_page = allocate(size_of::<Handoff>() as u64)?;
     let trampoline = low_page(MemoryType::LOADER_CODE)?;
     let loader_tables = crate::paging::loader::Builder::new()?;
