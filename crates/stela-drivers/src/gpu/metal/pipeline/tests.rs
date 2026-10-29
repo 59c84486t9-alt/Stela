@@ -7,6 +7,7 @@ use crate::gpu::metal::{
     },
     vertex::{Attribute, Layout, StepFunction, VertexFormat},
 };
+use alloc::string::String;
 
 fn shader(stage: Stage, code: u64, edit: impl FnOnce(&mut Interface)) -> CompiledShader {
     let mut interface = interface(stage);
@@ -503,10 +504,7 @@ fn varyings_link_by_identifier_and_type() {
     // Every output keeps a location, read or not.
     assert_eq!(
         link_varyings(&vertex, Some(&fragment)),
-        Ok(alloc::vec![
-            String::from("user(color)"),
-            String::from("user(uv)")
-        ])
+        Ok(vertex.varyings.clone())
     );
     assert_eq!(
         link_varyings(&vertex, None).map(|linked| linked.len()),

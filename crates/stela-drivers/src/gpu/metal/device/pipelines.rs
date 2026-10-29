@@ -10,7 +10,7 @@ use crate::gpu::metal::{
     },
     shader::{
         CompiledShader, Compiler, Interface, Specialization, Stage, Tessellation,
-        TessellationStages,
+        TessellationStages, Varying,
     },
     vertex::{StageInputDescriptor, VertexDescriptor},
     vulkan::{
@@ -46,7 +46,7 @@ struct RenderObject {
 struct MeshFunctions {
     object: Option<FunctionId>,
     mesh: FunctionId,
-    varyings: Vec<String>,
+    varyings: Vec<Varying>,
 }
 
 /// Threads per object and per mesh threadgroup, which mesh variants are

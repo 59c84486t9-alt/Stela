@@ -668,7 +668,12 @@ fn render_pipelines_compile_their_functions_once() {
         [(0, alloc::vec![1, 0, 0, 0])]
     );
     for specialization in &device.compiler.compiled {
-        assert_eq!(specialization.varyings, ["user(color)"], "both stages link");
+        let linked: Vec<_> = specialization
+            .varyings
+            .iter()
+            .map(|varying| varying.identifier.as_str())
+            .collect();
+        assert_eq!(linked, ["user(color)"], "both stages link");
     }
     assert_eq!(
         device.compiler.released.len(),
@@ -925,22 +930,24 @@ fn compute_and_mesh_variants_compile_per_shape() {
     let first = device
         .mesh_variant(u64::from(id.0), [32, 1, 1], [64, 1, 1])
         .unwrap();
-    let linked = ["user(color)", "user(normal)"];
+    let linked = [("user(color)", false), ("user(normal)", true)];
     let stages: Vec<_> = device.compiler.compiled[compiled..]
         .iter()
         .map(|specialization| {
-            (
-                specialization.varyings.clone(),
-                specialization.launched_by_grid,
-            )
+            let varyings: Vec<_> = specialization
+                .varyings
+                .iter()
+                .map(|varying| (varying.identifier.as_str(), varying.per_primitive))
+                .collect();
+            (varyings, specialization.launched_by_grid)
         })
         .collect();
     assert_eq!(
         stages,
         [
-            (linked.map(String::from).to_vec(), false),
+            (linked.to_vec(), false),
             (Vec::new(), true),
-            (linked.map(String::from).to_vec(), false),
+            (linked.to_vec(), false),
         ],
         "the fragment, then the object function the draw launches and the mesh function"
     );

@@ -349,9 +349,10 @@ pub struct Specialization {
     /// push constants' `view_mapping` offsets to the render target array and
     /// viewport indices it writes.
     pub amplified: bool,
-    /// The identifiers of a render pipeline's linked varyings; each takes
-    /// the location of its position.
-    pub varyings: Vec<String>,
+    /// A render pipeline's linked varyings, its vertex or mesh function's
+    /// outputs; each takes the location of its position, and a fragment
+    /// input takes its output's rate.
+    pub varyings: Vec<Varying>,
     /// The object function of a mesh pipeline, or its mesh function when it
     /// has none: the stage mesh draws launch, whose threads outside a
     /// `drawMeshThreads` grid skip the function.

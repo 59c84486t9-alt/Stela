@@ -26,7 +26,9 @@ use super::{
     error::{Error, Result, ensure, require},
     pixel_format::{Kind, PixelFormat},
     sampler::test_op,
-    shader::{CompiledShader, Interface, NumericClass, Specialization, Stage, Tessellation},
+    shader::{
+        CompiledShader, Interface, NumericClass, Specialization, Stage, Tessellation, Varying,
+    },
     vertex::{
         Attribute, StageInputDescriptor, VertexDescriptor, patch_input, stage_input, vertex_input,
     },
@@ -36,7 +38,7 @@ use super::{
         object::{ColorBlendAttachment, GraphicsPipelineInfo, ShaderCode, VertexInput},
     },
 };
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 
 pub const MAX_COLOR_ATTACHMENTS: usize = 8;
 
@@ -419,7 +421,7 @@ fn stage_in(function: &Interface, declared: &[Attribute]) -> Result<()> {
 /// fragment function reads, by identifier as Metal links them: each output
 /// takes the location of its position, and each input must name an output
 /// of its type.
-pub fn link_varyings(producer: &Interface, consumer: Option<&Interface>) -> Result<Vec<String>> {
+pub fn link_varyings(producer: &Interface, consumer: Option<&Interface>) -> Result<Vec<Varying>> {
     for input in consumer.iter().flat_map(|consumer| &consumer.varyings) {
         ensure(
             producer.varyings.iter().any(|output| {
@@ -429,11 +431,7 @@ pub fn link_varyings(producer: &Interface, consumer: Option<&Interface>) -> Resu
             "fragment input without a matching vertex or mesh output",
         )?;
     }
-    Ok(producer
-        .varyings
-        .iter()
-        .map(|output| output.identifier.clone())
-        .collect())
+    Ok(producer.varyings.clone())
 }
 
 pub fn mesh_render_pipeline(
