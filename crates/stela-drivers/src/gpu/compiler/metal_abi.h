@@ -158,12 +158,14 @@ struct stela_metal_tessellation {
 /* The stages a tessellated pipeline runs ahead of its post-tessellation
  * vertex function, which becomes the evaluation stage. Each patch is one
  * single-point patch-list vertex numbered by the draw's patch number. The
- * vertex stage passes (vertex index, instance index) on in VAR0; the
- * instance index includes the base instance, as Metal's instance_id does.
- * The control stage maps the patch number through the patch index buffer to
- * the patch ID, reads the patch's MTL{Triangle,Quad}TessellationFactorsHalf
- * by the step function, takes each through stela_metal_tessellation_factor
- * and emits them with (patch ID, instance index) in PATCH0. A patch whose
+ * vertex stage passes (vertex index, instance index, base instance) on in
+ * VAR0; the instance index includes the base instance, as Metal's
+ * instance_id does. The control stage maps the patch number through the
+ * patch index buffer to the patch ID, reads the patch's
+ * MTL{Triangle,Quad}TessellationFactorsHalf by the step function, takes each
+ * through stela_metal_tessellation_factor and emits them with (patch ID,
+ * instance index, base instance) in PATCH0, which the evaluation stage reads
+ * as its STELA_AIR_PATCH_IDS. A patch whose
  * patch index or factors lie outside their buffers is culled with zero
  * factors, as are patches Metal culls: those with a zero, negative or NaN
  * edge factor. Entry points "main"; options may be NULL. */

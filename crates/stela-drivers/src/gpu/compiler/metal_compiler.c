@@ -413,6 +413,13 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       .max_mesh_primitives = target->max_mesh_primitives,
    };
    shader = stela_air_stage_to_nir(air, size, entry, target->nir, &options, error);
+   /* A post-tessellation vertex function is its pipeline's evaluation stage,
+    * which no vertex stage can take the place of. */
+   if (shader && shader->info.stage == MESA_SHADER_TESS_EVAL) {
+      fail(error, STELA_AIR_ARGUMENT, "post-tessellation vertex functions need tessellation stages");
+      ralloc_free(shader);
+      shader = NULL;
+   }
 done:
    free(reflection);
    return shader;

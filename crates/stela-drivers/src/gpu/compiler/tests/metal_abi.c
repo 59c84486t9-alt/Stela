@@ -286,13 +286,23 @@ static nir_variable *variable(nir_shader *shader, nir_variable_mode mode, unsign
    return NULL;
 }
 
+static void evaluation_stages_read_their_patch_ids(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_TESS_EVAL, NULL, "patch");
+   nir_def *ids = stela_metal_load_device_value(&b, STELA_AIR_PATCH_IDS, NULL);
+   assert(ids->num_components == 3 && ids->bit_size == 32);
+   nir_variable *input = variable(b.shader, nir_var_shader_in, VARYING_SLOT_PATCH0);
+   assert(input->data.patch && input->type == glsl_uvec_type(3));
+   ralloc_free(b.shader);
+}
+
 static void tessellation_vertex_passes_the_draw_indices(void)
 {
    nir_shader *shader = stela_metal_tessellation_vertex(NULL);
    assert(shader->info.stage == MESA_SHADER_VERTEX);
    assert(!strcmp(nir_shader_get_entrypoint(shader)->function->name, "main"));
    nir_variable *patch = variable(shader, nir_var_shader_out, VARYING_SLOT_VAR0);
-   assert(patch->type == glsl_uvec_type(2));
+   assert(patch->type == glsl_uvec_type(3));
    nir_shader_gather_info(shader, nir_shader_get_entrypoint(shader));
    assert(BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_VERTEX_ID));
    assert(BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_BASE_INSTANCE));
@@ -337,7 +347,7 @@ static void tessellation_control_reads_factors_by_step(void)
       nir_variable *patch = variable(shader, nir_var_shader_out, VARYING_SLOT_PATCH0);
       assert(outer->data.patch && outer->data.compact && glsl_get_length(outer->type) == 4);
       assert(inner->data.patch && inner->data.compact && glsl_get_length(inner->type) == 2);
-      assert(patch->data.patch && !patch->data.compact && patch->type == glsl_uvec_type(2));
+      assert(patch->data.patch && !patch->data.compact && patch->type == glsl_uvec_type(3));
       assert(glsl_type_is_array(variable(shader, nir_var_shader_in, VARYING_SLOT_VAR0)->type));
 
       struct census census = count(shader);
@@ -446,6 +456,7 @@ int main(void)
    select_flags_each_command();
    tessellation_factors_follow_metal_rules();
    tessellation_vertex_passes_the_draw_indices();
+   evaluation_stages_read_their_patch_ids();
    tessellation_control_reads_factors_by_step();
    attributes_decode_metal_vertex_formats();
    glsl_type_singleton_decref();

@@ -839,11 +839,13 @@ stela_air_metadata_stage_buffer_type(struct stela_air_metadata *m,
 }
 
 /* The builtin input an argument descriptor's kind names, when the stage has
- * it. Positions and sizes have up to three lanes; the rest are scalars. */
+ * it. Positions and sizes have up to three lanes; the rest are scalars.
+ * PATCH is a post-tessellation vertex function. */
 static enum stela_air_builtin
 builtin_input(LLVMValueRef kind, const struct stela_air_render *render, unsigned *lanes)
 {
-   enum { KERNEL = 1, VERTEX = 2, FRAGMENT = 4, RENDER = VERTEX | FRAGMENT, ALL = 7 };
+   enum { KERNEL = 1, VERTEX = 2, FRAGMENT = 4, PATCH = 8, RENDER = VERTEX | FRAGMENT | PATCH,
+          ALL = KERNEL | RENDER };
    static const struct {
       const char *name;
       enum stela_air_builtin builtin;
@@ -870,9 +872,10 @@ builtin_input(LLVMValueRef kind, const struct stela_air_render *render, unsigned
       {"air.thread_execution_width", STELA_AIR_THREAD_EXECUTION_WIDTH, ALL, 1},
       {"air.thread_index_in_quadgroup", STELA_AIR_THREAD_INDEX_IN_QUADGROUP, ALL, 1},
       {"air.vertex_id", STELA_AIR_VERTEX_ID, VERTEX, 1},
-      {"air.instance_id", STELA_AIR_INSTANCE_ID, VERTEX, 1},
+      {"air.instance_id", STELA_AIR_INSTANCE_ID, VERTEX | PATCH, 1},
       {"air.base_vertex", STELA_AIR_BASE_VERTEX, VERTEX, 1},
-      {"air.base_instance", STELA_AIR_BASE_INSTANCE, VERTEX, 1},
+      {"air.base_instance", STELA_AIR_BASE_INSTANCE, VERTEX | PATCH, 1},
+      {"air.patch_id", STELA_AIR_PATCH_ID, PATCH, 1},
       {"air.amplification_id", STELA_AIR_AMPLIFICATION_ID, RENDER, 1},
       {"air.front_facing", STELA_AIR_FRONT_FACING, FRAGMENT, 1},
       {"air.sample_id", STELA_AIR_SAMPLE_ID, FRAGMENT, 1},
@@ -881,7 +884,8 @@ builtin_input(LLVMValueRef kind, const struct stela_air_render *render, unsigned
       {"air.render_target_array_index", STELA_AIR_RENDER_TARGET_ARRAY_INDEX_IN, FRAGMENT, 1},
       {"air.viewport_array_index", STELA_AIR_VIEWPORT_ARRAY_INDEX_IN, FRAGMENT, 1},
    };
-   unsigned stage = render && render->entry.stage == STELA_AIR_VERTEX ? VERTEX :
+   unsigned stage = render && render->entry.stage == STELA_AIR_VERTEX ?
+                       (render->entry.patch ? PATCH : VERTEX) :
                     render && render->entry.stage == STELA_AIR_FRAGMENT ? FRAGMENT : KERNEL;
    for (unsigned i = 0; i < ARRAY_SIZE(builtins); i++) {
       if (stela_air_md_string(kind, builtins[i].name)) {
@@ -1234,6 +1238,79 @@ argument_fields(struct stela_air_metadata *m, struct stela_air_kernel *kernel, L
    return true;
 }
 
+/* A post-tessellation vertex function's patch_control_point<T> stage-in:
+ * {i32 argument, "air.patch_control_point_input",
+ * {"air.patch_control_point_function", fn}, member...}. fn, externally
+ * defined, returns a control point's members as a struct from its index in
+ * the patch and the argument. Each member names its attribute's
+ * air.location_index, its type and name, and air.arg_unused when the
+ * function never reads it. */
+static bool
+control_point_input(struct stela_air_metadata *m, struct stela_air_render *r,
+                    struct stela_air_stage_io *io, LLVMValueRef param, const LLVMValueRef *fields,
+                    unsigned count, bool *locations)
+{
+   LLVMValueRef function[AIR_MAX_METADATA_OPERANDS];
+   unsigned n;
+   if (r->control_point_function || count < 4 || !stela_air_md_node(m, fields[2], function, &n) ||
+       n != 2 || !stela_air_md_string(function[0], "air.patch_control_point_function") ||
+       !function[1] || !LLVMIsAFunction(function[1]))
+      return fail(m, STELA_AIR_METADATA, "invalid/duplicate patch control point input");
+   LLVMValueRef fn = function[1];
+   LLVMTypeRef type = LLVMGlobalGetValueType(fn), result = LLVMGetReturnType(type);
+   const char *section = LLVMGetSection(fn);
+   unsigned members = count - 3;
+   if (!LLVMIsDeclaration(fn) || !section || strcmp(section, "air.externally_defined") ||
+       LLVMGetFunctionCallConv(fn) != LLVMCCallConv || LLVMIsFunctionVarArg(type) ||
+       LLVMCountParamTypes(type) != 2 || LLVMGetTypeKind(result) != LLVMStructTypeKind ||
+       LLVMIsOpaqueStruct(result) || LLVMIsPackedStruct(result) ||
+       LLVMCountStructElementTypes(result) != members || members > AIR_MAX_ARGUMENTS - r->member_count)
+      return fail(m, STELA_AIR_ARGUMENT, "unsupported patch control point function");
+   LLVMTypeRef params[2];
+   LLVMGetParamTypes(type, params);
+   if (LLVMGetTypeKind(params[0]) != LLVMIntegerTypeKind || LLVMGetIntTypeWidth(params[0]) != 32 ||
+       LLVMGetTypeKind(params[1]) != LLVMPointerTypeKind || LLVMGetPointerAddressSpace(params[1]) ||
+       LLVMTypeOf(param) != params[1])
+      return fail(m, STELA_AIR_ARGUMENT, "unsupported patch control point function parameters");
+   io->members = &r->members[r->member_count];
+   for (unsigned i = 0; i < members; i++) {
+      struct stela_air_struct_member *member = &r->members[r->member_count++];
+      io->member_count++;
+      LLVMValueRef info[AIR_MAX_METADATA_OPERANDS];
+      unsigned info_count, attributes;
+      bool located = false, typed = false, named = false;
+      if (!stela_air_md_node(m, fields[3 + i], info, &info_count))
+         return false;
+      for (unsigned f = 0; f < info_count;) {
+         LLVMValueRef key = info[f++];
+         if (!located && stela_air_md_string(key, "air.location_index") && f + 2 <= info_count &&
+             stela_air_md_uint(info[f], &member->location) &&
+             stela_air_md_uint(info[f + 1], &attributes) && attributes == 1) {
+            located = true;
+            f += 2;
+         } else if (!typed && stela_air_md_string(key, "air.arg_type_name") && f < info_count &&
+                    metadata_text(m, info[f], &member->type_name, &member->type_name_bytes)) {
+            member->primitive = primitive_type(info[f++], &member->components);
+            typed = true;
+         } else if (!named && stela_air_md_string(key, "air.arg_name") && f < info_count &&
+                    metadata_text(m, info[f++], &member->name, &member->name_bytes)) {
+            named = true;
+         } else if (!member->unused && stela_air_md_string(key, "air.arg_unused")) {
+            member->unused = true;
+         } else {
+            return fail(m, STELA_AIR_METADATA, "unsupported patch control point member metadata");
+         }
+      }
+      if (!located || !typed || !named || member->location >= AIR_MAX_VERTEX_ATTRIBUTES ||
+          locations[member->location] || !stage_varying(member->primitive) ||
+          !stage_type_matches(LLVMStructGetTypeAtIndex(result, i), member->primitive, member->components))
+         return fail(m, STELA_AIR_ARGUMENT, "unsupported/duplicate control point attribute %u", i);
+      locations[member->location] = true;
+   }
+   r->control_point_function = fn;
+   return true;
+}
+
 static bool
 metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef args_node,
                    struct stela_air_kernel *kernel, struct stela_air_render *render)
@@ -1255,7 +1332,8 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
    bool object = render && render->entry.stage == STELA_AIR_OBJECT;
    bool mesh_stage = render && render->entry.stage == STELA_AIR_MESH;
    bool compute = !render || object || mesh_stage;
-   bool payloads = false, meshes = false, grids = false;
+   bool patch = render && render->entry.patch;
+   bool payloads = false, meshes = false, grids = false, positions_in_patch = false;
    kernel->field_count = 0;
    for (unsigned a = 0; a < argc; a++) {
       LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
@@ -1291,15 +1369,18 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
                       stela_air_md_string(fields[1], "air.position");
       bool varying = render && render->entry.stage == STELA_AIR_FRAGMENT &&
                      stela_air_md_string(fields[1], "air.fragment_input");
+      /* A post-tessellation vertex function's per-patch stage-in. */
       bool vertex_input = render && render->entry.stage == STELA_AIR_VERTEX &&
-                          stela_air_md_string(fields[1], "air.vertex_input");
+                          stela_air_md_string(fields[1], patch ? "air.patch_input" : "air.vertex_input");
+      bool control_points = patch && stela_air_md_string(fields[1], "air.patch_control_point_input");
+      bool in_patch = patch && stela_air_md_string(fields[1], "air.position_in_patch");
       bool texture = stela_air_md_string(fields[1], "air.texture");
       bool sampler = stela_air_md_string(fields[1], "air.sampler");
       bool payload = (object || mesh_stage) && stela_air_md_string(fields[1], "air.payload");
       bool mesh = mesh_stage && stela_air_md_string(fields[1], "air.mesh");
       bool grid = object && stela_air_md_string(fields[1], "air.mesh_grid_properties");
       if (!buffer && !builtin && !position && !varying && !vertex_input && !texture && !sampler &&
-          !payload && !mesh && !grid)
+          !payload && !mesh && !grid && !control_points && !in_patch)
          return fail(t, STELA_AIR_ARGUMENT, "unsupported AIR argument kind at %u", index);
       if (builtin && builtins[builtin])
          return fail(t, STELA_AIR_METADATA, "duplicate builtin argument");
@@ -1315,7 +1396,9 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
                         position ? STELA_AIR_POSITION : texture ? STELA_AIR_STAGE_TEXTURE :
                         vertex_input ? STELA_AIR_VERTEX_INPUT :
                         sampler ? STELA_AIR_STAGE_SAMPLER : payload ? STELA_AIR_PAYLOAD :
-                        mesh ? STELA_AIR_MESH_OUTPUT : grid ? STELA_AIR_MESH_GRID : STELA_AIR_VARYING};
+                        mesh ? STELA_AIR_MESH_OUTPUT : grid ? STELA_AIR_MESH_GRID :
+                        control_points ? STELA_AIR_CONTROL_POINTS :
+                        in_patch ? STELA_AIR_POSITION_IN_PATCH : STELA_AIR_VARYING};
       }
       unsigned first_field = 2;
       if (varying) {
@@ -1328,6 +1411,11 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             return fail(t, STELA_AIR_METADATA, "invalid/duplicate mesh argument");
          meshes = true;
          first_field++;
+      }
+      if (control_points) {
+         if (!control_point_input(t, render, io, param, fields, fields_count, attribute_locations))
+            return false;
+         first_field = fields_count;
       }
       bool unused = false;
       LLVMValueRef struct_info = NULL;
@@ -1419,7 +1507,8 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             io->interpolation = stela_air_md_string(key, "air.perspective") ? STELA_AIR_PERSPECTIVE :
                                 stela_air_md_string(key, "air.no_perspective") ? STELA_AIR_NO_PERSPECTIVE :
                                 STELA_AIR_FLAT;
-         } else if (io && (position || varying) && stela_air_md_string(key, "air.arg_unused")) {
+         } else if (io && (position || varying || vertex_input) &&
+                    stela_air_md_string(key, "air.arg_unused")) {
             if (unused) return fail(t, STELA_AIR_METADATA, "duplicate unused qualifier");
             unused = true;
          } else {
@@ -1509,7 +1598,14 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             return fail(t, STELA_AIR_ARGUMENT, "unsupported/duplicate stage-in attribute at %u", index);
          attribute_locations[io->location] = true;
          components = type_components;
-      } else {
+      } else if (in_patch) {
+         unsigned lanes = render->entry.patch == STELA_AIR_PATCH_QUAD ? 2 : 3;
+         if (positions_in_patch || primitive != STELA_AIR_FLOAT || type_components != lanes ||
+             !stage_type_matches(LLVMTypeOf(param), primitive, type_components))
+            return fail(t, STELA_AIR_ARGUMENT, "position_in_patch must be one float%u", lanes);
+         positions_in_patch = true;
+         components = type_components;
+      } else if (!control_points) {
          LLVMTypeRef type = LLVMTypeOf(param);
          components = 1;
          if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
@@ -1566,8 +1662,7 @@ entry_limits(struct stela_air_metadata *m, LLVMValueRef node, enum stela_air_sta
    for (unsigned i = 3; i < n; i++) {
       LLVMValueRef pair[AIR_MAX_METADATA_OPERANDS];
       unsigned count, value;
-      if (stage == STELA_AIR_VERTEX || stage == STELA_AIR_FRAGMENT ||
-          !stela_air_md_node(m, fields[i], pair, &count) || count != 2 ||
+      if (stage == STELA_AIR_FRAGMENT || !stela_air_md_node(m, fields[i], pair, &count) || count != 2 ||
           !stela_air_md_uint(pair[1], &value) || !value)
          return fail(m, STELA_AIR_METADATA, "unsupported entry descriptor field");
       unsigned *limit = stela_air_md_string(pair[0], "air.max_work_group_size") ? max_threads :
@@ -1578,6 +1673,32 @@ entry_limits(struct stela_air_metadata *m, LLVMValueRef node, enum stela_air_sta
          return fail(m, STELA_AIR_METADATA, "unsupported/duplicate entry descriptor field");
       *limit = value;
    }
+   return true;
+}
+
+/* A vertex entry descriptor's field past its outputs and inputs: a
+ * post-tessellation function's {"air.patch", "triangle" or "quad"
+ * [, "air.patch_control_point", i32 count]}. */
+static bool
+entry_patch(struct stela_air_metadata *m, LLVMValueRef node, struct stela_air_stage_entry *entry)
+{
+   LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS], patch[AIR_MAX_METADATA_OPERANDS];
+   unsigned n, count;
+   if (!stela_air_md_node(m, node, fields, &n))
+      return false;
+   if (n == 3)
+      return true;
+   if (n != 4 || !stela_air_md_node(m, fields[3], patch, &count) || (count != 2 && count != 4) ||
+       !stela_air_md_string(patch[0], "air.patch"))
+      return fail(m, STELA_AIR_METADATA, "unsupported vertex entry descriptor field");
+   entry->patch = stela_air_md_string(patch[1], "triangle") ? STELA_AIR_PATCH_TRIANGLE :
+                  stela_air_md_string(patch[1], "quad") ? STELA_AIR_PATCH_QUAD : STELA_AIR_PATCH_NONE;
+   if (!entry->patch ||
+       (count == 4 && (!stela_air_md_string(patch[2], "air.patch_control_point") ||
+                       !stela_air_md_uint(patch[3], &entry->patch_control_points) ||
+                       !entry->patch_control_points ||
+                       entry->patch_control_points > AIR_MAX_PATCH_CONTROL_POINTS)))
+      return fail(m, STELA_AIR_METADATA, "unsupported patch type or control point count");
    return true;
 }
 
@@ -1656,7 +1777,9 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
          outputs = fields[1]; args = fields[2]; selected = nodes[i];
       }
    }
-   if (!args || !entry_limits(m, selected, stage, &r->entry.max_threads, &r->entry.max_mesh_threadgroups) ||
+   if (!args ||
+       !(stage == STELA_AIR_VERTEX ? entry_patch(m, selected, &r->entry) :
+         entry_limits(m, selected, stage, &r->entry.max_threads, &r->entry.max_mesh_threadgroups)) ||
        !metadata_arguments(m, fn, args, &r->arguments, r))
       return fail(m, STELA_AIR_METADATA, "selected entry is not a supported render stage");
    r->entry.input_count = r->arguments.count;
@@ -1665,7 +1788,9 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
    bool position = false;
    for (unsigned i = 0; i < r->entry.input_count; i++) {
       struct stela_air_stage_io *io = &r->inputs[i];
-      if (!stage_text(io->name, io->name_bytes) || !stage_text(io->type_name, io->type_name_bytes))
+      /* Control points name their members instead. */
+      if (io->semantic != STELA_AIR_CONTROL_POINTS &&
+          (!stage_text(io->name, io->name_bytes) || !stage_text(io->type_name, io->type_name_bytes)))
          return fail(m, STELA_AIR_METADATA, "missing/invalid stage argument name/type");
       if (io->semantic == STELA_AIR_POSITION) {
          if (position) return fail(m, STELA_AIR_METADATA, "duplicate render builtin argument");

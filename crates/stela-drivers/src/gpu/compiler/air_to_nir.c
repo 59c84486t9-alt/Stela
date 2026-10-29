@@ -101,6 +101,8 @@ struct translator {
    nir_block *exit;
    /* An amplified vertex function's layer and viewport outputs. */
    nir_variable *layer, *viewport;
+   /* A post-tessellation vertex function's STELA_AIR_PATCH_IDS. */
+   nir_def *patch_ids;
    struct stela_air_error *error;
    unsigned air_minor;
    unsigned language_major, language_minor;
@@ -473,7 +475,7 @@ device_value(struct translator *t, enum stela_air_device_value value)
       return NULL;
    }
    nir_def *def = t->options->load_device_value(&t->b, value, t->options->binding_data);
-   unsigned components = value == STELA_AIR_DISPATCH_GRID ? 3 : 1;
+   unsigned components = value == STELA_AIR_DISPATCH_GRID || value == STELA_AIR_PATCH_IDS ? 3 : 1;
    if (!def || def->num_components != components || def->bit_size != 32 || !binding_prelude(t)) {
       fail(t, STELA_AIR_ARGUMENT, "invalid device value");
       return NULL;
@@ -592,12 +594,17 @@ builtin_value(struct translator *t, enum stela_air_builtin builtin)
        * does, unlike vertex_id_zero_base. */
       return nir_load_vertex_id(b);
    case STELA_AIR_INSTANCE_ID:
-      /* Metal's instance_id includes the base instance; NIR's does not. */
+      /* Metal's instance_id includes the base instance; NIR's does not. A
+       * post-tessellation function's comes with its patch. */
+      if (t->patch_ids)
+         return nir_channel(b, t->patch_ids, 1);
       return nir_iadd(b, nir_load_instance_id(b), nir_load_base_instance(b));
    case STELA_AIR_BASE_VERTEX:
       return nir_load_base_vertex(b);
    case STELA_AIR_BASE_INSTANCE:
-      return nir_load_base_instance(b);
+      return t->patch_ids ? nir_channel(b, t->patch_ids, 2) : nir_load_base_instance(b);
+   case STELA_AIR_PATCH_ID:
+      return nir_channel(b, t->patch_ids, 0);
    case STELA_AIR_AMPLIFICATION_ID:
       return device_value(t, STELA_AIR_AMPLIFICATION);
    case STELA_AIR_FRONT_FACING:
@@ -1767,11 +1774,67 @@ view_output(struct translator *t, gl_varying_slot slot, const char *name)
    return var;
 }
 
+/* A post-tessellation vertex function's stage-in attribute in its type: of
+ * control point `point`, or of the patch when point is NULL. */
+static nir_def *
+patch_attribute(struct translator *t, unsigned location, nir_def *point,
+                enum stela_air_primitive p, unsigned components)
+{
+   bool integer = p != STELA_AIR_FLOAT && p != STELA_AIR_HALF;
+   const struct stela_air_options *options = t->options;
+   nir_def *lanes = options->fetch_attribute ?
+      options->fetch_attribute(&t->b, location, t->patch_ids, point, integer, options->binding_data) : NULL;
+   if (!lanes || lanes->num_components != 4 || lanes->bit_size != 32) {
+      fail(t, STELA_AIR_ARGUMENT, "stage-in attribute %u is not provided", location);
+      return NULL;
+   }
+   return stage_narrow(&t->b, nir_trim_vector(&t->b, lanes, components), p);
+}
+
+/* A call of a post-tessellation vertex function's control point function:
+ * the attributes of the control point its first operand indexes. Members
+ * the function never reads stay undefined. */
+static bool
+control_point_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, bool *lowered)
+{
+   *lowered = callee && callee == t->render.control_point_function;
+   if (!*lowered)
+      return true;
+   const struct stela_air_stage_io *io = t->render.inputs;
+   while (io->semantic != STELA_AIR_CONTROL_POINTS)
+      io++;
+   if (LLVMGetNumArgOperands(inst) != 2 || LLVMGetInstructionCallConv(inst) != LLVMCCallConv ||
+       LLVMGetOperand(inst, 1) != LLVMGetParam(t->entry, io->argument))
+      return fail(t, STELA_AIR_INSTRUCTION, "control points are read through their argument");
+   nir_def *point = get_value(t, LLVMGetOperand(inst, 0));
+   struct value *v = point ? new_aggregate(t, io->member_count, NULL) : NULL;
+   if (!v)
+      return false;
+   for (unsigned i = 0; i < io->member_count; i++) {
+      const struct stela_air_struct_member *member = &io->members[i];
+      if (member->unused)
+         continue;
+      nir_def *def = patch_attribute(t, member->location, point, member->primitive, member->components);
+      if (!def)
+         return false;
+      struct value *leaf = rzalloc(t->values, struct value);
+      if (!leaf)
+         return fail(t, STELA_AIR_ALLOCATION, "control point allocation failed");
+      *leaf = (struct value){.def = def, .components = def->num_components, .bits = def->bit_size};
+      v->elements[i] = leaf;
+   }
+   return _mesa_hash_table_insert(t->values, inst, v) != NULL ||
+      fail(t, STELA_AIR_ALLOCATION, "control point map allocation failed");
+}
+
 static bool
 stage_arguments(struct translator *t, LLVMValueRef fn)
 {
    bool slots[UINT8_MAX + 1] = {0};
    t->fields = t->render.arguments.fields;
+   /* Its builtins and stage-in read the patch's IDs. */
+   if (t->render.entry.patch && !(t->patch_ids = device_value(t, STELA_AIR_PATCH_IDS)))
+      return false;
    for (unsigned i = 0; i < t->render.entry.input_count; i++) {
       const struct stela_air_stage_io *io = &t->render.inputs[i];
       const struct stela_air_argument *argument = &t->render.arguments.arguments[i];
@@ -1812,6 +1875,16 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
          t->b.shader->info.fs.pixel_center_integer = false;
          if (!io->used) continue;
          def = nir_load_frag_coord(&t->b);
+      } else if (io->semantic == STELA_AIR_CONTROL_POINTS) {
+         continue; /* Calls of its function read it. */
+      } else if (io->semantic == STELA_AIR_POSITION_IN_PATCH) {
+         /* Metal's patch coordinates are Vulkan's with the upper-left domain
+          * origin. */
+         def = nir_trim_vector(&t->b, nir_load_tess_coord(&t->b), io->components);
+      } else if (t->render.entry.patch) {
+         if (!io->used) continue;
+         if (!(def = patch_attribute(t, io->location, NULL, io->primitive, io->components)))
+            return false;
       } else {
          nir_variable *var = stage_variable(t, io, false);
          if (!var) return false;
@@ -2876,6 +2949,10 @@ instruction(struct translator *t, LLVMValueRef inst)
       size_t name_length = 0;
       const char *name = LLVMGetValueName2(callee, &name_length);
       bool lowered;
+      if (!control_point_call(t, inst, callee, &lowered))
+         return false;
+      if (lowered)
+         return true;
       if (!texture_call(t, inst, name, name_length, &lowered))
          return false;
       if (lowered)
@@ -3854,8 +3931,13 @@ translate(const void *bitcode, size_t size, const char *entry,
       [STELA_AIR_VERTEX] = MESA_SHADER_VERTEX, [STELA_AIR_FRAGMENT] = MESA_SHADER_FRAGMENT,
       [STELA_AIR_OBJECT] = MESA_SHADER_TASK, [STELA_AIR_MESH] = MESA_SHADER_MESH,
    };
-   t.b = nir_builder_init_simple_shader(stage ? stages[stage->stage] : MESA_SHADER_COMPUTE,
-                                        nir_options, "%s", entry);
+   /* Post-tessellation vertex functions are evaluation shaders. */
+   enum stela_air_patch domain = t.render.entry.patch;
+   t.b = nir_builder_init_simple_shader(!stage ? MESA_SHADER_COMPUTE : domain ? MESA_SHADER_TESS_EVAL :
+                                        stages[stage->stage], nir_options, "%s", entry);
+   if (domain)
+      t.b.shader->info.tess._primitive_mode = domain == STELA_AIR_PATCH_QUAD ? TESS_PRIMITIVE_QUADS :
+                                                                              TESS_PRIMITIVE_TRIANGLES;
    t.b.fp_math_ctrl = nir_fp_no_fast_math;
    if (options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT && !fp_environment(&t))
       goto done;

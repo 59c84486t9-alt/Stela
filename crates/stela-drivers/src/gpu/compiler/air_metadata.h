@@ -12,6 +12,7 @@ extern "C" {
 #define AIR_MAX_CLIP_DISTANCES 8
 #define AIR_MAX_VERTEX_ATTRIBUTES 31u
 #define AIR_MAX_RENDER_TARGETS 8u
+#define AIR_MAX_PATCH_CONTROL_POINTS 32u
 #define AIR_MAX_METADATA_OPERANDS 256
 #define AIR_MAX_BITCODE_BYTES (64u * 1024u * 1024u)
 
@@ -146,11 +147,13 @@ enum stela_air_builtin {
    STELA_AIR_THREADS_PER_SIMDGROUP,
    STELA_AIR_THREAD_EXECUTION_WIDTH,
    STELA_AIR_THREAD_INDEX_IN_QUADGROUP,
-   /* Vertex functions. */
+   /* Vertex functions; post-tessellation ones have patch IDs, not vertex
+    * IDs. */
    STELA_AIR_VERTEX_ID,
    STELA_AIR_INSTANCE_ID,
    STELA_AIR_BASE_VERTEX,
    STELA_AIR_BASE_INSTANCE,
+   STELA_AIR_PATCH_ID,
    /* Vertex and fragment functions. */
    STELA_AIR_AMPLIFICATION_ID,
    /* Fragment functions. */
@@ -207,7 +210,13 @@ enum stela_air_stage_semantic {
    STELA_AIR_STAGE_BUFFER = 1, STELA_AIR_STAGE_BUILTIN, STELA_AIR_POSITION,
    STELA_AIR_VARYING, STELA_AIR_RENDER_TARGET, STELA_AIR_STAGE_TEXTURE,
    STELA_AIR_STAGE_SAMPLER,
-   STELA_AIR_VERTEX_INPUT, /* A stage-in attribute at location. */
+   /* A stage-in attribute at location; a post-tessellation vertex
+    * function's per-patch one. */
+   STELA_AIR_VERTEX_INPUT,
+   /* A post-tessellation vertex function's patch_control_point<T>: its
+    * members are the attributes of each control point. */
+   STELA_AIR_CONTROL_POINTS,
+   STELA_AIR_POSITION_IN_PATCH, /* The tessellated vertex's float2 or float3. */
    /* Object and mesh inputs: the object payload, a mesh function's mesh and
     * an object function's mesh grid properties. */
    STELA_AIR_PAYLOAD, STELA_AIR_MESH_OUTPUT, STELA_AIR_MESH_GRID,
@@ -236,6 +245,10 @@ struct stela_air_struct_member {
    unsigned components;
    const char *name, *type_name;
    size_t name_bytes, type_name_bytes;
+   /* A control point member's stage-in attribute, and whether the function
+    * never reads it. */
+   unsigned location;
+   bool unused;
 };
 struct stela_air_stage_io {
    enum stela_air_stage_semantic semantic;
@@ -265,6 +278,8 @@ struct stela_air_stage_io {
 };
 /* The primitives a mesh function outputs. */
 enum stela_air_topology { STELA_AIR_POINTS = 1, STELA_AIR_LINES, STELA_AIR_TRIANGLES };
+/* The patch a post-tessellation vertex function's [[patch]] names. */
+enum stela_air_patch { STELA_AIR_PATCH_NONE, STELA_AIR_PATCH_TRIANGLE, STELA_AIR_PATCH_QUAD };
 struct stela_air_stage_entry {
    enum stela_air_stage stage;
    bool framebuffer_fetch_present, framebuffer_fetch_enabled; /* Compile option, never a fetch operation. */
@@ -280,6 +295,10 @@ struct stela_air_stage_entry {
     * outputs are its mesh's vertex and primitive data. */
    unsigned max_vertices, max_primitives;
    enum stela_air_topology topology;
+   /* A post-tessellation vertex function's patch and its control points,
+    * zero when it does not declare them. */
+   enum stela_air_patch patch;
+   unsigned patch_control_points;
    /* As a kernel's stela_air_entry; a fragment function that calls
     * air.discard_fragment. */
    uint64_t threadgroup_bytes;
@@ -430,6 +449,8 @@ struct stela_air_render {
    struct stela_air_struct_member members[AIR_MAX_ARGUMENTS];
    unsigned member_count;
    struct stela_air_kernel arguments;
+   /* A post-tessellation vertex function's control point fetch. */
+   LLVMValueRef control_point_function;
 };
 bool stela_air_metadata_stage(struct stela_air_metadata *, LLVMValueRef,
                               enum stela_air_stage, struct stela_air_render *);

@@ -35,6 +35,14 @@ nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_val
       return load_push(b, 32, STELA_METAL_PUSH_AMPLIFICATION);
    case STELA_AIR_VIEW_MAPPING:
       return load_push(b, 32, STELA_METAL_PUSH_VIEW_MAPPING);
+   case STELA_AIR_PATCH_IDS: {
+      /* The tessellation control stage's PATCH0. */
+      nir_variable *ids = nir_variable_create(b->shader, nir_var_shader_in, glsl_uvec_type(3),
+                                              "patch_ids");
+      ids->data.location = VARYING_SLOT_PATCH0;
+      ids->data.patch = true;
+      return nir_load_var(b, ids);
+   }
    }
    return NULL;
 }
@@ -236,12 +244,13 @@ nir_shader *stela_metal_tessellation_vertex(const nir_shader_compiler_options *o
 {
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX, options,
                                                   "stela_metal_tessellation_vertex");
-   nir_variable *patch = nir_variable_create(b.shader, nir_var_shader_out, glsl_uvec_type(2),
+   nir_variable *patch = nir_variable_create(b.shader, nir_var_shader_out, glsl_uvec_type(3),
                                              "patch");
    patch->data.location = VARYING_SLOT_VAR0;
    patch->data.interpolation = INTERP_MODE_FLAT;
-   nir_def *instance = nir_iadd(&b, nir_load_instance_id(&b), nir_load_base_instance(&b));
-   nir_store_var(&b, patch, nir_vec2(&b, nir_load_vertex_id(&b), instance), 0x3);
+   nir_def *base = nir_load_base_instance(&b);
+   nir_def *instance = nir_iadd(&b, nir_load_instance_id(&b), base);
+   nir_store_var(&b, patch, nir_vec3(&b, nir_load_vertex_id(&b), instance, base), 0x7);
    return validated(&b);
 }
 
@@ -433,7 +442,7 @@ nir_shader *stela_metal_tessellation_control(const nir_shader_compiler_options *
    b.shader->info.tess.ccw = tessellation->winding == STELA_METAL_WINDING_CLOCKWISE;
 
    nir_variable *input = nir_variable_create(
-      b.shader, nir_var_shader_in, glsl_array_type(glsl_uvec_type(2), 32, 0), "patch");
+      b.shader, nir_var_shader_in, glsl_array_type(glsl_uvec_type(3), 32, 0), "patch");
    input->data.location = VARYING_SLOT_VAR0;
    input->data.interpolation = INTERP_MODE_FLAT;
    nir_variable *outputs[2] = {
@@ -442,8 +451,8 @@ nir_shader *stela_metal_tessellation_control(const nir_shader_compiler_options *
       patch_output(b.shader, glsl_array_type(glsl_float_type(), 2, 0),
                    VARYING_SLOT_TESS_LEVEL_INNER, "inner"),
    };
-   nir_variable *patch_ids = patch_output(b.shader, glsl_uvec_type(2), VARYING_SLOT_PATCH0,
-                                          "patch_id");
+   nir_variable *patch_ids = patch_output(b.shader, glsl_uvec_type(3), VARYING_SLOT_PATCH0,
+                                          "patch_ids");
 
    nir_def *vertex =
       nir_load_deref(&b, nir_build_deref_array_imm(&b, nir_build_deref_var(&b, input), 0));
@@ -511,6 +520,6 @@ nir_shader *stela_metal_tessellation_control(const nir_shader_compiler_options *
          nir_store_deref(&b, nir_build_deref_array_imm(&b, output, i), nir_channel(&b, value, i),
                          1);
    }
-   nir_store_var(&b, patch_ids, nir_vec2(&b, id, instance), 0x3);
+   nir_store_var(&b, patch_ids, nir_vec3(&b, id, instance, nir_channel(&b, vertex, 2)), 0x7);
    return validated(&b);
 }
