@@ -244,7 +244,7 @@ static struct stela_nvidia_render_options render_options(unsigned samples)
         .abi = STELA_NVIDIA_RENDER_ABI, .max_instructions = 10000, .max_code_bytes = 1024 * 1024,
         .max_constant_bytes = 65536, .max_varying_slots = 32, .argument_cbuf = {2, 2},
         .constant_data_cbuf = {3, 3}, .record_assembly = 1,
-        .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41,
+        .fp_profile = STELA_AIR_FP_METAL,
         .fs_key = {.force_sample_shading = samples > 1}, .raster_samples = samples,
         .sample_shading_enable = samples > 1, .min_sample_shading = samples > 1 ? 1.0f : 0.0f};
 }

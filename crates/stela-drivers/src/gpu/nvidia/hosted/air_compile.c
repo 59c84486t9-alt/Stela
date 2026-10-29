@@ -186,7 +186,7 @@ enum stela_nvidia_air_status stela_nvidia_air_compile_specialized(const struct n
         return report(error, STELA_NVIDIA_AIR_LIMIT, "Explicit bounded instruction/code budgets required");
     if (options->argument_cbuf >= CBUF_COUNT || options->record_assembly > 1 ||
         (options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT &&
-         options->fp_profile != STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41))
+         options->fp_profile != STELA_AIR_FP_METAL))
         return report(error, STELA_NVIDIA_AIR_UNSUPPORTED, "Unsupported cbuf/diagnostic/FP policy");
     if (!device_valid(device) || compiler->sm != device->sm || compiler->warps_per_sm != device->max_warps_per_mp)
         return report(error, STELA_NVIDIA_AIR_DEVICE, "Actual matching initialized NAK/device facts required");

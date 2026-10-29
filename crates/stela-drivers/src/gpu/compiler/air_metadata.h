@@ -410,9 +410,6 @@ bool stela_air_named_md(struct stela_air_metadata *m, const char *name,
                         LLVMValueRef *operands, unsigned *count);
 bool stela_air_metadata_layout(struct stela_air_metadata *m);
 bool stela_air_metadata_validate(struct stela_air_metadata *m);
-/* Whether the validated module is the AIR 2.9 / MSL 4.1 output of compiler
- * 32023.922, which the FP32 and shared-memory profiles qualify. */
-bool stela_air_metadata_qualified(const struct stela_air_metadata *m);
 /* The module's function constants and, when storage is not NULL, the global
  * each is stored in: an AS2 scalar or 2-4 lane vector of integers, half or
  * float, which specialization defines. Indices, names and storage are unique. */

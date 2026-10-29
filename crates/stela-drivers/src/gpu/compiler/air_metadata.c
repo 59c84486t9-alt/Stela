@@ -33,6 +33,18 @@ stela_air_md_string(LLVMValueRef value, const char *expected)
    return length == strlen(expected) && !memcmp(string, expected, length);
 }
 
+/* A metadata string for a refusal to name: its text, or "?" for another
+ * value. */
+static const char *
+md_text(LLVMValueRef value, unsigned *length)
+{
+   if (!value || !LLVMIsAMDString(value))
+      return *length = 1, "?";
+   const char *text = LLVMGetMDString(value, length);
+   *length = MIN2(*length, 120);
+   return text;
+}
+
 bool
 stela_air_md_uint(LLVMValueRef value, unsigned *number)
 {
@@ -68,19 +80,8 @@ stela_air_named_md(struct stela_air_metadata *t, const char *name, LLVMValueRef 
 }
 
 bool
-stela_air_metadata_qualified(const struct stela_air_metadata *t)
-{
-   static const char ident[] = "Apple metal version 32023.922 (metalfe-32023.922.4)";
-   return t->air_minor == 9 && t->language_major == 4 && t->language_minor == 1 &&
-          !strcmp(LLVMGetTarget(t->module), "air64_v29-apple-macosx27.2.0") && t->ident &&
-          t->ident_bytes == strlen(ident) && !memcmp(t->ident, ident, t->ident_bytes);
-}
-
-bool
 stela_air_metadata_shared_profile(struct stela_air_metadata *t)
 {
-   if (!stela_air_metadata_qualified(t))
-      return fail(t, STELA_AIR_METADATA, "shared-memory AIR/compiler profile is unqualified");
    if (LLVMPointerSizeForAS(t->layout, 3) != 8)
       return fail(t, STELA_AIR_TARGET, "shared-memory AIR pointers require 64-bit layout");
    return true;
@@ -255,14 +256,11 @@ version_metadata(struct stela_air_metadata *t, const char *name, bool language)
        !stela_air_md_uint(fields[base], &major) || !stela_air_md_uint(fields[base + 1], &minor) ||
        !stela_air_md_uint(fields[base + 2], &patch) || patch != 0)
       return fail(t, STELA_AIR_METADATA, "invalid %s", name);
+   /* Every Metal language version, and the AIR versions their compilers
+    * emit; LLVM upgrades the typed pointers of older AIR as it reads it. */
    bool supported = language ?
-      ((major == 1 && minor >= 1 && minor <= 2) ||
-       (major == 2 && minor <= 4) || (major == 3 && minor <= 2) ||
-       (major == 4 && minor <= 1)) : (major == 2 && (minor == 8 || minor == 9));
-   /* AIR 2.8 has only been observed with Metal 4.0 here. The AIR 2.9
-    * combinations below come from actual independent compiler requests. */
-   if (language && t->air_minor == 8)
-      supported &= major == 4 && minor == 0;
+      ((major == 1 && minor <= 2) || (major == 2 && minor <= 4) || (major == 3 && minor <= 2) ||
+       (major == 4 && minor <= 1)) : (major == 2 && minor <= 9);
    if (!supported)
       return fail(t, STELA_AIR_METADATA, "unsupported %s %u.%u.%u", name, major, minor, patch);
    if (!language)
@@ -325,15 +323,15 @@ stela_air_metadata_validate(struct stela_air_metadata *t)
         node = LLVMGetNextNamedMetadata(node)) {
       size_t size;
       const char *name = LLVMGetNamedMetadataName(node, &size);
-      const char *allowed[] = {"air.version", "air.language_version",
-                              "air.compile_options", "air.kernel", "air.visible", "llvm.ident",
-                              "llvm.module.flags", "air.function_constants"};
-      const char *render[] = {"air.vertex", "air.fragment", "air.object", "air.mesh"};
+      /* A library's module lists every entry point it defines, of any
+       * stage, and names its source file. */
+      const char *allowed[] = {"air.version", "air.language_version", "air.compile_options",
+                               "air.kernel", "air.vertex", "air.fragment", "air.object",
+                               "air.mesh", "air.visible", "llvm.ident", "llvm.module.flags",
+                               "air.function_constants", "air.source_file_name"};
       bool found = false;
       for (unsigned i = 0; i < ARRAY_SIZE(allowed); i++)
          found |= size == strlen(allowed[i]) && !memcmp(name, allowed[i], size);
-      for (unsigned i = 0; t->render && i < ARRAY_SIZE(render); i++)
-         found |= size == strlen(render[i]) && !memcmp(name, render[i], size);
       if (!found)
          return fail(t, STELA_AIR_METADATA, "unsupported module metadata: %.*s",
                      (int)MIN2(size, 160), name);
@@ -1486,8 +1484,12 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       bool mesh = mesh_stage && stela_air_md_string(fields[1], "air.mesh");
       bool grid = object && stela_air_md_string(fields[1], "air.mesh_grid_properties");
       if (!buffer && !builtin && !interpolated && !vertex_input && !texture && !sampler &&
-          !payload && !mesh && !grid && !control_points && !in_patch)
-         return fail(t, STELA_AIR_ARGUMENT, "unsupported AIR argument kind at %u", index);
+          !payload && !mesh && !grid && !control_points && !in_patch) {
+         unsigned length;
+         const char *kind = md_text(fields[1], &length);
+         return fail(t, STELA_AIR_ARGUMENT, "unsupported AIR argument kind %.*s at %u",
+                     (int)length, kind, index);
+      }
       if (byval && !texture && !sampler)
          return fail(t, STELA_AIR_ARGUMENT, "unsupported typed parameter attribute");
       if (builtin && builtins[builtin])
@@ -1622,7 +1624,10 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             if (io->interpolant) return fail(t, STELA_AIR_METADATA, "duplicate interpolant qualifier");
             io->interpolant = true;
          } else {
-            return fail(t, STELA_AIR_METADATA, "unsupported argument metadata at %u", index);
+            unsigned length;
+            const char *text = md_text(key, &length);
+            return fail(t, STELA_AIR_METADATA, "unsupported argument metadata %.*s at %u",
+                        (int)length, text, index);
          }
       }
       unsigned components = 0;

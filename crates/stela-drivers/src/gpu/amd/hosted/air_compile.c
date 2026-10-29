@@ -294,7 +294,7 @@ stela_amd_air_compile_specialized(const struct radeon_info *info, const struct s
       return report(error, STELA_AMD_AIR_LIMIT, "Explicit nonzero compiler/code budgets required");
    if ((options->wave_size != 32 && options->wave_size != 64) ||
        (options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT &&
-        options->fp_profile != STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41))
+        options->fp_profile != STELA_AIR_FP_METAL))
       return report(error, STELA_AMD_AIR_UNSUPPORTED, "Unsupported wave/FP profile");
    if (info->family < CHIP_TAHITI || info->family >= CHIP_LAST ||
        ac_get_gfx_level(info->family) != info->gfx_level || !aco_is_gpu_supported(info) ||

@@ -257,7 +257,7 @@ enum stela_intel_air_status stela_intel_air_compile_specialized(const struct brw
         return report(error, STELA_INTEL_AIR_UNSUPPORTED, "Gen35 compiler/dispatch qualification hold");
     if (!options->max_instructions || !options->max_code_bytes || options->max_code_bytes > MAX_CODE)
         return report(error, STELA_INTEL_AIR_LIMIT, "Explicit instruction/resident code budgets required");
-    if ((options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT && options->fp_profile != STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41) ||
+    if ((options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT && options->fp_profile != STELA_AIR_FP_METAL) ||
         (options->subgroup_size && options->subgroup_size != 8 && options->subgroup_size != 16 && options->subgroup_size != 32) ||
         (options->subgroup_size == 8 && device->ver >= 20))
         return report(error, STELA_INTEL_AIR_UNSUPPORTED, "Unsupported FP/subgroup specialization");

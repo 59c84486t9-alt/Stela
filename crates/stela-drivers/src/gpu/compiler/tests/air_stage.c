@@ -94,7 +94,7 @@ static bool bind(const struct stela_air_buffer *buffer,unsigned *slot,void *data
 static struct stela_air_stage_options options(enum stela_air_stage stage,const struct stela_air_varying_slot *map,unsigned count,unsigned *calls)
 {
    return (struct stela_air_stage_options){.stage=stage,.resources={.max_instructions=10000,
-      .bind_ssbo=bind,.ssbo_count=2,.binding_data=calls,.fp_profile=STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41},
+      .bind_ssbo=bind,.ssbo_count=2,.binding_data=calls,.fp_profile=STELA_AIR_FP_METAL},
       .varyings=map,.varying_count=count,.max_varying_slots=16};
 }
 static nir_shader *translate(LLVMMemoryBufferRef b,const char *name,const struct stela_air_stage_options *o)
@@ -740,7 +740,7 @@ pointer_phi_stage_semantics(void)
    free(text); text = change(bad, "!4 = !{!5,!6}", "!4 = !{!5,!6,!26}"); free(bad);
    bad = change(text, "[%buffer,%a],[%alias,%b]", "[%buffer,%a],[%other,%b]"); free(text);
    const char *extra = "!26 = !{i32 2,!\"air.buffer\",!\"air.location_index\",i32 1,i32 1,!\"air.read\",!\"air.address_space\",i32 2,"
-      "!\"air.struct_type_info\",!7,!\"air.arg_type_size\",i32 16,!\"air.arg_type_align_size\",i32 16,!\"air.arg_type_name\",!\"Input\"}\n";
+      "!\"air.struct_type_info\",!7,!\"air.arg_type_size\",i32 16,!\"air.arg_type_align_size\",i32 16,!\"air.arg_type_name\",!\"Input\",!\"air.arg_name\",!\"other\"}\n";
    size_t bytes = strlen(bad) + strlen(extra) + 1;
    text = malloc(bytes); CHECK(text); snprintf(text, bytes, "%s%s", bad, extra); free(bad);
    refusal(text, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_MEMORY);

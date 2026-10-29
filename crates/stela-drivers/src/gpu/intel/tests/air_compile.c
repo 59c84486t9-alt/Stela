@@ -910,7 +910,7 @@ static void source_input(int argc,char **argv)
               &error) == STELA_METAL_ASSEMBLY_OK);
     struct context c;context(&c,"skl");
     struct stela_intel_air_options opts = options();
-    opts.fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
+    opts.fp_profile = STELA_AIR_FP_METAL;
     struct stela_intel_air_compilation *owner=compile(&c,library,0,&opts,STELA_INTEL_AIR_OK);
     expect_owned("original-source-owner",c.name);validate(&c,library,owner,"original-source-owner");
     free(air.data);free(source.data);stela_metal_assembly_destroy(&library);ralloc_free(c.memory);

@@ -149,8 +149,8 @@ static struct stela_intel_graphics_options options(void)
         .max_varying_slots = 16,
         .color_regions = 1,
         .samples = 1,
-        .vertex_fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41,
-        .fragment_fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41};
+        .vertex_fp_profile = STELA_AIR_FP_METAL,
+        .fragment_fp_profile = STELA_AIR_FP_METAL};
 }
 static void compiler_log(void *data, unsigned *id, const char *format, ...)
 {

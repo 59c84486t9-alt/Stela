@@ -680,7 +680,7 @@ static void source_input(int argc,char **argv)
     struct stela_metal_assembly_error error;struct stela_metal_assembly *library=NULL;
     CHECK(stela_metal_assemble_source(&assembly_options,&config,&request,&compiled,&library,&error)==STELA_METAL_ASSEMBLY_OK);
     struct nv_device_info device=stela_nvidia_target_device(89, ADA_COMPUTE_A);struct nak_compiler *nak=compiler(&device);
-    struct stela_nvidia_air_options opts=options();opts.fp_profile=STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
+    struct stela_nvidia_air_options opts=options();opts.fp_profile=STELA_AIR_FP_METAL;
     struct stela_nvidia_air_compilation *owner=compile(&device,nak,library,0,&opts,STELA_NVIDIA_AIR_OK);
     expect_owned("original-source-owner",device.sm);validate(&device,nak,library,owner,"original-source-owner",false);
     free(air.data);free(source.data);stela_metal_assembly_destroy(&library);nak_compiler_destroy(nak);

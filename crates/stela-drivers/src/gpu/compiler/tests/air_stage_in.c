@@ -145,7 +145,7 @@ translate(const char *text, bool fetch, struct stela_air_error *error)
       .varying_count = ARRAY_SIZE(varyings),
       .resources = {
          .max_instructions = 10000, .max_constant_bytes = 65536,
-         .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41,
+         .fp_profile = STELA_AIR_FP_METAL,
          .load_device_value = load_device_value, .fetch_attribute = fetch ? fetch_attribute : NULL,
       },
    };
@@ -299,7 +299,7 @@ translate_kernel(const char *text, struct stela_air_error *error)
    LLVMMemoryBufferRef input = bitcode(text);
    const struct stela_air_options o = {
       .max_instructions = 10000, .workgroup_size = {64, 1, 1}, .bind_buffer = bind_buffer,
-      .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41, .fetch_attribute = fetch_attribute,
+      .fp_profile = STELA_AIR_FP_METAL, .fetch_attribute = fetch_attribute,
    };
    fetch_count = 0;
    patch_ids = NULL;

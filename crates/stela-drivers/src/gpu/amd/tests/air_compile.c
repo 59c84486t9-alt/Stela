@@ -726,7 +726,7 @@ static void source_input(int argc, char **argv)
    struct stela_metal_assembly_error error; struct stela_metal_assembly *library = NULL;
    CHECK(stela_metal_assemble_source(&assembly_options, &config, &request, &compiled, &library, &error) == STELA_METAL_ASSEMBLY_OK);
    struct radeon_info info = model(CHIP_NAVI31, true); struct stela_amd_air_options opts = options(32);
-   opts.fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
+   opts.fp_profile = STELA_AIR_FP_METAL;
    expect_owned("original-source-owner", info.family, 32);
    struct stela_amd_air_compilation *owner = compile(&info, library, &opts, STELA_AMD_AIR_OK);
    free(air.data); free(source.data); stela_metal_assembly_destroy(&library);

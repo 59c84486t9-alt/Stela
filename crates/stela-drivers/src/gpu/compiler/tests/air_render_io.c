@@ -184,7 +184,7 @@ translate(const char *text, enum stela_air_stage stage, bool amplified,
       .varying_count = ARRAY_SIZE(varyings), .amplified = amplified,
       .resources = {
          .max_instructions = 10000, .bind_buffer = stela_metal_bind_buffer, .binding_data = &primary,
-         .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41,
+         .fp_profile = STELA_AIR_FP_METAL,
          .load_device_value = stela_metal_load_device_value, .max_constant_bytes = 65536,
       },
    };

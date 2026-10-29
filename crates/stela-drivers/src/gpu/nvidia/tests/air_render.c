@@ -223,7 +223,7 @@ static void frontend_refusals(struct run *run, const nir_shader_compiler_options
     struct stela_air_stage_options valid = {.stage = STELA_AIR_VERTEX,
         .resources = {.max_instructions = 10000, .bind_ssbo = bind_ssbo,
             .ssbo_count = MAX_BINDINGS, .binding_data = run,
-            .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41},
+            .fp_profile = STELA_AIR_FP_METAL},
         .varyings = run->map, .varying_count = run->varying_count, .max_varying_slots = 32};
     const unsigned calls = run->callbacks, backend = run->backend_calls;
     for (unsigned failure = 0; failure < 7; ++failure) {
@@ -262,7 +262,7 @@ static void compile_target(struct run *run, const struct stela_air_stage_entry *
         struct stela_air_stage_options air = {.stage = stage ? STELA_AIR_FRAGMENT : STELA_AIR_VERTEX,
             .resources = {.max_instructions = 10000, .bind_ssbo = stage ? NULL : bind_ssbo,
                 .ssbo_count = stage ? 0 : MAX_BINDINGS, .binding_data = run,
-                .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41},
+                .fp_profile = STELA_AIR_FP_METAL},
             .varyings = run->map, .varying_count = run->varying_count, .max_varying_slots = 32};
         struct stela_air_error error;
         nir_shader *nir = stela_air_stage_to_nir(run->bytes, run->size, entry->name, options, &air, &error);
@@ -306,7 +306,7 @@ static void compile_target(struct run *run, const struct stela_air_stage_entry *
         record_bool("depth_feedback", model->depth_feedback);
         record_bool("conservative_underestimate", model->conservative_underestimate);
         record_bool("fs_key_passed", stage);
-        record_uint("fp_profile", STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41);
+        record_uint("fp_profile", STELA_AIR_FP_METAL);
         record_uint("max_instructions", 10000);
         record_uint("max_varying_slots", 32);
         record_uint("sample_info_cb", layout.sample_info_cb);

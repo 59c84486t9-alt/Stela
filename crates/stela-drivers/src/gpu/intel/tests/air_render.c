@@ -116,7 +116,7 @@ static bool fragment(const struct stela_air_inspection *inspection,
             .resources = {.max_instructions = p->reject == 4 ? 0 : 10000,
                 .bind_ssbo = stage ? NULL : bind_ssbo,
                 .ssbo_count = stage ? 0 : p->reject == 5 ? 1 : 2, .binding_data = &bindings[stage],
-                .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41},
+                .fp_profile = STELA_AIR_FP_METAL},
             .varyings = map, .varying_count = count, .max_varying_slots = limit,
         };
         p->nir[stage] = stela_air_stage_to_nir(p->input->bytes, p->input->size,

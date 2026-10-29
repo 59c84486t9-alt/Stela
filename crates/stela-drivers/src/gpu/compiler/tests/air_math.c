@@ -49,7 +49,7 @@ translate(const char *declarations, const char *body, const nir_shader_compiler_
    const struct stela_air_options o = {
       .workgroup_size = {1, 1, 1}, .max_instructions = 10000,
       .bind_buffer = bind, .binding_data = &primary,
-      .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41,
+      .fp_profile = STELA_AIR_FP_METAL,
    };
    nir_shader *shader = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
                                          "kernel", options, &o, error);
@@ -394,7 +394,7 @@ fragments_take_derivatives_and_discard(void)
    struct stela_air_stage_options o = {
       .stage = STELA_AIR_FRAGMENT, .max_varying_slots = 16,
       .resources = {.max_instructions = 10000, .bind_buffer = stela_metal_bind_buffer,
-                    .binding_data = &primary, .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41},
+                    .binding_data = &primary, .fp_profile = STELA_AIR_FP_METAL},
    };
    struct stela_air_error error = {0};
    nir_shader *shader = stela_air_stage_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),

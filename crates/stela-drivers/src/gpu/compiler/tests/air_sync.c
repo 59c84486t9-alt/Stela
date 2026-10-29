@@ -50,7 +50,7 @@ translate(const char *declarations, const char *body, const nir_shader_compiler_
    const struct stela_air_options o = {
       .workgroup_size = {64, 1, 1}, .max_instructions = 10000, .max_threadgroup_bytes = 256,
       .bind_buffer = bind, .binding_data = &primary,
-      .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41,
+      .fp_profile = STELA_AIR_FP_METAL,
    };
    *error = (struct stela_air_error){0};
    nir_shader *shader = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),

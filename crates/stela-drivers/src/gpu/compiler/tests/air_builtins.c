@@ -106,7 +106,7 @@ options(struct stela_metal_stage *stage, bool compute, bool device)
    return (struct stela_air_options){
       .workgroup_size = {compute ? 8u : 0u, compute ? 4u : 0u, compute ? 2u : 0u},
       .max_instructions = 10000, .bind_buffer = stela_metal_bind_buffer, .binding_data = stage,
-      .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41,
+      .fp_profile = STELA_AIR_FP_METAL,
       .load_device_value = device ? stela_metal_load_device_value : NULL,
    };
 }

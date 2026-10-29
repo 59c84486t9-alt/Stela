@@ -280,7 +280,7 @@ enum stela_nvidia_render_status stela_nvidia_render_compile(const struct nv_devi
         !options->max_varying_slots || options->max_varying_slots > MAX_VARYINGS)
         return report(error, STELA_NVIDIA_RENDER_LIMIT, "Explicit bounded code/constants/IO budgets required");
     if (options->record_assembly > 1 ||
-        (options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT && options->fp_profile != STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41) ||
+        (options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT && options->fp_profile != STELA_AIR_FP_METAL) ||
         !options->raster_samples || options->raster_samples > 16 ||
         (options->raster_samples & (options->raster_samples - 1)) ||
         !isfinite(options->min_sample_shading) || options->min_sample_shading < 0 || options->min_sample_shading > 1 ||

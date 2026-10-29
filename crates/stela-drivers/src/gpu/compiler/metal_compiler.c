@@ -64,12 +64,12 @@ texture_access(enum stela_air_texture_access access)
    }
 }
 
-/* A reflection in progress, and the module facts compilation selects by. */
+/* A reflection in progress. */
 struct reflecting {
    const char *entry;
    struct stela_metal_reflection *out;
    struct stela_air_error *error;
-   bool found, denorms_disable;
+   bool found;
 };
 
 /* Copies bytes into the names, at *offset. */
@@ -89,7 +89,6 @@ static bool
 module_facts(struct reflecting *r, const struct stela_air_inspection *info)
 {
    struct stela_metal_reflection *out = r->out;
-   r->denorms_disable = info->denorms_disable;
    out->commands = !!(info->commands & STELA_AIR_COMMANDS_ENCODE);
    out->command_barriers = !!(info->commands & STELA_AIR_COMMANDS_BARRIERS);
    for (unsigned i = 0; i < info->function_constant_count; i++) {
@@ -455,9 +454,7 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       .max_instructions = target->max_instructions,
       .bind_buffer = stela_metal_bind_buffer,
       .binding_data = &binding,
-      /* Only the qualified Apple profile flushes FP32 denormals. */
-      .fp_profile = r.denorms_disable ? STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41 :
-                                        STELA_AIR_FP_IEEE_DEFAULT,
+      .fp_profile = STELA_AIR_FP_METAL,
       .max_private_bytes = target->max_private_bytes,
       .max_constant_bytes = target->max_constant_bytes,
       .bind_texture = stela_metal_bind_texture,

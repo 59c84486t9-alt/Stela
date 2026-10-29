@@ -222,13 +222,9 @@ fp_environment(struct translator *t)
 {
    if (t->fp_checked)
       return true;
-   bool ftz = t->options->fp_profile == STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
-   if (ftz) {
-      if (!stela_air_metadata_qualified(&t->metadata) || !t->denorms_disable || !t->fast_math)
-         return fail(t, STELA_AIR_METADATA, "AIR/compiler metadata differs from selected FP32 profile");
-   } else if (t->denorms_disable) {
-      return fail(t, STELA_AIR_METADATA, "AIR denorms_disable arithmetic requires qualified FP profile");
-   }
+   if (t->denorms_disable && t->options->fp_profile != STELA_AIR_FP_METAL)
+      return fail(t, STELA_AIR_METADATA, "AIR denorms_disable arithmetic requires the Metal FP profile");
+   bool ftz = t->denorms_disable;
    const char *special[] = {"strictfp", "denormal_fpenv"};
    for (unsigned i = 0; i < ARRAY_SIZE(special); i++) {
       unsigned kind = LLVMGetEnumAttributeKindForName(special[i], strlen(special[i]));
@@ -3372,7 +3368,8 @@ instruction(struct translator *t, LLVMValueRef inst)
          if (!LLVMGetIntrinsicID(callee) && (name_length < 4 || memcmp(name, "air.", 4)))
             return fail(t, STELA_AIR_INSTRUCTION, "unresolved external function %.*s",
                         (int)MIN2(name_length, 160), name);
-         return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR function/intrinsic call");
+         return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR call %.*s",
+                     (int)MIN2(name_length, 160), name);
       case STELA_AIR_CALL_FAILED:
          return false;
       case STELA_AIR_CALL_LOWERED:
@@ -4263,7 +4260,7 @@ translate(const void *bitcode, size_t size, const char *entry,
       return NULL;
    }
    if (options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT &&
-       options->fp_profile != STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41) {
+       options->fp_profile != STELA_AIR_FP_METAL) {
       fail(&t, STELA_AIR_INPUT, "unknown AIR floating-point profile");
       return NULL;
    }

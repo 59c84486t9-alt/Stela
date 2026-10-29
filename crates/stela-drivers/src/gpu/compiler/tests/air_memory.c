@@ -69,7 +69,7 @@ translate_kernel(const char *declarations, const char *definition, const char *k
    const struct stela_air_options o = {
       .workgroup_size = {1, 1, 1}, .max_instructions = 10000,
       .bind_buffer = bind, .binding_data = &primary,
-      .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41,
+      .fp_profile = STELA_AIR_FP_METAL,
       .max_private_bytes = limits->private_bytes, .max_constant_bytes = limits->constant_bytes,
    };
    *error = (struct stela_air_error){0};

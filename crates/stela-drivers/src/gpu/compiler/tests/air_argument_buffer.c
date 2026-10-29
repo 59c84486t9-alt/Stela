@@ -282,7 +282,7 @@ fragments_sample_argument_buffers(void)
    struct stela_air_stage_options o = {
       .stage = STELA_AIR_FRAGMENT, .resources = options(&fragment, false), .max_varying_slots = 16,
    };
-   o.resources.fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
+   o.resources.fp_profile = STELA_AIR_FP_METAL;
    struct stela_air_error error = {0};
    nir_shader *shader = stela_air_stage_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
                                                "fragment", &nir_options, &o, &error);

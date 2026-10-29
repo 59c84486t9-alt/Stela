@@ -207,12 +207,11 @@ bool stela_air_ssbo_view_valid(const struct stela_air_ssbo_view *view,
 enum stela_air_fp_profile {
    /* Ordinary LLVM environment; private AIR denorm options are not inferred. */
    STELA_AIR_FP_IEEE_DEFAULT = 0,
-   /* Reverse-engineered AIR 2.9 / MSL 4.1 compiler 32023.922 profile: arithmetic
-    * FP32 FTZ inputs/results and RTE, target air64_v29-apple-macosx27.2.0.
-    * The caller must retain independently verified compiler/build provenance;
-    * matching llvm.ident is consistency
-    * metadata, not authentication. This is not a universal AIR declaration. */
-   STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41 = 1,
+   /* Metal's environment: FP32 rounds to nearest even and flushes denormal
+    * inputs and results when the module's compile options disable them
+    * (air.compile.denorms_disable, Metal's default), preserving them
+    * otherwise. */
+   STELA_AIR_FP_METAL = 1,
 };
 
 /* Values the device supplies rather than the stage. */

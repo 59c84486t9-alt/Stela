@@ -2188,7 +2188,7 @@ floating_contracts(void)
 static void
 qualified_floating_semantics(void)
 {
-   const enum stela_air_fp_profile profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
+   const enum stela_air_fp_profile profile = STELA_AIR_FP_METAL;
    const struct {const char *op; uint32_t a, b, result;} arithmetic[] = {
       {"fadd",1,0,0}, {"fadd",0x007fffff,1,0},
       {"fsub",0x00800000,0x007fffff,0x00800000},
