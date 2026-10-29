@@ -17,6 +17,15 @@ struct thread_info {
 	int preempt_count;
 };
 
+/* Original initial-task metadata starts with Linux's real initialization
+ * preemption reference. This does not install current or enter a Runtime.
+ * INIT_PREEMPT_COUNT is supplied by the pinned linux/preempt.h at expansion. */
+#define INIT_THREAD_INFO(initial_task) { \
+    .task = &(initial_task), \
+    .flags = 0, \
+    .preempt_count = INIT_PREEMPT_COUNT, \
+}
+
 extern struct thread_info stela_thread_info;
 struct thread_info *stela_linux_thread_info(void);
 /* Override Linux's CONFIG_THREAD_INFO_IN_TASK default at the arch boundary so

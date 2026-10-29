@@ -8,6 +8,9 @@
  * task metadata contains no duplicate architecture context switch state. */
 struct thread_struct {
 };
+/* There is genuinely no duplicate CPU frame in this native metadata. This
+ * initializer does not construct x86 thread.sp, pt_regs or ret_from_fork. */
+#define INIT_THREAD {}
 
 struct pt_regs;
 struct task_struct;
