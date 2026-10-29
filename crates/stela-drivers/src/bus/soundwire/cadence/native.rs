@@ -17,7 +17,6 @@ impl<P: 'static> NativeRegisters<P> {
     /// Initialization/frame shape is acknowledged and no clock-stop/reset or
     /// deferred user can intervene. `layout` is observed from that same owner.
     /// Leaking this object must retain every grant, not merely its description.
-    #[allow(clippy::type_complexity)]
     pub unsafe fn claim(
         mapping: Mapping,
         platform: P,

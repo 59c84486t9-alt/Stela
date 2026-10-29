@@ -158,7 +158,6 @@ pub struct Controller<R: Registers, T: Timer = Clock> {
 impl<R: Registers, T: Timer> Controller<R, T> {
     /// The unsafe register provider supplies actual exclusive native admission.
     /// Invalid configuration returns all original owners without any access.
-    #[allow(clippy::type_complexity)]
     pub fn new(registers: R, timer: T, timeout_us: u64) -> Result<Self, (ErrorKind, R, T)> {
         if timeout_us == 0 || !timer.calibrated() || timer.check_duration(timeout_us).is_err() {
             return Err((ErrorKind::Configuration, registers, timer));

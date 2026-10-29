@@ -19,7 +19,6 @@ impl<P: 'static> NativeRegisters<P> {
     /// Prior DMA, IRQ and deferred users are stopped/drained and cannot restart.
     /// No other owner can reset, revoke or relocate this epoch; deliberate leak
     /// retains all actual grants. A short-lived external guard is insufficient.
-    #[allow(clippy::type_complexity)]
     pub unsafe fn claim(
         mapping: Mapping,
         platform: P,

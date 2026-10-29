@@ -203,7 +203,6 @@ pub struct Controller<R: Registers, T: Timer = Clock> {
     wire_started: bool,
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
-    #[allow(clippy::type_complexity)]
     pub fn new(registers: R, timer: T, timeout_us: u64) -> Result<Self, (ErrorKind, R, T)> {
         if timeout_us == 0 || !timer.calibrated() || timer.check_duration(timeout_us).is_err() {
             return Err((ErrorKind::Configuration, registers, timer));

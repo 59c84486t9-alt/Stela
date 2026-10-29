@@ -135,7 +135,6 @@ impl<R: Registers + 'static, T: Timer + 'static> Controller<R, T> {
     /// actual requester, not shared, and remains pinned for the rest of boot.
     /// Speed inputs are observed board/peripheral limits; None means no adapter
     /// is granted. The clock is calibrated, monotonic and advancing.
-    #[allow(clippy::type_complexity)]
     pub unsafe fn claim(
         registers: R,
         timer: T,

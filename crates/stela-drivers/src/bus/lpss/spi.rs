@@ -204,7 +204,6 @@ impl<R: Registers, T: Timer> Spi<R, T> {
     /// arbitration. Source root frequency is an actual established platform
     /// clock, not authority inferred solely from its PCI ID. No IRQ/DMA child
     /// exists, and all prior traffic/callbacks were drained by this same owner.
-    #[allow(clippy::type_complexity)]
     pub unsafe fn attach(
         registers: R,
         timer: T,

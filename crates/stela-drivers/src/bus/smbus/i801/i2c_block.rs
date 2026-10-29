@@ -105,7 +105,10 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
     /// Host and configuration refer to the same exclusively owned, powered real
     /// function with firmware/AML/SMM/IRQ exclusion. Their static native owners
     /// remain valid when quarantined. Host has no in-flight operation.
-    #[allow(clippy::type_complexity)]
+    #[allow(
+        clippy::type_complexity,
+        reason = "Failed block-mode claim returns both the actual SMBus host and original PCI configuration owner"
+    )]
     pub unsafe fn claim(
         host: I801<R, T>,
         mut configuration: C,

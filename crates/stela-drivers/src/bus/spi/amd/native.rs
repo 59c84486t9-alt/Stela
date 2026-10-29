@@ -21,7 +21,6 @@ impl<P: 'static> NativeRegisters<P> {
     /// RAM. No firmware/AML/IRQ/DMA/other CPU accesses it; no reset, relocation,
     /// power removal or pin reuse occurs while retained. `profile` is from that
     /// actual hardware session. The grant must outlive every register access.
-    #[allow(clippy::type_complexity)]
     pub unsafe fn claim(
         mapping: Mapping,
         platform: P,

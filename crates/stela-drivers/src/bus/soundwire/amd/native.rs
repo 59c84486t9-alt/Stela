@@ -15,7 +15,6 @@ impl<P: 'static> NativeRegisters<P> {
     /// the original device/mapping reservation, active initialized frame/link
     /// clocks, pins, reset/power and firmware/IRQ/work/sibling exclusion for
     /// this observed manager. Leaking it must retain every real resource.
-    #[allow(clippy::type_complexity)]
     pub unsafe fn claim(
         mapping: Mapping,
         platform: P,
