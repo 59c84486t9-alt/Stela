@@ -607,8 +607,8 @@ impl Recorder<'_> {
                     count,
                     SelectArguments::WORKGROUP_SIZE,
                 ),
-                &Command::ResolveCommands { arguments, count } => self.internal(
-                    self.backend.resolve,
+                &Command::ResolveDraws { arguments, count } => self.internal(
+                    self.backend.resolve_draws,
                     arguments,
                     count,
                     ResolveArguments::WORKGROUP_SIZE,

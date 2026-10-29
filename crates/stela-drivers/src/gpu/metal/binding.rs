@@ -335,7 +335,7 @@ impl SelectArguments {
 }
 
 /// What the backend's internal resolve kernel reads at the push constants'
-/// `arguments` (`stela_metal_resolve_kernel`): it turns each command of a
+/// `arguments` (`stela_metal_resolve_draws_kernel`): it turns each command of a
 /// GPU-resident render indirect command buffer into a [`GeneratedSequence`]
 /// and its counts per [`ResolveSlot`].
 #[derive(Clone, Debug, Default, PartialEq)]

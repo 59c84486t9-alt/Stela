@@ -340,11 +340,11 @@ pub enum Command {
         arguments: u64,
         count: u32,
     },
-    /// The backend's resolve kernel over `count` commands, with a
+    /// The backend's draw resolve kernel over `count` commands, with a
     /// [`ResolveArguments`](crate::gpu::metal::binding::ResolveArguments)
     /// upload's address in the push constants, like
     /// [`AccumulateResults`](Self::AccumulateResults).
-    ResolveCommands {
+    ResolveDraws {
         arguments: u64,
         count: u32,
     },

@@ -50,7 +50,7 @@ pub struct Loader {
 }
 
 /// The backend's own kernels: the NIR of `stela_metal_accumulate_kernel`,
-/// `stela_metal_select_kernel` and `stela_metal_resolve_kernel`
+/// `stela_metal_select_kernel` and `stela_metal_resolve_draws_kernel`
 /// (`compiler/metal_abi.h`).
 #[derive(Clone, Copy, Debug)]
 pub struct InternalKernels {
@@ -62,10 +62,10 @@ pub struct InternalKernels {
     /// [`SelectArguments`](super::binding::SelectArguments), one thread per
     /// command in workgroups of `WORKGROUP_SIZE`.
     pub select: ShaderCode,
-    /// Resolves GPU-resident indirect commands per
+    /// Resolves GPU-resident render indirect commands per
     /// [`ResolveArguments`](super::binding::ResolveArguments), one thread
     /// per command in workgroups of `WORKGROUP_SIZE`.
-    pub resolve: ShaderCode,
+    pub resolve_draws: ShaderCode,
 }
 
 /// A host mapping of a `VkDeviceMemory`.
@@ -128,7 +128,7 @@ pub struct NativeBackend {
     bind_value: u64,
     accumulate: vk::Pipeline,
     select: vk::Pipeline,
-    resolve: vk::Pipeline,
+    resolve_draws: vk::Pipeline,
 }
 
 impl NativeBackend {
@@ -260,7 +260,7 @@ impl NativeBackend {
             bind_value: 0,
             accumulate: vk::Pipeline::null(),
             select: vk::Pipeline::null(),
-            resolve: vk::Pipeline::null(),
+            resolve_draws: vk::Pipeline::null(),
         };
         // Dropping a partly built backend destroys what was created.
         backend.create_layout(family)?;
@@ -273,7 +273,7 @@ impl NativeBackend {
         };
         backend.accumulate = backend.create_compute(&kernel(kernels.accumulate))?;
         backend.select = backend.create_compute(&kernel(kernels.select))?;
-        backend.resolve = backend.create_compute(&kernel(kernels.resolve))?;
+        backend.resolve_draws = backend.create_compute(&kernel(kernels.resolve_draws))?;
         Ok(backend)
     }
 
@@ -568,7 +568,7 @@ impl Drop for NativeBackend {
         unsafe {
             let _ = self.device.device_wait_idle();
             self.device.destroy_pipeline(self.accumulate, None);
-            self.device.destroy_pipeline(self.resolve, None);
+            self.device.destroy_pipeline(self.resolve_draws, None);
             self.device.destroy_pipeline(self.select, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline_layout(self.layout, None);

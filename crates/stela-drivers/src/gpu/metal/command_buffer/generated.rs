@@ -369,7 +369,7 @@ impl CommandBuffer {
                 PipelineStages::COMPUTE_SHADER,
                 Access::SHADER_READ | Access::SHADER_WRITE,
             ));
-            recorder.push(Command::ResolveCommands {
+            recorder.push(Command::ResolveDraws {
                 arguments: upload.address,
                 count,
             });

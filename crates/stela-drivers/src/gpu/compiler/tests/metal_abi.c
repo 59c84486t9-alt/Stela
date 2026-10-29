@@ -272,7 +272,7 @@ static void select_flags_each_command(void)
 
 static void resolve_writes_each_command_sequence(void)
 {
-   nir_shader *shader = stela_metal_resolve_kernel(NULL);
+   nir_shader *shader = stela_metal_resolve_draws_kernel(NULL);
    check_kernel(shader);
    struct census census = count(shader);
    assert(census.push_constants == 1 && census.push_base == STELA_METAL_PUSH_ARGUMENTS);

@@ -261,7 +261,7 @@ nir_shader *stela_metal_select_kernel(const nir_shader_compiler_options *options
  * slot is the command's pipeline class, action and primitive type, else 0.
  * Commands of a buffer that inherits pipeline state are class 0; others
  * are their pipeline handle's. */
-nir_shader *stela_metal_resolve_kernel(const nir_shader_compiler_options *options);
+nir_shader *stela_metal_resolve_draws_kernel(const nir_shader_compiler_options *options);
 
 /* MTLTessellationPartitionMode, MTLTessellationFactorStepFunction and
  * MTLWinding, in their raw values. */

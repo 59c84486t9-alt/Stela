@@ -548,11 +548,11 @@ static void resolve_vertex_buffers(nir_builder *b, nir_def *arguments, nir_def *
    pop_count(b, counter, index);
 }
 
-nir_shader *stela_metal_resolve_kernel(const nir_shader_compiler_options *options)
+nir_shader *stela_metal_resolve_draws_kernel(const nir_shader_compiler_options *options)
 {
    nir_def *arguments, *thread;
-   nir_builder b = kernel(options, "stela_metal_resolve", STELA_METAL_RESOLVE_COUNT, &arguments,
-                          &thread);
+   nir_builder b = kernel(options, "stela_metal_resolve_draws", STELA_METAL_RESOLVE_COUNT,
+                          &arguments, &thread);
    nir_variable *counter = nir_local_variable_create(b.impl, glsl_uint_type(), "counter");
    nir_def *header = load(&b, arguments, STELA_METAL_RESOLVE_HEADER, 64);
    nir_def *command = nir_iadd(&b, thread, load(&b, arguments, STELA_METAL_RESOLVE_FIRST, 32));

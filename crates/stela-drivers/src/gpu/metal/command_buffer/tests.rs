@@ -2231,9 +2231,9 @@ fn resident_draws_execute_one_generated_sequence_per_slot() {
 
     let resolve = commands
         .iter()
-        .position(|command| matches!(command, Command::ResolveCommands { count: 2, .. }))
+        .position(|command| matches!(command, Command::ResolveDraws { count: 2, .. }))
         .unwrap();
-    let Command::ResolveCommands { arguments, .. } = commands[resolve] else {
+    let Command::ResolveDraws { arguments, .. } = commands[resolve] else {
         unreachable!()
     };
     let arguments = uploaded(&recording, arguments);
@@ -2345,7 +2345,7 @@ fn resident_draws_switch_pipelines_through_execution_sets() {
     let arguments = commands
         .iter()
         .find_map(|command| match command {
-            Command::ResolveCommands { arguments, .. } => Some(*arguments),
+            Command::ResolveDraws { arguments, .. } => Some(*arguments),
             _ => None,
         })
         .unwrap();
