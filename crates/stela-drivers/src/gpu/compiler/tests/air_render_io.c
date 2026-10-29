@@ -484,6 +484,36 @@ fragment_functions_interpolate_their_interpolants(void)
    ralloc_free(shader);
 }
 
+/* A fragment function with only side effects, tested before it runs. */
+static const char *early =
+   "define void @fragment(<4 x float> %p) {\nret void\n}\n"
+   "!air.fragment = !{!2}\n"
+   "!2 = !{ptr @fragment, !3, !4, !\"early_fragment_tests\"}\n!3 = !{}\n!4 = !{!40}\n"
+   "!40 = !{i32 0, !\"air.position\", !\"air.center\", !\"air.no_perspective\","
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\", !\"air.arg_unused\"}\n";
+
+/* A vertex function rasterization is disabled for. */
+static const char *unrasterized =
+   "define void @vertex(i32 %id) {\nret void\n}\n"
+   "!air.vertex = !{!2}\n"
+   "!2 = !{ptr @vertex, !3, !4}\n!3 = !{}\n!4 = !{!40}\n"
+   "!40 = !{i32 0, !\"air.vertex_id\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"id\"}\n";
+
+static void
+void_functions_write_nothing(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = translate(early, STELA_AIR_FRAGMENT, false, &error);
+   if (!shader)
+      fprintf(stderr, "early: %u %s\n", error.kind, error.detail);
+   assert(shader && shader->info.fs.early_fragment_tests);
+   assert(!variable(shader, nir_var_shader_out, FRAG_RESULT_DATA0, 0));
+   ralloc_free(shader);
+   shader = translate(unrasterized, STELA_AIR_VERTEX, false, &error);
+   assert(shader && !variable(shader, nir_var_shader_out, VARYING_SLOT_POS, 0));
+   ralloc_free(shader);
+}
+
 static void
 refuses_unrepresentable_render_io(void)
 {
@@ -528,6 +558,13 @@ refuses_unrepresentable_render_io(void)
       {pulled, "!\"air.interpolation_function\", !\"air.perspective\"",
        "!\"air.interpolation_function\", !\"air.center\", !\"air.perspective\"", STELA_AIR_FRAGMENT,
        STELA_AIR_ARGUMENT},
+      /* Fragment functions' only descriptor field is early testing. */
+      {early, "!\"early_fragment_tests\"", "!\"late_fragment_tests\"", STELA_AIR_FRAGMENT,
+       STELA_AIR_METADATA},
+      /* A function returns exactly its outputs. */
+      {early, "!3 = !{}", "!3 = !{!30}\n!30 = !{!\"air.render_target\", i32 0, i32 0,"
+       " !\"air.arg_type_name\", !\"float4\"}", STELA_AIR_FRAGMENT, STELA_AIR_TYPE},
+      {vertex, "!3 = !{!30, !31, !32, !33, !34, !35}", "!3 = !{}", STELA_AIR_VERTEX, STELA_AIR_LIMIT},
       /* Calls interpolate as their interpolant declares. */
       {pulled, "!\"air.interpolation_function\", !\"air.no_perspective\"",
        "!\"air.interpolation_function\", !\"air.perspective\"", STELA_AIR_FRAGMENT, STELA_AIR_TYPE},
@@ -559,6 +596,7 @@ main(void)
    vertex_functions_write_clip_distances();
    fragment_functions_interpolate_and_write_targets();
    fragment_functions_interpolate_their_interpolants();
+   void_functions_write_nothing();
    refuses_unrepresentable_render_io();
    glsl_type_singleton_decref();
    puts("air render io: ok");

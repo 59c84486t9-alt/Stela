@@ -2094,6 +2094,8 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
 static bool
 stage_return(struct translator *t, LLVMValueRef inst)
 {
+   if (!t->render.entry.output_count && !LLVMGetNumOperands(inst))
+      return true;
    if (LLVMGetNumOperands(inst) != 1) return fail(t, STELA_AIR_TYPE, "render entry requires its real return value");
    LLVMValueRef returned = LLVMGetOperand(inst, 0);
    struct value *aggregate = NULL;
@@ -4308,6 +4310,8 @@ translate(const void *bitcode, size_t size, const char *entry,
    if (domain)
       t.b.shader->info.tess._primitive_mode = domain == STELA_AIR_PATCH_QUAD ? TESS_PRIMITIVE_QUADS :
                                                                               TESS_PRIMITIVE_TRIANGLES;
+   if (stage && stage->stage == STELA_AIR_FRAGMENT)
+      t.b.shader->info.fs.early_fragment_tests = t.render.entry.early_fragment_tests;
    t.b.fp_math_ctrl = nir_fp_no_fast_math;
    if (options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT && !fp_environment(&t))
       goto done;

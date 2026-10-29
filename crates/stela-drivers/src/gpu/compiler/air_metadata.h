@@ -345,6 +345,8 @@ struct stela_air_stage_entry {
     * air.discard_fragment. */
    uint64_t threadgroup_bytes;
    bool discards;
+   /* A fragment function's [[early_fragment_tests]]. */
+   bool early_fragment_tests;
 };
 typedef bool (*stela_air_visit_stage)(const struct stela_air_inspection *,
                                      const struct stela_air_stage_entry *, void *);

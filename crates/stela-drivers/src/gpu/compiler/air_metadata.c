@@ -1717,7 +1717,7 @@ entry_limits(struct stela_air_metadata *m, LLVMValueRef node, enum stela_air_sta
    for (unsigned i = 3; i < n; i++) {
       LLVMValueRef pair[AIR_MAX_METADATA_OPERANDS];
       unsigned count, value;
-      if (stage == STELA_AIR_FRAGMENT || !stela_air_md_node(m, fields[i], pair, &count) || count != 2 ||
+      if (!stela_air_md_node(m, fields[i], pair, &count) || count != 2 ||
           !stela_air_md_uint(pair[1], &value) || !value)
          return fail(m, STELA_AIR_METADATA, "unsupported entry descriptor field");
       unsigned *limit = stela_air_md_string(pair[0], "air.max_work_group_size") ? max_threads :
@@ -1728,6 +1728,23 @@ entry_limits(struct stela_air_metadata *m, LLVMValueRef node, enum stela_air_sta
          return fail(m, STELA_AIR_METADATA, "unsupported/duplicate entry descriptor field");
       *limit = value;
    }
+   return true;
+}
+
+/* A fragment entry descriptor's field past its outputs and inputs:
+ * "early_fragment_tests". */
+static bool
+entry_fragment(struct stela_air_metadata *m, LLVMValueRef node, struct stela_air_stage_entry *entry)
+{
+   LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+   unsigned n;
+   if (!stela_air_md_node(m, node, fields, &n))
+      return false;
+   if (n == 3)
+      return true;
+   if (n != 4 || !stela_air_md_string(fields[3], "early_fragment_tests"))
+      return fail(m, STELA_AIR_METADATA, "unsupported fragment entry descriptor field");
+   entry->early_fragment_tests = true;
    return true;
 }
 
@@ -1834,6 +1851,7 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
    }
    if (!args ||
        !(stage == STELA_AIR_VERTEX ? entry_patch(m, selected, &r->entry) :
+         stage == STELA_AIR_FRAGMENT ? entry_fragment(m, selected, &r->entry) :
          entry_limits(m, selected, stage, &r->entry.max_threads, &r->entry.max_mesh_threadgroups)) ||
        !metadata_arguments(m, fn, args, &r->arguments, r))
       return fail(m, STELA_AIR_METADATA, "selected entry is not a supported render stage");
@@ -1870,9 +1888,19 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
       return stage == STELA_AIR_OBJECT || r->entry.output_count ||
          fail(m, STELA_AIR_METADATA, "mesh function lacks its mesh");
    }
-   if (!stela_air_md_node(m, outputs, nodes, &count) || !count || count > AIR_MAX_ARGUMENTS)
-      return fail(m, STELA_AIR_LIMIT, "render output budget/shape exceeded");
+   /* A void function has no outputs: a fragment function that only has
+    * side effects, or a vertex function rasterization is disabled for. */
    LLVMTypeRef result = LLVMGetReturnType(LLVMGlobalGetValueType(fn));
+   bool none = LLVMGetTypeKind(result) == LLVMVoidTypeKind;
+   if (!stela_air_md_node(m, outputs, nodes, &count) || (!count && !none) ||
+       count > AIR_MAX_ARGUMENTS)
+      return fail(m, STELA_AIR_LIMIT, "render output budget/shape exceeded");
+   if (none) {
+      if (count)
+         return fail(m, STELA_AIR_TYPE, "render return/output count mismatch");
+      r->entry.output_count = 0;
+      return true;
+   }
    bool aggregate = LLVMGetTypeKind(result) == LLVMStructTypeKind;
    if (aggregate && (LLVMIsOpaqueStruct(result) || !LLVMIsPackedStruct(result) ||
                      LLVMCountStructElementTypes(result) != count))
