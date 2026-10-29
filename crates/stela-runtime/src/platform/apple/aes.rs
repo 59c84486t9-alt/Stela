@@ -279,6 +279,9 @@ pub struct Aes {
     uid: Option<[u8; 32]>,
     disabled: u32,
     started: bool,
+    /// Unsupported DMA may already have committed RAM and chaining state.
+    /// Retain the cause until a qualified recovery can authorize execution.
+    dma_failure: Option<&'static str>,
     fifo: VecDeque<u32>,
     overflow: bool,
     watermark: u32,
@@ -316,6 +319,7 @@ impl Aes {
             uid,
             disabled,
             started: false,
+            dma_failure: None,
             fifo: VecDeque::with_capacity(FIFO_WORDS),
             overflow: false,
             watermark: 0,
@@ -460,12 +464,14 @@ impl Aes {
 
     /// Whether commands wait for [`Self::run`].
     pub fn pending(&self) -> bool {
-        self.executing() && self.started && !self.fifo.is_empty()
+        self.dma_failure.is_none() && self.executing() && self.started && !self.fifo.is_empty()
     }
 
     /// Run every whole command at the head of the started FIFO, moving data
     /// through `port`. A command the model does not implement is refused
-    /// and stays queued.
+    /// and stays queued. An unsupported DMA transfer retains its cause and
+    /// command without replay: accepted prefixes and chaining state cannot be
+    /// undone or restarted by FIFO submission, START or CLEAR_FIFO.
     pub fn run(&mut self, port: &mut Port<'_, '_>) -> Result<(), MmioError> {
         if !self.executing() {
             return Err(refuse(
@@ -474,6 +480,15 @@ impl Aes {
                 Width::Word,
                 Direction::Write,
                 "AES DMA while PMGR inhibits execution",
+            ));
+        }
+        if let Some(reason) = self.dma_failure {
+            return Err(refuse(
+                NAME,
+                self.command_fifo(),
+                Width::Word,
+                Direction::Write,
+                reason,
             ));
         }
         while self.started {
@@ -697,13 +712,16 @@ impl Aes {
                 self.int_status |= interrupt;
                 Ok(())
             }
-            DmaError::Unsupported(reason) => Err(refuse(
-                NAME,
-                self.command_fifo(),
-                Width::Word,
-                Direction::Write,
-                reason,
-            )),
+            DmaError::Unsupported(reason) => {
+                self.dma_failure = Some(reason);
+                Err(refuse(
+                    NAME,
+                    self.command_fifo(),
+                    Width::Word,
+                    Direction::Write,
+                    reason,
+                ))
+            }
         }
     }
 }
@@ -820,6 +838,9 @@ impl MmioDevice for Aes {
                 }
             }
             _ if offset == self.command_fifo() => {
+                if let Some(reason) = self.dma_failure {
+                    return Err(fail(reason));
+                }
                 if self.fifo.len() < FIFO_WORDS {
                     self.fifo.push_back(value);
                 } else {
@@ -1000,6 +1021,127 @@ mod tests {
             assert!(self.ram.read(physical, &mut bytes));
             bytes
         }
+    }
+
+    fn check_unsupported_dart_dma_prefix(write_failure: bool, version: u32) {
+        use super::super::dart::Dart;
+        use stela_soc_data::dart::Profile;
+        const PAGE: u64 = 0x4000;
+        const INPUT: u64 = 0x200_7000;
+        let mut config = j473();
+        config.version = version;
+        let mut bench = Bench::with(config, None, RAM);
+        bench.ram = Ram::new(RAM, (6 * PAGE) as usize);
+        let entry = |address: u64| address >> 4 | 1;
+        bench.ram.put_u64(RAM + 8, entry(RAM + PAGE));
+        for (slot, page, unsupported) in [
+            (1, 2, false),
+            (2, 3, !write_failure),
+            (3, 4, false),
+            (4, 5, write_failure),
+        ] {
+            bench.ram.put_u64(
+                RAM + PAGE + slot * 8,
+                entry(RAM + page * PAGE) | 0xfff << 40 | if unsupported { 1 << 9 } else { 0 },
+            );
+        }
+        let length = if write_failure { CHUNK } else { 2 * CHUNK };
+        let committed = if write_failure { BLOCK } else { CHUNK };
+        let destination = if write_failure {
+            0x200_fff0
+        } else {
+            0x200_c000
+        };
+        let physical_destination = RAM + 4 * PAGE + (destination & (PAGE - 1));
+        let plain = vec![0x11; length];
+        assert!(bench.ram.write(RAM + 3 * PAGE - CHUNK as u64, &plain));
+        let key = hex("2b7e151628aed2a6abf7158809cf4f3c");
+        bench
+            .push(
+                core::iter::once(OPCODE_KEY << OPCODE_SHIFT | KEY_ENCRYPT | 1 << 16)
+                    .chain(words(&key)),
+            )
+            .unwrap();
+        let iv = hex("000102030405060708090a0b0c0d0e0f");
+        bench
+            .push(core::iter::once(OPCODE_IV << OPCODE_SHIFT).chain(words(&iv)))
+            .unwrap();
+        let mut dart = Dart::for_profile(Profile::T8110, 16, None).unwrap();
+        {
+            let mut access = Access::new(0, 0, &mut bench.latch);
+            for (offset, value) in [(0xc00, 2), (0x1004, 1), (0x1404, RAM >> 14 << 2 | 1)] {
+                dart.write(offset, Width::Word, value, &mut access).unwrap();
+            }
+        }
+        for word in [
+            OPCODE_DATA << OPCODE_SHIFT | length as u32,
+            0,
+            INPUT as u32,
+            destination as u32,
+        ] {
+            bench.write(FIFO, u64::from(word));
+        }
+        let run = |bench: &mut Bench, dart: &mut Dart| {
+            let mut access = Access::new(0, 0, &mut bench.latch);
+            bench.aes.run(&mut Port {
+                iommu: dart,
+                stream: 1,
+                memory: &mut bench.ram,
+                access: &mut access,
+            })
+        };
+        assert_eq!(
+            reason(run(&mut bench, &mut dart)),
+            "DART descriptor contains unmodeled attributes"
+        );
+        let prefix = bench.bytes(physical_destination, committed);
+        assert_ne!(prefix, plain[..committed]);
+        assert_eq!(
+            bench.bytes(physical_destination + committed as u64, BLOCK),
+            [0; BLOCK]
+        );
+        let chaining = bench.aes.ivs[0];
+        // A natural next guest FIFO store must not authorize DATA offset zero again.
+        let submitted = bench.access(
+            FIFO,
+            Some(u64::from(
+                OPCODE_FLAG << OPCODE_SHIFT | FLAG_INTERRUPT | 0x2a,
+            )),
+        );
+        assert!(run(&mut bench, &mut dart).is_err());
+        assert_eq!(
+            bench.bytes(physical_destination, committed),
+            prefix,
+            "CBC prefix replay, write_failure={write_failure}"
+        );
+        assert_eq!(bench.aes.ivs[0], chaining);
+        assert_eq!(bench.read(FLAG_COMMAND), 0);
+        assert!(!bench.aes.pending());
+        assert!(submitted.is_err());
+        if version < 2 {
+            bench.write(CLEAR_FIFO, 1);
+            bench.write(CONTROL, u64::from(CONTROL_STOP));
+            bench.write(CONTROL, u64::from(CONTROL_START));
+            assert!(!bench.aes.pending());
+            assert!(run(&mut bench, &mut dart).is_err());
+            assert_eq!(bench.bytes(physical_destination, committed), prefix);
+            assert_eq!(bench.aes.ivs[0], chaining);
+        }
+    }
+
+    #[test]
+    fn unsupported_dart_read_after_prefix_never_replays() {
+        check_unsupported_dart_dma_prefix(false, 3);
+    }
+
+    #[test]
+    fn unsupported_dart_write_after_prefix_never_replays() {
+        check_unsupported_dart_dma_prefix(true, 3);
+    }
+
+    #[test]
+    fn unsupported_dma_replay_is_not_authorized_by_fifo_clear_or_start() {
+        check_unsupported_dart_dma_prefix(false, 1);
     }
 
     /// NIST SP 800-38A F.2.1 (CBC-AES128.Encrypt), the chaining value the
