@@ -86,6 +86,27 @@ impl Drop for TaggedRoots {
 
 /// Held while a core is inside the host drivers ([`RestoreRoot`]).
 static HOST_DRIVERS: AtomicBool = AtomicBool::new(false);
+static HOST_DRIVERS_GS: AtomicU64 = AtomicU64::new(0);
+
+/// Validate the existing manager's actual same-CPU entered loader context.
+/// Allocation and CPU authority remain with the caller's genuine retained owner.
+pub(super) fn entered_loader_root(owner: &crate::paging::loader::LoaderTables) -> bool {
+    if !HOST_DRIVERS.load(Ordering::Acquire) {
+        return false;
+    }
+    let (root, cr4, gs): (u64, u64, u64);
+    // SAFETY: this internal query follows RootIdentity's CPL0/CPU admission.
+    unsafe {
+        asm!("mov {}, cr3", "mov {}, cr4", out(reg) root, out(reg) cr4, options(nomem, nostack, preserves_flags));
+        gs = crate::cpu::msr::GS_BASE.read();
+    }
+    let expected = if cr4 & PCIDE != 0 {
+        owner.root() | LOADER_CONTEXT
+    } else {
+        owner.root()
+    };
+    gs != 0 && HOST_DRIVERS_GS.load(Ordering::Acquire) == gs && root == expected
+}
 /// Counter ticks cores waited for [`HOST_DRIVERS`] since the last report,
 /// and the longest wait.
 static HOST_DRIVERS_WAITED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
@@ -128,6 +149,7 @@ pub(super) struct RestoreRoot {
     root: u64,
     flags: u64,
     tagged: bool,
+    _local: core::marker::PhantomData<*mut ()>,
 }
 impl RestoreRoot {
     /// Wait for the host drivers' lock, which no holder takes again: a
@@ -143,6 +165,10 @@ impl RestoreRoot {
         unsafe {
             asm!("pushfq","pop {flags}","cli","mov {previous}, cr3","mov {cr4}, cr4",flags=out(reg)flags,previous=out(reg)previous,cr4=out(reg)cr4);
         }
+        // SAFETY: actual native CPU; this records the same concrete manager
+        // owner while IF0 excludes its own IRQ/reentrant root transition.
+        let gs = unsafe { crate::cpu::msr::GS_BASE.read() };
+        HOST_DRIVERS_GS.store(gs, Ordering::Release);
         let tagged = cr4 & PCIDE != 0;
         // Tagged, entering flushes the loader's context alone.
         let root = if tagged {
@@ -156,6 +182,7 @@ impl RestoreRoot {
             root: previous,
             flags,
             tagged,
+            _local: core::marker::PhantomData,
         }
     }
 }
@@ -173,6 +200,7 @@ impl Drop for RestoreRoot {
         unsafe {
             asm!("mov cr3, {}",in(reg)root,options(nostack,preserves_flags));
         }
+        HOST_DRIVERS_GS.store(0, Ordering::Release);
         HOST_DRIVERS.store(false, Ordering::Release);
         // SAFETY: only IF was changed by enter().
         unsafe {

@@ -64,6 +64,7 @@ fn unavailable<T>(_: T) -> WorkError {
 /// Descriptor/local storage is static or permanently pinned through terminal IRQs.
 pub(crate) struct RootIdentity {
     roots: Arc<MmioRoots>,
+    loader_tables: &'static crate::paging::loader::LoaderTables,
     snapshot: Snapshot,
     id: u32,
     gs: u64,
@@ -72,7 +73,92 @@ pub(crate) struct RootIdentity {
     task: u16,
     ram_generation: AtomicU64,
 }
+/// Borrowed immutable root-read scope. It is neither an execution/stack loan
+/// nor a firmware/controller capability. Every observation checks its live CPU,
+/// entered root, IF and LA57 again; the original allocation owners stay pinned.
+pub(crate) struct ProcessRootScope<'a> {
+    identity: &'a RootIdentity,
+    root: u64,
+    _local: PhantomData<*mut ()>,
+}
+impl ProcessRootScope<'_> {
+    pub(crate) fn observe_original(
+        &self,
+        address: u64,
+    ) -> Result<Option<stela_boot_core::guarded_stacks::mappings::Observation>, WorkError> {
+        self.identity.validate_process_root()?;
+        if root() != self.root {
+            return Err(WorkError::CorruptContext);
+        }
+        // SAFETY: same actual HostOwner/original loader owner, retained shared
+        // aliases and IF0 scope were checked immediately above. No callbacks.
+        let result =
+            unsafe { self.identity.loader_tables.observe_shared(address) }.map_err(unavailable)?;
+        self.identity.validate_process_root()?;
+        if root() != self.root {
+            return Err(WorkError::CorruptContext);
+        }
+        Ok(result)
+    }
+}
 impl RootIdentity {
+    fn validate_process_root(&self) -> Result<(), WorkError> {
+        self.affinity()?;
+        let (flags, cr4): (u64, u64);
+        // SAFETY: actual retained native CPU, after affinity before table access.
+        unsafe {
+            asm!("pushfq", "pop {}", "mov {}, cr4", out(reg) flags, out(reg) cr4, options(nomem, preserves_flags));
+        }
+        if flags & IF != 0 {
+            return Err(WorkError::Busy);
+        }
+        if self.loader_tables.levels() != if cr4 & (1 << 12) != 0 { 5 } else { 4 } {
+            return Err(WorkError::CorruptContext);
+        }
+        if root() != self.snapshot.cr3
+            && !crate::engine::storage::entered_loader_root(self.loader_tables)
+        {
+            return Err(WorkError::CorruptContext);
+        }
+        // SAFETY: actual fixed Host root is retained by roots._lease, and the
+        // entered original loader root is retained by loader_tables. Both shared
+        // their window at the real Host installation; no copied root grants it.
+        unsafe { self.loader_tables.check_shared_root(root() & ADDRESS) }.map_err(unavailable)
+    }
+    pub(crate) fn process_root(&self) -> Result<ProcessRootScope<'_>, WorkError> {
+        self.validate_process_root()?;
+        Ok(ProcessRootScope {
+            identity: self,
+            root: root(),
+            _local: PhantomData,
+        })
+    }
+    /// Read-only clock admission for ONLY the actual Host root or its manager's
+    /// entered original loader root. No arbitrary guest/root or task permission.
+    pub(crate) fn check_clock_root(&self) -> Result<(), WorkError> {
+        self.affinity()?;
+        let saved = disable();
+        let result = (|| {
+            let scope = self.process_root()?;
+            // Revalidate the original catalog's actual shared-window metadata
+            // and page ownership; returned leaf data is not memory authority.
+            let address = crate::layout::physical(self.loader_tables.root());
+            let observed = scope
+                .observe_original(address)?
+                .ok_or(WorkError::CorruptContext)?;
+            if observed.physical != self.loader_tables.root() || observed.user || !observed.writable
+            {
+                return Err(WorkError::CorruptContext);
+            }
+            Ok(())
+        })();
+        // SAFETY: read-only validation never switches/calls/migrates; restore
+        // the exact saved flags even on a typed refusal before any table access.
+        unsafe {
+            restore(saved);
+        }
+        result
+    }
     fn affinity(&self) -> Result<(), WorkError> {
         // BEFORE any GS-local dereference: colliding legacy CPUID IDs on a
         // different CPU cannot borrow this processor's removable scope.
@@ -104,7 +190,19 @@ impl RootIdentity {
         self.affinity()?;
         let current = root();
         if current & !ADDRESS != 0 || !self.roots.roots().contains(&current) {
-            return Err(WorkError::CorruptContext);
+            // Preserve the existing pinned guest IRQ roots above. The only
+            // additional tagged root is this manager's genuinely entered loader
+            // root, backed by its original allocation owner and same CPU guard.
+            if !crate::engine::storage::entered_loader_root(self.loader_tables) {
+                return Err(WorkError::CorruptContext);
+            }
+            let saved = disable();
+            let result = self.validate_process_root();
+            // SAFETY: read-only validation cannot switch/call/migrate.
+            unsafe {
+                restore(saved);
+            }
+            return result;
         }
         Ok(())
     }
@@ -348,6 +446,7 @@ impl Owner {
                 ram,
                 _lease: lease,
             }),
+            loader_tables: state._loader_tables,
             snapshot,
             id,
             gs: observed.gs,

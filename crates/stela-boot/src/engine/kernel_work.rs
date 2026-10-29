@@ -406,11 +406,23 @@ impl KernelWork {
         self._cpu
             .reservation
             .identity
+            .check_clock_root()
+            .map_err(Error::Work)?;
+        self._cpu
+            .reservation
+            .identity
             .check_dispatch()
             .map_err(Error::Work)?;
         // SAFETY: genuine retained loader root on this physical BSP, no native
         // or IRQ frame; every continuation was qualified in this same domain.
         let _root = unsafe { RestoreRoot::enter(self.root) };
+        // This checks the genuine original allocation/entered root link only;
+        // it supplies no rate, timer, firmware-service or task admission grant.
+        self._cpu
+            .reservation
+            .identity
+            .check_clock_root()
+            .map_err(Error::Work)?;
         let runtime = self.executor.runtime();
         match runtime.current_id() {
             Ok(_) => return Err(Error::Work(WorkError::WouldDeadlock)),
