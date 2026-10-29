@@ -27,7 +27,7 @@ use anyhow::{Context, Result, ensure};
 use aot::ArtifactPreparation;
 use core::marker::PhantomData;
 use services::{
-    AuthenticatedLoadError, RuntimeServices, complete_pauth_with_memory, runtime_pauth_key,
+    PauthFault, RuntimeServices, complete_pauth_with_memory, runtime_pauth_key,
     serialize_instruction_execution,
 };
 #[cfg(feature = "std")]
@@ -736,37 +736,29 @@ impl BlockRuntime {
                 );
                 let (next, authenticated) = match result {
                     Ok(value) => value,
-                    Err(error) => {
-                        outcome.reason = match error.downcast_ref::<pauth::AuthenticationError>() {
-                            Some(pauth::AuthenticationError::Failure { code }) => {
-                                StopReason::PointerAuthenticationFailure {
+                    Err(fault) => {
+                        outcome.reason = match fault {
+                            PauthFault::Authentication(pauth::AuthenticationError::Failure {
+                                code,
+                            }) => StopReason::PointerAuthenticationFailure { instruction, code },
+                            PauthFault::UndefinedOverlap => {
+                                StopReason::PointerAuthenticationLoadUndefined { instruction }
+                            }
+                            PauthFault::StackAlignment { stack_pointer } => {
+                                StopReason::PointerAuthenticationStackAlignment {
                                     instruction,
-                                    code: *code,
+                                    stack_pointer,
                                 }
                             }
-                            _ => match error.downcast_ref::<AuthenticatedLoadError>() {
-                                Some(AuthenticatedLoadError::UndefinedOverlap) => {
-                                    StopReason::PointerAuthenticationLoadUndefined { instruction }
-                                }
-                                Some(AuthenticatedLoadError::StackAlignment { stack_pointer }) => {
-                                    StopReason::PointerAuthenticationStackAlignment {
-                                        instruction,
-                                        stack_pointer: *stack_pointer,
-                                    }
-                                }
-                                Some(AuthenticatedLoadError::MemoryRequired) => {
-                                    StopReason::PointerAuthenticationMemoryRequired { instruction }
-                                }
-                                Some(AuthenticatedLoadError::Read(fault)) => {
-                                    StopReason::PointerAuthenticationMemoryFault {
-                                        instruction,
-                                        fault: *fault,
-                                    }
-                                }
-                                None => StopReason::PointerAuthenticationUnsupported {
-                                    instruction,
-                                    detail: error.to_string(),
-                                },
+                            PauthFault::MemoryRequired => {
+                                StopReason::PointerAuthenticationMemoryRequired { instruction }
+                            }
+                            PauthFault::Read(fault) => {
+                                StopReason::PointerAuthenticationMemoryFault { instruction, fault }
+                            }
+                            fault => StopReason::PointerAuthenticationUnsupported {
+                                instruction,
+                                detail: fault.to_string(),
                             },
                         };
                         break;

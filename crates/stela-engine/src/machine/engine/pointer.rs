@@ -258,13 +258,16 @@ impl PointerService {
                 match context.authenticate_operation(key, pointer, modifier, combined) {
                     Ok(result) => Ok((result.pointer, result.authenticated)),
                     Err(pauth::AuthenticationError::Failure { code }) => Err(code),
-                    Err(pauth::AuthenticationError::KeyUnavailable { .. }) => return None,
+                    Err(
+                        pauth::AuthenticationError::KeyUnavailable { .. }
+                        | pauth::AuthenticationError::GenericKeyUnavailable,
+                    ) => return None,
                 }
             }
         };
         let strips_back = match (operation, result) {
             (PointerOperation::Sign, Ok((signed, _))) => {
-                (context.strip(key, signed).ok() == Some(pointer)).then_some(signed)
+                (context.strip(key, signed) == pointer).then_some(signed)
             }
             _ => None,
         };
@@ -459,7 +462,7 @@ mod tests {
                             };
                             assert_eq!(
                                 (pointer & keep) | if upper { cell.upper_extension } else { 0 },
-                                context.strip(key, pointer).unwrap()
+                                context.strip(key, pointer)
                             );
                         }
                     }

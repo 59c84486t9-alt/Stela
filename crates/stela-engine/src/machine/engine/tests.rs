@@ -4574,11 +4574,7 @@ fn xpac_thunks_follow_regime_masks_without_key_enables_and_close_on_changes() {
         ] {
             for pointer in [0xdead_1234_5678_aaaa, 0xdead_9234_5678_aaaa] {
                 machine.cpu.state.x[17] = pointer;
-                let expected = machine
-                    .pointer_context()
-                    .unwrap()
-                    .strip(key, pointer)
-                    .unwrap();
+                let expected = machine.pointer_context().unwrap().strip(key, pointer);
                 let el = machine.cpu.pstate.el;
                 machine.system_instruction_for_test(word);
                 assert_eq!(

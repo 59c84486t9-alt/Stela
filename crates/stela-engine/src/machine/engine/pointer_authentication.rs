@@ -183,17 +183,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.cpu.pc = next.0;
                 Ok(())
             }
-            Err(error) => match error.downcast_ref::<pauth::AuthenticationError>() {
-                Some(&pauth::AuthenticationError::Failure { code }) => {
-                    self.take(Exception::synchronous(
-                        Class::PointerAuthenticationFailure,
-                        u32::from(code),
-                        pc,
-                    ));
-                    Ok(())
-                }
-                _ => refuse(self, format!("{error:#}")),
-            },
+            Err(crate::blocks::services::PauthFault::Authentication(
+                pauth::AuthenticationError::Failure { code },
+            )) => {
+                self.take(Exception::synchronous(
+                    Class::PointerAuthenticationFailure,
+                    u32::from(code),
+                    pc,
+                ));
+                Ok(())
+            }
+            Err(fault) => refuse(self, fault.to_string()),
         }
     }
 
@@ -709,7 +709,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub fn strip_instruction_pointer(&self, pointer: u64) -> u64 {
         self.pointer_context()
             .ok()
-            .and_then(|context| context.strip(stela_contracts::pauth::Key::Ia, pointer).ok())
+            .map(|context| context.strip(stela_contracts::pauth::Key::Ia, pointer))
             .unwrap_or(pointer)
     }
 

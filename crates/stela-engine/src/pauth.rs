@@ -8,7 +8,6 @@
 //! with secret data: its S-box is Boolean polynomials or, with SSSE3, PSHUFB
 //! register lookups (Arm pseudocode `ComputePACQARMA`, `InsertPAC`,
 //! `Authenticate`).
-use anyhow::Result;
 use core::fmt;
 use serde::Serialize;
 
@@ -82,10 +81,10 @@ impl Keys {
         self.generic = Some(words);
         self
     }
-    fn get(&self, key: Key) -> Result<&[u64; 2]> {
+    fn get(&self, key: Key) -> Result<&[u64; 2], AuthenticationError> {
         self.words[key.index()]
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("pointer authentication key {key:?} is unavailable"))
+            .ok_or(AuthenticationError::KeyUnavailable { key })
     }
 }
 
@@ -115,6 +114,7 @@ pub struct AuthResult {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuthenticationError {
     KeyUnavailable { key: Key },
+    GenericKeyUnavailable,
     Failure { code: u8 },
 }
 
@@ -125,6 +125,9 @@ impl fmt::Display for AuthenticationError {
                 formatter,
                 "pointer authentication key {key:?} is unavailable"
             ),
+            Self::GenericKeyUnavailable => {
+                formatter.write_str("generic pointer authentication key is unavailable")
+            }
             Self::Failure { code } => write!(
                 formatter,
                 "architectural pointer authentication failure {code}"
@@ -216,7 +219,7 @@ impl Context {
     /// authentication. Null is signed. Classic invalid extension corrupts
     /// PAC bit62 (instruction) or54 (data), following June2026 Arm ASL, rather
     /// than the older Unicorn invalid-extension behavior. Enhanced profiles XOR the PAC field.
-    pub fn sign(&self, key: Key, pointer: u64, modifier: u64) -> Result<u64> {
+    pub fn sign(&self, key: Key, pointer: u64, modifier: u64) -> Result<u64, AuthenticationError> {
         let words = self.keys.get(key)?;
         let layout = self.layout(key_domain(key), pointer, true);
         let input = policy::signing_input(layout, pointer);
@@ -229,8 +232,13 @@ impl Context {
     }
 
     /// Standalone AUT policy; combined loads/transfers use authenticate_operation.
-    pub fn authenticate(&self, key: Key, pointer: u64, modifier: u64) -> Result<AuthResult> {
-        Ok(self.authenticate_operation(key, pointer, modifier, false)?)
+    pub fn authenticate(
+        &self,
+        key: Key,
+        pointer: u64,
+        modifier: u64,
+    ) -> Result<AuthResult, AuthenticationError> {
+        self.authenticate_operation(key, pointer, modifier, false)
     }
 
     pub fn authenticate_operation(
@@ -239,10 +247,8 @@ impl Context {
         pointer: u64,
         modifier: u64,
         combined: bool,
-    ) -> core::result::Result<AuthResult, AuthenticationError> {
-        let words = self.keys.words[key.index()]
-            .as_ref()
-            .ok_or(AuthenticationError::KeyUnavailable { key })?;
+    ) -> Result<AuthResult, AuthenticationError> {
+        let words = self.keys.get(key)?;
         let domain = key_domain(key);
         let layout = self.layout(domain, pointer, false);
         let input = policy::authentication_input(layout, pointer);
@@ -271,22 +277,20 @@ impl Context {
     }
 
     /// PACGA has no address-domain canonicalization; all64 data/modifier bits enter QARMA.
-    pub fn generic_code(&self, data: u64, modifier: u64) -> Result<u64> {
-        let words =
-            self.keys.generic.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("generic pointer authentication key is unavailable")
-            })?;
+    pub fn generic_code(&self, data: u64, modifier: u64) -> Result<u64, AuthenticationError> {
+        let words = self
+            .keys
+            .generic
+            .as_ref()
+            .ok_or(AuthenticationError::GenericKeyUnavailable)?;
         Ok(qarma5(data, modifier, words) & GENERIC_CODE_MASK)
     }
 
     /// Architectural XPAC: keyless restoration, never an authentication check.
     /// Ia/Ib select instruction layout, Da/Db tagged-data layout; this succeeds
     /// even when that domain's cryptographic key was not provided.
-    pub fn strip(&self, key: Key, pointer: u64) -> Result<u64> {
-        Ok(policy::authentication_input(
-            self.layout(key_domain(key), pointer, false),
-            pointer,
-        ))
+    pub fn strip(&self, key: Key, pointer: u64) -> u64 {
+        policy::authentication_input(self.layout(key_domain(key), pointer, false), pointer)
     }
 
     /// The bits kept by XPAC in the lower and upper address ranges.
@@ -302,10 +306,14 @@ impl Context {
     }
 
     /// Sign with the IB key (the original single-key profile).
-    pub fn sign_ib(&self, pointer: u64, modifier: u64) -> Result<u64> {
+    pub fn sign_ib(&self, pointer: u64, modifier: u64) -> Result<u64, AuthenticationError> {
         self.sign(Key::Ib, pointer, modifier)
     }
-    pub fn authenticate_ib(&self, pointer: u64, modifier: u64) -> Result<AuthResult> {
+    pub fn authenticate_ib(
+        &self,
+        pointer: u64,
+        modifier: u64,
+    ) -> Result<AuthResult, AuthenticationError> {
         self.authenticate(Key::Ib, pointer, modifier)
     }
 }
@@ -333,14 +341,14 @@ impl stela_contracts::pauth::TranslationSigner for Context {
 }
 
 impl stela_contracts::pauth::Signer for Context {
-    type Error = anyhow::Error;
+    type Error = AuthenticationError;
     fn address_space(&self) -> u64 {
         self.address_space()
     }
     fn profile_id(&self) -> &'static str {
         self.profile_id()
     }
-    fn sign(&self, key: Key, pointer: u64, modifier: u64) -> Result<u64> {
+    fn sign(&self, key: Key, pointer: u64, modifier: u64) -> Result<u64, AuthenticationError> {
         self.sign(key, pointer, modifier)
     }
 }

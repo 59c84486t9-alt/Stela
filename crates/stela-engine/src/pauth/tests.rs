@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::Result;
 
 #[test]
 fn out_of_range_tnsz_is_forced_into_the_architectural_range() {
@@ -440,7 +441,7 @@ fn generic_domains_match_original_canonical_sign_auth_and_xpac_vectors() -> Resu
                     authenticated: true,
                 }
             );
-            assert_eq!(context.strip(key, signed)?, pointer);
+            assert_eq!(context.strip(key, signed), pointer);
         }
     }
     Ok(())
@@ -468,7 +469,7 @@ fn auth_and_strip_keep_the_tag() -> Result<()> {
                     authenticated: true,
                 }
             );
-            assert_eq!(context.strip(key, signed)?, pointer);
+            assert_eq!(context.strip(key, signed), pointer);
             for bit in 47..55 {
                 let failed = context.authenticate(key, signed ^ (1 << bit), modifier)?;
                 assert!(!failed.authenticated);
@@ -560,7 +561,7 @@ fn missing_keys_decline_sign_and_auth_but_xpac_is_keyless() -> Result<()> {
         assert!(!ib.has_key(key));
         assert!(ib.sign(key, 0x1400, 0x2000).is_err());
         assert!(ib.authenticate(key, 0x1400, 0x2000).is_err());
-        assert_eq!(ib.strip(key, 0x1400)?, 0x1400);
+        assert_eq!(ib.strip(key, 0x1400), 0x1400);
     }
     assert_eq!(ib.sign_ib(0x1400, 0x2000)?, 0xce76000000001400);
     let full = Context::new(73, all_keys());
@@ -680,7 +681,7 @@ fn a_set_pac_bit_63_does_not_move_the_field_to_the_upper_range() -> Result<()> {
                 matches!(result, Ok(AuthResult { pointer: p, authenticated: true }) if p == pointer),
                 "{key:?} {pointer:#x} signed {signed:#x}: {result:?}"
             );
-            assert_eq!(context.strip(key, signed)?, pointer);
+            assert_eq!(context.strip(key, signed), pointer);
         }
     }
     assert!(upper > 0 && lower > 0, "both PAC bit-63 values occur");
