@@ -5,6 +5,7 @@ use crate::artifact::{LoadedArtifact, prepare};
 #[cfg(feature = "std")]
 use std::path::{Path, PathBuf};
 use stela_compiler::block::CompilationPlan;
+use stela_contracts::{refuse, require};
 
 const MAX_MANIFEST_CHECKSUM_BYTES: usize = 1024;
 
@@ -22,10 +23,11 @@ impl ArtifactPreparation {
     pub(super) fn cache_root(&self, pc: GuestAddress) -> Result<&Path> {
         match self {
             Self::FileCache(root) => Ok(root),
-            Self::AheadOfTime => anyhow::bail!(
-                "AOT block unavailable at {:#x}; runtime compilation is unsupported",
-                pc.0
-            ),
+            Self::AheadOfTime => Err(refuse!(
+                "AOT block unavailable; runtime compilation is unsupported",
+                pc = pc.0
+            )
+            .into()),
         }
     }
 }
@@ -42,11 +44,9 @@ impl LoadedBlock {
         prepared: LoadedArtifact,
         native: &[u8],
     ) -> Result<Self> {
-        ensure!(
-            crate::platform::cpu::admitted(target),
-            "host CPU lacks generated-code requirements {}",
-            target.id()
-        );
+        if !crate::platform::cpu::admitted(target) {
+            return Err(crate::Error::HostLacks(target));
+        }
         let mapping = platform::Mapping::new(native)?;
         serialize_instruction_execution()?;
         Ok(Self {
@@ -122,14 +122,16 @@ impl BlockRuntime {
         manifest_checksum_json: &[u8],
         native: &[u8],
     ) -> Result<()> {
-        ensure!(pc.0.is_multiple_of(4), "unaligned preparation entry");
-        ensure!(
+        require!(pc.0.is_multiple_of(4), "unaligned preparation entry");
+        require!(
             !self.loaded.contains_key(&pc.0),
             "native block already loaded"
         );
-        let (base, region) = self.region(pc).context("unmapped preparation entry")?;
-        ensure!(region.end - pc.0 >= 4, "truncated preparation instruction");
-        let offset = usize::try_from(pc.0 - base)?;
+        let (base, region) = self
+            .region(pc)
+            .ok_or(refuse!("unmapped preparation entry", pc = pc.0))?;
+        require!(region.end - pc.0 >= 4, "truncated preparation instruction");
+        let offset = (pc.0 - base) as usize;
         let available = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS) * 4;
         let generation = region.generation;
         let window = &region.source[offset..offset + available];
@@ -142,7 +144,7 @@ impl BlockRuntime {
         .with_resident_loops();
         let profile = plan.profile();
         let source_bytes = plan.source_bytes();
-        ensure!(
+        require!(
             source_bytes == analysis.source_bytes,
             "prepared block analysis extent mismatch"
         );
@@ -150,18 +152,18 @@ impl BlockRuntime {
 
         // Preserve the file byte/provider rejection order, including checksum
         // codec before digest, then CPA specialization before fresh metadata.
-        ensure!(
+        require!(
             manifest_bytes.len() <= prepare::MAX_CACHE_MANIFEST_BYTES,
             "cache file exceeds size limit"
         );
-        ensure!(
+        require!(
             manifest_checksum_json.len() <= MAX_MANIFEST_CHECKSUM_BYTES,
             "cache file exceeds size limit"
         );
         let expected: String = serde_json::from_slice(manifest_checksum_json)?;
         prepare::validate_manifest_bytes(manifest_bytes, &expected)?;
         let manifest: crate::Manifest = serde_json::from_slice(manifest_bytes)?;
-        ensure!(
+        require!(
             manifest.identity.memory_specialization_sha256
                 == crate::memory_specialization_sha256(profile, manifest.memory_requirements)?,
             "cached memory specialization differs from complete requirements"
@@ -171,12 +173,10 @@ impl BlockRuntime {
             &expected_identity,
             plan.memory_requirements(),
         )?;
-        prepare::validate_preparation_native(&manifest, native)
-            .context("cached native code checksum mismatch")?;
+        prepare::validate_preparation_native(&manifest, native)?;
         prepare::validate_preparation_claim(&manifest)?;
         validate_source_map(&manifest, pc, source_bytes)?;
-        let prepared = LoadedArtifact::bind(manifest, native)
-            .context("block native snapshot checksum mismatch")?;
+        let prepared = LoadedArtifact::bind(manifest, native)?;
         let block = LoadedBlock::from_artifact(
             self.target,
             profile,
@@ -195,6 +195,7 @@ impl BlockRuntime {
 mod tests {
     //! Loading real compiler artifacts.
     use super::*;
+    use anyhow::Result;
     use stela_compiler::{
         TargetCpu,
         context::memory::address::{AccessEl, AddressAddChecks, EffectiveAddressChecks},
@@ -298,7 +299,7 @@ mod tests {
         let error = runtime.prepare(BASE).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "AOT block unavailable at 0x1000; runtime compilation is unsupported"
+            "AOT block unavailable; runtime compilation is unsupported (pc=0x1000)"
         );
         let mut observations = outcome();
         assert!(runtime.load(BASE, &mut observations).is_err());

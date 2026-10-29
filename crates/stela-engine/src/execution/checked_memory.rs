@@ -5,6 +5,7 @@
 //! direct-RAM blocks and caller-supplied native artifacts are excluded.
 
 use super::{context::ContextLoan, floating_environment::HostFloatingEnvironment, platform};
+use crate::Result;
 use crate::{
     blocks::ThreadState,
     system::{
@@ -15,7 +16,6 @@ use crate::{
         state::SystemState,
     },
 };
-use anyhow::{Result, ensure};
 use std::{marker::PhantomData, rc::Rc};
 use stela_compiler::{
     GuestAddress, Lifter, TargetCpu,
@@ -23,6 +23,7 @@ use stela_compiler::{
     block::{BlockExit, BlockProfile, CheckedMemoryProfile, CompilationPlan},
     context::{ExecutionContext, memory::MemoryRequirements},
 };
+use stela_contracts::{refuse, require};
 
 pub use crate::memory::domain::MemoryFault;
 
@@ -74,7 +75,7 @@ pub struct RawMemoryObservation {
 
 #[derive(Debug)]
 pub struct FinalizationFailure {
-    pub status: stela_compiler::context::memory::MemoryStatus,
+    pub cause: crate::system::process_memory::ProcessMemoryError,
     pub observation: Option<Observation>,
     pub raw_memory: Option<RawMemoryObservation>,
 }
@@ -82,12 +83,16 @@ impl core::fmt::Display for FinalizationFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "checked block finalization failed: {:?}; observation: {:?}; raw memory: {:?}",
-            self.status, self.observation, self.raw_memory
+            "checked block finalization failed: {}; observation: {:?}; raw memory: {:?}",
+            self.cause, self.observation, self.raw_memory
         )
     }
 }
-impl core::error::Error for FinalizationFailure {}
+impl core::error::Error for FinalizationFailure {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
 
 impl CheckedMemoryBlock {
     /// Compile one complete source block. Trailing unconsumed bytes are refused
@@ -99,7 +104,7 @@ impl CheckedMemoryBlock {
         profile: CheckedMemoryProfile,
         target: TargetCpu,
     ) -> Result<Self> {
-        ensure!(
+        require!(
             matches!(
                 profile,
                 CheckedMemoryProfile::SpAlignmentEnabled
@@ -107,19 +112,19 @@ impl CheckedMemoryBlock {
             ),
             "this boundary requires the fixed checked GPR memory profile"
         );
-        ensure!(
+        require!(
             !target.data_independent_timing(),
             "shared memory does not admit the single-agent DIT target"
         );
-        ensure!(
+        require!(
             crate::platform::cpu::admitted(target),
             "host lacks native target requirements"
         );
-        ensure!(
+        require!(
             !source.is_empty() && source.len() <= 4096,
             "source must be one bounded nonempty block"
         );
-        ensure!(
+        require!(
             entry.0.checked_add(source.len() as u64).is_some(),
             "source address overflow"
         );
@@ -131,7 +136,7 @@ impl CheckedMemoryBlock {
                 target,
             ),
         )?;
-        ensure!(
+        require!(
             plan.source_bytes() == source.len(),
             "source contains unconsumed trailing bytes"
         );
@@ -143,8 +148,8 @@ impl CheckedMemoryBlock {
             let word = u32::from_le_bytes(*bytes);
             let instruction = Decoder
                 .lift(GuestAddress(entry.0 + (index * 4) as u64), word)
-                .map_err(|error| anyhow::anyhow!("source outside checked baseline: {error:?}"))?;
-            ensure!(
+                .map_err(stela_compiler::CompileError::from)?;
+            require!(
                 baseline_register_operation(word, &instruction.operation)
                     || matches!(
                         instruction.operation,
@@ -277,15 +282,14 @@ impl CheckedMemoryBlock {
         pc: &mut GuestAddress,
         low128: Option<(&DebugControls, &Low128FpContext<'_, '_>)>,
     ) -> Result<Observation> {
-        ensure!(
+        require!(
             *pc == self.identity.entry,
             "thread PC differs from checked source entry"
         );
         // Keep this outer loan through exact architectural PC settlement.
-        let _publication = thread
-            .memory
-            .execution_loan()
-            .map_err(|status| anyhow::anyhow!("checked publication loan refused: {status:?}"))?;
+        let _publication = thread.memory.execution_loan().map_err(|status| {
+            refuse!("checked publication loan refused", status = status.name())
+        })?;
         let boundary = EntryBoundary::new(
             self.identity.address_space,
             1,
@@ -297,21 +301,19 @@ impl CheckedMemoryBlock {
         let mut observation = None;
         let mut raw_memory = None;
         let finalized = if let Some((debug, context)) = low128 {
-            let entry = controls
-                .prepare_profile_with_low128(
-                    Low128Entry {
-                        boundary: &boundary,
-                        system,
-                        context,
-                    },
-                    self.profile,
-                    self.requirements,
-                    debug,
-                    registers,
-                    thread,
-                )
-                .map_err(|error| anyhow::anyhow!("checked low128 CPU entry refused: {error:?}"))?;
-            ensure!(
+            let entry = controls.prepare_profile_with_low128(
+                Low128Entry {
+                    boundary: &boundary,
+                    system,
+                    context,
+                },
+                self.profile,
+                self.requirements,
+                debug,
+                registers,
+                thread,
+            )?;
+            require!(
                 entry.requirements() == self.requirements
                     && entry.profile_id() == self.profile.process_memory_profile_id(),
                 "checked body/authority mismatch"
@@ -324,31 +326,21 @@ impl CheckedMemoryBlock {
                     self.invoke_native(registers, view, &mut observation, &mut raw_memory)
                 })
             };
-            result.map_err(|error| {
-                if let crate::system::process_memory::ProcessMemoryError::Memory(status) = error {
-                    anyhow::Error::new(FinalizationFailure {
-                        status,
-                        observation: observation.take(),
-                        raw_memory: raw_memory.take(),
-                    })
-                } else {
-                    anyhow::anyhow!(
-                        "checked low128 finalization refused: {error:?}; observation: {observation:?}; raw memory: {raw_memory:?}"
-                    )
-                }
+            result.map_err(|cause| FinalizationFailure {
+                cause,
+                observation: observation.take(),
+                raw_memory: raw_memory.take(),
             })
         } else {
-            let entry = controls
-                .prepare(
-                    &boundary,
-                    self.requirements,
-                    system,
-                    registers,
-                    thread.memory,
-                    thread.events,
-                )
-                .map_err(|error| anyhow::anyhow!("checked CPU entry refused: {error:?}"))?;
-            ensure!(
+            let entry = controls.prepare(
+                &boundary,
+                self.requirements,
+                system,
+                registers,
+                thread.memory,
+                thread.events,
+            )?;
+            require!(
                 entry.requirements() == self.requirements
                     && entry.profile_id() == self.profile.process_memory_profile_id(),
                 "checked body/authority mismatch"
@@ -360,17 +352,15 @@ impl CheckedMemoryBlock {
                     self.invoke_native(registers, view, &mut observation, &mut raw_memory)
                 })
             }
-            .map_err(|status| {
-                anyhow::Error::new(FinalizationFailure {
-                    status,
-                    observation: observation.take(),
-                    raw_memory: raw_memory.take(),
-                })
+            .map_err(|status| FinalizationFailure {
+                cause: crate::system::process_memory::ProcessMemoryError::Memory(status),
+                observation: observation.take(),
+                raw_memory: raw_memory.take(),
             })
         };
         finalized??;
-        let observation = observation
-            .ok_or_else(|| anyhow::anyhow!("checked entry returned without an observation"))?;
+        let observation =
+            observation.ok_or(refuse!("checked entry returned without an observation"))?;
         *pc = GuestAddress(
             observation
                 .fault
@@ -400,17 +390,20 @@ impl CheckedMemoryBlock {
             pc: view.fault_pc,
             completed_bytes: view.completed_bytes,
         });
-        ensure!(
+        require!(
             loan.context().has_supported_header()
                 && loan.context().memory == core::ptr::from_mut(view).cast(),
             "checked context association changed during native call"
         );
-        let status = stela_compiler::context::memory::MemoryStatus::from_code(view.fault_kind)
-            .ok_or_else(|| anyhow::anyhow!("unknown checked memory status"))?;
+        let status =
+            stela_compiler::context::memory::MemoryStatus::from_code(view.fault_kind).ok_or(
+                refuse!("unknown checked memory status", status = view.fault_kind),
+            )?;
         let access = stela_compiler::context::memory::FaultAccess::from_code(view.fault_access)
-            .ok_or_else(|| {
-                anyhow::anyhow!("unknown checked memory fault access {}", view.fault_access)
-            })?;
+            .ok_or(refuse!(
+                "unknown checked memory fault access",
+                access = view.fault_access
+            ))?;
         let fault = (status != stela_compiler::context::memory::MemoryStatus::Success).then_some(
             MemoryFault {
                 access,
@@ -422,12 +415,12 @@ impl CheckedMemoryBlock {
         );
         *observation = Some(Observation { exit, fault });
         if let Some(fault) = observation.as_ref().and_then(|value| value.fault) {
-            ensure!(
+            require!(
                 self.source_map.iter().any(|(pc, _)| pc.0 == fault.pc),
                 "fault outside consumed source"
             );
         }
-        Ok::<(), anyhow::Error>(())
+        Ok(())
     }
 }
 

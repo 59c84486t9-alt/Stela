@@ -1,8 +1,9 @@
 //! Native code mappings on x86-64 macOS and Linux.
 use crate::execution::native_image::{ExecutableStorage, NativeImage};
-use anyhow::{Context, Result, ensure};
+use crate::{Result, error::Io};
 use core::{convert::Infallible, ptr::NonNull};
 use stela_compiler::GuestState;
+use stela_contracts::{refuse, require};
 
 pub fn ensure_supported() -> Result<()> {
     // Every x86-64 CPU implements Stela's integer and SSE2 baseline.
@@ -18,7 +19,7 @@ pub struct Mapping {
 
 impl Mapping {
     pub fn new(bytes: &[u8]) -> Result<Self> {
-        ensure!(!bytes.is_empty(), "cannot map empty native code");
+        require!(!bytes.is_empty(), "cannot map empty native code");
         // SAFETY: Request fresh anonymous private RW storage. MAP_FAILED is
         // checked before the pointer is used. Never request executable RW.
         let pointer = unsafe {
@@ -32,13 +33,13 @@ impl Mapping {
             )
         };
         if pointer == libc::MAP_FAILED {
-            return Err(std::io::Error::last_os_error()).context("allocate RW native code");
+            return Err(std::io::Error::last_os_error()).io("allocate RW native code");
         }
         let Some(pointer) = NonNull::new(pointer.cast::<u8>()) else {
             // SAFETY: Address zero cannot back a Rust NonNull mapping, even if an OS
             // were to honor it. Release the successful OS allocation first.
             unsafe { libc::munmap(pointer, bytes.len()) };
-            anyhow::bail!("OS returned an unusable null native mapping");
+            return Err(refuse!("OS returned an unusable null native mapping").into());
         };
         let mapping = Self {
             pointer,
@@ -61,7 +62,7 @@ impl Mapping {
         };
         if result != 0 {
             // mapping's Drop releases memory on this error path too.
-            return Err(std::io::Error::last_os_error()).context("protect native code RX");
+            return Err(std::io::Error::last_os_error()).io("protect native code RX");
         }
         Ok(mapping)
     }
@@ -224,7 +225,7 @@ impl Mapping {
         y: *const u8,
         row: u64,
     ) -> Result<()> {
-        ensure!(
+        require!(
             offset < self.length,
             "AMX kernel offset outside its library"
         );

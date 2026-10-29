@@ -334,7 +334,7 @@ impl OwnedMemory {
         Ok(Arc::clone(&shared.domain))
     }
 
-    pub(super) fn write_shared(&self, address: u64, bytes: &[u8]) -> anyhow::Result<()> {
+    pub(super) fn write_shared(&self, address: u64, bytes: &[u8]) -> crate::Result<()> {
         let shared = self.shared.as_ref().expect("bound writer");
         shared.check().map_err(|status| PublicationFault {
             status,
@@ -355,7 +355,7 @@ impl OwnedMemory {
         loan: &super::domain::MemoryServiceLoan,
         address: u64,
         bytes: &[u8],
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         let shared = self.shared.as_ref().ok_or(PublicationFault {
             status: MemoryStatus::Unsupported,
             completed: 0,
@@ -384,7 +384,7 @@ impl OwnedMemory {
                 .shared_backing
                 .as_ref()
                 .expect("canonical bound backing");
-            let backing_offset = usize::try_from(start - allocation.base)?;
+            let backing_offset = (start - allocation.base) as usize;
             shared
                 .publish_in_service(
                     loan,

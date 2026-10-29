@@ -24,12 +24,13 @@ use stela_compiler::{
     },
     block::scalable::{AdmittedScalableNumericalInstruction, ScalableNumericalOperation},
 };
+use stela_contracts::refuse;
 
 use crate::scalable::ScalableState;
 
 #[derive(Debug)]
 pub enum CompletionError {
-    State(anyhow::Error),
+    State(crate::Error),
     UnsupportedControl(UnsupportedControl),
 }
 
@@ -49,15 +50,21 @@ impl core::fmt::Display for CompletionError {
 impl core::error::Error for CompletionError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            Self::State(error) => Some(error.as_ref()),
+            Self::State(error) => Some(error),
             Self::UnsupportedControl(_) => None,
         }
     }
 }
 
-impl From<anyhow::Error> for CompletionError {
-    fn from(error: anyhow::Error) -> Self {
+impl From<crate::Error> for CompletionError {
+    fn from(error: crate::Error) -> Self {
         Self::State(error)
+    }
+}
+
+impl From<stela_contracts::Refusal> for CompletionError {
+    fn from(refusal: stela_contracts::Refusal) -> Self {
+        Self::State(refusal.into())
     }
 }
 
@@ -95,7 +102,7 @@ pub(crate) fn complete(
 ) -> Result<(), CompletionError> {
     let profile = instruction.profile();
     if scalable.vector_length() != profile.vector_length() || scalable.mode() != profile.mode() {
-        return Err(anyhow::anyhow!("scalable numerical state/profile mismatch").into());
+        return Err(refuse!("scalable numerical state/profile mismatch").into());
     }
     let controls = NumericalControls::new(
         state.fpcr,

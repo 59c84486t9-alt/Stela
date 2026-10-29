@@ -1,15 +1,16 @@
 //! Native-image calls in the freestanding build.
-use anyhow::Result;
+use crate::Result;
 use stela_compiler::{GuestState, block::BlockExit, context::ExecutionContext};
+use stela_contracts::refuse;
 
 #[derive(Debug)]
 pub struct Mapping;
 pub fn ensure_supported() -> Result<()> {
-    anyhow::bail!("UNSUPPORTED native blocks: the freestanding build maps no native code")
+    Err(refuse!("UNSUPPORTED native blocks: the freestanding build maps no native code").into())
 }
 impl Mapping {
     pub fn new(_bytes: &[u8]) -> Result<Self> {
-        anyhow::bail!("UNSUPPORTED native blocks: the freestanding build maps no native code")
+        Err(refuse!("UNSUPPORTED native blocks: the freestanding build maps no native code").into())
     }
     // Freestanding entries are refused before the call.
     /// # Safety
@@ -22,7 +23,7 @@ impl Mapping {
         _state: &mut GuestState,
         _context: &mut ExecutionContext,
     ) -> Result<()> {
-        anyhow::bail!("freestanding context leaf entry has no canonical storage finalizer")
+        Err(refuse!("freestanding context leaf entry has no canonical storage finalizer").into())
     }
     /// Invoke this owned mapping with the compiler's context-block ABI.
     ///
@@ -36,7 +37,7 @@ impl Mapping {
         _state: &mut GuestState,
         _context: &mut ExecutionContext,
     ) -> Result<BlockExit> {
-        anyhow::bail!("freestanding context entry is not implemented")
+        Err(refuse!("freestanding context entry is not implemented").into())
     }
     /// Invoke the compiler's resident-budget block ABI.
     ///
@@ -50,7 +51,7 @@ impl Mapping {
         _state: &mut GuestState,
         _budget: &mut stela_compiler::block::loop_budget::LoopBudget,
     ) -> Result<BlockExit> {
-        anyhow::bail!("freestanding resident entry has no canonical storage finalizer")
+        Err(refuse!("freestanding resident entry has no canonical storage finalizer").into())
     }
     /// Invoke this owned mapping with the compiler's ordinary block ABI.
     ///
@@ -60,7 +61,7 @@ impl Mapping {
     /// mapped with the compiled rights, and the caller keeps exclusive
     /// state, memory/fault owners and source identity through full settlement.
     pub unsafe fn call_block(&self, _state: &mut GuestState) -> Result<BlockExit> {
-        anyhow::bail!("freestanding native entry is not implemented")
+        Err(refuse!("freestanding native entry is not implemented").into())
     }
     /// The boot platform admits only the baseline target, so no AMX kernel
     /// tier is ever mapped here.
@@ -72,6 +73,6 @@ impl Mapping {
         _y: *const u8,
         _row: u64,
     ) -> Result<()> {
-        anyhow::bail!("freestanding AMX kernels are not admitted")
+        Err(refuse!("freestanding AMX kernels are not admitted").into())
     }
 }

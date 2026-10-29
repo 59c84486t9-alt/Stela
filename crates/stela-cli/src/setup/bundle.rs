@@ -469,7 +469,10 @@ pub(super) mod tests {
         if generation.revision != FIRST_REVISION {
             listing["revision"] = generation.revision.into();
         }
-        stela_engine::write_json(&directory.join(MANIFEST), &listing)
+        Ok(stela_engine::write_json(
+            &directory.join(MANIFEST),
+            &listing,
+        )?)
     }
 
     #[test]

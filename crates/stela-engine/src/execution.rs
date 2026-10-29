@@ -15,15 +15,17 @@ pub(crate) use native_image::ReachedCall as ObservedNativeCall;
 #[cfg(feature = "std")]
 use crate::dispatch::{LeafDispatcher, ResolvedLeaf};
 #[cfg(feature = "std")]
-use alloc::rc::Rc;
+use crate::{Result, error::Io};
 #[cfg(feature = "std")]
-use anyhow::{Context, Result, ensure};
+use alloc::rc::Rc;
 #[cfg(feature = "std")]
 use core::marker::PhantomData;
 #[cfg(feature = "std")]
 use std::io::Read;
 #[cfg(feature = "std")]
 use stela_compiler::GuestState;
+#[cfg(feature = "std")]
+use stela_contracts::require;
 #[cfg(feature = "std")]
 use stela_formats::sha256;
 
@@ -49,44 +51,39 @@ impl ExecutableLeaf {
     /// the identity or expected hash held by the resolved handle. An already
     /// loaded mapping remains independent of later disk changes.
     pub fn load(dispatcher: &LeafDispatcher, resolved: &ResolvedLeaf) -> Result<Self> {
-        ensure!(
+        require!(
             dispatcher.is_current(resolved),
             "stale or foreign registered leaf"
         );
         let manifest = &resolved.prepared().manifest;
         let identity = &manifest.identity;
-        ensure!(
+        require!(
             *identity == resolved.identity().translation,
             "resolved translation identity mismatch"
         );
-        ensure!(
+        require!(
             identity.schema_version == 1,
             "unsupported translation schema"
         );
-        ensure!(
+        require!(
             identity.compiler_source_sha256 == crate::compiler_source_sha256(),
             "generated code uses a different compiler"
         );
-        ensure!(
+        require!(
             identity.abi
                 == stela_compiler::block::BlockProfile::new(stela_compiler::block::Features::LEAF)
                     .abi(),
             "unsupported generated-code ABI"
         );
-        let target = identity
-            .target_cpu
-            .parse::<stela_compiler::TargetCpu>()
-            .map_err(anyhow::Error::msg)?;
-        ensure!(
-            crate::platform::cpu::admitted(target),
-            "host CPU lacks generated-code requirements {}",
-            target.id()
-        );
-        ensure!(
+        let target = identity.target_cpu.parse::<stela_compiler::TargetCpu>()?;
+        if !crate::platform::cpu::admitted(target) {
+            return Err(crate::Error::HostLacks(target));
+        }
+        require!(
             !manifest.verified,
             "cache metadata is not verification evidence"
         );
-        ensure!(
+        require!(
             manifest.native_bytes > 0 && manifest.native_bytes <= MAX_NATIVE_BYTES,
             "generated-code size exceeds execution bound"
         );
@@ -94,16 +91,17 @@ impl ExecutableLeaf {
         let path = resolved.prepared().directory.join("native.bin");
         let mut bytes = Vec::new();
         std::fs::File::open(&path)
-            .with_context(|| format!("open generated artifact {}", path.display()))?
+            .io("open a generated artifact")?
             .take((MAX_NATIVE_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)?;
-        ensure!(
+            .read_to_end(&mut bytes)
+            .io("read a generated artifact")?;
+        require!(
             bytes.len() == manifest.native_bytes && sha256(&bytes) == manifest.native_sha256,
             "generated artifact differs from resolved immutable manifest"
         );
         let mapping = platform::Mapping::new(&bytes)?;
         // The immutable dispatcher borrow spans validation and publication.
-        ensure!(
+        require!(
             dispatcher.is_current(resolved),
             "registered leaf became stale"
         );
@@ -145,7 +143,7 @@ impl ExecutableLeaf {
         dispatcher: &LeafDispatcher,
         state: &mut GuestState,
     ) -> Result<()> {
-        ensure!(
+        require!(
             dispatcher.is_current(&self.resolved),
             "refusing stale or foreign native execution"
         );
@@ -164,6 +162,7 @@ pub mod platform;
 ))]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use stela_compiler::GuestAddress;
 
     fn source(value: u32) -> Vec<u8> {

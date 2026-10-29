@@ -1,7 +1,7 @@
 //! Services borrowed for one run and the completion of the instructions that use them.
 use super::{REGISTER_COUNT, ZERO_REGISTER_INDEX};
+use crate::Result;
 use crate::{memory, pauth, system};
-use anyhow::Result;
 use stela_compiler::{
     GuestAddress, GuestState,
     block::{
@@ -78,7 +78,7 @@ pub(super) fn serialize_instruction_execution() -> Result<()> {
         Ok(())
     }
     #[cfg(not(target_arch = "x86_64"))]
-    anyhow::bail!("instruction synchronization requires the x86-64 runtime")
+    return Err(refuse!("instruction synchronization requires the x86-64 runtime").into());
 }
 
 pub(super) fn runtime_pauth_key(key: PointerAuthenticationKey) -> stela_contracts::pauth::Key {
@@ -107,7 +107,7 @@ pub(super) fn pauth_modifier(
 /// Why the run's services did not complete a pointer-authentication
 /// instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PauthFault {
+pub enum PauthFault {
     /// The architectural check failed, or the key it needs is unavailable.
     Authentication(pauth::AuthenticationError),
     /// An LDRA whose writeback base overlaps its destination.

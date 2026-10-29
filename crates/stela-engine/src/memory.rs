@@ -16,6 +16,7 @@ mod protection;
 mod published;
 mod service;
 pub mod system_ram;
+use stela_contracts::{refuse, require};
 pub use system_ram::{
     CanonicalRamService, RegisteredSystemRam, RegistrationError as SystemRamRegistrationError,
     ReservedSystemRamRange,
@@ -38,10 +39,10 @@ pub use protection::{DataProtectionLimit, ProtectionError};
 pub use published::PublishedReadOnlyRegion;
 pub use service::GuestServiceMemory;
 
+use crate::Result;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use alloc::{rc::Rc, sync::Arc};
-use anyhow::{Context, Result, bail, ensure};
 use binding::SharedBinding;
 use core::marker::PhantomData;
 #[cfg(host_memory)]
@@ -129,21 +130,21 @@ pub struct OwnedMemory {
 pub fn host_page_size() -> Result<usize> {
     // SAFETY: sysconf has no pointer arguments or mutable Rust state.
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    ensure!(page > 0, "cannot determine host page size");
-    let page = usize::try_from(page)?;
-    ensure!(page.is_power_of_two(), "unsupported host page size");
+    require!(page > 0, "cannot determine host page size");
+    let page = page as usize;
+    require!(page.is_power_of_two(), "unsupported host page size");
     Ok(page)
 }
 
 #[cfg(not(feature = "std"))]
 pub fn host_page_size() -> Result<usize> {
-    bail!("UNSUPPORTED guest memory: the freestanding build maps no host pages")
+    Err(refuse!("UNSUPPORTED guest memory: the freestanding build maps no host pages").into())
 }
 
 /// Hosts without POSIX mappings back no guest memory.
 #[cfg(all(feature = "std", not(host_memory)))]
 pub fn host_page_size() -> Result<usize> {
-    bail!("UNSUPPORTED guest memory: it needs a host with POSIX memory mappings")
+    Err(refuse!("UNSUPPORTED guest memory: it needs a host with POSIX memory mappings").into())
 }
 
 impl OwnedMemory {
@@ -158,17 +159,19 @@ impl OwnedMemory {
     }
 
     fn validate_access(&self, address: u64, length: usize, write: bool) -> Result<()> {
-        ensure!(
+        require!(
             self.usable,
             "guest address space is unusable after failed protection rollback"
         );
-        ensure!(
+        require!(
             length as u64 <= MAX_IMAGE_MEMORY_BYTES,
             "guest access exceeds memory limit"
         );
-        let end = address
-            .checked_add(length as u64)
-            .context("guest access address overflow")?;
+        let end = address.checked_add(length as u64).ok_or(refuse!(
+            "guest access address overflow",
+            address,
+            length
+        ))?;
         if length == 0 {
             return Ok(());
         }
@@ -177,11 +180,11 @@ impl OwnedMemory {
             if region.end() <= cursor {
                 continue;
             }
-            ensure!(
+            require!(
                 region.guest_address <= cursor,
                 "guest access reaches unmapped memory"
             );
-            ensure!(
+            require!(
                 if write {
                     region.writable
                 } else {
@@ -194,7 +197,7 @@ impl OwnedMemory {
                 return Ok(());
             }
         }
-        bail!("guest access reaches unmapped memory")
+        Err(refuse!("guest access reaches unmapped memory", address, length).into())
     }
 
     /// Validate one complete private data write without changing any bytes.

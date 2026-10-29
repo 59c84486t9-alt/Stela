@@ -56,22 +56,6 @@ impl Drop for NativeMapping {
     }
 }
 
-#[cfg(host_memory)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StorageError {
-    AliasExtentMismatch,
-    AliasesOverlap,
-}
-
-#[cfg(host_memory)]
-impl core::fmt::Display for StorageError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "retained native storage failed: {self:?}")
-    }
-}
-#[cfg(host_memory)]
-impl core::error::Error for StorageError {}
-
 /// One physical storage lifetime, optionally with its two native aliases. A
 /// `MemoryBacking` holds this owner; this owner must never hold the backing,
 /// which would form a reference cycle.
@@ -130,9 +114,13 @@ impl NativeStorage {
         primary: NativeMapping,
         publisher: NativeMapping,
         file: File,
-    ) -> Result<Arc<Self>, StorageError> {
+    ) -> Result<Arc<Self>, stela_contracts::Refusal> {
         if primary.bytes != publisher.bytes {
-            return Err(StorageError::AliasExtentMismatch);
+            return Err(stela_contracts::refuse!(
+                "published aliases differ in extent",
+                primary = primary.bytes,
+                publisher = publisher.bytes
+            ));
         }
         let primary_start = primary.base.as_ptr() as usize;
         let publisher_start = publisher.base.as_ptr() as usize;
@@ -140,7 +128,7 @@ impl NativeStorage {
         if primary_start < publisher_start + publisher.bytes
             && publisher_start < primary_start + primary.bytes
         {
-            return Err(StorageError::AliasesOverlap);
+            return Err(stela_contracts::refuse!("published aliases overlap"));
         }
         Ok(Arc::new(Self {
             primary,
@@ -398,7 +386,10 @@ mod tests {
         let result = unsafe {
             NativeStorage::published_aliases(primary, publisher, tempfile::tempfile().unwrap())
         };
-        assert_eq!(result.unwrap_err(), StorageError::AliasExtentMismatch);
+        assert_eq!(
+            result.unwrap_err().what(),
+            "published aliases differ in extent"
+        );
     }
 
     #[test]

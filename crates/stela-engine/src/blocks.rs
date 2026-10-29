@@ -9,6 +9,7 @@ mod discovery;
 mod outcome;
 pub(crate) mod scalable;
 pub(crate) mod services;
+pub use services::PauthFault;
 mod validate;
 
 pub use discovery::{
@@ -18,17 +19,19 @@ pub use outcome::{
     ClockEvent, PointerAuthenticationEvent, RunOutcome, StopReason, ThreadRegisterEvent,
     ThreadState,
 };
+use stela_contracts::{refuse, require};
 
+use crate::Result;
+#[cfg(feature = "std")]
+use crate::error::Io;
 use crate::{execution::platform, floating, memory, pauth, system};
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, string::ToString, vec::Vec};
 use alloc::{collections::BTreeMap, rc::Rc};
-use anyhow::{Context, Result, ensure};
 use aot::ArtifactPreparation;
 use core::marker::PhantomData;
 use services::{
-    PauthFault, RuntimeServices, complete_pauth_with_memory, runtime_pauth_key,
-    serialize_instruction_execution,
+    RuntimeServices, complete_pauth_with_memory, runtime_pauth_key, serialize_instruction_execution,
 };
 #[cfg(feature = "std")]
 use std::{io::Read, path::PathBuf};
@@ -148,16 +151,16 @@ impl BlockRuntime {
     /// but can never be padded into a fetchable instruction. Same-base replacement
     /// always advances generation, even when the source bytes are identical.
     pub fn register_code(&mut self, base: GuestAddress, source: Vec<u8>) -> Result<u64> {
-        ensure!(
+        require!(
             base.0.is_multiple_of(4) && source.len() >= 4,
             "code region must have an aligned base and at least one instruction"
         );
         let end = base
             .0
-            .checked_add(u64::try_from(source.len())?)
-            .context("code region overflow")?;
+            .checked_add(source.len() as u64)
+            .ok_or(refuse!("code region overflow"))?;
         for (&start, region) in &self.regions {
-            ensure!(
+            require!(
                 start == base.0 || end <= start || base.0 >= region.end,
                 "code registration overlaps an existing region"
             );
@@ -165,7 +168,7 @@ impl BlockRuntime {
         let generation = self
             .next_generation
             .checked_add(1)
-            .context("code generation exhausted")?;
+            .ok_or(refuse!("code generation exhausted"))?;
         self.loaded.retain(|_, block| block.region_base != base.0);
         self.regions.insert(
             base.0,
@@ -196,9 +199,11 @@ impl BlockRuntime {
     }
 
     fn load(&mut self, pc: GuestAddress, outcome: &mut RunOutcome) -> Result<()> {
-        let (base, region) = self.region(pc).context("instruction mapping disappeared")?;
+        let (base, region) = self
+            .region(pc)
+            .ok_or(refuse!("instruction mapping disappeared", pc = pc.0))?;
         if let Some(block) = self.loaded.get(&pc.0) {
-            ensure!(
+            require!(
                 block.region_base == base && block.generation == region.generation,
                 "stale native block generation"
             );
@@ -213,8 +218,7 @@ impl BlockRuntime {
             let source_bytes = discovery.analysis.source_bytes;
             let native = discovery.native;
             let prepared =
-                crate::artifact::LoadedArtifact::bind(discovery.prepared.manifest, &native)
-                    .context("block native snapshot checksum mismatch")?;
+                crate::artifact::LoadedArtifact::bind(discovery.prepared.manifest, &native)?;
             let block = LoadedBlock::from_artifact(
                 self.target,
                 profile,
@@ -235,11 +239,13 @@ impl BlockRuntime {
             let source_bytes = prepared.analysis.source_bytes;
             let prepared = prepared.prepared;
             let mut native = Vec::new();
-            std::fs::File::open(prepared.directory.join("native.bin"))?
+            std::fs::File::open(prepared.directory.join("native.bin"))
+                .io("open a cached native block")?
                 .take((MAX_NATIVE_BYTES + 1) as u64)
-                .read_to_end(&mut native)?;
-            let loaded_artifact = crate::artifact::LoadedArtifact::bind(prepared.manifest, &native)
-                .context("block native snapshot checksum mismatch")?;
+                .read_to_end(&mut native)
+                .io("read a cached native block")?;
+            let loaded_artifact =
+                crate::artifact::LoadedArtifact::bind(prepared.manifest, &native)?;
             let block = LoadedBlock::from_artifact(
                 self.target,
                 profile,
@@ -301,11 +307,11 @@ impl BlockRuntime {
         block_budget: usize,
         context: &pauth::Context,
     ) -> Result<RunOutcome> {
-        ensure!(
+        require!(
             self.profile.has(Features::POINTER_AUTHENTICATION),
             "PAuth execution requires the explicit software PAuth block profile"
         );
-        ensure!(
+        require!(
             context.address_space() == self.address_space,
             "PAuth context belongs to another guest address space"
         );
@@ -339,22 +345,25 @@ impl BlockRuntime {
         reader: &mut dyn memory::domain::MemoryReader,
         controls: pauth::memory::Controls,
     ) -> Result<RunOutcome> {
-        ensure!(
+        require!(
             self.profile.has(Features::POINTER_AUTHENTICATION),
             "PAuth execution requires the explicit software PAuth block profile"
         );
-        ensure!(
+        require!(
             context.address_space() == self.address_space,
             "PAuth context belongs to another guest address space"
         );
-        ensure!(
+        require!(
             reader.address_space() == Some(self.address_space),
             "memory reader belongs to another guest address space"
         );
         reader
             .validate_privilege(controls.privileged)
             .map_err(|status| {
-                anyhow::anyhow!("LDRA memory privilege profile unavailable: {status:?}")
+                refuse!(
+                    "LDRA memory privilege profile unavailable",
+                    status = status.name()
+                )
             })?;
         // SAFETY: the caller upholds this method's direct-RAM contract, which is `run_inner`'s.
         unsafe {
@@ -381,11 +390,11 @@ impl BlockRuntime {
         block_budget: usize,
         dispatcher: &mut dyn system::execution::Dispatcher,
     ) -> Result<RunOutcome> {
-        ensure!(
+        require!(
             self.profile.has(Features::SYSTEM),
             "System execution requires the explicit System block profile"
         );
-        ensure!(
+        require!(
             dispatcher.address_space() == self.address_space,
             "System dispatcher belongs to another guest address space"
         );
@@ -412,7 +421,7 @@ impl BlockRuntime {
             system: mut system_dispatcher,
         } = services;
         platform::ensure_supported()?;
-        ensure!(
+        require!(
             self.profile.checked_memory().is_none(),
             "checked artifact cannot execute through direct entry"
         );
@@ -484,7 +493,7 @@ impl BlockRuntime {
                     region.source.len(),
                     word,
                 );
-                let offset = usize::try_from(pc.0 - base)?;
+                let offset = (pc.0 - base) as usize;
                 let available = ((region.source.len() - offset) / INSTRUCTION_BYTES)
                     .min(MAX_BLOCK_INSTRUCTIONS)
                     * INSTRUCTION_BYTES;
@@ -505,7 +514,7 @@ impl BlockRuntime {
             // Decode ahead of loading so an unsupported instruction is a typed
             // dispatch stop. Disk corruption and allocation errors remain errors.
             if !self.loaded.contains_key(&pc.0) {
-                let offset = usize::try_from(pc.0 - base)?;
+                let offset = (pc.0 - base) as usize;
                 let words = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS);
                 if let Err(error) = stela_compiler::block::source_bytes_with_profile(
                     &region.source[offset..offset + words * 4],
@@ -519,9 +528,14 @@ impl BlockRuntime {
                 }
             }
             self.load(pc, &mut outcome)?;
-            let block = self.loaded.get(&pc.0).context("loaded block disappeared")?;
-            let (_, current) = self.region(pc).context("loaded block unmapped")?;
-            ensure!(
+            let block = self
+                .loaded
+                .get(&pc.0)
+                .ok_or(refuse!("loaded block disappeared", pc = pc.0))?;
+            let (_, current) = self
+                .region(pc)
+                .ok_or(refuse!("loaded block unmapped", pc = pc.0))?;
+            require!(
                 block.generation == current.generation && block.source_bytes > 0,
                 "refusing stale block execution"
             );
@@ -539,7 +553,7 @@ impl BlockRuntime {
                 completed_blocks = budget
                     .consumed(available)
                     .filter(|&consumed| consumed != 0)
-                    .context("invalid resident-block budget accounting")?;
+                    .ok_or(refuse!("invalid resident-block budget accounting"))?;
                 returned
             } else {
                 // SAFETY: the generation check above shows this mapping and source are current, and
@@ -548,8 +562,8 @@ impl BlockRuntime {
             };
             let BlockExit { next_pc, kind } = native_exit;
             let exit_kind = ExitKind::try_from(kind)
-                .map_err(|_| anyhow::anyhow!("invalid native block exit kind"))?;
-            ensure!(
+                .map_err(|_| refuse!("invalid native block exit kind", kind))?;
+            require!(
                 exit_kind != ExitKind::ScalableNumerical,
                 "context-block numerical exit requires owned scalable entry"
             );
@@ -565,7 +579,7 @@ impl BlockRuntime {
                 None
             };
             let pointer_authentication = if exit_kind == ExitKind::PointerAuthentication {
-                ensure!(
+                require!(
                     self.profile.has(Features::POINTER_AUTHENTICATION),
                     "ordinary block produced an unrequested PAuth helper exit"
                 );
@@ -580,7 +594,7 @@ impl BlockRuntime {
                 None
             };
             let clock_instruction = if exit_kind == ExitKind::Clock {
-                ensure!(
+                require!(
                     self.profile.has(Features::CLOCK),
                     "block produced an unrequested clock helper exit"
                 );
@@ -595,7 +609,7 @@ impl BlockRuntime {
                 None
             };
             let thread_register_instruction = if exit_kind == ExitKind::ThreadRegister {
-                ensure!(
+                require!(
                     self.profile.has(Features::THREAD_REGISTERS),
                     "block produced an unrequested thread-register helper exit"
                 );
@@ -610,7 +624,7 @@ impl BlockRuntime {
                 None
             };
             let amx_instruction = if exit_kind == ExitKind::Amx {
-                ensure!(
+                require!(
                     self.profile.has(Features::AMX),
                     "block produced an unrequested AMX exit"
                 );
@@ -625,7 +639,7 @@ impl BlockRuntime {
                 None
             };
             let system_boundary = if exit_kind == ExitKind::System {
-                ensure!(
+                require!(
                     self.profile.has(Features::SYSTEM),
                     "block produced an unrequested System helper exit"
                 );
@@ -637,7 +651,7 @@ impl BlockRuntime {
                     &current.source,
                 )?;
                 Some(system::execution::Boundary::new(
-                    system_entry.context("System exit lacks validated entry")?,
+                    system_entry.ok_or(refuse!("System exit lacks validated entry"))?,
                     block.source_bytes,
                     instruction,
                 ))
@@ -662,7 +676,7 @@ impl BlockRuntime {
                 let instruction = boundary.instruction();
                 let dispatcher = system_dispatcher
                     .as_deref_mut()
-                    .context("System exit lacks validated dispatcher")?;
+                    .ok_or(refuse!("System exit lacks validated dispatcher"))?;
                 match dispatcher.complete(boundary, &mut state.registers) {
                     Ok(next) => state.pc = next,
                     Err(failure) => {

@@ -344,9 +344,11 @@ fn multi_span_failure_reports_total_completed_prefix() {
     let error = memory
         .write(base + page as u64 - 3, &[1, 2, 3, 4, 5])
         .unwrap_err();
-    let fault = error.downcast_ref::<PublicationFault>().unwrap();
+    let crate::Error::Publication(fault) = error else {
+        panic!("expected a publication fault, got {error}");
+    };
     assert_eq!(
-        *fault,
+        fault,
         PublicationFault {
             status: MemoryStatus::Domain,
             completed: 3
@@ -476,7 +478,9 @@ fn service_borrow_requires_domain_even_with_equal_namespace() {
         let error = memory
             .write_shared_in_service(&wrong_service, base, bytes)
             .unwrap_err();
-        let fault = error.downcast_ref::<PublicationFault>().unwrap();
+        let crate::Error::Publication(fault) = error else {
+            panic!("expected a publication fault, got {error}");
+        };
         assert_eq!(fault.status, MemoryStatus::Domain);
         assert_eq!(fault.completed, 0);
     }

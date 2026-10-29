@@ -1,12 +1,16 @@
 //! Hosts without native execution: every mapping operation fails.
-use anyhow::{Result, bail};
+use crate::Result;
 use stela_compiler::GuestState;
+use stela_contracts::refuse;
 
 pub fn ensure_supported() -> Result<()> {
     #[cfg(feature = "std")]
-    bail!("native leaf execution requires x86-64 macOS or Linux with the System V ABI");
+    return Err(refuse!(
+        "native leaf execution requires x86-64 macOS or Linux with the System V ABI"
+    )
+    .into());
     #[cfg(not(feature = "std"))]
-    bail!("freestanding executable storage owner is not mounted")
+    return Err(refuse!("freestanding executable storage owner is not mounted").into());
 }
 
 #[derive(Debug)]

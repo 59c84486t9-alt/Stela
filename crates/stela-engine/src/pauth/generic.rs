@@ -39,6 +39,7 @@ pub fn complete<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     #[test]
     fn all_register_roles_snapshot_inputs_and_preserve_other_state() {

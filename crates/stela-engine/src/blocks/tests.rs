@@ -1,6 +1,7 @@
 #[cfg(target_arch = "x86_64")]
 use super::services::complete_pauth;
 use super::*;
+use anyhow::Result;
 use stela_compiler::{
     GuestState,
     block::{

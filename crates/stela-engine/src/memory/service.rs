@@ -65,7 +65,7 @@ impl<P: DataPolicy> GuestServiceMemory<'_, P> {
 
     /// Copy the current readable bytes into owned staging. Aliases owned by
     /// another facade are refused.
-    pub fn read_snapshot(&self, address: u64, bytes: usize) -> anyhow::Result<Vec<u8>> {
+    pub fn read_snapshot(&self, address: u64, bytes: usize) -> crate::Result<Vec<u8>> {
         self.check().map_err(SharedBindingError::Domain)?;
         self.owner.validate_access(address, bytes, false)?;
         Ok(self
@@ -75,14 +75,14 @@ impl<P: DataPolicy> GuestServiceMemory<'_, P> {
     }
 
     /// Check logical write bounds without changing bytes or reservations.
-    pub fn validate_write(&self, address: u64, bytes: usize) -> anyhow::Result<()> {
+    pub fn validate_write(&self, address: u64, bytes: usize) -> crate::Result<()> {
         self.check().map_err(SharedBindingError::Domain)?;
         self.owner.validate_write(address, bytes)
     }
 
     /// Publish a validated request through the backing's monitor. On a domain
     /// failure, PublicationFault keeps the completed prefix.
-    pub fn write(&mut self, address: u64, bytes: &[u8]) -> anyhow::Result<()> {
+    pub fn write(&mut self, address: u64, bytes: &[u8]) -> crate::Result<()> {
         self.owner
             .write_shared_in_service(&self.service, address, bytes)
     }

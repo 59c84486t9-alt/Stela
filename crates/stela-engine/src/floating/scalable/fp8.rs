@@ -1,6 +1,5 @@
 //! Completion of SVE FP8 conversions.
 
-use anyhow::anyhow;
 use stela_compiler::{
     GuestState,
     aarch64::{
@@ -9,6 +8,7 @@ use stela_compiler::{
         sve::floating::fp8::{Kind, Operand, Precision},
     },
 };
+use stela_contracts::refuse;
 
 use super::{CompletionError, NumericalControls};
 use crate::scalable::ScalableState;
@@ -28,7 +28,7 @@ pub(super) fn complete(
     controls: NumericalControls,
 ) -> Result<(), CompletionError> {
     if !scalable.mode().streaming() {
-        return Err(anyhow!("FP8 conversion requires admitted streaming state").into());
+        return Err(refuse!("FP8 conversion requires admitted streaming state").into());
     }
     if operand.destination >= 32
         || operand.source >= 32
@@ -48,7 +48,7 @@ pub(super) fn complete(
         )
         || matches!(operand.kind, Kind::Narrow { .. }) && operand.source & 1 != 0
     {
-        return Err(anyhow!("invalid SVE FP8 conversion descriptor").into());
+        return Err(refuse!("invalid SVE FP8 conversion descriptor").into());
     }
     let length = scalable.vector_length().bytes();
     let fpmr = scalable.fpmr();

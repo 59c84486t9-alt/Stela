@@ -418,6 +418,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         engine::NoDevices,
         engine::publication::{WorkerBinding, WorkerOwner, WorkerPublications},
     };
+    use anyhow::Result;
     pub(in crate::machine::engine::shared_memory) struct Local;
     impl Host for Local {
         fn read_native(&mut self, code: NativeCode, output: &mut [u8]) -> bool {

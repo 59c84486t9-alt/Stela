@@ -14,7 +14,9 @@ pub mod identity;
 pub mod interrupt;
 pub mod pauth;
 pub mod processor;
+pub mod refusal;
 pub mod tag_storage;
 
 pub use chip::Chip;
 pub use cpu_features::Feature;
+pub use refusal::Refusal;

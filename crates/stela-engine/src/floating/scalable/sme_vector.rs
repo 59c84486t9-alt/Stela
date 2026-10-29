@@ -1,6 +1,5 @@
 //! Completion of SME2 floating-point operations on aligned Z groups.
 
-use anyhow::anyhow;
 use stela_compiler::{
     GuestState,
     aarch64::{
@@ -15,6 +14,7 @@ use stela_compiler::{
         sme::fp_vector::{Conversion, ElementFormat, Kind, Operand, VectorGroup},
     },
 };
+use stela_contracts::require;
 
 use super::{CompletionError, NumericalControls};
 use crate::scalable::ScalableState;
@@ -27,26 +27,18 @@ const SINGLE_BYTES: usize = size_of::<u32>();
 const NO_FRACTION_BITS: u8 = 0;
 type GroupBytes = [[u8; MAX_VECTOR_BYTES]; MAX_GROUP_COUNT];
 
-fn require(condition: bool, message: &'static str) -> Result<(), CompletionError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(anyhow!(message).into())
-    }
-}
-
 fn snapshot_group(
     state: &GuestState,
     scalable: &ScalableState,
     group: VectorGroup,
 ) -> Result<GroupBytes, CompletionError> {
-    require(
+    require!(
         matches!(group.count, 1 | PAIR_COUNT | QUARTET_COUNT)
             && group.first.is_multiple_of(group.count)
             && usize::from(group.first) + usize::from(group.count)
                 <= usize::from(VECTOR_REGISTER_COUNT),
         "invalid scalable vector group",
-    )?;
+    );
     let length = scalable.vector_length().bytes();
     let mut result = [[0; MAX_VECTOR_BYTES]; MAX_GROUP_COUNT];
     for (index, output) in result.iter_mut().take(usize::from(group.count)).enumerate() {
@@ -154,10 +146,10 @@ pub(super) fn complete(
     operand: &Operand,
     controls: NumericalControls,
 ) -> Result<(), CompletionError> {
-    require(
+    require!(
         scalable.mode().streaming(),
         "SME FP vectors require streaming state",
-    )?;
+    );
     let length = scalable.vector_length().bytes();
     let destination = operand.destination;
     let mut result = snapshot_group(state, scalable, destination)?;
@@ -166,11 +158,11 @@ pub(super) fn complete(
     let mut exceptions = 0;
     match operand.kind {
         Kind::MinMax { operation, right } => {
-            require(
+            require!(
                 matches!(destination.count, PAIR_COUNT | QUARTET_COUNT)
                     && (right.count == 1 || right.count == destination.count),
                 "invalid SME min/max groups",
-            )?;
+            );
             let right_values = snapshot_group(state, scalable, right)?;
             let bytes = format_bytes(operand.format);
             for (index, output) in result
@@ -193,10 +185,10 @@ pub(super) fn complete(
             }
         }
         Kind::Clamp { lower, upper } => {
-            require(
+            require!(
                 matches!(destination.count, PAIR_COUNT | QUARTET_COUNT),
                 "invalid SME clamp group",
-            )?;
+            );
             let mut lower_values = [0; MAX_VECTOR_BYTES];
             let mut upper_values = [0; MAX_VECTOR_BYTES];
             scalable.read_z(state, lower, &mut lower_values[..length])?;
@@ -227,10 +219,10 @@ pub(super) fn complete(
             let sources = snapshot_group(state, scalable, source)?;
             match operation {
                 Conversion::Narrow { interleaved, .. } => {
-                    require(
+                    require!(
                         source.count == PAIR_COUNT && destination.count == 1,
                         "invalid SME narrowing groups",
-                    )?;
+                    );
                     for (register, input) in
                         sources.iter().take(usize::from(PAIR_COUNT)).enumerate()
                     {
@@ -257,10 +249,10 @@ pub(super) fn complete(
                     }
                 }
                 Conversion::Widen { deinterleaved } => {
-                    require(
+                    require!(
                         source.count == 1 && destination.count == PAIR_COUNT,
                         "invalid SME widening groups",
-                    )?;
+                    );
                     let output_lanes = length / SINGLE_BYTES;
                     for lane in 0..length / HALF_BYTES {
                         let outcome = convert_lane(
@@ -287,11 +279,11 @@ pub(super) fn complete(
                     }
                 }
                 _ => {
-                    require(
+                    require!(
                         source.count == destination.count
                             && matches!(source.count, PAIR_COUNT | QUARTET_COUNT),
                         "invalid SME conversion groups",
-                    )?;
+                    );
                     for (input, output) in sources
                         .iter()
                         .zip(&mut result)

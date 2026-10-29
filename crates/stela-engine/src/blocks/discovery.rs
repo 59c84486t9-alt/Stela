@@ -6,12 +6,12 @@ use super::MAX_NATIVE_BYTES;
 use super::aot::ArtifactPreparation;
 use super::validate::validate_source_map;
 use crate::Prepared;
+use crate::Result;
 #[cfg(feature = "std")]
 use crate::prepare_runtime_block_for_target;
 use alloc::collections::{BTreeSet, VecDeque};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use stela_compiler::{
     CompileErrorKind, GuestAddress,
@@ -19,6 +19,7 @@ use stela_compiler::{
         BlockAnalysis, BlockProfile, DynamicEdge, MAX_BLOCK_INSTRUCTIONS, analyze_with_profile,
     },
 };
+use stela_contracts::{refuse, require};
 use stela_formats::sha256;
 
 /// Persistent preparation artifact shared by ahead-of-time discovery and JIT.
@@ -83,36 +84,38 @@ impl BlockRuntime {
     /// loading or execution. Source bytes/edges share the compiler's parser.
     #[cfg(feature = "std")]
     pub fn prepare(&mut self, pc: GuestAddress) -> Result<PreparedDiscoveryBlock> {
-        ensure!(pc.0.is_multiple_of(4), "unaligned preparation entry");
+        require!(pc.0.is_multiple_of(4), "unaligned preparation entry");
         let cache_root = self.preparation.cache_root(pc)?;
-        let (base, region) = self.region(pc).context("unmapped preparation entry")?;
-        ensure!(region.end - pc.0 >= 4, "truncated preparation instruction");
-        let offset = usize::try_from(pc.0 - base)?;
+        let (base, region) = self
+            .region(pc)
+            .ok_or(refuse!("unmapped preparation entry", pc = pc.0))?;
+        require!(region.end - pc.0 >= 4, "truncated preparation instruction");
+        let offset = (pc.0 - base) as usize;
         let available = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS) * 4;
         let generation = region.generation;
         let window = &region.source[offset..offset + available];
         let analysis = analyze_with_profile(window, pc, self.profile)?;
         let (prepared, artifact_profile) =
             prepare_runtime_block_for_target(window, pc, cache_root, self.profile, self.target)?;
-        ensure!(
+        require!(
             prepared.source_bytes == analysis.source_bytes,
             "prepared block analysis extent mismatch"
         );
         let manifest = &prepared.prepared.manifest;
-        ensure!(
+        require!(
             manifest.identity.guest_base == pc.0
                 && manifest.identity.abi == artifact_profile.abi()
                 && manifest.identity.target_cpu == self.target.id()
                 && manifest.identity.schema_version == 1,
             "unsupported block translation identity"
         );
-        ensure!(
+        require!(
             manifest.identity.compiler_source_sha256 == crate::compiler_source_sha256()
                 && manifest.identity.source_sha256 == sha256(&window[..prepared.source_bytes]),
             "block compiler/source identity mismatch"
         );
         validate_source_map(&prepared.prepared.manifest, pc, prepared.source_bytes)?;
-        ensure!(
+        require!(
             manifest.native_bytes > 0 && manifest.native_bytes <= MAX_NATIVE_BYTES,
             "invalid block native size"
         );
@@ -128,15 +131,17 @@ impl BlockRuntime {
 
     #[cfg(not(feature = "std"))]
     pub fn prepare(&mut self, pc: GuestAddress) -> Result<PreparedDiscoveryBlock> {
-        ensure!(pc.0.is_multiple_of(4), "unaligned preparation entry");
-        ensure!(
+        require!(pc.0.is_multiple_of(4), "unaligned preparation entry");
+        require!(
             matches!(self.preparation, ArtifactPreparation::InMemory),
-            "AOT block unavailable at {:#x}; runtime compilation is unsupported",
-            pc.0
+            "AOT block unavailable; runtime compilation is unsupported",
+            pc = pc.0
         );
-        let (base, region) = self.region(pc).context("unmapped preparation entry")?;
-        ensure!(region.end - pc.0 >= 4, "truncated preparation instruction");
-        let offset = usize::try_from(pc.0 - base)?;
+        let (base, region) = self
+            .region(pc)
+            .ok_or(refuse!("unmapped preparation entry", pc = pc.0))?;
+        require!(region.end - pc.0 >= 4, "truncated preparation instruction");
+        let offset = (pc.0 - base) as usize;
         let available = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS) * 4;
         let generation = region.generation;
         let window = &region.source[offset..offset + available];
@@ -149,7 +154,7 @@ impl BlockRuntime {
         .with_resident_loops();
         let artifact_profile = plan.profile();
         let source_bytes = plan.source_bytes();
-        ensure!(
+        require!(
             source_bytes == analysis.source_bytes,
             "prepared block analysis extent mismatch"
         );
@@ -181,17 +186,17 @@ impl BlockRuntime {
     /// budget counts every attempted entry, including refusals and missing
     /// regions. Nothing executes during discovery.
     pub fn discover(&mut self, roots: &[GuestAddress], budget: usize) -> Result<DiscoveryReport> {
-        ensure!(
+        require!(
             !roots.is_empty() && roots.len() <= 1024,
             "discovery requires 1..1024 roots"
         );
-        ensure!(
+        require!(
             budget <= 4096,
             "discovery budget exceeds 4096 attempted entries"
         );
         let mut unique = BTreeSet::new();
         for root in roots {
-            ensure!(
+            require!(
                 root.0.is_multiple_of(4) && unique.insert(root.0),
                 "discovery roots must be aligned and distinct"
             );
@@ -216,7 +221,7 @@ impl BlockRuntime {
                 if region.end - raw < 4 {
                     Some(DiscoveryProblem::TruncatedInstruction)
                 } else {
-                    let offset = usize::try_from(raw - base)?;
+                    let offset = (raw - base) as usize;
                     let available =
                         ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS) * 4;
                     match analyze_with_profile(
@@ -256,7 +261,7 @@ impl BlockRuntime {
                     instruction_pc: block
                         .analysis
                         .terminator_pc
-                        .context("dynamic edge lacks terminator")?,
+                        .ok_or(refuse!("dynamic edge lacks terminator"))?,
                     edge: edge.clone(),
                 });
             }

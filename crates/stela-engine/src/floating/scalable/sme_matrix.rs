@@ -1,7 +1,6 @@
 //! Completion of SME floating-point ZA arithmetic. ZA operations use default NaNs
 //! and leave FPSR unchanged; only affected ZA rows are staged.
 
-use anyhow::anyhow;
 use stela_compiler::{
     GuestState,
     aarch64::{
@@ -16,6 +15,7 @@ use stela_compiler::{
         },
     },
 };
+use stela_contracts::{refuse, require};
 
 use super::{CompletionError, NumericalControls};
 use crate::scalable::ScalableState;
@@ -23,14 +23,6 @@ use crate::scalable::ScalableState;
 const HALF_BYTES: usize = size_of::<u16>();
 const SINGLE_BYTES: usize = size_of::<u32>();
 const MAX_ZA_ROWS: usize = MAX_VECTOR_BYTES / HALF_BYTES;
-
-pub(super) fn require(condition: bool, message: &'static str) -> Result<(), CompletionError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(anyhow!(message).into())
-    }
-}
 
 pub(super) struct ZaResults<'scratch> {
     rows: [usize; MAX_ZA_ROWS],
@@ -45,15 +37,15 @@ impl<'scratch> ZaResults<'scratch> {
         rows: &[usize],
         bytes: &'scratch mut [u8],
     ) -> Result<Self, CompletionError> {
-        require(
+        require!(
             !rows.is_empty() && rows.len() <= MAX_ZA_ROWS,
             "ZA result row count differs",
-        )?;
+        );
         let length = scalable.vector_length().bytes();
-        require(
+        require!(
             bytes.len() == rows.len() * length,
             "ZA staging byte count differs",
-        )?;
+        );
         let mut result = Self {
             rows: [0; MAX_ZA_ROWS],
             count: rows.len(),
@@ -61,10 +53,10 @@ impl<'scratch> ZaResults<'scratch> {
             bytes,
         };
         for (index, row) in rows.iter().copied().enumerate() {
-            require(
+            require!(
                 row < length && !rows[..index].contains(&row),
                 "ZA result rows overlap or exceed SVL",
-            )?;
+            );
             result.rows[index] = row;
             scalable.read_za(row * length, result.row_mut(index))?;
         }
@@ -107,10 +99,10 @@ pub(super) fn read_z(
 }
 
 pub(super) fn selector(state: &GuestState, register: u8) -> Result<u32, CompletionError> {
-    require(
+    require!(
         (8..=11).contains(&register),
         "ZA vector selector must be W8..W11",
-    )?;
+    );
     Ok(state.x[usize::from(register)] as u32)
 }
 
@@ -216,10 +208,10 @@ fn complete_vector<'scratch>(
 ) -> Result<ZaResults<'scratch>, CompletionError> {
     let length = scalable.vector_length();
     let count = usize::from(operand.group.count());
-    require(
+    require!(
         count == 2 || count == 4,
         "ZA vector arithmetic group must contain two or four rows",
-    )?;
+    );
     let rows = operand
         .vectors(length, selector(state, operand.vector_select)?)
         .map(usize::from);
@@ -228,13 +220,13 @@ fn complete_vector<'scratch>(
     for group in 0..count {
         let (left_register, right_register) = match operand.sources {
             Sources::AddendGroup { first } => {
-                require(
+                require!(
                     matches!(
                         operand.operation,
                         VectorOperation::Add | VectorOperation::Subtract
                     ),
                     "ZA addend group requires add/subtract",
-                )?;
+                );
                 (None, first + group as u8)
             }
             Sources::Single { left, right } => {
@@ -271,10 +263,10 @@ pub(super) fn complete(
     operand: &Operand,
     controls: NumericalControls,
 ) -> Result<(), CompletionError> {
-    require(
+    require!(
         scalable.mode().streaming() && scalable.mode().za_enabled(),
         "SME matrix arithmetic requires streaming and ZA state",
-    )?;
+    );
     let fpcr = (controls.fpcr | FPCR_DN) & !FPCR_EXCEPTION_ENABLE_MASK;
     let rows = match operand {
         Operand::Vector(operand) => usize::from(operand.group.count()),
@@ -347,21 +339,21 @@ fn snapshot_dot_sources(
             (left, right, false, false, Some(usize::from(index)))
         }
         fp_matrix::Sources::AddendGroup { .. } => {
-            return Err(anyhow::anyhow!("ZA dot/long requires two Z source roles").into());
+            return Err(refuse!("ZA dot/long requires two Z source roles").into());
         }
     };
     if usize::from(left) >= DOT_REGISTER_COUNT || usize::from(right) >= DOT_REGISTER_COUNT {
-        return Err(anyhow::anyhow!("ZA dot/long source register is outside Z0..Z31").into());
+        return Err(refuse!("ZA dot/long source register is outside Z0..Z31").into());
     }
     if (!wrap_left && usize::from(left) + groups > DOT_REGISTER_COUNT)
         || (grouped_right && usize::from(right) + groups > DOT_REGISTER_COUNT)
         || (!grouped_right && usize::from(right) >= DOT_INDEXED_REGISTER_COUNT)
     {
-        return Err(anyhow::anyhow!("ZA dot/long source group exceeds its encoded field").into());
+        return Err(refuse!("ZA dot/long source group exceeds its encoded field").into());
     }
     let index_limit = VECTOR_CHUNK_BYTES / if long { HALF_BYTES } else { SINGLE_BYTES };
     if index.is_some_and(|index| index >= index_limit) {
-        return Err(anyhow::anyhow!("ZA dot/long index exceeds one 128-bit segment").into());
+        return Err(refuse!("ZA dot/long index exceeds one 128-bit segment").into());
     }
     let mut snapshots = DotSourceSnapshots {
         left: [[0; MAX_VECTOR_BYTES]; DOT_SOURCE_GROUP_MAX],
@@ -399,9 +391,7 @@ fn complete_dot<'scratch>(
         && (groups != DOT_PRODUCT_TERMS
             || !matches!(operand.sources, fp_matrix::Sources::Indexed { .. }))
     {
-        return Err(
-            anyhow::anyhow!("ZA vertical dot requires an indexed two-register group").into(),
-        );
+        return Err(refuse!("ZA vertical dot requires an indexed two-register group").into());
     }
     let sources = snapshot_dot_sources(state, scalable, operand.sources, groups, false)?;
     let stride = length / groups;
@@ -550,7 +540,7 @@ fn outer_dot_kind(operand: &fp_matrix::OuterOperand) -> Result<Option<DotFormat>
             MatrixFormat::Float(Format::Single),
             MatrixFormat::BFloat16,
         ) => Ok(Some(DotFormat::BFloat16)),
-        _ => Err(anyhow::anyhow!("inconsistent floating outer-product format").into()),
+        _ => Err(refuse!("inconsistent floating outer-product format").into()),
     }
 }
 
@@ -577,7 +567,7 @@ fn complete_outer<'scratch>(
     let element_bytes = operand.destination.element_size().bytes();
     let dimension = length.bytes() / element_bytes;
     if usize::from(operand.tile) >= element_bytes || dimension > MAX_ZA_ROWS {
-        return Err(anyhow::anyhow!("floating outer-product tile is out of range").into());
+        return Err(refuse!("floating outer-product tile is out of range").into());
     }
 
     // Snapshot both complete source vectors and predicate banks before staging

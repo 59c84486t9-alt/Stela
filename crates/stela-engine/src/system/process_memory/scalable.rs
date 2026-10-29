@@ -64,7 +64,7 @@ pub enum ScalableExecutionError {
     },
     Execution {
         entry_pc: GuestAddress,
-        cause: anyhow::Error,
+        cause: crate::Error,
     },
 }
 

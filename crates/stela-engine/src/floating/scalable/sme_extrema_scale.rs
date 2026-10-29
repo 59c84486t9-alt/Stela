@@ -9,6 +9,7 @@ use stela_compiler::{
         sme::extrema_scale::{Kind, Operand},
     },
 };
+use stela_contracts::refuse;
 
 const MAX_GROUP_COUNT: usize = 4;
 type GroupBytes = [[u8; MAX_VECTOR_BYTES]; MAX_GROUP_COUNT];
@@ -23,7 +24,7 @@ fn snapshot(
         || !first.is_multiple_of(count)
         || usize::from(first) + usize::from(count) > usize::from(VECTOR_REGISTER_COUNT)
     {
-        return Err(anyhow::anyhow!("invalid SME extrema/scale register group").into());
+        return Err(refuse!("invalid SME extrema/scale register group").into());
     }
     let length = scalable.vector_length().bytes();
     let mut values = [[0; MAX_VECTOR_BYTES]; MAX_GROUP_COUNT];
@@ -49,11 +50,11 @@ pub(super) fn complete(
     controls: NumericalControls,
 ) -> Result<(), CompletionError> {
     if !scalable.mode().streaming() {
-        return Err(anyhow::anyhow!("SME extrema/scale requires streaming state").into());
+        return Err(refuse!("SME extrema/scale requires streaming state").into());
     }
     let count = operand.group.count();
     if !operand.right_grouped && (operand.kind != Kind::Scale || operand.right >= 16) {
-        return Err(anyhow::anyhow!("invalid SME extrema/scale broadcast operand").into());
+        return Err(refuse!("invalid SME extrema/scale broadcast operand").into());
     }
     let mut results = snapshot(state, scalable, operand.destination, count)?;
     let rights = snapshot(

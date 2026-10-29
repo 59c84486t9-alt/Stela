@@ -961,7 +961,6 @@ dependencies = [
 name = "stela-engine"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "hex",
  "libc",
  "serde",

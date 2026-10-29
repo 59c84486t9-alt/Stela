@@ -1,6 +1,5 @@
 //! Completion of the SVE predicated conversions.
 
-use anyhow::anyhow;
 use stela_compiler::{
     GuestState,
     aarch64::{
@@ -13,19 +12,12 @@ use stela_compiler::{
         sve::floating::conversion::{Kind, Operand, Placement},
     },
 };
+use stela_contracts::{refuse, require};
 
 use super::{CompletionError, NumericalControls};
 use crate::scalable::ScalableState;
 
 const MAX_PREDICATE_BYTES: usize = MAX_VECTOR_BYTES / BITS_PER_BYTE;
-
-fn require(condition: bool, message: &'static str) -> Result<(), CompletionError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(anyhow!(message).into())
-    }
-}
 
 fn active(predicate: &[u8], byte: usize) -> bool {
     predicate[byte / BITS_PER_BYTE] & (1 << (byte % BITS_PER_BYTE)) != 0
@@ -132,7 +124,7 @@ fn integer_lane(kind: Kind, fpcr: u32, bits: u64) -> Result<Outcome, CompletionE
             fpcr,
             bits,
         )?,
-        _ => return Err(anyhow!("expected admitted integer conversion").into()),
+        _ => return Err(refuse!("expected admitted integer conversion").into()),
     };
     if let Kind::ToInteger { destination, .. } = kind
         && destination.signed
@@ -154,25 +146,25 @@ pub(super) fn complete(
     operand: &Operand,
     controls: NumericalControls,
 ) -> Result<(), CompletionError> {
-    require(
+    require!(
         scalable.mode().streaming(),
         "scalable conversion requires streaming state",
-    )?;
+    );
     let kind = operand.kind;
-    require(
+    require!(
         admitted_integer(kind) || admitted_precision(kind) || matches!(kind, Kind::Bfloat16 { .. }),
         "unadmitted scalable conversion",
-    )?;
+    );
     let slot_bytes = usize::from(kind.slot_bytes());
     let source_bytes = kind.source_bits() as usize / BITS_PER_BYTE;
     let source_offset = usize::from(kind.source_offset());
     let destination_offset = usize::from(kind.destination_offset());
     let written_bytes = usize::from(kind.written_bytes());
-    require(
+    require!(
         source_offset + source_bytes <= slot_bytes
             && destination_offset + written_bytes <= slot_bytes,
         "scalable conversion placement exceeds its slot",
-    )?;
+    );
     let length = scalable.vector_length().bytes();
     let predicate_bytes = scalable.vector_length().predicate_bytes();
     let mut source = [0; MAX_VECTOR_BYTES];

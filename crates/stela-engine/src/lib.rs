@@ -10,6 +10,13 @@ compile_error!(
     "freestanding runtime requires aborting panic; platform must terminate the machine on panic"
 );
 pub mod amx;
+mod error;
+#[cfg(feature = "std")]
+use error::Io;
+pub use error::{Error, Result};
+use stela_contracts::refuse;
+#[cfg(feature = "std")]
+use stela_contracts::require;
 pub mod blocks;
 #[cfg(feature = "std")]
 pub mod dispatch;
@@ -31,9 +38,6 @@ pub mod scalable;
 pub mod system;
 pub mod translations;
 #[cfg(feature = "std")]
-use anyhow::ensure;
-use anyhow::{Context, Result};
-#[cfg(feature = "std")]
 pub use json::{read_json, write_json};
 use serde::Serialize;
 #[cfg(feature = "std")]
@@ -54,14 +58,17 @@ use artifact::prepare::{MAX_CACHE_MANIFEST_BYTES, MAX_CACHE_NATIVE_BYTES};
 
 #[cfg(feature = "std")]
 fn bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
-    let file = std::fs::File::open(path)?;
-    ensure!(
-        file.metadata()?.len() <= limit as u64,
-        "cache file exceeds size limit"
+    let file = std::fs::File::open(path).io("open a cache file")?;
+    require!(
+        file.metadata().io("read a cache file's size")?.len() <= limit as u64,
+        "cache file exceeds size limit",
+        limit
     );
     let mut bytes = Vec::new();
-    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= limit, "cache file grew beyond size limit");
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .io("read a cache file")?;
+    require!(bytes.len() <= limit, "cache file grew beyond size limit");
     Ok(bytes)
 }
 
@@ -78,7 +85,7 @@ fn memory_specialization_sha256(
     ) {
         return Ok(None);
     }
-    let required = requirements.context("specialized checked plan requirements absent")?;
+    let required = requirements.ok_or(refuse!("specialized checked plan requirements absent"))?;
     // Aggregation alone loses the source-role -> access-EL association. Bind the
     // full typed compilation profile as well as every consumed requirement.
     Ok(Some(sha256(&serde_json::to_vec(&(profile, required))?)))
@@ -107,15 +114,14 @@ fn validate(
     )?)?;
     artifact::prepare::validate_manifest_bytes(&manifest_bytes, &expected)?;
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes)?;
-    ensure!(
+    require!(
         manifest.identity.memory_specialization_sha256
             == memory_specialization_sha256(profile, manifest.memory_requirements)?,
         "cached memory specialization differs from complete requirements"
     );
     artifact::prepare::validate_preparation_metadata(&manifest, identity, memory_requirements)?;
     let native = bounded_file(&directory.join("native.bin"), MAX_CACHE_NATIVE_BYTES)?;
-    artifact::prepare::validate_preparation_native(&manifest, &native)
-        .context("cached native code checksum mismatch")?;
+    artifact::prepare::validate_preparation_native(&manifest, &native)?;
     artifact::prepare::validate_preparation_claim(&manifest)?;
     Ok(manifest)
 }
@@ -276,12 +282,16 @@ fn prepare(
     generate: impl FnOnce() -> Result<NativeBlock, stela_compiler::CompileError>,
 ) -> Result<Prepared> {
     let key = sha256(&serde_json::to_vec(&identity)?);
-    std::fs::create_dir_all(root)?;
-    let root = root.canonicalize()?;
+    std::fs::create_dir_all(root).io("create the translation cache")?;
+    let root = root.canonicalize().io("resolve the translation cache")?;
     let directory = root.join(&key);
+    let invalid = |cause| Error::InvalidCacheEntry {
+        directory: directory.clone(),
+        cause: alloc::boxed::Box::new(cause),
+    };
     if directory.exists() {
-        let manifest = validate(&directory, &identity, memory_requirements, profile)
-            .context("refusing invalid cached translation; remove this cache entry to rebuild")?;
+        let manifest =
+            validate(&directory, &identity, memory_requirements, profile).map_err(invalid)?;
         return Ok(Prepared {
             key,
             cache_hit: true,
@@ -292,11 +302,13 @@ fn prepare(
     // Compile before creating an entry. Unsupported code never produces a hit.
     let (manifest, x86_64_code) =
         artifact::prepare::generate(identity.clone(), memory_requirements, generate)?;
-    let pending = tempfile::tempdir_in(&root)?;
+    let pending = tempfile::tempdir_in(&root).io("create a pending cache entry")?;
     let path = pending.path().join("native.bin");
-    std::fs::write(&path, &x86_64_code)?;
+    std::fs::write(&path, &x86_64_code).io("write generated code")?;
     write_json(&pending.path().join("manifest.json"), &manifest)?;
-    let manifest_hash = sha256(&std::fs::read(pending.path().join("manifest.json"))?);
+    let manifest_hash = sha256(
+        &std::fs::read(pending.path().join("manifest.json")).io("read a generated manifest")?,
+    );
     write_json(&pending.path().join("manifest.sha256.json"), &manifest_hash)?;
     match std::fs::rename(pending.path(), &directory) {
         Ok(()) => Ok(Prepared {
@@ -305,9 +317,10 @@ fn prepare(
             directory,
             manifest,
         }),
-        Err(error) if directory.exists() => {
-            let manifest = validate(&directory, &identity, memory_requirements, profile)
-                .with_context(|| format!("concurrent cache publication failed: {error}"))?;
+        // Another process published the same entry first; it must validate.
+        Err(_) if directory.exists() => {
+            let manifest =
+                validate(&directory, &identity, memory_requirements, profile).map_err(invalid)?;
             Ok(Prepared {
                 key,
                 cache_hit: true,
@@ -315,7 +328,10 @@ fn prepare(
                 manifest,
             })
         }
-        Err(error) => Err(error.into()),
+        Err(error) => Err(Error::Io {
+            operation: "publish a cache entry".into(),
+            error,
+        }),
     }
 }
 

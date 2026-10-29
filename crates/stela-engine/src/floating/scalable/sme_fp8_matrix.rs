@@ -8,10 +8,11 @@ use stela_compiler::{
         sme::fp8_matrix::{Operand, OuterOperand, RightSource, VectorOperand, VectorOperation},
     },
 };
+use stela_contracts::require;
 
 use super::{
     CompletionError, NumericalControls,
-    sme_matrix::{ZaResults, read_lane, read_z, require, selector, write_lane},
+    sme_matrix::{ZaResults, read_lane, read_z, selector, write_lane},
 };
 use crate::scalable::ScalableState;
 
@@ -21,10 +22,10 @@ const MAX_TERMS: usize = 4;
 const MAX_PREDICATE_BYTES: usize = MAX_VECTOR_BYTES / BITS_PER_BYTE;
 
 fn width(format: Format) -> Result<usize, CompletionError> {
-    require(
+    require!(
         matches!(format, Format::Half | Format::Single),
         "FP8 ZA accumulation requires Half or Single",
-    )?;
+    );
     Ok(format.bits() as usize / BITS_PER_BYTE)
 }
 
@@ -41,7 +42,7 @@ fn snapshot_sources(
     operand: &VectorOperand,
 ) -> Result<Sources, CompletionError> {
     let groups = usize::from(operand.groups);
-    require(matches!(groups, 1 | 2 | 4), "invalid FP8 ZA source group")?;
+    require!(matches!(groups, 1 | 2 | 4), "invalid FP8 ZA source group");
     let vertical = matches!(operand.operation, VectorOperation::VerticalDot { .. });
     let source_groups = if vertical { 2 } else { groups };
     let (right, grouped_right, index) = match operand.right {
@@ -53,38 +54,38 @@ fn snapshot_sources(
     let right = usize::from(right);
     let registers = usize::from(VECTOR_REGISTER_COUNT);
     let wrap_left = matches!(operand.right, RightSource::Vector(_)) && !vertical;
-    require(
+    require!(
         left < registers && right < registers,
         "FP8 ZA source register out of range",
-    )?;
-    require(
+    );
+    require!(
         (wrap_left || (left.is_multiple_of(source_groups) && left + source_groups <= registers))
             && (!grouped_right || (right.is_multiple_of(groups) && right + groups <= registers))
             && (grouped_right || right < registers / 2),
         "FP8 ZA source group exceeds its encoding",
-    )?;
+    );
     let bytes = width(operand.accumulator)?;
     let index_limit = if operand.operation == VectorOperation::MultiplyAdd {
         VECTOR_CHUNK_BYTES
     } else {
         VECTOR_CHUNK_BYTES / bytes
     };
-    require(
+    require!(
         index.is_none_or(|index| index < index_limit),
         "FP8 ZA source index out of range",
-    )?;
-    require(
+    );
+    require!(
         !vertical || index.is_some(),
         "FP8 vertical dot requires indexed source",
-    )?;
-    require(
+    );
+    require!(
         operand.accumulator != Format::Half
             || !matches!(
                 operand.operation,
                 VectorOperation::VerticalDot { top: true }
             ),
         "Half FP8 vertical dot has no top form",
-    )?;
+    );
     let mut result = Sources {
         left: [[0; MAX_VECTOR_BYTES]; MAX_GROUPS],
         right: [[0; MAX_VECTOR_BYTES]; MAX_GROUPS],
@@ -112,11 +113,11 @@ fn complete_vector<'scratch>(
     let sources = snapshot_sources(state, scalable, operand)?;
     let long = operand.operation == VectorOperation::MultiplyAdd;
     let vertical = matches!(operand.operation, VectorOperation::VerticalDot { .. });
-    require(
+    require!(
         !vertical || groups == bytes,
         "FP8 vertical dot output group differs",
-    )?;
-    require(long || groups != 1, "FP8 dot requires multiple ZA vectors")?;
+    );
+    require!(long || groups != 1, "FP8 dot requires multiple ZA vectors");
     let rows_per_group = if long { bytes } else { 1 };
     let length = scalable.vector_length().bytes();
     let stride = length / groups;
@@ -196,14 +197,14 @@ fn complete_outer<'scratch>(
     scratch: &'scratch mut [u8],
 ) -> Result<ZaResults<'scratch>, CompletionError> {
     let bytes = width(operand.accumulator)?;
-    require(
+    require!(
         usize::from(operand.tile) < bytes,
         "FP8 ZA tile out of range",
-    )?;
-    require(
+    );
+    require!(
         operand.row_predicate < 8 && operand.column_predicate < 8,
         "FP8 ZA predicate out of range",
-    )?;
+    );
     let left = read_z(state, scalable, operand.left)?;
     let right = read_z(state, scalable, operand.right)?;
     let length = scalable.vector_length().bytes();
@@ -265,10 +266,10 @@ pub(super) fn complete(
     operand: &Operand,
     controls: NumericalControls,
 ) -> Result<(), CompletionError> {
-    require(
+    require!(
         scalable.mode().streaming() && scalable.mode().za_enabled(),
         "FP8 ZA arithmetic requires streaming and ZA state",
-    )?;
+    );
     let rows = match operand {
         Operand::Vector(operand) => {
             usize::from(operand.groups)

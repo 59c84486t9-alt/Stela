@@ -127,6 +127,7 @@ impl<'a> ExecuteTranslation<'a> {
 mod tests {
     use super::*;
     use alloc::sync::Arc;
+    use anyhow::Result;
 
     fn fixture(test: impl FnOnce(&mut SharedMemory, &Controls, &Arc<RegisteredSystemRam>)) {
         let (mut machine, ram, events) = crate::machine::engine::shared_memory::tests::machine();

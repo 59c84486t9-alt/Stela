@@ -179,7 +179,7 @@ impl Movprfx {
 
     /// Arm's MOVPRFX: Zd = Zn, or for each element its active value,
     /// keeping (merging) or zeroing the inactive ones.
-    fn apply(self, scalable: &mut ScalableState, state: &mut GuestState) -> anyhow::Result<()> {
+    fn apply(self, scalable: &mut ScalableState, state: &mut GuestState) -> crate::Result<()> {
         let mut result = [0u8; STREAMING_VECTOR_BYTES];
         scalable.read_z(state, self.source, &mut result)?;
         if let Some((predicate, element, merging)) = self.predicated {

@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::Result;
 fn source(value: u32) -> Vec<u8> {
     [0xd2800000 | (value << 5), 0xd65f03c0]
         .iter()

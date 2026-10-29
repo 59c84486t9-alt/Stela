@@ -212,6 +212,20 @@ impl MemoryStatus {
         .into_iter()
         .find(|status| *status as u32 == code)
     }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Translation => "translation",
+            Self::Permission => "permission",
+            Self::Alignment => "alignment",
+            Self::TagCheck => "tag check",
+            Self::Unsupported => "unsupported",
+            Self::InvalidRequest => "invalid request",
+            Self::Domain => "domain",
+            Self::StackAlignment => "stack alignment",
+        }
+    }
 }
 
 /// Buffer bytes are little endian. Reads may change staging before a later part

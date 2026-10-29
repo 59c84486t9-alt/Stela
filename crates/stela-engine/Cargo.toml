@@ -11,10 +11,9 @@ workspace = true
 default = ["std"]
 test-support = []
 native-profile = ["stela-contracts/native-profile"]
-std = ["anyhow/std", "serde/std", "serde_json/std", "stela-compiler/std", "stela-contracts/std", "stela-formats/std", "dep:tempfile", "dep:libc"]
+std = ["serde/std", "serde_json/std", "stela-compiler/std", "stela-contracts/std", "stela-formats/std", "dep:tempfile", "dep:libc"]
 
 [dependencies]
-anyhow = { version = "1", default-features = false }
 serde.workspace = true
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 tempfile = { workspace = true, optional = true }
@@ -30,4 +29,5 @@ stela-formats = { path = "../stela-formats", default-features = false }
 stela-fingerprint = { path = "../stela-fingerprint" }
 
 [dev-dependencies]
+anyhow.workspace = true
 stela-contracts = { path = "../stela-contracts", features = ["test-support"] }

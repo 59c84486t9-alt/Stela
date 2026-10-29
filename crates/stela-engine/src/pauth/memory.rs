@@ -90,6 +90,7 @@ pub fn complete<A, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use std::cell::Cell;
 
     fn load(base: u8, destination: u8, writeback: bool) -> Load {

@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::Result;
 
 fn context_options(
     scalable: stela_compiler::scalable_context::ScalableProfile,
@@ -66,7 +67,11 @@ mod fp8 {
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
-        PreparedScalableBlock::prepare(&source, BASE, &profile(bytes, streaming, true, true, true))
+        Ok(PreparedScalableBlock::prepare(
+            &source,
+            BASE,
+            &profile(bytes, streaming, true, true, true),
+        )?)
     }
 
     fn owner(bytes: usize, streaming: bool) -> Result<(ThreadState, ScalableState)> {
@@ -573,8 +578,9 @@ mod numerical22 {
 
         fn set_result(&mut self, lane: &[u8]) -> Result<()> {
             let bytes = self.scalable.vector_length().bytes();
-            self.scalable
-                .write_z(&mut self.thread.registers, 0, &repeated(lane, bytes))
+            Ok(self
+                .scalable
+                .write_z(&mut self.thread.registers, 0, &repeated(lane, bytes))?)
         }
     }
 
@@ -608,7 +614,11 @@ mod numerical22 {
         word: u32,
         features: NumericalFeatures,
     ) -> Result<PreparedScalableBlock> {
-        PreparedScalableBlock::prepare(&source(word), BASE, &profile(bytes, features))
+        Ok(PreparedScalableBlock::prepare(
+            &source(word),
+            BASE,
+            &profile(bytes, features),
+        )?)
     }
 
     fn context() -> ExecutionContext {

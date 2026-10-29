@@ -3,8 +3,9 @@ use alloc::rc::Rc;
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String};
 use core::marker::PhantomData;
+use stela_contracts::{refuse, require};
 
-use anyhow::{Context, Result, ensure};
+use crate::Result;
 use stela_compiler::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::scalable::execution::{
@@ -94,12 +95,12 @@ impl PreparedScalableLeaf {
         profile: ScalableProfile,
         target: TargetCpu,
     ) -> Result<Self> {
-        ensure!(
+        require!(
             source.len() <= MAX_NATIVE_BYTES,
             "context leaf source exceeds the native preparation bound"
         );
         platform::ensure_supported()?;
-        ensure!(
+        require!(
             crate::platform::cpu::admitted(target),
             "host lacks context-leaf CPU requirements"
         );
@@ -109,16 +110,15 @@ impl PreparedScalableLeaf {
             target,
         )
         .with_scalable(profile);
-        let plan = CompilationPlan::new(&source, base, &options)
-            .context("prepare context leaf and source requirements")?;
+        let plan = CompilationPlan::new(&source, base, &options)?;
         let requirements = plan
             .memory_requirements()
-            .context("context leaf memory requirements absent")?;
+            .ok_or(refuse!("context leaf memory requirements absent"))?;
         let execution_requirements = plan
             .execution_requirements()
-            .context("context leaf execution requirements absent")?;
-        let native = plan.compile().context("compile context leaf")?.native;
-        ensure!(
+            .ok_or(refuse!("context leaf execution requirements absent"))?;
+        let native = plan.compile()?.native;
+        require!(
             !native.x86_64_code.is_empty() && native.x86_64_code.len() <= MAX_NATIVE_BYTES,
             "generated context leaf exceeds the native preparation bound"
         );
@@ -188,15 +188,15 @@ impl PreparedScalableLeaf {
         memory: &mut MemoryThread<P>,
         context: &mut ExecutionContext,
     ) -> Result<ScalableLeafExit> {
-        ensure!(
+        require!(
             context.has_supported_header(),
             "unsupported execution context"
         );
-        ensure!(
+        require!(
             crate::platform::cpu::admitted(self.target),
             "context-leaf host requirements changed"
         );
-        ensure!(
+        require!(
             scalable.vector_length() == self.identity.profile.vector_length()
                 && scalable.mode() == self.identity.profile.mode(),
             "owned scalable state differs from prepared profile"
@@ -236,7 +236,7 @@ impl PreparedScalableLeaf {
                     // Finalization can discard the callback result, so keep the
                     // fault before validating its PC.
                     original_fault = Some(fault);
-                    ensure!(
+                    require!(
                         self.source_map
                             .iter()
                             .any(|(address, _)| *address == fault.pc),
@@ -260,7 +260,7 @@ impl PreparedScalableLeaf {
 
 fn memory_status(raw: u32) -> Result<MemoryStatus> {
     MemoryStatus::from_code(raw)
-        .ok_or_else(|| anyhow::anyhow!("memory service returned an unknown status {raw}"))
+        .ok_or(refuse!("memory service returned an unknown status", raw).into())
 }
 
 #[cfg(all(

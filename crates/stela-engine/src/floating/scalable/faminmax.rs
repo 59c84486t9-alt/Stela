@@ -2,7 +2,6 @@
 
 use super::{CompletionError, NumericalControls};
 use crate::scalable::ScalableState;
-use anyhow::anyhow;
 use stela_compiler::{
     GuestState,
     aarch64::{
@@ -11,6 +10,7 @@ use stela_compiler::{
         sve::floating::faminmax::Operand,
     },
 };
+use stela_contracts::refuse;
 
 const MAX_PREDICATE_BYTES: usize = MAX_VECTOR_BYTES / BITS_PER_BYTE;
 
@@ -21,7 +21,7 @@ pub(super) fn complete(
     controls: NumericalControls,
 ) -> Result<(), CompletionError> {
     if !scalable.mode().streaming() {
-        return Err(anyhow!("scalable absolute extrema require streaming state").into());
+        return Err(refuse!("scalable absolute extrema require streaming state").into());
     }
     let length = scalable.vector_length();
     let vector_bytes = length.bytes();

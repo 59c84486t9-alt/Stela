@@ -17,6 +17,7 @@ use crate::{
     memory::{domain::MemoryThread, policy::MemoryControls},
     system::events::EventEndpoint,
 };
+use anyhow::Result;
 use std::{
     alloc::{Layout, alloc_zeroed, dealloc},
     ptr::NonNull,

@@ -5,8 +5,9 @@ use alloc::rc::Rc;
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String};
 use core::marker::PhantomData;
+use stela_contracts::{refuse, require};
 
-use anyhow::{Context, Result, ensure};
+use crate::Result;
 use stela_compiler::{
     GuestAddress, Options, TargetCpu,
     block::{BlockExit, BlockProfile, ExitKind, Features, MAX_BLOCK_INSTRUCTIONS},
@@ -56,22 +57,22 @@ impl PreparedScalableBlock {
     /// Prepare the block at `base` for `options`, whose profile must be the
     /// context block's.
     pub fn prepare(source: &[u8], base: GuestAddress, options: &Options) -> Result<Self> {
-        ensure!(
+        require!(
             options.profile() == BlockProfile::new(Features::CONTEXT),
             "context block services are not integrated"
         );
         let target = options.target();
-        ensure!(
+        require!(
             source.len() <= MAX_BLOCK_INSTRUCTIONS * INSTRUCTION_BYTES,
             "context block exceeds the compiler instruction bound"
         );
         platform::ensure_supported()?;
-        ensure!(
+        require!(
             crate::platform::cpu::admitted(target),
             "host lacks context-block requirements"
         );
         let compiled = stela_compiler::compile(source, base, options)?;
-        ensure!(
+        require!(
             compiled.source_bytes > 0
                 && compiled.source_bytes.is_multiple_of(INSTRUCTION_BYTES)
                 && compiled.source_bytes <= source.len(),
@@ -79,11 +80,11 @@ impl PreparedScalableBlock {
         );
         let source: Box<[u8]> = source[..compiled.source_bytes].into();
         let native = compiled.native;
-        ensure!(
+        require!(
             !native.x86_64_code.is_empty() && native.x86_64_code.len() <= MAX_NATIVE_BYTES,
             "context block native size exceeds execution bound"
         );
-        ensure!(
+        require!(
             native.source_map.len() == source.len() / INSTRUCTION_BYTES,
             "context block source map extent mismatch"
         );
@@ -91,9 +92,9 @@ impl PreparedScalableBlock {
         for (index, &(pc, offset)) in native.source_map.iter().enumerate() {
             let expected = base
                 .0
-                .checked_add(u64::try_from(index * INSTRUCTION_BYTES)?)
-                .context("context block source map address overflow")?;
-            ensure!(
+                .checked_add((index * INSTRUCTION_BYTES) as u64)
+                .ok_or(refuse!("context block source map address overflow"))?;
+            require!(
                 pc.0 == expected
                     && offset >= prior_offset
                     && offset < native.x86_64_code.len()
@@ -128,10 +129,9 @@ impl PreparedScalableBlock {
     }
 
     fn scalable(&self) -> Result<stela_compiler::scalable_context::ScalableProfile> {
-        self.identity
-            .options
-            .scalable()
-            .context("context block options lack a scalable specialization")
+        Ok(self.identity.options.scalable().ok_or(refuse!(
+            "context block options lack a scalable specialization"
+        ))?)
     }
 
     pub fn source(&self) -> &[u8] {
@@ -165,20 +165,20 @@ impl PreparedScalableBlock {
         scalable: &mut ScalableState,
         context: &mut ExecutionContext,
     ) -> Result<BlockExit> {
-        ensure!(
+        require!(
             context.has_supported_header(),
             "unsupported execution context"
         );
-        ensure!(
+        require!(
             crate::platform::cpu::admitted(self.target),
             "context-block host requirements changed"
         );
-        ensure!(
+        require!(
             state.pc == self.identity.guest_base,
             "context block invocation PC differs from prepared entry"
         );
         let profile = self.scalable()?;
-        ensure!(
+        require!(
             scalable.vector_length() == profile.vector_length()
                 && scalable.mode() == profile.mode(),
             "owned scalable state differs from prepared profile"
@@ -194,8 +194,8 @@ impl PreparedScalableBlock {
             })
         }?;
         let kind = ExitKind::try_from(exit.kind)
-            .map_err(|_| anyhow::anyhow!("invalid context block exit kind"))?;
-        ensure!(
+            .map_err(|_| refuse!("invalid context block exit kind", kind = exit.kind))?;
+        require!(
             matches!(
                 kind,
                 ExitKind::Fallthrough
@@ -227,7 +227,7 @@ impl PreparedScalableBlock {
     ) -> Result<GuestAddress, CompletionError> {
         let instruction = self.recover_numerical(exit)?;
         if state.pc != instruction.instruction_pc() {
-            return Err(anyhow::anyhow!("numerical completion PC differs from native exit").into());
+            return Err(refuse!("numerical completion PC differs from native exit").into());
         }
         floating::scalable::complete(&mut state.registers, scalable, &instruction)?;
         state.pc = instruction.next_pc();
@@ -238,7 +238,7 @@ impl PreparedScalableBlock {
         &self,
         exit: BlockExit,
     ) -> Result<stela_compiler::block::scalable::AdmittedScalableNumericalInstruction> {
-        ensure!(
+        require!(
             exit.kind == ExitKind::ScalableNumerical as u64,
             "context block exit is not scalable numerical"
         );

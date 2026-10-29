@@ -115,6 +115,36 @@ pub enum ProcessMemoryError {
     PointerChecks(PointerChecksError),
 }
 
+impl core::fmt::Display for ProcessMemoryError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Identification(error) => write!(f, "unsupported identification: {error:?}"),
+            Self::UnsupportedFeature {
+                register,
+                field,
+                value,
+            } => write!(f, "unsupported {register}.{field} = {value:#x}"),
+            Self::UnsupportedControl { register, value } => {
+                write!(f, "unsupported {register} control {value:#x}")
+            }
+            Self::LowerAddress(status) => write!(f, "lower address refused: {}", status.name()),
+            Self::UnsupportedMode(mode) => write!(f, "unsupported PSTATE mode {mode:#x}"),
+            Self::IllegalExecutionState => f.write_str("PSTATE.IL is set"),
+            Self::UnsupportedPstate(pstate) => write!(f, "unsupported PSTATE {pstate:#x}"),
+            Self::MteState => f.write_str("MTE state is unsupported"),
+            Self::WrongAddressSpace => f.write_str("memory belongs to another address space"),
+            Self::WrongMemoryDomain => f.write_str("memory belongs to another domain"),
+            Self::MissingEventEndpoint => f.write_str("no event endpoint"),
+            Self::Memory(status) => write!(f, "memory service refused: {}", status.name()),
+            #[cfg(feature = "std")]
+            Self::Low128(error) => write!(f, "low128 FP access refused: {error:?}"),
+            Self::PointerChecks(error) => write!(f, "pointer checks refused: {error:?}"),
+        }
+    }
+}
+
+impl core::error::Error for ProcessMemoryError {}
+
 /// The checked facts this memory contract needs. Base SPE absence is required
 /// too, because base branch helpers can change profiling history even with
 /// profiling disabled. There is no default or detection.

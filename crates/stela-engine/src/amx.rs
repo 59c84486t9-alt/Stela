@@ -1,10 +1,10 @@
 //! Direct-RAM AMX reference execution and reusable native kernel mappings.
 //! The native system engine separately owns architectural AMX state and
 //! enablement under the guest kernel's AMX_CTL_EL1 controls.
+use crate::Result;
 use crate::{execution::platform::Mapping, memory::DIRECT_RAM_USER_END};
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
-use anyhow::{Context as _, Result};
 use serde::Serialize;
 use stela_compiler::{
     GuestState, TargetCpu,
@@ -161,7 +161,7 @@ impl Kernels {
             return Ok(None);
         };
         let library = Library::new(tier);
-        let mapping = Mapping::new(&library.code).context("map AMX kernels")?;
+        let mapping = Mapping::new(&library.code)?;
         Ok(Some(Self { library, mapping }))
     }
 
