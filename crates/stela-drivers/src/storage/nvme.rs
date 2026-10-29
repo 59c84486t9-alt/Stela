@@ -402,6 +402,8 @@ enum Tag {
         id: u16,
         /// Its submission queue entry.
         slot: u16,
+        /// An accepted submission head has passed this command.
+        fetched: bool,
         namespace: u32,
         block: usize,
         command: Command,
@@ -1196,6 +1198,7 @@ impl Controller {
             Ok((id, deadline)) => Tag::Running {
                 id,
                 slot,
+                fetched: false,
                 namespace,
                 block,
                 command,
@@ -1352,9 +1355,17 @@ impl Controller {
     /// a running command matched.
     fn complete(&mut self, id: u16, status: u32, head: u16) -> bool {
         let io = &self.io;
+        // NVMe SQHD is a snapshot when the CQE is created, not the completed
+        // command's slot (Base 1.1, section 4.6). A fetched command may remain
+        // in flight while later commands carry the ring through another turn.
+        for tag in &mut self.tags {
+            if let Tag::Running { slot, fetched, .. } = tag {
+                *fetched |= io.fetched(*slot, head);
+            }
+        }
         let Some(tag) = self.tags.iter().position(|tag| {
-            matches!(tag, Tag::Running { id: running, slot, .. }
-                if *running == id && io.fetched(*slot, head))
+            matches!(tag, Tag::Running { id: running, fetched: true, .. }
+                if *running == id)
         }) else {
             return false;
         };
@@ -3069,6 +3080,73 @@ mod tests {
         }
         assert!(!disk.room());
         assert!(disk.start(Command::Flush).is_err());
+    }
+
+    #[test]
+    fn delayed_read_completes_after_submission_ring_wraps() {
+        let _clock = crate::test_clock::virtualize();
+        for turns in [1, 2] {
+            let mut fixture = Fixture::new();
+            let disk = &mut fixture.disk;
+            let delayed = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+            let delayed_id = running_id(&disk.controller.borrow(), delayed);
+            for _ in 1..usize::from(IO_ENTRIES) * turns {
+                let read = disk.start(Command::Read { lba: 1, bytes: 512 }).unwrap();
+                {
+                    let mut controller = disk.controller.borrow_mut();
+                    controller.slot(read as usize).0.bytes_mut()[..512].fill(0x71);
+                    let id = running_id(&controller, read);
+                    post(&mut controller, id, 0);
+                }
+                assert_eq!(disk.finish(read), Some(Ok(Some(vec![0x71; 512]))));
+                assert_eq!(disk.finish(delayed), None);
+            }
+            {
+                let mut controller = disk.controller.borrow_mut();
+                assert_eq!(controller.io.tail, 0);
+                assert_eq!(controller.io.consumed, 0);
+                controller.slot(delayed as usize).0.bytes_mut()[..512].fill(0x42);
+                post(&mut controller, delayed_id, 0);
+            }
+            assert_eq!(disk.finish(delayed), Some(Ok(Some(vec![0x42; 512]))));
+            assert!(disk.controller.borrow().fault.is_none());
+        }
+    }
+
+    #[test]
+    fn reused_tag_requires_its_new_submission_to_be_fetched() {
+        let _clock = crate::test_clock::virtualize();
+        let mut fixture = Fixture::new();
+        let disk = &mut fixture.disk;
+        let first = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+        {
+            let mut controller = disk.controller.borrow_mut();
+            let id = running_id(&controller, first);
+            post(&mut controller, id, 0);
+        }
+        assert!(disk.finish(first).unwrap().is_ok());
+        let second = disk.start(Command::Read { lba: 1, bytes: 512 }).unwrap();
+        assert_eq!(first, second);
+        {
+            let mut controller = disk.controller.borrow_mut();
+            let id = running_id(&controller, second);
+            let entry = usize::from(controller.io.head) * 16;
+            let consumed = u32::from(controller.io.consumed);
+            let phase = u32::from(controller.io.phase) << 16;
+            controller
+                .io
+                .completions
+                .write(entry + 8, 1u32 << 16 | consumed);
+            controller
+                .io
+                .completions
+                .write(entry + 12, phase | u32::from(id));
+        }
+        assert_eq!(
+            disk.finish(second),
+            Some(Err(BlockError::Device { status: 0xffff }))
+        );
+        assert_eq!(disk.controller.borrow().io.head, 1);
     }
 
     #[test]
