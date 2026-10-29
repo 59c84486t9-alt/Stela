@@ -786,9 +786,17 @@ query(struct call *call, enum operation op, nir_def **result)
        (op == ARRAY_SIZE && !shape->array) || (op == SAMPLES && shape->dim != GLSL_SAMPLER_DIM_MS) ||
        (op == MIP_LEVELS && !shape->mipmapped))
       return fail(call, "texture query does not apply to its texture type");
-   if (image && op == MIP_LEVELS)
-      return fail(call, "querying the levels of a storage texture");
    nir_builder *b = call->b;
+   if (image && op == MIP_LEVELS) {
+      const struct stela_air_options *options = call->c->options;
+      if (!options->texture_levels)
+         return fail(call, "querying the levels of a storage texture");
+      if (!finished(call))
+         return false;
+      *result = options->texture_levels(b, call->texture_id ? NULL : call->texture,
+                                        call->texture_id, options->binding_data);
+      return *result || fail(call, "texture %u is unbound", call->texture->index);
+   }
    bool sized = op == WIDTH || op == HEIGHT || op == DEPTH || op == ARRAY_SIZE;
    nir_def *lod = NULL;
    if ((op == WIDTH || op == HEIGHT || op == DEPTH) && shape->mipmapped &&

@@ -59,6 +59,13 @@ typedef nir_deref_instr *(*stela_air_bind_texture_id)(nir_builder *b, nir_def *i
 typedef nir_deref_instr *(*stela_air_bind_sampler_id)(nir_builder *b, nir_def *id, bool integer,
                                                       void *data);
 
+/* The mip level count of a write or read_write texture argument, or with id
+ * of the one an argument buffer's identifier names (texture is then NULL):
+ * the count of the images bind_texture selects among. */
+typedef nir_def *(*stela_air_texture_levels)(nir_builder *b,
+                                             const struct stela_air_texture *texture,
+                                             nir_def *id, void *data);
+
 struct stela_air_threadgroup_view {
    uint64_t size; /* Exact nonempty per-dispatch byte extent, not type_size. */
    unsigned alignment;
@@ -157,6 +164,9 @@ struct stela_air_options {
     * buffers hold device addresses, so they require bind_buffer. */
    stela_air_bind_texture_id bind_texture_id;
    stela_air_bind_sampler_id bind_sampler_id;
+   /* Storage textures' level counts; NULL refuses get_num_mip_levels of
+    * them. */
+   stela_air_texture_levels texture_levels;
    /* Device values; NULL refuses the builtins that read them. With it,
     * kernel threads outside a dispatchThreads grid return before the
     * function runs, as Metal's smaller edge threadgroups never run them. */

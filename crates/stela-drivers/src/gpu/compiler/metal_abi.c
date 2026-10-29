@@ -133,6 +133,17 @@ nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air
       stage);
 }
 
+nir_def *stela_metal_texture_levels(nir_builder *b, const struct stela_air_texture *texture,
+                                    nir_def *id, void *stage)
+{
+   if (!id) {
+      if (texture->index >= STELA_METAL_TEXTURES)
+         return NULL;
+      id = table_id(b, stage, STELA_METAL_TABLE_TEXTURES + 8u * texture->index);
+   }
+   return nir_iadd_imm(b, nir_ushr_imm(b, id_half(b, id, true), STELA_METAL_LEVEL_SHIFT), 1);
+}
+
 nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air_sampler *sampler,
                                           bool integer, void *stage)
 {

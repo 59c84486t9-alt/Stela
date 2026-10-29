@@ -27,7 +27,8 @@ static const char *module =
    " i32, i32)\n"
    "declare void @air.write_texture_2d.v4f32(ptr addrspace(1), <2 x i32>, <4 x float>, i32, i32)\n"
    "declare i32 @air.get_width_texture_2d(ptr addrspace(1), i32)\n"
-   "declare i32 @air.get_array_size_texture_2d_array(ptr addrspace(1))\n";
+   "declare i32 @air.get_array_size_texture_2d_array(ptr addrspace(1))\n"
+   "declare i32 @air.get_num_mip_levels_texture_2d_array(ptr addrspace(1))\n";
 
 /* A kernel that samples src at a level with an offset, writes the texel to
  * dst, reads a uint array texture and stores its size queries. */
@@ -123,7 +124,7 @@ options(struct stela_metal_stage *stage, bool compute)
       .workgroup_size = {compute ? 64u : 0u, compute ? 1u : 0u, compute ? 1u : 0u},
       .max_instructions = 10000, .bind_buffer = stela_metal_bind_buffer, .binding_data = stage,
       .bind_texture = stela_metal_bind_texture, .bind_sampler = stela_metal_bind_sampler,
-      .max_private_bytes = 64,
+      .texture_levels = stela_metal_texture_levels, .max_private_bytes = 64,
    };
 }
 
@@ -298,6 +299,25 @@ storage_levels_select_their_descriptor(void)
       assert(!(nir_intrinsic_access(store) & ACCESS_NON_UNIFORM) == !i);
       ralloc_free(shader);
    }
+
+   /* A storage texture's level count is the count its ID carries. */
+   struct stela_air_error error = {0};
+   nir_shader *shader = kernel(replace(kernel_body, "@air.get_array_size_texture_2d_array",
+                                       "@air.get_num_mip_levels_texture_2d_array"),
+                               kernel_metadata, &error);
+   assert(shader);
+   bool counted = false;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            nir_alu_instr *alu = instr->type == nir_instr_type_alu ? nir_instr_as_alu(instr) : NULL;
+            counted |= alu && alu->op == nir_op_ushr && nir_src_is_const(alu->src[1].src) &&
+                       nir_src_as_uint(alu->src[1].src) == STELA_METAL_LEVEL_SHIFT;
+         }
+      }
+   }
+   assert(counted);
+   ralloc_free(shader);
 }
 
 static void
