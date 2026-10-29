@@ -75,7 +75,7 @@
   {
     "package": "stela-drivers",
     "test": "acp70_unchanged_linux_power_and_init_oracle",
-    "source": "crates/stela-drivers/src/audio/acp63.rs",
+    "source": "crates/stela-drivers/src/audio/acp63/tests/linux_oracle.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_ACP70_ORACLE"
