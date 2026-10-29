@@ -56,6 +56,7 @@ mod native_work_check;
 mod output;
 mod paging;
 mod payload;
+mod pci_io;
 mod random;
 mod selection;
 mod serial;

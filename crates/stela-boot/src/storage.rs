@@ -20,10 +20,7 @@ use core::time::Duration;
 use stela_drivers::{
     Clock, Handoff,
     block::BlockDevice,
-    bus::{
-        dma::RegionAllocator,
-        pci::{self, Bar, Function},
-    },
+    bus::{dma::RegionAllocator, pci},
     probe::probe,
 };
 use stela_runtime::pc::{
@@ -31,7 +28,7 @@ use stela_runtime::pc::{
     storage::{self, Target},
 };
 use uefi::{
-    boot::{self, AllocateType, MemoryType, OpenProtocolAttributes, OpenProtocolParams, Tpl},
+    boot::{self, AllocateType, MemoryType, OpenProtocolAttributes, OpenProtocolParams},
     proto::{
         nvme::{NvmeQueueType, NvmeRequestBuilder, pass_thru::NvmePassThru},
         pci::{configuration::ResourceRangeType, root_bridge::PciRootBridgeIo},
@@ -231,22 +228,54 @@ pub fn discover() -> Result<Handoff, &'static str> {
     // SAFETY: RDTSC has no memory effects.
     let ticks = unsafe { core::arch::x86_64::_rdtsc() } - start;
     let mut mapped: Vec<_> = ecam.iter().map(|window| window.range()).collect();
-    {
-        // Size BARs with no firmware event able to reach the devices.
-        // SAFETY: restored when the guard drops, before any boot service.
-        let _tpl = unsafe { boot::raise_tpl(Tpl::HIGH_LEVEL) };
-        for window in &ecam {
-            // SAFETY: the firmware maps configuration space while it runs.
-            for mut function in unsafe { Function::enumerate(window) } {
-                if stela_drivers::probe::claims(&function) {
-                    mapped.extend(function.bars().iter().filter_map(|bar| match bar {
-                        Some(bar @ Bar::Memory { .. }) => bar.memory(),
-                        _ => None,
-                    }));
+    match crate::pci_io::capture() {
+        Ok(census) => {
+            for failure in census.failures {
+                output::arguments(format_args!(
+                    "PCI firmware observation incomplete: {failure}; native owned discovery required\n"
+                ));
+            }
+            for function in census.functions {
+                let identity = function.identity();
+                if !stela_drivers::probe::claims_identity(&identity) {
+                    continue;
+                }
+                for (bar, regions) in function.bars.into_iter().enumerate() {
+                    match regions {
+                        Ok(regions) => {
+                            for region in regions {
+                                if region.resource_type == 0 {
+                                    if region.host != region.pci {
+                                        output::arguments(format_args!(
+                                            "UNSUPPORTED PCI BAR translation {} bar={bar} host={:x?} pci={:x?}; native translated owner required\n",
+                                            identity.address, region.host, region.pci
+                                        ));
+                                    } else {
+                                        mapped.push(region.host);
+                                    }
+                                }
+                            }
+                        }
+                        Err(crate::pci_io::Error::Firmware(uefi::Status::UNSUPPORTED)) => {}
+                        Err(error) => output::arguments(format_args!(
+                            "PCI firmware BAR observation refused {} bar={bar}: {error}; native owned discovery required\n",
+                            identity.address
+                        )),
+                    }
                 }
             }
         }
+        Err(crate::pci_io::CaptureFailure::Function(crate::pci_io::Error::Release(status))) => {
+            output::arguments(format_args!(
+                "PCI firmware resource buffer release failed: {status:?}\n"
+            ));
+            return Err("PCI firmware resource buffer remains retained; handoff refused");
+        }
+        Err(error) => output::arguments(format_args!(
+            "PCI firmware observation unavailable: {error}; native owned discovery required\n"
+        )),
     }
+
     Ok(Handoff {
         firmware: None,
         bluetooth_platform: bluetooth_platform::capture(),
