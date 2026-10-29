@@ -55,6 +55,8 @@ impl Remote {
             return Err(String::from("the install payload is not a remote image"));
         };
         let (host, path) = super::network::split_url(url)?;
+        let last=manifest.source.bytes.checked_sub(1).ok_or_else(||String::from("the remote image is empty"))?;
+        Ranged::with_identity(0,last,etag,manifest.source.bytes).map_err(|error|alloc::format!("{error}"))?;
         output::arguments(format_args!(
             "REMOTE IMAGE http://{host}{path} bytes={} etag={etag}\n",
             manifest.source.bytes
@@ -90,9 +92,10 @@ impl Remote {
     fn step(&mut self) -> Result<(), NetError> {
         if self.range.is_none() {
             let (first, last) = (self.end(), self.len - 1);
+            let ranged=Ranged::with_identity(first,last,&self.etag,self.len)?;
             let request = http::get_range(&self.host, &self.path, first, last, Some(&self.etag))?;
             let transfer = self.network.0.borrow_mut().download(&self.host, request)?;
-            self.range = Some((transfer, Ranged::new(first, last)));
+            self.range = Some((transfer, ranged));
             self.ranges += 1;
             output::arguments(format_args!(
                 "REMOTE IMAGE range {} bytes={first}-{last}\n",
@@ -161,7 +164,7 @@ impl ReadAt for Remote {
     }
 
     fn read_at(&mut self, offset: u64, out: &mut [u8]) -> Result<(), NetError> {
-        let until = offset + out.len() as u64;
+        let until = offset.checked_add(out.len() as u64).ok_or(NetError::Invalid("remote image offset overflow"))?;
         if until > self.len {
             return Err(NetError::Invalid("read past the remote image's end"));
         }
