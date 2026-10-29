@@ -13,7 +13,6 @@
 //! from provisioned machine roots, kept only here and zeroized on drop.
 //! Key rotation and other key types are separate unsupported operations.
 use super::{
-    super::der::{self, Cursor},
     Fields,
     reference_key::{self, ReferenceKey},
 };
@@ -23,6 +22,7 @@ use hmac::{Hmac, Mac};
 use p256::{SecretKey, elliptic_curve::sec1::ToEncodedPoint};
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
+use stela_formats::der::{self, Cursor};
 use zeroize::Zeroizing;
 
 pub(super) const PERFORM_OPERATION: u8 = 0x22;
@@ -416,7 +416,7 @@ impl ParameterDiagnostic {
                     return Err(refuse!("SEP diagnostic number is duplicated"));
                 }
                 _ => {
-                    entry.next()?;
+                    entry.next_element()?;
                 }
             }
             entry.end()?;

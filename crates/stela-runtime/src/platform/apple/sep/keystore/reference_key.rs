@@ -11,10 +11,7 @@
 //! Only the source-observed standalone class 13 / option 1 profile and P-256
 //! types 4/5 are admitted. Credential bags, deletion/revocation, attestation,
 //! private export and unsupported key classes remain separate operations.
-use super::super::{
-    Entropy,
-    der::{self, Cursor},
-};
+use super::super::Entropy;
 use crate::Result;
 use alloc::{vec, vec::Vec};
 use hmac::{Hmac, Mac};
@@ -29,6 +26,7 @@ use p256::{
 };
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
+use stela_formats::der::{self, Cursor};
 use zeroize::Zeroizing;
 
 pub(super) const CLASS: u32 = 13;

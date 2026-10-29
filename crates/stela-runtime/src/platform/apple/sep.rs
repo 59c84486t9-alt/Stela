@@ -16,7 +16,6 @@
 //! `firmware`/`os`/`control` and docs/research/sep.md.
 pub mod boot_policy;
 pub mod control;
-mod der;
 pub mod endpoint;
 pub mod firmware;
 pub mod image;

@@ -192,7 +192,7 @@ fn reference_signing_roundtrips_original_dictionary_in_both_ipc_versions() {
         let mut fields = message.fields();
         let result = fields.blob().unwrap();
         fields.end().unwrap();
-        let mut outer = crate::platform::apple::sep::der::Cursor(result);
+        let mut outer = stela_formats::der::Cursor(result);
         let signature = p256::ecdsa::Signature::from_der(outer.take(4).unwrap().value).unwrap();
         outer.end().unwrap();
         let key = reference_key::ReferenceKey::open(&root, &blob).unwrap();
