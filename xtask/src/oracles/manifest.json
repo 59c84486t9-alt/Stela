@@ -4781,5 +4781,13 @@
     "inputs": [],
     "reason": "oracle: exhaustive",
     "precondition": "exhaustive"
+  },
+  {
+    "package": "stela-compiler",
+    "test": "sve_merge_costs",
+    "source": "crates/stela-compiler/src/x86_64/sve/integer_bits/tests/costs.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "opt-in hardware comparison of compiled GFNI SVE RBIT.B predicate merges; requires actual GFNI, AVX2 and AVX-512 F/VL support and preserves dependent/independent emitted binaries for each vector length"
   }
 ]

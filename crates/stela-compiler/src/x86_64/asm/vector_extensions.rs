@@ -1,4 +1,6 @@
-//! Packed GFNI bit reversal and AVX-512 population counts (Intel SDM Vol. 2).
+//! Capability-checked packed bit operations (Intel SDM Vol. 2).
+#[cfg(test)]
+use super::Vex;
 use super::{Code, Evex, Gpr, Map, Pp, Rm};
 use crate::TargetCpu;
 use crate::x86_64::isa::SimdOpcode as Host;
@@ -40,6 +42,82 @@ pub(crate) fn population_supported(lane_bytes: u8, target: TargetCpu) -> bool {
         && target.supports(TargetCpu::Avx512vl)
         && target.supports(extension)
         && !target.data_independent_timing()
+}
+
+/// EVEX.128 ternary logic needs F and VL. The DIT profile retains its recipe.
+pub(crate) fn merge_supported(target: TargetCpu) -> bool {
+    target.supports(TargetCpu::Avx512f)
+        && target.supports(TargetCpu::Avx512vl)
+        && !target.data_independent_timing()
+}
+
+/// Select each bit from the new destination where mask is set, else from old.
+/// VPTERNLOGD indexes imm8 with destination:old:mask, so this table is 0xe4.
+/// k0 disables opmasking: byte/halfword predicates remain full bitwise masks.
+pub(crate) fn merge(
+    code: &mut Code,
+    destination: u8,
+    old: u8,
+    mask: u8,
+    target: TargetCpu,
+) -> bool {
+    if !merge_supported(target) {
+        return false;
+    }
+    let mut asm = code.asm();
+    asm.evex(
+        Evex {
+            map: Map::M0f3a,
+            pp: Pp::P66,
+            w: false,
+            length: 0,
+            mask: 0,
+            zeroing: false,
+            broadcast: false,
+            scale: 16,
+        },
+        0x25,
+        destination,
+        old,
+        Rm::Xmm(mask),
+    );
+    asm.data(&[0xe4]);
+    true
+}
+
+/// VEX.128 VPBLENDVB needs AVX; the represented AVX2 target is sufficient.
+/// Each mask byte must be 0 or255, as produced by the predicate expander.
+/// Unlike the legacy form, the mask is explicit and cannot clobber XMM0.
+#[cfg(test)]
+pub(crate) fn blend_bytes(
+    code: &mut Code,
+    destination: u8,
+    old: u8,
+    mask: u8,
+    target: TargetCpu,
+) -> bool {
+    if !target.supports(TargetCpu::Avx2) || target.data_independent_timing() {
+        return false;
+    }
+    assert!(
+        destination < 16 && old < 16 && mask < 16,
+        "VEX blend uses legacy XMM register encodings"
+    );
+    let mut asm = code.asm();
+    asm.vex(
+        Vex {
+            map: Map::M0f3a,
+            pp: Pp::P66,
+            w: false,
+            l: false,
+        },
+        0x4c,
+        destination,
+        old,
+        Rm::Xmm(destination),
+    );
+    asm.data(&[mask << 4]);
+    true
 }
 
 /// Packed dword/qword leading-zero counts require CD in addition to F and VL.
@@ -168,6 +246,69 @@ pub(crate) mod execution {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_blend_has_explicit_mask_and_refuses_missing_state_or_dit() {
+        let target = TargetCpu::Avx2;
+        for (destination, old, mask, expected) in [
+            (0, 7, 6, [0xc4, 0xe3, 0x41, 0x4c, 0xc0, 0x60]),
+            (8, 15, 14, [0xc4, 0x43, 0x01, 0x4c, 0xc0, 0xe0]),
+        ] {
+            let mut code = Code::new();
+            assert!(blend_bytes(&mut code, destination, old, mask, target));
+            assert_eq!(*code, expected);
+            assert_eq!(code.instructions(), 1);
+        }
+        for target in [
+            TargetCpu::Baseline,
+            TargetCpu::Gfni,
+            TargetCpu::Avx512f.with_avx512vl(),
+            TargetCpu::Avx2.with_data_independent_timing(),
+        ] {
+            let mut code = Code::new();
+            assert!(!blend_bytes(&mut code, 0, 7, 6, target));
+            assert!(code.is_empty());
+        }
+    }
+
+    #[test]
+    fn merge_requires_vector_state_and_preserves_dit() {
+        for target in [
+            TargetCpu::Baseline,
+            TargetCpu::Avx512f,
+            TargetCpu::Avx512vl,
+            TargetCpu::Avx512f
+                .with_avx512vl()
+                .with_data_independent_timing(),
+        ] {
+            let mut code = Code::new();
+            assert!(!merge(&mut code, 0, 7, 6, target));
+            assert!(code.is_empty());
+        }
+    }
+
+    #[test]
+    fn merge_truth_table_and_gnu_encodings() {
+        let target = TargetCpu::Avx512f.with_avx512vl();
+        for (destination, old, mask, expected) in [
+            (0, 7, 6, [0x62, 0xf3, 0x45, 0x08, 0x25, 0xc6, 0xe4]),
+            (8, 15, 14, [0x62, 0x53, 0x05, 0x08, 0x25, 0xc6, 0xe4]),
+            (31, 30, 29, [0x62, 0x03, 0x0d, 0x00, 0x25, 0xfd, 0xe4]),
+        ] {
+            let mut code = Code::new();
+            assert!(merge(&mut code, destination, old, mask, target));
+            assert_eq!(*code, expected);
+            assert_eq!(code.instructions(), 1);
+        }
+        for new in 0u8..2 {
+            for old in 0u8..2 {
+                for mask in 0u8..2 {
+                    let index = (new << 2) | (old << 1) | mask;
+                    assert_eq!((0xe4u8 >> index) & 1, (new & mask) | (old & (mask ^ 1)));
+                }
+            }
+        }
+    }
 
     #[test]
     fn leading_zero_count_requires_cd_and_uses_evex_128() {

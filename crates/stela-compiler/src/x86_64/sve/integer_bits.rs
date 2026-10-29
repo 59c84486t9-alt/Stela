@@ -324,13 +324,78 @@ pub(crate) fn requires_declared_dit_zero(operand: Operand, length: VectorLength)
                 && length.bytes() == SCALAR_WORD_VECTOR_BYTES))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Merge {
+    Baseline,
+    #[cfg(test)]
+    Blend,
+    Ternary,
+}
+
+fn selected_merge(operand: Operand, target: TargetCpu) -> Merge {
+    if operand.kind != Kind::ReverseBits
+        || operand.element_size != ElementSize::Byte
+        || !target.supports(TargetCpu::Gfni)
+        || target.data_independent_timing()
+    {
+        return Merge::Baseline;
+    }
+    if vector_extensions::merge_supported(target) {
+        Merge::Ternary
+    } else {
+        Merge::Baseline
+    }
+}
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+std::thread_local! { static MERGE_OVERRIDE: core::cell::Cell<Option<Merge>>=const {core::cell::Cell::new(None)}; }
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+fn with_merge<T>(merge: Merge, emit: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Merge>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            MERGE_OVERRIDE.set(self.0);
+        }
+    }
+    let _restore = Restore(MERGE_OVERRIDE.replace(Some(merge)));
+    emit()
+}
+
 pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: TargetCpu) {
+    let merge = selected_merge(operand, target);
+    #[cfg(all(
+        test,
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    let merge = MERGE_OVERRIDE.get().unwrap_or(merge);
+    emit_with_merge(code, operand, length, target, merge);
+}
+fn emit_with_merge(
+    code: &mut Code,
+    operand: Operand,
+    length: VectorLength,
+    target: TargetCpu,
+    merge: Merge,
+) {
     let Predication::Merging(predicate) = operand.predication else {
-        unreachable!("bit-operation decoder owns only merging forms");
+        unreachable!("bit-operation decoder owns only merging forms")
     };
-    if (operand.kind == Kind::PopulationCount
-        && (vector_extensions::population_supported(operand.element_size.bytes() as u8, target)
-            || vector_extensions::population_supported(1, target)))
+    if merge != Merge::Baseline
+        || (operand.kind == Kind::PopulationCount
+            && (vector_extensions::population_supported(
+                operand.element_size.bytes() as u8,
+                target,
+            ) || vector_extensions::population_supported(1, target)))
         || (matches!(operand.kind, Kind::LeadingZeros | Kind::LeadingSignBits)
             && vector_extensions::leading_supported(operand.element_size.bytes() as u8, target))
     {
@@ -375,10 +440,29 @@ pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: Tar
             length,
             target,
         );
-        // old XOR ((new XOR old) AND active-mask), preserving inactive bytes.
-        packed(code, Host::Xor, SOURCE_XMM, OLD_DESTINATION_XMM);
-        packed(code, Host::And, SOURCE_XMM, PREDICATE_XMM);
-        packed(code, Host::Xor, SOURCE_XMM, OLD_DESTINATION_XMM);
+        let merged = match merge {
+            Merge::Baseline => false,
+            #[cfg(test)]
+            Merge::Blend => vector_extensions::blend_bytes(
+                code,
+                SOURCE_XMM,
+                OLD_DESTINATION_XMM,
+                PREDICATE_XMM,
+                target,
+            ),
+            Merge::Ternary => vector_extensions::merge(
+                code,
+                SOURCE_XMM,
+                OLD_DESTINATION_XMM,
+                PREDICATE_XMM,
+                target,
+            ),
+        };
+        if !merged {
+            packed(code, Host::Xor, SOURCE_XMM, OLD_DESTINATION_XMM);
+            packed(code, Host::And, SOURCE_XMM, PREDICATE_XMM);
+            packed(code, Host::Xor, SOURCE_XMM, OLD_DESTINATION_XMM);
+        }
         store_z_chunk(code, operand.destination, chunk, SOURCE_XMM, length, target);
     }
 }
@@ -388,157 +472,4 @@ pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: Tar
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux")
 ))]
-mod tests {
-    use super::*;
-    use crate::x86_64::asm::vector_extensions::execution::Native;
-    use crate::{
-        GuestState,
-        context::{ExecutionContext, ScalableStateView},
-    };
-    use alloc::{vec, vec::Vec};
-
-    #[test]
-    fn packed_bit_extensions_preserve_predication_and_aliases() {
-        let host = TargetCpu::detect();
-        for target in [
-            TargetCpu::Baseline,
-            TargetCpu::Gfni,
-            TargetCpu::Avx512f.with_avx512vl().with_avx512bitalg(),
-            TargetCpu::Avx512f.with_avx512vl().with_avx512vpopcntdq(),
-            TargetCpu::Avx512f.with_avx512vl().with_avx512cd(),
-        ] {
-            if !host.supports(target) {
-                continue;
-            }
-            for bytes in [16usize, 64, 256] {
-                let length = VectorLength::from_bytes(bytes).unwrap();
-                let upper_bytes = bytes - 16;
-                for element_size in [
-                    ElementSize::Byte,
-                    ElementSize::Halfword,
-                    ElementSize::Word,
-                    ElementSize::Doubleword,
-                ] {
-                    for kind in [
-                        Kind::ReverseBits,
-                        Kind::PopulationCount,
-                        Kind::LeadingZeros,
-                        Kind::LeadingSignBits,
-                    ] {
-                        for destination in [1u8, 2] {
-                            let operand = Operand {
-                                kind,
-                                destination,
-                                source: 1,
-                                element_size,
-                                predication: Predication::Merging(0),
-                            };
-                            let mut code = crate::scalable_context::context_wrapper();
-                            emit(&mut code, operand, length, target);
-                            code.asm().ret();
-                            let native = Native::new(&code);
-                            for mask in [0u16, u16::MAX, 0xa5c3] {
-                                let input: Vec<u8> = (0..bytes)
-                                    .map(|i| ((i * 37 + 91) ^ (i >> 2)) as u8)
-                                    .collect();
-                                let old = if destination == 1 {
-                                    input.clone()
-                                } else {
-                                    vec![0xa5; bytes]
-                                };
-                                let mut expected = old.clone();
-                                let lane = element_size.bytes();
-                                for at in (0..bytes).step_by(lane) {
-                                    if mask & (1 << (at % 16)) == 0 {
-                                        continue;
-                                    }
-                                    let mut x = [0u8; 8];
-                                    x[..lane].copy_from_slice(&input[at..at + lane]);
-                                    let x = u64::from_le_bytes(x);
-                                    let bits = element_size.bits();
-                                    let result = match kind {
-                                        Kind::ReverseBits => x.reverse_bits() >> (64 - bits),
-                                        Kind::PopulationCount => u64::from(x.count_ones()),
-                                        Kind::LeadingZeros => {
-                                            u64::from(x.leading_zeros()) - (64 - bits) as u64
-                                        }
-                                        Kind::LeadingSignBits => {
-                                            let shifted = (x << (64 - bits)) as i64;
-                                            let unsigned = if shifted < 0 {
-                                                !shifted as u64
-                                            } else {
-                                                shifted as u64
-                                            };
-                                            u64::from(unsigned.leading_zeros().min(bits as u32)) - 1
-                                        }
-                                        _ => unreachable!(),
-                                    };
-                                    expected[at..at + lane]
-                                        .copy_from_slice(&result.to_le_bytes()[..lane]);
-                                }
-                                let words = |x: &[u8]| {
-                                    [
-                                        u64::from_le_bytes(x[..8].try_into().unwrap()),
-                                        u64::from_le_bytes(x[8..16].try_into().unwrap()),
-                                    ]
-                                };
-                                let mut state = GuestState {
-                                    fpsr: 0x0800_001f,
-                                    nzcv: 0xa000_0000,
-                                    ..GuestState::default()
-                                };
-                                state.v[1] = words(&input);
-                                state.v[usize::from(destination)] = words(&old);
-                                let mut upper = vec![0u8; 32 * upper_bytes];
-                                upper[upper_bytes..2 * upper_bytes].copy_from_slice(&input[16..]);
-                                upper[usize::from(destination) * upper_bytes
-                                    ..(usize::from(destination) + 1) * upper_bytes]
-                                    .copy_from_slice(&old[16..]);
-                                let mut predicates = vec![0u8; 16 * length.predicate_bytes()];
-                                for b in predicates[..length.predicate_bytes()]
-                                    .as_chunks_mut::<2>()
-                                    .0
-                                {
-                                    b.copy_from_slice(&mask.to_le_bytes());
-                                }
-                                let original_predicates = predicates.clone();
-                                let mut scalable = ScalableStateView {
-                                    svl_bytes: bytes as u16,
-                                    reserved: [0; 6],
-                                    svcr: 0,
-                                    tpidr2_el0: 0,
-                                    fpmr: 0,
-                                    z_upper: upper.as_mut_ptr(),
-                                    predicates: predicates.as_mut_ptr(),
-                                    ffr: core::ptr::null_mut(),
-                                    za: core::ptr::null_mut(),
-                                    zt0: core::ptr::null_mut(),
-                                };
-                                let mut context = ExecutionContext {
-                                    scalable: &mut scalable,
-                                    ..ExecutionContext::default()
-                                };
-                                native.run(&mut state, &mut context);
-                                let mut result = state.v[usize::from(destination)]
-                                    .iter()
-                                    .flat_map(|w| w.to_le_bytes())
-                                    .collect::<Vec<_>>();
-                                result.extend_from_slice(
-                                    &upper[usize::from(destination) * upper_bytes
-                                        ..(usize::from(destination) + 1) * upper_bytes],
-                                );
-                                assert_eq!(
-                                    result, expected,
-                                    "{target:?} {bytes} {element_size:?} {kind:?} {destination} {mask:#x}"
-                                );
-                                assert_eq!(state.fpsr, 0x0800_001f);
-                                assert_eq!(state.nzcv, 0xa000_0000);
-                                assert_eq!(predicates, original_predicates);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+mod tests;
