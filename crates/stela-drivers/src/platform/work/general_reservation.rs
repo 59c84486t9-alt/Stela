@@ -1,7 +1,7 @@
 //! Affine actual-worker/job reservation under a borrowed entered process guard.
 use super::*;
 mod owned;
-pub use owned::OwnedGeneralEscrow;
+pub use owned::{ColdStackPreparation, OwnedGeneralEscrow};
 /// Actual borrowed platform process-entry authority, independent of task IDs.
 ///
 /// # Safety
@@ -64,6 +64,19 @@ pub struct GeneralReservation<'runtime, 'entered, const N: usize> {
     live: bool,
     _local: PhantomData<*mut ()>,
 }
+#[derive(Clone, Copy)]
+enum Eligibility {
+    AnyIdle,
+    Unstarted,
+}
+impl Eligibility {
+    fn permits(self, task: &Task) -> bool {
+        match self {
+            Self::AnyIdle => true,
+            Self::Unstarted => !task.ever_entered,
+        }
+    }
+}
 impl<const N: usize> Runtime<N> {
     /// Reserve one actually idle, unbound compatible General worker and one
     /// ordinary job slot. This publishes no callback, ticket, C task or current.
@@ -73,6 +86,24 @@ impl<const N: usize> Runtime<N> {
         self: Pin<&'runtime Self>,
         entered: &'entered dyn EnteredProcess,
         requirement: StackRequirement,
+    ) -> Result<GeneralReservation<'runtime, 'entered, N>, WorkError> {
+        self.reserve_eligible(entered, requirement, Eligibility::AnyIdle)
+    }
+    /// Reserve only an actual never-entered compatible worker. This is a short
+    /// reservation, not stack byte access or C task publication. Eligibility is
+    /// constructor/entry-owned history, never a caller-provided cold flag.
+    pub fn reserve_unstarted_general<'runtime, 'entered>(
+        self: Pin<&'runtime Self>,
+        entered: &'entered dyn EnteredProcess,
+        requirement: StackRequirement,
+    ) -> Result<GeneralReservation<'runtime, 'entered, N>, WorkError> {
+        self.reserve_eligible(entered, requirement, Eligibility::Unstarted)
+    }
+    fn reserve_eligible<'runtime, 'entered>(
+        self: Pin<&'runtime Self>,
+        entered: &'entered dyn EnteredProcess,
+        requirement: StackRequirement,
+        eligibility: Eligibility,
     ) -> Result<GeneralReservation<'runtime, 'entered, N>, WorkError> {
         entered.check()?;
         self.current_context()?;
@@ -106,6 +137,7 @@ impl<const N: usize> Runtime<N> {
                     let task = unsafe { &*self.task(*index) };
                     task.lane == Lane::General
                         && task.state == TaskState::Idle
+                        && eligibility.permits(task)
                         && task.job.is_none()
                         && task.binding.is_none()
                         && !task.draining

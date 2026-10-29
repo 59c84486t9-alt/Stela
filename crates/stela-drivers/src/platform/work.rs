@@ -42,7 +42,7 @@ mod reservation;
 mod stack_requirement;
 #[cfg(target_arch = "x86_64")]
 pub use general_reservation::{
-    AssignedGeneral, EnteredProcess, GeneralReservation, OwnedGeneralEscrow,
+    AssignedGeneral, ColdStackPreparation, EnteredProcess, GeneralReservation, OwnedGeneralEscrow,
 };
 pub use stack_requirement::{StackProfile, StackRequirement};
 #[cfg(all(test, unix, target_arch = "x86_64"))]
@@ -795,6 +795,7 @@ enum TaskState {
     Idle,
     Reserved,
     Escrow,
+    Preparing,
     Ready,
     Running,
     Runnable,
@@ -811,6 +812,7 @@ struct Task {
     flags: u64,
     draining: bool,
     owned_escrows: usize,
+    ever_entered: bool,
     binding: Option<Arc<dyn SwitchBinding>>,
     signal: Arc<WakeSignal>,
 }
@@ -946,6 +948,7 @@ impl<const N: usize> Runtime<N> {
                 flags: 0,
                 draining: false,
                 owned_escrows: 0,
+                ever_entered: false,
                 binding: None,
                 signal: Arc::new(WakeSignal {
                     service: layout.lane(index) == Lane::Service,
@@ -1714,7 +1717,10 @@ impl<const N: usize> Runtime<N> {
                         TaskState::Ready | TaskState::Runnable => true,
                         TaskState::Blocked => task.signal.pending.load(Ordering::Acquire),
                         TaskState::Idle => queued_lanes[lane_index(task.lane)],
-                        TaskState::Running | TaskState::Reserved | TaskState::Escrow => false,
+                        TaskState::Running
+                        | TaskState::Reserved
+                        | TaskState::Escrow
+                        | TaskState::Preparing => false,
                     }
             })
         }
@@ -1928,6 +1934,11 @@ impl<const N: usize> Runtime<N> {
 unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) -> ! {
     // SAFETY: covered by this function's own safety contract.
     let executor = unsafe { &*(pointer as *const Runtime<N>) };
+    executor.valid();
+    // SAFETY: the actual constructed trampoline just entered this retained
+    // worker at IF0. The monotonic history changes only here, before hooks or
+    // callbacks; an idle suspended entry frame can never masquerade as cold.
+    unsafe { (*executor.task(index)).ever_entered = true };
     loop {
         executor.valid();
         // SAFETY: covered by this function's own safety contract.

@@ -1,5 +1,7 @@
 //! Owned exclusion across creator suspension; no stack loan or child publication.
 use super::*;
+mod cold;
+pub use cold::ColdStackPreparation;
 
 /// Retains a genuine compatible idle worker and job slot without a process-scope
 /// borrow. The lifetime pins the actual Runtime and its StackBacking owners;
@@ -93,6 +95,9 @@ impl<const N: usize> OwnedGeneralEscrow<'_, N> {
         Ok(())
     }
     fn validate(&self, state: &State<N>) -> Result<(), WorkError> {
+        self.validate_state(state, TaskState::Escrow)
+    }
+    fn validate_state(&self, state: &State<N>, expected: TaskState) -> Result<(), WorkError> {
         if self.slot >= N
             || state.reservations[self.slot] != self.nonce
             || state.jobs[self.slot].is_some()
@@ -110,7 +115,7 @@ impl<const N: usize> OwnedGeneralEscrow<'_, N> {
         };
         if task.id != self.context
             || task.lane != Lane::General
-            || task.state != TaskState::Escrow
+            || task.state != expected
             || task.job.is_some()
             || task.binding.is_some()
             || task.draining
