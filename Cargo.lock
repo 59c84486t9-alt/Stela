@@ -2299,6 +2299,7 @@ dependencies = [
  "aes 0.8.4",
  "anyhow",
  "crypto-bigint",
+ "getrandom 0.2.17",
  "hex",
  "hmac",
  "httparse",
@@ -2306,6 +2307,7 @@ dependencies = [
  "lzfse_rust",
  "miniz_oxide",
  "p256",
+ "rustls",
  "serde",
  "serde_json",
  "sha1",
@@ -2318,6 +2320,7 @@ dependencies = [
  "stela-engine",
  "stela-formats",
  "stela-soc-data",
+ "stela-tls",
  "tempfile",
  "zeroize",
 ]

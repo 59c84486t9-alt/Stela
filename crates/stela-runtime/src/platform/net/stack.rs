@@ -5,6 +5,7 @@
 mod automatic;
 mod dad;
 mod rdnss;
+mod tls;
 use super::{Clock, Ipv4, NetError, http};
 use alloc::{string::String, vec, vec::Vec};
 pub use automatic::Automatic;
@@ -17,6 +18,7 @@ use smoltcp::{
     wire::{DnsQueryType, EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Cidr, Ipv6Cidr},
 };
 use stela_drivers::net::{Link, LinkError, MAX_FRAME};
+pub use tls::SecureTransfer;
 
 /// An interface's IPv4 configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -515,6 +517,17 @@ impl<L: Link, C: Clock> Stack<L, C> {
     pub fn read(
         &mut self,
         transfer: &mut Transfer,
+        take: impl FnMut(&[u8], bool) -> Result<bool, NetError>,
+    ) -> Result<bool, NetError> {
+        self.read_bounded(transfer, usize::MAX, take)
+    }
+
+    /// Consume at most the caller's available receive capacity, leaving every
+    /// other TCP byte in its socket. This preserves TLS record backpressure.
+    fn read_bounded(
+        &mut self,
+        transfer: &mut Transfer,
+        mut capacity: usize,
         mut take: impl FnMut(&[u8], bool) -> Result<bool, NetError>,
     ) -> Result<bool, NetError> {
         self.poll()?;
@@ -526,9 +539,13 @@ impl<L: Link, C: Clock> Stack<L, C> {
                 .map_err(|_| NetError::Reset)?;
         }
         let mut done = false;
-        while socket.can_recv() && !done {
+        while socket.can_recv() && !done && capacity != 0 {
             done = socket
-                .recv(|bytes| (bytes.len(), take(bytes, false)))
+                .recv(|bytes| {
+                    let count = bytes.len().min(capacity);
+                    capacity -= count;
+                    (count, take(&bytes[..count], false))
+                })
                 .map_err(|_| NetError::Reset)??;
             transfer.idle_at = now + IDLE_US;
         }
@@ -543,7 +560,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
                 Err(NetError::Reset)
             }
             tcp::State::SynSent | tcp::State::SynReceived => self.waiting(transfer, now),
-            _ if !socket.may_recv() => take(&[], true),
+            _ if !socket.may_recv() && !socket.can_recv() => take(&[], true),
             _ => self.waiting(transfer, now),
         }
     }
@@ -625,6 +642,8 @@ impl<L: Link, C: Clock> Stack<L, C> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[cfg(not(target_os = "uefi"))]
+    mod tls;
     use super::*;
     use alloc::{collections::VecDeque, rc::Rc};
     use core::cell::{Cell, RefCell};

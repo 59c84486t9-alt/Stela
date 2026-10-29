@@ -17,9 +17,10 @@ use stela_drivers::net::LinkError;
 
 pub mod http;
 pub mod stack;
+pub mod tls;
 
 pub use smoltcp::wire::Ipv4Address as Ipv4;
-pub use stack::{Config, Stack, Transfer};
+pub use stack::{Config, SecureTransfer, Stack, Transfer};
 
 /// Why a network operation failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +41,8 @@ pub enum NetError {
     Timeout(&'static str),
     /// The HTTP response was malformed or not one this client accepts.
     Http(String),
+    /// The TLS engine refused the peer, record or required time/entropy input.
+    Tls(String),
     /// The server answered with a non-success HTTP status.
     Status(u16),
     /// A request the stack cannot express (bad URL, oversized message).
@@ -59,6 +62,7 @@ impl fmt::Display for NetError {
             Self::Reset => f.write_str("connection refused or reset by peer"),
             Self::Timeout(what) => write!(f, "timed out: {what}"),
             Self::Http(why) => write!(f, "HTTP: {why}"),
+            Self::Tls(why) => write!(f, "TLS: {why}"),
             Self::Status(code) => write!(f, "HTTP status {code}"),
             Self::Invalid(why) => write!(f, "invalid request: {why}"),
         }
