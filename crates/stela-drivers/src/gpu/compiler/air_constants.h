@@ -11,4 +11,9 @@
 bool stela_air_specialize_constants(struct stela_air_metadata *m,
                                     const struct stela_air_constant_value *values,
                                     unsigned count);
+
+/* Evaluates the specialized module's air.static_init constructors, making the
+ * program-scope constants they compute constant data, and removes them;
+ * refuses constructors that depend on more than function constants. */
+bool stela_air_construct_constants(struct stela_air_metadata *m);
 #endif

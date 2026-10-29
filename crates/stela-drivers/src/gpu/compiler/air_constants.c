@@ -10,10 +10,15 @@
  * value and the tests into constants, so the paths a constant selects
  * against stay as dead code for NIR to remove. A constant without a value is
  * zero: Metal requires a value wherever a function reads it untested.
- * Program-scope constants derived from function constants are computed by
- * air.static_init functions, whose stores to AS2 storage remain refused. */
+ *
+ * Program-scope constants derived from function constants are AS2 globals
+ * that air.static_init constructors, listed in llvm.global_ctors, store.
+ * Once the function constants are specialized, LLVM's global optimizer
+ * evaluates the constructors as it does C++ static initializers; it runs on a
+ * clone, so only the values it computes reach the module. */
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_constants.h"
+#include "llvm-c/Transforms/PassBuilder.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -146,5 +151,94 @@ stela_air_specialize_constants(struct stela_air_metadata *m,
    LLVMValueRef test = LLVMGetNamedFunction(m->module, "air.is_function_constant_defined");
    if (test && !LLVMGetFirstUse(test))
       LLVMDeleteFunction(test);
+   return true;
+}
+
+/* A constant of plain data: no global's address, at any depth. */
+static bool
+plain(LLVMValueRef value, unsigned depth)
+{
+   if (!value || depth > 8 || LLVMIsAGlobalValue(value) || LLVMIsAConstantExpr(value))
+      return false;
+   if (LLVMIsAConstantInt(value) || LLVMIsAConstantFP(value) || LLVMIsAConstantDataSequential(value) ||
+       LLVMIsAConstantAggregateZero(value) || LLVMIsUndef(value))
+      return true;
+   for (int i = 0; i < LLVMGetNumOperands(value); i++) {
+      if (!plain(LLVMGetOperand(value, (unsigned)i), depth + 1))
+         return false;
+   }
+   return LLVMIsAConstantArray(value) || LLVMIsAConstantStruct(value) || LLVMIsAConstantVector(value);
+}
+
+/* Whether the global optimizer left no constructor in the clone. */
+static bool
+constructed(LLVMModuleRef clone)
+{
+   LLVMValueRef list = LLVMGetNamedGlobal(clone, "llvm.global_ctors");
+   LLVMValueRef entries = list ? LLVMGetInitializer(list) : NULL;
+   return !list || (entries && LLVMGetTypeKind(LLVMTypeOf(entries)) == LLVMArrayTypeKind &&
+                    !LLVMGetArrayLength2(LLVMTypeOf(entries)));
+}
+
+bool
+stela_air_construct_constants(struct stela_air_metadata *m)
+{
+   LLVMValueRef constructors = stela_air_metadata_constructors(m->module);
+   if (!constructors)
+      return true;
+   LLVMValueRef entries = LLVMGetInitializer(constructors);
+   unsigned functions = LLVMGetArrayLength2(LLVMTypeOf(entries));
+   if (functions > AIR_MAX_ARGUMENTS)
+      return fail(m, STELA_AIR_LIMIT, "constructor count exceeded");
+   /* The globals constructors may store, paired with the clone's; those stay
+    * defined there, so the optimizer keeps them and only commits their
+    * values. */
+   LLVMModuleRef clone = LLVMCloneModule(m->module);
+   if (!clone)
+      return fail(m, STELA_AIR_ALLOCATION, "module clone allocation failed");
+   LLVMValueRef originals[AIR_MAX_ARGUMENTS], copies[AIR_MAX_ARGUMENTS];
+   unsigned count = 0;
+   bool evaluated = true;
+   for (LLVMValueRef global = LLVMGetFirstGlobal(m->module), copy = LLVMGetFirstGlobal(clone);
+        global && copy && evaluated; global = LLVMGetNextGlobal(global), copy = LLVMGetNextGlobal(copy)) {
+      if (!stela_air_metadata_constructed(global))
+         continue;
+      evaluated = count < AIR_MAX_ARGUMENTS;
+      originals[count] = global;
+      copies[count++] = copy;
+      LLVMSetLinkage(copy, LLVMExternalLinkage);
+   }
+   LLVMPassBuilderOptionsRef options = evaluated ? LLVMCreatePassBuilderOptions() : NULL;
+   LLVMErrorRef error = options ? LLVMRunPasses(clone, "globalopt", NULL, options) : NULL;
+   if (options)
+      LLVMDisposePassBuilderOptions(options);
+   if (error) {
+      LLVMDisposeErrorMessage(LLVMGetErrorMessage(error));
+      evaluated = false;
+   }
+   evaluated &= options && constructed(clone);
+   LLVMValueRef values[AIR_MAX_ARGUMENTS];
+   for (unsigned i = 0; evaluated && i < count; i++)
+      evaluated = plain(values[i] = LLVMGetInitializer(copies[i]), 0);
+   /* The values are the context's, which outlives the clone. */
+   LLVMDisposeModule(clone);
+   if (!evaluated)
+      return fail(m, STELA_AIR_INSTRUCTION,
+                  "program-scope constants depend on more than function constants");
+   for (unsigned i = 0; i < count; i++) {
+      LLVMSetInitializer(originals[i], values[i]);
+      LLVMSetGlobalConstant(originals[i], true);
+   }
+   LLVMValueRef dropped[AIR_MAX_ARGUMENTS];
+   for (unsigned i = 0; i < functions; i++)
+      dropped[i] = LLVMGetOperand(LLVMGetAggregateElement(entries, i), 1);
+   LLVMDeleteGlobal(constructors);
+   for (unsigned i = 0; i < functions; i++) {
+      bool listed = false;
+      for (unsigned j = 0; j < i; j++)
+         listed |= dropped[j] == dropped[i];
+      if (!listed && !LLVMGetFirstUse(dropped[i]))
+         LLVMDeleteFunction(dropped[i]);
+   }
    return true;
 }

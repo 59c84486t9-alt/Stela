@@ -359,6 +359,10 @@ struct stela_air_metadata {
    bool render; /* Additive decoder mode; legacy compute remains false. */
    bool framebuffer_fetch_present, framebuffer_fetch_enabled;
    bool denorms_disable, fast_math;
+   /* Whether air.static_init constructors compute program-scope constants:
+    * AS2 globals they store, which are constant data once translation has
+    * evaluated them. */
+   bool constructed;
 };
 
 bool stela_air_md_string(LLVMValueRef value, const char *expected);
@@ -391,9 +395,16 @@ struct stela_air_global {
 };
 bool stela_air_metadata_global(struct stela_air_metadata *m, LLVMValueRef global,
                                struct stela_air_global *info);
-/* Validates every global but function constants' storage; `threadgroup`
- * reports any threadgroup memory. */
+/* Validates every global but function constants' storage and the
+ * constructor list; `threadgroup` reports any threadgroup memory. */
 bool stela_air_metadata_globals(struct stela_air_metadata *m, bool *threadgroup);
+/* llvm.global_ctors when it lists only air.static_init functions, which
+ * compute the program-scope constants derived from function constants; NULL
+ * otherwise. */
+LLVMValueRef stela_air_metadata_constructors(LLVMModuleRef module);
+/* A global air.static_init constructors may compute: an internal AS2 global
+ * with an initializer they replace. */
+bool stela_air_metadata_constructed(LLVMValueRef global);
 
 /* An argument buffer's fields: kernel->fields[first, first + count), in
  * increasing offsets. */

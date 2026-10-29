@@ -142,8 +142,42 @@ storage_size(struct stela_air_metadata *t, LLVMTypeRef type, unsigned depth, uns
    return *size <= UINT32_MAX || fail(t, STELA_AIR_LIMIT, "global storage size exceeded");
 }
 
+/* An internal function of section air.static_init. */
+static bool
+static_init(LLVMValueRef fn)
+{
+   const char *section = fn && LLVMIsAFunction(fn) ? LLVMGetSection(fn) : NULL;
+   return section && !strcmp(section, "air.static_init") && !LLVMIsDeclaration(fn) &&
+          LLVMGetLinkage(fn) == LLVMInternalLinkage;
+}
+
+LLVMValueRef
+stela_air_metadata_constructors(LLVMModuleRef module)
+{
+   LLVMValueRef list = LLVMGetNamedGlobal(module, "llvm.global_ctors");
+   LLVMValueRef entries = list ? LLVMGetInitializer(list) : NULL;
+   LLVMTypeRef type = entries ? LLVMTypeOf(entries) : NULL;
+   if (!type || LLVMGetLinkage(list) != LLVMAppendingLinkage ||
+       LLVMGetTypeKind(type) != LLVMArrayTypeKind)
+      return NULL;
+   for (unsigned i = 0; i < LLVMGetArrayLength2(type); i++) {
+      LLVMValueRef entry = LLVMGetAggregateElement(entries, i);
+      if (!entry || LLVMGetNumOperands(entry) != 3 || !static_init(LLVMGetOperand(entry, 1)))
+         return NULL;
+   }
+   return list;
+}
+
+bool
+stela_air_metadata_constructed(LLVMValueRef global)
+{
+   return LLVMGetPointerAddressSpace(LLVMTypeOf(global)) == 2 && !LLVMIsGlobalConstant(global) &&
+          LLVMGetLinkage(global) == LLVMInternalLinkage && LLVMGetInitializer(global);
+}
+
 /* Threadgroup memory is an undefined internal AS3 global; constant data is an
- * initialized internal or private AS2 constant. */
+ * initialized internal or private AS2 constant, or a global constructors
+ * compute. */
 bool
 stela_air_metadata_global(struct stela_air_metadata *t, LLVMValueRef global,
                           struct stela_air_global *info)
@@ -155,8 +189,9 @@ stela_air_metadata_global(struct stela_air_metadata *t, LLVMValueRef global,
    bool constant = LLVMIsGlobalConstant(global);
    bool threadgroup = space == 3 && !constant && linkage == LLVMInternalLinkage && initializer &&
                       LLVMIsUndef(initializer) && !LLVMIsPoison(initializer);
-   bool data = space == 2 && constant && initializer &&
-               (linkage == LLVMInternalLinkage || linkage == LLVMPrivateLinkage);
+   bool data = (space == 2 && constant && initializer &&
+                (linkage == LLVMInternalLinkage || linkage == LLVMPrivateLinkage)) ||
+               (t->constructed && stela_air_metadata_constructed(global));
    if ((!threadgroup && !data) || LLVMIsThreadLocal(global) || LLVMIsExternallyInitialized(global) ||
        (section && *section))
       return fail(t, STELA_AIR_TARGET, "unsupported global storage or initializer ABI");
@@ -169,7 +204,7 @@ stela_air_metadata_global(struct stela_air_metadata *t, LLVMValueRef global,
       return fail(t, STELA_AIR_TARGET, "global pointers require 64-bit layout");
    LLVMTypeRef type = LLVMGlobalGetValueType(global);
    unsigned budget = 4096;
-   *info = (struct stela_air_global){.constant = constant};
+   *info = (struct stela_air_global){.constant = data};
    if (!storage_size(t, type, 0, &budget, &info->size))
       return false;
    if (!info->size)
@@ -186,12 +221,14 @@ stela_air_metadata_globals(struct stela_air_metadata *t, bool *threadgroup)
 {
    unsigned count = 0;
    *threadgroup = false;
+   LLVMValueRef constructors = stela_air_metadata_constructors(t->module);
+   t->constructed = constructors != NULL;
    for (LLVMValueRef global = LLVMGetFirstGlobal(t->module); global;
         global = LLVMGetNextGlobal(global)) {
       struct stela_air_global info;
       if (++count > AIR_MAX_ARGUMENTS)
          return fail(t, STELA_AIR_LIMIT, "global count exceeded");
-      if (stela_air_metadata_is_function_constant(t, global))
+      if (global == constructors || stela_air_metadata_is_function_constant(t, global))
          continue;
       if (!stela_air_metadata_global(t, global, &info))
          return false;

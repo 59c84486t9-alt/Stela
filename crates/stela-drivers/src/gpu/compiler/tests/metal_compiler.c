@@ -105,6 +105,40 @@ static const char *constants =
    "!50 = !{ptr addrspace(2) @scale, !\"uint\", !\"scale\", i32 0, i1 false}\n"
    "!51 = !{ptr addrspace(2) @enabled, !\"bool\", !\"enabled\", i32 3, i1 true}\n";
 
+/* Stores a program-scope constant derived from width, as Apple's compiler
+ * records `constant int derived = is_function_constant_defined(width) ?
+ * width * 2 : 8;`: twice width when it is defined, else eight. */
+#define DERIVED(twice)                                                                      \
+   "@width = linkonce_odr hidden addrspace(2) externally_initialized constant i32 undef,"   \
+   " section \"air.fc_initializer\", align 4\n"                                             \
+   "@twice_width = internal unnamed_addr addrspace(2) global i32 0, align 4\n"              \
+   "@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }]"                          \
+   " [{ i32, ptr, ptr } { i32 65535, ptr @init, ptr null }]\n"                              \
+   "declare i1 @air.is_function_constant_defined(ptr addrspace(2))\n"                       \
+   "declare i32 @air.unknown(i32)\n"                                                        \
+   "define void @derived(ptr addrspace(1) %data) {\n"                                       \
+   "%v = load i32, ptr addrspace(2) @twice_width, align 4\n"                                \
+   "store i32 %v, ptr addrspace(1) %data, align 4\n"                                        \
+   "ret void\n}\n"                                                                          \
+   "define internal void @init() section \"air.static_init\" {\n"                           \
+   "%w = load i32, ptr addrspace(2) @width, align 4\n"                                      \
+   "%defined = call i1 @air.is_function_constant_defined(ptr addrspace(2) @width)\n"        \
+   twice                                                                                    \
+   "%v = select i1 %defined, i32 %x, i32 8\n"                                               \
+   "store i32 %v, ptr addrspace(2) @twice_width, align 4\n"                                 \
+   "ret void\n}\n"                                                                          \
+   "!air.kernel = !{!2}\n"                                                                  \
+   "!2 = !{ptr @derived, !3, !4}\n!3 = !{}\n!4 = !{!40}\n"                                  \
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\"," \
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\"," \
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"              \
+   "!air.function_constants = !{!50}\n"                                                     \
+   "!50 = !{ptr addrspace(2) @width, !\"int\", !\"width\", i32 0}\n"
+
+static const char *derived = DERIVED("%x = shl nsw i32 %w, 1\n");
+/* A constructor that calls an AIR function, which no constant folds. */
+static const char *called = DERIVED("%x = call i32 @air.unknown(i32 %w)\n");
+
 #define VERTEX_RESULT "<{ <4 x float>, <2 x float> }>"
 
 static const char *vertex =
@@ -519,6 +553,47 @@ function_constants_reflect_and_specialize(void)
    assert(!compile(constants, "constants", &specialization, &error) && error.kind == STELA_AIR_INPUT);
 }
 
+/* The value of the shader's one 32-bit constant datum. */
+static int32_t
+datum(const nir_shader *shader)
+{
+   int32_t value;
+   assert(shader->constant_data_size == sizeof(value));
+   memcpy(&value, shader->constant_data, sizeof(value));
+   return value;
+}
+
+static void
+derived_constants_are_constructed_from_their_function_constants(void)
+{
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   assert(reflect(derived, "derived", &reflection, &error));
+   assert(reflection.function_constant_count == 1);
+
+   const int32_t five = 5;
+   const struct stela_air_constant_value values[] = {{0, &five, 4}};
+   struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .constants = values, .constant_count = 1,
+   };
+   nir_shader *shader = compile(derived, "derived", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "derived: %u %s\n", error.kind, error.detail);
+   assert(shader && datum(shader) == 10);
+   stela_metal_release(shader);
+
+   /* Without width, its definedness test selects eight. */
+   specialization.constant_count = 0;
+   shader = compile(derived, "derived", &specialization, &error);
+   assert(shader && datum(shader) == 8);
+   stela_metal_release(shader);
+
+   /* Constructors are evaluated, never run. */
+   assert(reflect(called, "derived", &reflection, &error));
+   assert(!compile(called, "derived", &specialization, &error) && error.kind == STELA_AIR_INSTRUCTION &&
+          strstr(error.detail, "program-scope constants"));
+}
+
 int
 main(void)
 {
@@ -529,6 +604,7 @@ main(void)
    kernels_compile_with_their_stage_in();
    mesh_stages_compile_with_their_launch();
    function_constants_reflect_and_specialize();
+   derived_constants_are_constructed_from_their_function_constants();
    glsl_type_singleton_decref();
    puts("metal compiler: ok");
    return 0;

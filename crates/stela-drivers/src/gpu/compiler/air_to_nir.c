@@ -3990,7 +3990,8 @@ translate(const void *bitcode, size_t size, const char *entry,
    }
    t.metadata = (struct stela_air_metadata){.module = t.module, .error = error, .render = stage != NULL};
    if (!stela_air_metadata_layout(&t.metadata) || !stela_air_metadata_validate(&t.metadata) ||
-       !stela_air_specialize_constants(&t.metadata, options->constants, options->constant_count))
+       !stela_air_specialize_constants(&t.metadata, options->constants, options->constant_count) ||
+       !stela_air_construct_constants(&t.metadata))
       goto done;
    t.layout = t.metadata.layout;
    t.air_minor = t.metadata.air_minor;
