@@ -1,0 +1,17 @@
+[package]
+name = "stela-driver-audio"
+version.workspace = true
+edition.workspace = true
+# Original Stela code is MIT; Linux-derived audio code retains its GPL notices.
+license = "MIT AND GPL-2.0-only AND GPL-2.0-or-later"
+
+[lints]
+workspace = true
+
+[dependencies]
+stela-driver-base = { path = "../stela-driver-base" }
+stela-driver-core = { path = "../stela-driver-core" }
+
+[dev-dependencies]
+stela-driver-base = { path = "../stela-driver-base", features = ["test-support"] }
+sha2 = { version = "0.10", default-features = false }

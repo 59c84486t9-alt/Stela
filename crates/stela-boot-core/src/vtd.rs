@@ -3,7 +3,7 @@
 // Register definitions and legacy invalidation/context sequencing adapted from
 // Linux drivers/iommu/intel/{iommu.h,iommu.c,dmar.c}, commit
 // a804c5742bff224d4cb4d25dd383554d598be32b. Source hashes and license terms:
-// crates/stela-drivers/src/platform/THIRD_PARTY.md and LICENSES/GPL-2.0-only.txt.
+// crates/stela-driver-base/src/platform/THIRD_PARTY.md and LICENSES/GPL-2.0-only.txt.
 //! Exclusive legacy VT-d unit with distinct owned requester contexts/domains.
 //! Every requester the unit covers starts in the window domain (DID 1),
 //! which maps the drivers' shared DMA region one to one, so a driver that

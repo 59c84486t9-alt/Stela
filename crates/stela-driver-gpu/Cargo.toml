@@ -1,0 +1,55 @@
+[package]
+name = "stela-driver-gpu"
+version.workspace = true
+edition.workspace = true
+# Original Stela code is MIT; Linux-derived ports retain their GPL notices
+# and the LLVM patches keep the terms of the upstream files they change.
+license = "MIT AND BSD-3-Clause AND GPL-2.0-only AND GPL-2.0-or-later AND Apache-2.0 WITH LLVM-exception"
+
+[lints]
+workspace = true
+
+[features]
+# Common native Linux kernel services; selecting this attaches no GPU.
+linux-kernel = ["dep:cc", "dep:stela-c-build", "stela-driver-base/linux-kernel"]
+# Build the implemented native NVIDIA OS hooks, not a complete GPU driver.
+nvidia-port = ["dep:cc", "dep:stela-c-build"]
+# Native Xe command/page-table support; not an initialized Intel GPU driver.
+intel-port = ["linux-kernel"]
+# Native AMD page-entry and BAR support; requires real mapping/GMC owners.
+amd-port = ["linux-kernel"]
+# Hosted AMD encoder build; its C runtime is not yet ported to UEFI.
+amd-commands = ["dep:cc"]
+# Shared Metal library input validation, independent of a physical GPU backend.
+metal = []
+
+[dependencies]
+stela-driver-base = { path = "../stela-driver-base" }
+stela-driver-core = { path = "../stela-driver-core" }
+stela-crypto = { path = "../stela-crypto" }
+zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
+triomphe = { version = "=0.1.16", default-features = false }
+
+[dev-dependencies]
+stela-driver-base = { path = "../stela-driver-base", features = ["test-support"] }
+sha2 = { version = "0.10", default-features = false }
+
+[build-dependencies]
+# Reuse retained shared-input/object/digest versions; no new crate fetch.
+libc = "0.2"
+object = { version = "0.37", default-features = false, features = ["read"] }
+sha2 = { version = "0.10", default-features = false }
+cc = { version = "1", optional = true }
+stela-c-build = { path = "../stela-c-build", optional = true }
+
+[[test]]
+name = "nvidia_mmio"
+required-features = ["nvidia-port"]
+
+[[test]]
+name = "amd_native_mmio"
+required-features = ["amd-port"]
+
+[[test]]
+name = "intel_activation"
+required-features = ["intel-port"]

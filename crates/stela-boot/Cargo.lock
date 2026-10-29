@@ -896,6 +896,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "stela-c-build"
+version = "0.1.0"
+
+[[package]]
 name = "stela-compiler"
 version = "0.1.0"
 dependencies = [
@@ -925,6 +929,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "stela-driver-audio"
+version = "0.1.0"
+dependencies = [
+ "stela-driver-base",
+ "stela-driver-core",
+]
+
+[[package]]
+name = "stela-driver-base"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "stela-c-build",
+ "stela-driver-core",
+ "triomphe",
+]
+
+[[package]]
 name = "stela-driver-core"
 version = "0.1.0"
 dependencies = [
@@ -932,19 +954,54 @@ dependencies = [
 ]
 
 [[package]]
-name = "stela-drivers"
+name = "stela-driver-gpu"
 version = "0.1.0"
 dependencies = [
  "cc",
- "hmac",
  "libc",
  "object",
- "p256",
  "sha2",
+ "stela-c-build",
  "stela-crypto",
+ "stela-driver-base",
+ "stela-driver-core",
+ "triomphe",
+ "zeroize",
+]
+
+[[package]]
+name = "stela-driver-net"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "p256",
+ "stela-crypto",
+ "stela-driver-base",
  "stela-driver-core",
  "subtle",
  "triomphe",
+ "zeroize",
+]
+
+[[package]]
+name = "stela-driver-storage"
+version = "0.1.0"
+dependencies = [
+ "stela-driver-base",
+ "stela-driver-core",
+]
+
+[[package]]
+name = "stela-drivers"
+version = "0.1.0"
+dependencies = [
+ "stela-crypto",
+ "stela-driver-audio",
+ "stela-driver-base",
+ "stela-driver-core",
+ "stela-driver-gpu",
+ "stela-driver-net",
+ "stela-driver-storage",
  "zeroize",
 ]
 

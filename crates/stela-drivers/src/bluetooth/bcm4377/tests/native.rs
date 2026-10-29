@@ -35,7 +35,7 @@ use crate::bus::{
         native_aspm::{RootBus, Topology},
         owned::{
             OwnedConfig,
-            tests::{Counters, fixture as owned_config},
+            test_support::{Counters, fixture as owned_config},
         },
     },
 };

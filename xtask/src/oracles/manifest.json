@@ -73,9 +73,9 @@
     "reason": "measurement over a local image"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-audio",
     "test": "acp70_unchanged_linux_power_and_init_oracle",
-    "source": "crates/stela-drivers/src/audio/acp63/tests/linux_oracle.rs",
+    "source": "crates/stela-driver-audio/src/acp63/tests/linux_oracle.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_ACP70_ORACLE"
@@ -83,9 +83,9 @@
     "reason": "requires unchanged Linux trace in STELA_ACP70_ORACLE"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-audio",
     "test": "unchanged_linux_acp3x_acp5x_dma_configuration",
-    "source": "crates/stela-drivers/src/audio/acp_i2s/tests.rs",
+    "source": "crates/stela-driver-audio/src/acp_i2s/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_ACP_I2S_ORACLE"
@@ -93,9 +93,9 @@
     "reason": "requires unchanged Linux trace in STELA_ACP_I2S_ORACLE"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-audio",
     "test": "realtek_capture_gain_matches_original_linux_path_and_amp_verbs",
-    "source": "crates/stela-drivers/src/audio/hda/tests/realtek_owned_models/capture_gain.rs",
+    "source": "crates/stela-driver-audio/src/hda/tests/realtek_owned_models/capture_gain.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_HDA_CAPTURE_GAIN_ORACLE"
@@ -103,9 +103,9 @@
     "reason": "requires unchanged-source HDA capture gain oracle trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-audio",
     "test": "hda_unsolicited_matches_linux_admission_and_dispatch",
-    "source": "crates/stela-drivers/src/audio/hda/tests/unsolicited_models.rs",
+    "source": "crates/stela-driver-audio/src/hda/tests/unsolicited_models.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_HDA_UNSOLICITED_ORACLE"
@@ -113,9 +113,9 @@
     "reason": "requires unchanged-source HDA unsolicited oracle trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-audio",
     "test": "unchanged_linux_cnl_host_done_notification_acknowledgement",
-    "source": "crates/stela-drivers/src/audio/intel_dsp/tests.rs",
+    "source": "crates/stela-driver-audio/src/intel_dsp/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_INTEL_SOF_ORACLE"
@@ -123,9 +123,9 @@
     "reason": "STELA_INTEL_SOF_ORACLE: run intel_dsp/reference.py against unchanged pinned Linux first"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_debounce_bins_pin_zero_and_preserved_controls",
-    "source": "crates/stela-drivers/src/bus/gpio/amd/tests/oracle.rs",
+    "source": "crates/stela-driver-base/src/bus/gpio/amd/tests/oracle.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_AMD_GPIO_ORACLE"
@@ -133,9 +133,9 @@
     "reason": "requires freshly executed pinned Linux AMD GPIO debounce oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "original_linux_gpio_encodings_and_pad_ownership",
-    "source": "crates/stela-drivers/src/bus/gpio/intel/tests/oracle.rs",
+    "source": "crates/stela-driver-base/src/bus/gpio/intel/tests/oracle.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_INTEL_GPIO_ORACLE"
@@ -143,9 +143,9 @@
     "reason": "requires a fresh pinned original Intel GPIO oracle trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_source_commands_and_events",
-    "source": "crates/stela-drivers/src/bus/i2c/amd_mp2/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/i2c/amd_mp2/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_AMD_MP2_ORACLE"
@@ -153,9 +153,9 @@
     "reason": "requires a fresh unchanged Linux source oracle trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_spi_pci_inventory_reset_remap_and_clock_functions_match_native_owner",
-    "source": "crates/stela-drivers/src/bus/lpss/spi/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/lpss/spi/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_LPSS_SPI_TRACE"
@@ -163,9 +163,9 @@
     "reason": "requires integrity-checked unchanged Linux LPSS SPI clock/reset/profile trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_source_all_pci_i2c_profiles_and_property_groups",
-    "source": "crates/stela-drivers/src/bus/lpss/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/lpss/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_LPSS_PROFILE_ORACLE"
@@ -173,9 +173,9 @@
     "reason": "requires fresh unchanged pinned LPSS PCI/property trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_source_reset_remap_effects",
-    "source": "crates/stela-drivers/src/bus/lpss/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/lpss/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_LPSS_ORACLE"
@@ -183,9 +183,9 @@
     "reason": "requires fresh unchanged pinned LPSS source trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_pm_functions_match_3072_source_cases",
-    "source": "crates/stela-drivers/src/bus/pci/power/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/pci/power/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_PCI_POWER_TRACE"
@@ -193,9 +193,9 @@
     "reason": "requires integrity-checked unchanged Linux PCI PM oracle trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_fixed_block_wire_and_return_classes",
-    "source": "crates/stela-drivers/src/bus/smbus/i801/i2c_block/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/smbus/i801/i2c_block/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_I801_I2C_BLOCK_ORACLE"
@@ -203,9 +203,9 @@
     "reason": "requires fresh unchanged Linux fixed-block oracle trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_combined_blocks_fifo_resets_and_optional_pec_policy",
-    "source": "crates/stela-drivers/src/bus/smbus/i801/pec/tests/block_process.rs",
+    "source": "crates/stela-driver-base/src/bus/smbus/i801/pec/tests/block_process.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_I801_BLOCK_PROCESS_ORACLE"
@@ -213,9 +213,9 @@
     "reason": "requires a fresh unchanged Linux E32B block-process trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_quick_target_error_policy_and_absence_of_data_or_pec_match_native",
-    "source": "crates/stela-drivers/src/bus/smbus/i801/pec/tests/quick.rs",
+    "source": "crates/stela-driver-base/src/bus/smbus/i801/pec/tests/quick.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_I801_QUICK_ORACLE"
@@ -223,9 +223,9 @@
     "reason": "requires a fresh unchanged Linux Quick/PEC exclusion trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_byte_done_payload_ack_last_byte_and_pec_policy",
-    "source": "crates/stela-drivers/src/bus/smbus/i801/pec/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/smbus/i801/pec/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_I801_BYTE_PEC_ORACLE"
@@ -233,9 +233,9 @@
     "reason": "requires a fresh unchanged Linux BYTE_DONE PEC trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_process_call_registers_and_pec_error_policy",
-    "source": "crates/stela-drivers/src/bus/smbus/i801/pec/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/smbus/i801/pec/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_I801_PROCESS_PEC_ORACLE"
@@ -243,9 +243,9 @@
     "reason": "requires a fresh unchanged Linux process-call PEC trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_access_crc_modes_and_error_precedence",
-    "source": "crates/stela-drivers/src/bus/smbus/i801/pec/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/smbus/i801/pec/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_I801_PEC_ORACLE"
@@ -253,9 +253,9 @@
     "reason": "requires a fresh unchanged Linux PEC access/error trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_amd_immediate_words_page_ack_and_timeout_effects_match_native",
-    "source": "crates/stela-drivers/src/bus/soundwire/amd/tests/oracle.rs",
+    "source": "crates/stela-driver-base/src/bus/soundwire/amd/tests/oracle.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_AMD_SOUNDWIRE_ORACLE"
@@ -263,9 +263,9 @@
     "reason": "requires pinned original AMD SoundWire command/polling records"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_command_and_page_batches_match_native_control_word_effects",
-    "source": "crates/stela-drivers/src/bus/soundwire/cadence/tests/oracle.rs",
+    "source": "crates/stela-driver-base/src/bus/soundwire/cadence/tests/oracle.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_CADENCE_SOUNDWIRE_ORACLE"
@@ -273,9 +273,9 @@
     "reason": "requires integrity-checked original Cadence command transcripts"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_memory_wire_effects_and_frontend_frequency_limits_match_native",
-    "source": "crates/stela-drivers/src/bus/spi/amd/memory/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/spi/amd/memory/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_AMD_SPI_MEMORY_TRACE"
@@ -283,9 +283,9 @@
     "reason": "requires unchanged pinned AMD and SPI memory-core source records"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_fifo_commands_match_all_4970_bounded_partitions",
-    "source": "crates/stela-drivers/src/bus/spi/amd/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/spi/amd/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_AMD_SPI_TRACE"
@@ -293,9 +293,9 @@
     "reason": "requires integrity-checked unchanged Linux AMD SPI oracle trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_lpss_profiles_cs_clock_and_all_word_helpers_match_native_io",
-    "source": "crates/stela-drivers/src/bus/spi/pxa2xx/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/spi/pxa2xx/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_PXA2XX_SPI_TRACE"
@@ -303,9 +303,9 @@
     "reason": "requires integrity-checked unchanged Linux LPSS/PXA2xx source trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_adapter_controls_and_nfc_register_effects_match",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/adapter/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/adapter/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_THUNDERBOLT_ADAPTER_ORACLE"
@@ -313,9 +313,9 @@
     "reason": "requires hash-pinned unchanged Linux adapter control trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_config_frames_match_rust_wire_bytes",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/config/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/config/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_THUNDERBOLT_CONFIG_ORACLE"
@@ -323,9 +323,9 @@
     "reason": "requires hash-pinned unchanged Linux C helper trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_controller_preparation_effects_and_match_table_agree",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/controller/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/controller/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_THUNDERBOLT_CONTROLLER_ORACLE"
@@ -333,9 +333,9 @@
     "reason": "requires hash-pinned unchanged Linux NHI preparation trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_dp_complete_write_transcript_matches_native_dma",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/displayport/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/displayport/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_THUNDERBOLT_DP_ORACLE"
@@ -343,9 +343,9 @@
     "reason": "requires pinned unchanged Linux DP activation/stop transcript"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_drom_acquisition_crc_and_port_metadata_match_native_frames",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/drom/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/drom/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_THUNDERBOLT_DROM_ORACLE"
@@ -353,9 +353,9 @@
     "reason": "requires pinned unchanged Linux DROM acquisition/CRC/parser transcript"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_hop_deactivation_register_effects_match",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/hop.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/hop.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_THUNDERBOLT_HOP_ORACLE"
@@ -363,9 +363,9 @@
     "reason": "requires hash-pinned unchanged Linux hop-deactivation trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_icm_driver_ready_and_command_wire_agree",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/icm/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/icm/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_THUNDERBOLT_ICM_ORACLE"
@@ -373,9 +373,9 @@
     "reason": "requires hash-pinned unchanged Linux ICM parsing/TX trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_link_bonding_credit_and_two_ended_write_trace_matches_dma",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/link/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/link/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_THUNDERBOLT_LINK_ORACLE"
@@ -383,9 +383,9 @@
     "reason": "requires hash-pinned unchanged Gen2/3 Linux link trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_router_operation_bytes_and_source_statuses_match_native_dma",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/operations/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/operations/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_THUNDERBOLT_OPERATIONS_ORACLE"
@@ -393,9 +393,9 @@
     "reason": "requires pinned unchanged Linux native router operation transcript"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_path_usb3_complete_write_trace_matches_dma",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/path/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/path/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_THUNDERBOLT_PATH_ORACLE"
@@ -403,9 +403,9 @@
     "reason": "requires unchanged Linux two-hop path oracle trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_pcie_complete_write_transcript_matches_native_dma",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/pcie/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/pcie/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_THUNDERBOLT_PCIE_ORACLE"
@@ -413,9 +413,9 @@
     "reason": "requires pinned unchanged Linux PCIe activation/stop transcript"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_usb4_power_register_effects_match",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/power/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/power/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_THUNDERBOLT_POWER_ORACLE"
@@ -423,9 +423,9 @@
     "reason": "requires pinned unchanged Linux USB4 wake/sleep trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_router_full_write_trace_matches_dma_engine",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/router/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/router/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_THUNDERBOLT_ROUTER_ORACLE"
@@ -433,9 +433,9 @@
     "reason": "requires hash-pinned unchanged full Linux USB4 router trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_router_adapter_bitfields_and_helpers_match",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/topology/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/topology/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_THUNDERBOLT_TOPOLOGY_ORACLE"
@@ -443,9 +443,9 @@
     "reason": "requires hash-pinned unchanged Linux topology helper trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_usb3_bandwidth_complete_writes_and_rates_match_dma",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/usb3/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/usb3/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_USB3_BANDWIDTH_ORACLE"
@@ -453,9 +453,9 @@
     "reason": "requires unchanged Linux root USB3 bandwidth oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_usb3_tunnel_full_bandwidth_paths_and_endpoint_writes_match_dma",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/usb3/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/usb3/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_USB3_TUNNEL_ORACLE"
@@ -463,9 +463,9 @@
     "reason": "requires unchanged Linux full root USB3 activation oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_usb3_complete_activation_optional_release_and_stop_match_dma",
-    "source": "crates/stela-drivers/src/bus/thunderbolt/usb3/tests.rs",
+    "source": "crates/stela-driver-base/src/bus/thunderbolt/usb3/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_USB3_STOP_ORACLE"
@@ -473,25 +473,25 @@
     "reason": "requires unchanged Linux complete USB3 stop/release oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-gpu",
     "test": "trees_child",
-    "source": "crates/stela-drivers/src/gpu/linux/task/tests.rs",
+    "source": "crates/stela-driver-gpu/src/linux/task/tests.rs",
     "kind": "isolation",
     "inputs": [],
     "reason": "isolated exact child of gpu::c_tests::linux_trees; no global registry sharing"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-gpu",
     "test": "mutex_child",
-    "source": "crates/stela-drivers/src/gpu/linux/task/tests.rs",
+    "source": "crates/stela-driver-gpu/src/linux/task/tests.rs",
     "kind": "isolation",
     "inputs": [],
     "reason": "isolated exact child of gpu::c_tests::linux_mutex_wait"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-gpu",
     "test": "mutex_quarantine_child",
-    "source": "crates/stela-drivers/src/gpu/linux/task/tests.rs",
+    "source": "crates/stela-driver-gpu/src/linux/task/tests.rs",
     "kind": "isolation",
     "inputs": [],
     "reason": "isolated exact child; intentional quarantine cannot share normal teardown proof"
@@ -728,9 +728,9 @@
     "reason": "requires STELA_SYNAPTICS_ORACLE from unchanged pinned Linux packet helpers"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_live_read_data_flags_and_exact_independent_alive_access_match_native",
-    "source": "crates/stela-drivers/src/net/aqtion/tests/liveness.rs",
+    "source": "crates/stela-driver-net/src/aqtion/tests/liveness.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_AQTION_LIVENESS_ORACLE"
@@ -738,9 +738,9 @@
     "reason": "requires pinned unchanged Linux live-read transcript"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_flb_rbl_complete_reset_writes_and_settling_match_hardware",
-    "source": "crates/stela-drivers/src/net/aqtion/tests/reset_source.rs",
+    "source": "crates/stela-driver-net/src/aqtion/tests/reset_source.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_AQTION_RESET_ORACLE"
@@ -748,9 +748,9 @@
     "reason": "requires pinned unchanged Linux Atlantic reset transcript"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_aqtion_registers",
-    "source": "crates/stela-drivers/src/net/aqtion/tests.rs",
+    "source": "crates/stela-driver-net/src/aqtion/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_AQTION_REGISTERS_ORACLE"
@@ -758,9 +758,9 @@
     "reason": "UNRUN: set STELA_AQTION_REGISTERS_ORACLE to the unchanged Linux trace.txt"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_source_pci_board_mac_join_is_exact_and_exhaustive",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/i219.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/i219.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_I219_SPT_ORACLE",
@@ -771,9 +771,9 @@
     "reason": "set all four STELA_E1000E_PCH_I219_*_ORACLE paths"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_family_nvm_policies_keep_repair_checksum_and_tgp_exemptions_distinct",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/i219.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/i219.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_I219_SPT_ORACLE",
@@ -784,9 +784,9 @@
     "reason": "set all four STELA_E1000E_PCH_I219_*_ORACLE paths"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_family_reset_post_phy_ulp_and_platform_effects",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/i219.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/i219.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_I219_SPT_ORACLE",
@@ -797,9 +797,9 @@
     "reason": "set all four STELA_E1000E_PCH_I219_*_ORACLE paths"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_lpt_post_reset_lcd_smbus_and_oem_effects",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/lpt/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/lpt/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_LPT_ORACLE"
@@ -807,9 +807,9 @@
     "reason": "set STELA_E1000E_PCH_LPT_ORACLE to an unchanged helper trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_lpt_platform_ltr_effects",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/lpt/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/lpt/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_LPT_ORACLE"
@@ -817,9 +817,9 @@
     "reason": "set STELA_E1000E_PCH_LPT_ORACLE to an unchanged helper trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_lpt_global_reset_prefix_and_forbidden_flush_boundary",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/lpt/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/lpt/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_LPT_ORACLE"
@@ -827,9 +827,9 @@
     "reason": "set STELA_E1000E_PCH_LPT_ORACLE to an unchanged helper trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_dmi_matches_and_quirk_table_preserve_byte_string_semantics",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/mtp/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/mtp/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_MTP_DMI_ORACLE"
@@ -837,9 +837,9 @@
     "reason": "set STELA_E1000E_PCH_MTP_DMI_ORACLE"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "exact_remaining_fourteen_ids_match_source_table_without_broadening_old_constructor",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/mtp/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/mtp/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_MTP_ORACLE",
@@ -848,9 +848,9 @@
     "reason": "set MTP/PTP source oracle paths"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_mtp_ptp_reset_post_ulp_ltr_shra_eee_link_flush_and_k1",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/mtp/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/mtp/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_MTP_ORACLE",
@@ -859,9 +859,9 @@
     "reason": "set MTP/PTP source oracle paths"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_reset_dpg_tail_is_ptp_only_and_preserves_other_bits",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/mtp/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/mtp/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_MTP_ORACLE",
@@ -870,9 +870,9 @@
     "reason": "set MTP/PTP source oracle paths"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_mdic_protocol_retry_limit_delays_and_both_directions",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/mtp/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/mtp/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_MTP_ORACLE",
@@ -881,9 +881,9 @@
     "reason": "set MTP/PTP source oracle paths"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_lpt_shared_address_ownership_and_register_effects",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/queue/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/queue/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_LPT_ORACLE"
@@ -891,9 +891,9 @@
     "reason": "set STELA_E1000E_PCH_LPT_ORACLE to an unchanged helper trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_lpt_eee_disabled_phy_and_emi_effects",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/queue/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/queue/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_LPT_ORACLE"
@@ -901,9 +901,9 @@
     "reason": "set STELA_E1000E_PCH_LPT_ORACLE to an unchanged helper trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_spt_shared_address_and_eee_disabled_effects",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/queue/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/queue/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_SPT_ORACLE"
@@ -911,9 +911,9 @@
     "reason": "set STELA_E1000E_PCH_SPT_ORACLE to an unchanged helper trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_spt_link_phy_mac_and_platform_workarounds",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/queue/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/queue/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_SPT_ORACLE"
@@ -921,9 +921,9 @@
     "reason": "set STELA_E1000E_PCH_SPT_ORACLE to an unchanged helper trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_spt_owned_descriptor_flush_effects_and_exact_dma_bytes",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/queue/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/queue/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_SPT_ORACLE"
@@ -931,9 +931,9 @@
     "reason": "set STELA_E1000E_PCH_SPT_ORACLE to an unchanged helper trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_family_shra_eee_link_flush_and_dma_clock_effects",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/queue/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/queue/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_I219_SPT_ORACLE",
@@ -944,9 +944,9 @@
     "reason": "set all four STELA_E1000E_PCH_I219_*_ORACLE paths"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "source_nvm_outcomes_compose_through_every_cold_reset_packet_and_stop",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/queue/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/queue/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_I219_SPT_ORACLE",
@@ -957,9 +957,9 @@
     "reason": "set all four STELA_E1000E_PCH_I219_*_ORACLE paths"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "mandatory_mtp_nvm_source_outcomes_and_clock_policy_compose_through_packet_stop",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/queue/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/queue/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_MTP_ORACLE",
@@ -968,9 +968,9 @@
     "reason": "set MTP/PTP source oracle paths"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_spt_post_reset_ltr_and_global_reset_effects",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/spt/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/spt/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_SPT_ORACLE"
@@ -978,9 +978,9 @@
     "reason": "set STELA_E1000E_PCH_SPT_ORACLE to an unchanged helper trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_spt_forced_ulp_exit_ordered_effects",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/spt/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/spt/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_SPT_ORACLE"
@@ -988,9 +988,9 @@
     "reason": "set STELA_E1000E_PCH_SPT_ORACLE to an unchanged helper trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_global_reset_prefix_register_effects",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_RESET_ORACLE"
@@ -998,9 +998,9 @@
     "reason": "set STELA_E1000E_PCH_RESET_ORACLE to an unchanged helper trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_post_reset_lcd_and_oem_effects",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/cold/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/cold/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_POST_ORACLE"
@@ -1008,9 +1008,9 @@
     "reason": "set STELA_E1000E_PCH_POST_ORACLE to an unchanged helper trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_pch_nvm_register_effects_and_payloads",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/nvm/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/nvm/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_NVM_ORACLE"
@@ -1018,9 +1018,9 @@
     "reason": "requires unchanged pinned Linux PCH NVM oracle trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_pch_phy_register_effects",
-    "source": "crates/stela-drivers/src/net/e1000e/pch/tests.rs",
+    "source": "crates/stela-driver-net/src/e1000e/pch/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_E1000E_PCH_ORACLE"
@@ -1028,9 +1028,9 @@
     "reason": "requires unchanged pinned Linux PCH PHY oracle trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_advertisement_matches_real_mdio_and_mmd_operations",
-    "source": "crates/stela-drivers/src/net/igc/hardware/tests.rs",
+    "source": "crates/stela-driver-net/src/igc/hardware/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IGC_AUTONEG_ORACLE"
@@ -1038,9 +1038,9 @@
     "reason": "requires the pinned unchanged Linux C advertisement oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_5761_initialization_selections_match_kept_packet_owner",
-    "source": "crates/stela-drivers/src/net/tg3/packet/tests/bcm5761.rs",
+    "source": "crates/stela-driver-net/src/tg3/packet/tests/bcm5761.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TG3_BCM5761_ORACLE"
@@ -1048,9 +1048,9 @@
     "reason": "set STELA_TG3_BCM5761_ORACLE from unchanged original tg3_bcm5761_oracle.py"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_5761_phy_power_writes_match_clock_and_kept_owner",
-    "source": "crates/stela-drivers/src/net/tg3/packet/tests/bcm5761_power.rs",
+    "source": "crates/stela-driver-net/src/tg3/packet/tests/bcm5761_power.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TG3_BCM5761_PHY_POWER_ORACLE"
@@ -1058,9 +1058,9 @@
     "reason": "set STELA_TG3_BCM5761_PHY_POWER_ORACLE from original tg3_phy_power_oracle.py bcm5761 mode"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_5720_5762_selected_packet_setup_matches_registers",
-    "source": "crates/stela-drivers/src/net/tg3/packet/tests/bcm5762.rs",
+    "source": "crates/stela-driver-net/src/tg3/packet/tests/bcm5762.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TG3_PACKET_ORACLE"
@@ -1068,9 +1068,9 @@
     "reason": "UNRUN: set STELA_TG3_PACKET_ORACLE from unchanged pinned tg3_bcm5762_packet_oracle.py"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_clkreq_flag_and_complete_word_policy_match_packet_owner",
-    "source": "crates/stela-drivers/src/net/tg3/packet/tests/clkreq.rs",
+    "source": "crates/stela-driver-net/src/tg3/packet/tests/clkreq.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TG3_CLKREQ_ORACLE"
@@ -1078,9 +1078,9 @@
     "reason": "set STELA_TG3_CLKREQ_ORACLE from unchanged original tg3_clkreq_oracle.py"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_aux_decode_and_mac_duplex_match_driver",
-    "source": "crates/stela-drivers/src/net/tg3/packet/tests/phy_link.rs",
+    "source": "crates/stela-driver-net/src/tg3/packet/tests/phy_link.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TG3_PHY_LINK_ORACLE"
@@ -1088,9 +1088,9 @@
     "reason": "requires original Linux tg3_phy_link_oracle.py trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_phy_power_writes_match_kept_driver",
-    "source": "crates/stela-drivers/src/net/tg3/packet/tests/phy_power.rs",
+    "source": "crates/stela-driver-net/src/tg3/packet/tests/phy_power.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TG3_PHY_POWER_ORACLE"
@@ -1098,9 +1098,9 @@
     "reason": "requires original Linux tg3_phy_power_oracle.py trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_complete_rdma_mode_matches_register_and_raw_traffic",
-    "source": "crates/stela-drivers/src/net/tg3/packet/tests/rdma_mode.rs",
+    "source": "crates/stela-driver-net/src/tg3/packet/tests/rdma_mode.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TG3_RDMA_MODE_ORACLE"
@@ -1108,9 +1108,9 @@
     "reason": "set STELA_TG3_RDMA_MODE_ORACLE from unchanged original tg3_rdma_mode_oracle.py"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_complete_receive_policy_crc_hash_slots_writes_and_settling_match_native",
-    "source": "crates/stela-drivers/src/net/tg3/packet/tests/receive_filter.rs",
+    "source": "crates/stela-driver-net/src/tg3/packet/tests/receive_filter.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TG3_FILTER_ORACLE"
@@ -1118,9 +1118,9 @@
     "reason": "set STELA_TG3_FILTER_ORACLE from unchanged original tg3_filter_oracle.py"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_ape_mdio_sram_transport",
-    "source": "crates/stela-drivers/src/net/tg3/transport/tests.rs",
+    "source": "crates/stela-driver-net/src/tg3/transport/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TG3_TRANSPORT_ORACLE"
@@ -1128,9 +1128,9 @@
     "reason": "UNRUN: set STELA_TG3_TRANSPORT_ORACLE from pinned unchanged-Linux tg3_transport_oracle.py"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_linux_cold_mld_mac_and_inactive_link_bytes",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/ax200/mac_context/mld.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/ax200/mac_context/mld.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_MLD_MAC_TRACE"
@@ -1138,9 +1138,9 @@
     "reason": "requires unchanged pinned Linux cold MLD MAC/link trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_linux_mld_link_activation_unassign_reset_and_phy_reference_bytes",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/ax200/scan/phy/tx_power/binding/mld_link.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/ax200/scan/phy/tx_power/binding/mld_link.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_MLD_LINK_TRACE"
@@ -1148,9 +1148,9 @@
     "reason": "requires unchanged pinned Linux MLD active-link and full unassign trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_linux_mld_station_tlc_and_no_queue_removal_bytes",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/ax200/scan/phy/tx_power/binding/peer/mld.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/ax200/scan/phy/tx_power/binding/peer/mld.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_MLD_PEER_TRACE"
@@ -1158,9 +1158,9 @@
     "reason": "requires unchanged pinned Linux MLD station/TLC/flush trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_linux_mld_scheduler_remove_and_original_free_call_bytes",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/ax200/scan/phy/tx_power/binding/peer/queue.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/ax200/scan/phy/tx_power/binding/peer/queue.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_MLD_QUEUE_TRACE"
@@ -1168,9 +1168,9 @@
     "reason": "requires unchanged pinned Linux MLD queue removal trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_linux_legacy_station_tlc_and_no_queue_flush_bytes",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/ax200/scan/phy/tx_power/binding/peer.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/ax200/scan/phy/tx_power/binding/peer.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_PEER_TRACE"
@@ -1178,9 +1178,9 @@
     "reason": "requires unchanged pinned Linux legacy station/TLC/flush trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_linux_cold_quota_layout_offload_and_acknowledged_cache",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/ax200/scan/phy/tx_power/binding.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/ax200/scan/phy/tx_power/binding.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_QUOTA_TRACE"
@@ -1188,9 +1188,9 @@
     "reason": "requires unchanged pinned Linux cold quota/cache trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_linux_cold_binding_sf_and_mac_power_bytes",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/ax200/scan/phy/tx_power/binding.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/ax200/scan/phy/tx_power/binding.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_BINDING_TRACE"
@@ -1198,9 +1198,9 @@
     "reason": "requires unchanged pinned Linux cold binding/SF/MAC-power trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_linux_transmit_power_bytes_and_explicit_limit_boundary",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/ax200/scan/phy/tx_power.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/ax200/scan/phy/tx_power.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_TRANSMIT_POWER_TRACE"
@@ -1208,9 +1208,9 @@
     "reason": "requires unchanged pinned Linux SET_LINK transmit-power trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_linux_phy_context_and_rlc_bytes",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/ax200/scan/phy.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/ax200/scan/phy.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_PHY_TRACE"
@@ -1218,9 +1218,9 @@
     "reason": "requires unchanged pinned Linux PHY/RLC trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_linux_cold_coexistence_ci_and_management_antenna",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/coexistence.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/coexistence.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_COEX_TRACE"
@@ -1228,9 +1228,9 @@
     "reason": "requires unchanged original coexistence/SMPS/antenna source trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_sentinel_index_and_reclaim_oracle",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/hcmd.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/hcmd.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_HCMD_ORACLE"
@@ -1238,9 +1238,9 @@
     "reason": "requires freshly built unchanged Linux HCMD helper oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax200_binding_schema_does_not_bypass_mld_mac_link_requirement",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1248,9 +1248,9 @@
     "reason": "requires unchanged pinned AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax200_board_schema_and_native_owner",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_board_tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_board_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1258,9 +1258,9 @@
     "reason": "requires unchanged pinned AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax200_bt_config6_ci2_and_fixed_old_profile_source_owner",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests/peer_tests/mld_tests/queue_tests/coexistence_tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests/peer_tests/mld_tests/queue_tests/coexistence_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1268,9 +1268,9 @@
     "reason": "requires unchanged pinned AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax200_mld_image_refuses_legacy_mac_before_effects",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_mac_tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_mac_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1278,9 +1278,9 @@
     "reason": "requires unchanged pinned AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_ax200_firmware_selects_mld_activation_and_unassign_commands",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests/mld_link_tests/cases.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests/mld_link_tests/cases.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1288,9 +1288,9 @@
     "reason": "requires unchanged pinned AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_ax200_firmware_selects_mld_mac_and_inactive_link_commands",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_mac_tests/mld_tests/cases.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_mac_tests/mld_tests/cases.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1298,9 +1298,9 @@
     "reason": "requires unchanged pinned AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_ax200_firmware_selects_mld_station_and_tlc_commands",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests/peer_tests/mld_tests/cases.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests/peer_tests/mld_tests/cases.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1308,9 +1308,9 @@
     "reason": "requires unchanged pinned AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax200_mld_scheduler3_reply2_allocates_and_removes_original_queue_dma",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests/peer_tests/mld_tests/queue_tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests/peer_tests/mld_tests/queue_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1318,9 +1318,9 @@
     "reason": "requires unchanged pinned AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax200_umac15_schema_does_not_bypass_mld_mac_requirement",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_native_scan_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1328,9 +1328,9 @@
     "reason": "requires unchanged pinned AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax200_mld_peer_schema_requires_distinct_mac_link_owner",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests/peer_tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests/binding_tests/peer_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1338,9 +1338,9 @@
     "reason": "requires unchanged pinned AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax200_phy4_rlc2_schema_does_not_bypass_mld_mac_requirement",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1348,9 +1348,9 @@
     "reason": "requires unchanged pinned AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax200_scan_cfg5_uses_real_rx_tx_antennas_and_original_dma_epoch",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_scan_tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_scan_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1358,9 +1358,9 @@
     "reason": "requires actual unchanged pinned AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax200_thermal_power_versions_and_capability_branches",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_tests/thermal.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_tests/thermal.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1368,9 +1368,9 @@
     "reason": "requires pinned unchanged AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "mcc_ax200_v5_response_is_kept_with_original_dma_epoch",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_tests/mcc.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_tests/mcc.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1378,9 +1378,9 @@
     "reason": "requires pinned unchanged AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax200_power5_schema_does_not_bypass_mld_mac_requirement",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/ax200_native_scan_tests/phy_tests/transmit_power_tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1388,9 +1388,9 @@
     "reason": "requires unchanged pinned AX200 firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "cold_radio_images_run_source_prefix_with_distinct_offload_and_latencies",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/cold_radio.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/cold_radio.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1398,9 +1398,9 @@
     "reason": "requires actual pinned Intel firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unified_images_drive_real_command_and_notification_epoch",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/nvm_completion.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/nvm_completion.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1408,9 +1408,9 @@
     "reason": "requires actual pinned Intel firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "rx_recycling_unchanged_source_free_producer_and_vid_oracle",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/receive_recycling.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/receive_recycling.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_RX_RECYCLE_ORACLE"
@@ -1418,9 +1418,9 @@
     "reason": "requires freshly built unchanged Intel RX restock oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax210_ucode_external_pnvm_source_dma_doorbell_and_notification",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/firmware_inputs.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/firmware_inputs.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1428,9 +1428,9 @@
     "reason": "requires actual AX210 firmware and PNVM assets; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax210_image_iml_rom_rx_alive_preserves_pnvm_allocations",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/firmware_inputs.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/firmware_inputs.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1438,9 +1438,9 @@
     "reason": "requires pinned actual AX210 firmware; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax200_image_publishes_owned_context_and_consumes_completed_alive",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/firmware_inputs.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/firmware_inputs.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1448,9 +1448,9 @@
     "reason": "requires pinned actual AX200 firmware; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "lari_images_drive_lari6_without_extension_and_lari8_with_extension",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/lari_policy.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/tests/lari_policy.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1458,9 +1458,9 @@
     "reason": "requires actual pinned Intel firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "command_headers_and_tfh_descriptors_match_linux",
-    "source": "crates/stela-drivers/src/net/wifi/intel/command/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/command/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_COMMAND_ORACLE"
@@ -1468,9 +1468,9 @@
     "reason": "requires pinned unchanged Linux command helper oracle; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_context_and_payload_copy_oracle",
-    "source": "crates/stela-drivers/src/net/wifi/intel/context.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/context.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_CONTEXT_ORACLE",
@@ -1479,9 +1479,9 @@
     "reason": "requires pinned Linux context trace and AX200 firmware; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_ax210_context_scratch_iml_and_payload_copies",
-    "source": "crates/stela-drivers/src/net/wifi/intel/context_v2/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/context_v2/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_CONTEXT_V2_ORACLE",
@@ -1490,9 +1490,9 @@
     "reason": "requires pinned actual AX210 image and unchanged context-v2 oracle; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "images_preserve_every_mapped_payload_and_paging_lifetime",
-    "source": "crates/stela-drivers/src/net/wifi/intel/dma.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/dma.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1500,9 +1500,9 @@
     "reason": "requires pinned actual Intel firmware; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "real_ax200_ax210_images_keep_every_section_and_paging_byte",
-    "source": "crates/stela-drivers/src/net/wifi/intel/firmware.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/firmware.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1510,9 +1510,9 @@
     "reason": "requires pinned redistributable Intel firmware; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_channel_inventory_and_full_restriction_oracle",
-    "source": "crates/stela-drivers/src/net/wifi/intel/mcc/channel.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/mcc/channel.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_CHANNEL_ORACLE"
@@ -1520,9 +1520,9 @@
     "reason": "requires fresh unchanged Linux full channel restriction oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_mcc_layouts_and_capability_semantics_oracle",
-    "source": "crates/stela-drivers/src/net/wifi/intel/mcc.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/mcc.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_MCC_ORACLE"
@@ -1530,9 +1530,9 @@
     "reason": "requires freshly built unchanged MCC capability/layout oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "images_select_same_v4_layout_but_different_capability_semantics",
-    "source": "crates/stela-drivers/src/net/wifi/intel/mcc.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/mcc.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1540,9 +1540,9 @@
     "reason": "requires actual pinned Intel firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "exact_linux_structures_and_unchanged_mac_permutation_oracle",
-    "source": "crates/stela-drivers/src/net/wifi/intel/nvm.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/nvm.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_NVM_ORACLE"
@@ -1550,9 +1550,9 @@
     "reason": "requires freshly built unchanged Intel NVM layout oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "images_advertise_nvm_v4_with_correct_api_stride",
-    "source": "crates/stela-drivers/src/net/wifi/intel/nvm.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/nvm.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1560,9 +1560,9 @@
     "reason": "requires actual pinned Intel firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_step_mailboxes_and_every_revision",
-    "source": "crates/stela-drivers/src/net/wifi/intel/platform/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/platform/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_STEP_ORACLE"
@@ -1570,9 +1570,9 @@
     "reason": "requires pinned unchanged Linux STEP helper trace; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_inline_descriptor_and_reduced_power_oracle",
-    "source": "crates/stela-drivers/src/net/wifi/intel/pnvm/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/pnvm/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_UEFI_ORACLE"
@@ -1580,9 +1580,9 @@
     "reason": "requires unchanged Linux UEFI helper trace; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "ax210_skus_match_unchanged_linux_selector",
-    "source": "crates/stela-drivers/src/net/wifi/intel/pnvm/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/pnvm/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES",
@@ -1591,9 +1591,9 @@
     "reason": "requires pinned PNVM asset and unchanged Linux selector trace; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pnvm_skus_preserve_payloads_in_both_layouts",
-    "source": "crates/stela-drivers/src/net/wifi/intel/pnvm_dma/tests/reference.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/pnvm_dma/tests/reference.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1601,9 +1601,9 @@
     "reason": "requires pinned actual PNVM asset; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pnvm_and_reduced_power_tables_match_linux_for_both_layouts",
-    "source": "crates/stela-drivers/src/net/wifi/intel/pnvm_dma/tests/reference.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/pnvm_dma/tests/reference.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES",
@@ -1612,9 +1612,9 @@
     "reason": "requires actual PNVM and unchanged Linux payload/setter helper oracle; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_ownership_reset_and_clock_effects",
-    "source": "crates/stela-drivers/src/net/wifi/intel/power/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/power/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_POWER_ORACLE"
@@ -1622,9 +1622,9 @@
     "reason": "requires unchanged pinned Linux power-helper trace; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_full_power_table_getters_and_maps_oracle",
-    "source": "crates/stela-drivers/src/net/wifi/intel/radio/bios/power_tables/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/radio/bios/power_tables/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_POWER_TABLES_ORACLE"
@@ -1632,9 +1632,9 @@
     "reason": "requires fresh unchanged Linux UEFI power-table getter oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_bios_selection_cache_and_complete_raw_call_order",
-    "source": "crates/stela-drivers/src/net/wifi/intel/radio/bios/service/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/radio/bios/service/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_BIOS_SELECTION_ORACLE"
@@ -1642,9 +1642,9 @@
     "reason": "requires fresh unchanged Linux BIOS source-selection/cache oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_uefi_radio_scalar_dsm_and_phy_getters_oracle",
-    "source": "crates/stela-drivers/src/net/wifi/intel/radio/bios.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/radio/bios.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_RADIO_BIOS_ORACLE"
@@ -1652,9 +1652,9 @@
     "reason": "requires fresh unchanged Linux UEFI radio scalar/DSM/PHY getter oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "images_preserve_capability_skips_and_real_control_schemas",
-    "source": "crates/stela-drivers/src/net/wifi/intel/radio/control.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/radio/control.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1662,9 +1662,9 @@
     "reason": "requires actual pinned Intel firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_control_helpers_match_every_complete_wire_command",
-    "source": "crates/stela-drivers/src/net/wifi/intel/radio/control.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/radio/control.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_CONTROL_ORACLE"
@@ -1672,9 +1672,9 @@
     "reason": "requires fresh unchanged Linux complete control-helper oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "images_select_source_lari6_and_lari8_with_frozen_extension",
-    "source": "crates/stela-drivers/src/net/wifi/intel/radio/lari.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/radio/lari.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1682,9 +1682,9 @@
     "reason": "requires actual pinned Intel firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_lari_full_preparation_and_ordered_send_oracle",
-    "source": "crates/stela-drivers/src/net/wifi/intel/radio/lari.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/radio/lari.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_LARI_ORACLE"
@@ -1692,9 +1692,9 @@
     "reason": "requires fresh unchanged Linux LARI preparation/ordered-send oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "images_use_source_cold_prefix_schemas_and_distinct_smart_fifo_policy",
-    "source": "crates/stela-drivers/src/net/wifi/intel/radio.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/radio.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1702,9 +1702,9 @@
     "reason": "requires actual pinned Intel firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_cold_prefix_command_helpers_oracle",
-    "source": "crates/stela-drivers/src/net/wifi/intel/radio.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/radio.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_RADIO_ORACLE"
@@ -1712,9 +1712,9 @@
     "reason": "requires freshly built unchanged Linux radio-prefix helper oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_crypto_and_logical_skb_bytes_match",
-    "source": "crates/stela-drivers/src/net/wifi/intel/receive/mpdu/normalize.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/receive/mpdu/normalize.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_RX_CRYPTO_ORACLE"
@@ -1722,9 +1722,9 @@
     "reason": "requires unchanged pinned Linux RX crypto/create-SKB oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "images_admit_only_source_family_descriptor_versions",
-    "source": "crates/stela-drivers/src/net/wifi/intel/receive/mpdu/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/receive/mpdu/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1732,9 +1732,9 @@
     "reason": "requires actual pinned Intel firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_packed_source_fields_and_masks_match_all_metadata_vectors",
-    "source": "crates/stela-drivers/src/net/wifi/intel/receive/mpdu/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/receive/mpdu/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_MPDU_ORACLE"
@@ -1742,9 +1742,9 @@
     "reason": "requires fresh unchanged packed RX-MPDU source ABI oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "both_firmware_images_negotiate_alive_six",
-    "source": "crates/stela-drivers/src/net/wifi/intel/receive/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/receive/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1752,9 +1752,9 @@
     "reason": "requires pinned actual firmware; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_donor_structs_match_every_alive_field_and_ax210_descriptor_lane",
-    "source": "crates/stela-drivers/src/net/wifi/intel/receive/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/receive/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_RECEIVE_ORACLE"
@@ -1762,9 +1762,9 @@
     "reason": "requires pinned unchanged donor struct layout trace; see THIRD_PARTY.md"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "images_select_queue_command3_reply2_and_stage_canonical_native_maps",
-    "source": "crates/stela-drivers/src/net/wifi/intel/transmit/queue.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/transmit/queue.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1772,9 +1772,9 @@
     "reason": "requires pinned actual Intel firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_queue_allocation_and_reply_helpers_match_exact_wire_bytes",
-    "source": "crates/stela-drivers/src/net/wifi/intel/transmit/queue.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/transmit/queue.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_TX_QUEUE_ORACLE"
@@ -1782,9 +1782,9 @@
     "reason": "requires unchanged pinned Linux TX queue/response helper oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "images_negotiate_complete_source_format2_and_tx_response7",
-    "source": "crates/stela-drivers/src/net/wifi/intel/transmit/response.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/transmit/response.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1792,9 +1792,9 @@
     "reason": "requires pinned actual Intel firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_full_response_layout_and_trailing_ssn_helpers_match",
-    "source": "crates/stela-drivers/src/net/wifi/intel/transmit/response.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/transmit/response.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_TX_QUEUE_ORACLE"
@@ -1802,9 +1802,9 @@
     "reason": "requires unchanged pinned Linux TX queue/response helper oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "images_negotiate_source_rate2_and_family9_10_layouts",
-    "source": "crates/stela-drivers/src/net/wifi/intel/transmit/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/transmit/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1812,9 +1812,9 @@
     "reason": "requires actual pinned Intel firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_new_tx_helpers_match_complete_commands_and_byte_counts",
-    "source": "crates/stela-drivers/src/net/wifi/intel/transmit/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/intel/transmit/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_TRANSMIT_ORACLE"
@@ -1822,9 +1822,9 @@
     "reason": "requires fresh unchanged Linux complete new TX command helper oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "probe_ies_and_commands_match_source",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/bootstrap/client/local/scan.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/bootstrap/client/local/scan.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT7925_PROBE_ORACLE"
@@ -1832,9 +1832,9 @@
     "reason": "requires complete unchanged source mac80211 probe writers"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_full_source_local_capabilities_match_all_band_stream_width_profiles",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/bootstrap/client/local.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/bootstrap/client/local.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT7925_LOCAL_ORACLE"
@@ -1842,9 +1842,9 @@
     "reason": "requires full unchanged source HT/VHT/HE/EHT/PPE local helpers"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "composed_bootstrap_matches_source_mac_effects_and_all_initial_packet_bytes",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/bootstrap/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/bootstrap/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_BOOTSTRAP_ORACLE"
@@ -1852,9 +1852,9 @@
     "reason": "requires unchanged bootstrap helpers/writers and complete MAC oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "all_images_boot_the_full_native_layout_before_source_initialization",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/bootstrap/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/bootstrap/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_FIRMWARE"
@@ -1862,9 +1862,9 @@
     "reason": "requires the exact six redistributable source firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_donor_reset_helper_matches_native_register_trace_and_minimum_waits",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/control/cold_start.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/control/cold_start.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT7925_WFSYS_ORACLE"
@@ -1872,9 +1872,9 @@
     "reason": "requires STELA_MT7925_WFSYS_ORACLE unchanged pinned C helper output"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_pinned_ownership_and_disable_helpers_match_register_effects",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/control/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/control/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_CONTROL_ORACLE"
@@ -1882,9 +1882,9 @@
     "reason": "requires STELA_MT792X_CONTROL_ORACLE from unchanged pinned ownership/DMA helpers"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_pinned_prefetch_and_enable_match_except_explicit_polling_irq_policy",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/control/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/control/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_START_ORACLE"
@@ -1892,9 +1892,9 @@
     "reason": "requires STELA_MT792X_START_ORACLE from unchanged pinned WFDMA helpers"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_download_matches_every_unchanged_donor_command_byte",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/download.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/download.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_FIRMWARE",
@@ -1903,9 +1903,9 @@
     "reason": "requires pinned actual firmware and unchanged C oracle traces"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "full_linux_clc_loaders_match_selected_bytes_and_owned_auxiliary_resources",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/firmware/auxiliary.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/firmware/auxiliary.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_CLC_ORACLE"
@@ -1913,9 +1913,9 @@
     "reason": "requires full unchanged loaders and pinned actual RAM images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "complete_linux_country_helpers_match_every_request_and_fallback_fact",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/firmware/clc/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/firmware/clc/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_CLC_COUNTRY_ORACLE"
@@ -1923,9 +1923,9 @@
     "reason": "requires full unchanged loaders/country helpers and actual firmware oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "exact_country_requests_cross_complete_source_mcu_writers",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/firmware/clc/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/firmware/clc/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_CLC_WIRE_ORACLE"
@@ -1933,9 +1933,9 @@
     "reason": "requires full country-helper/MCU-writer composed source oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_images_preserve_all_regions_and_release_information",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/firmware.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/firmware.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_FIRMWARE"
@@ -1943,9 +1943,9 @@
     "reason": "requires exact redistributable images identified by STELA_MT792X_FIRMWARE"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "all_source_rate_plans_cross_coherent_native_clc_domain_power_and_pse_dma",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/clc/remaining/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mailbox/clc/remaining/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_POWER_ORACLE"
@@ -1953,9 +1953,9 @@
     "reason": "requires full unchanged source rate/SAR/batch/MCU oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "images_execute_kept_clc_domain_power_chain_past_provider_lifetime",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/clc/remaining/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mailbox/clc/remaining/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_FIRMWARE"
@@ -1963,9 +1963,9 @@
     "reason": "requires six exact redistributable firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "full_source_clc_plans_execute_through_one_native_requester_and_exact_wire_bytes",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/clc/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mailbox/clc/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_CLC_WIRE_ORACLE"
@@ -1973,9 +1973,9 @@
     "reason": "requires unchanged full CLC country-helper and MCU-writer oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "downloaded_images_and_owned_reports_execute_clc_past_provider_lifetime",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/clc/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mailbox/clc/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_FIRMWARE"
@@ -1983,9 +1983,9 @@
     "reason": "requires the exact six actual redistributable firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_download_crosses_owned_dma_and_mcu_event_path",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mailbox/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_FIRMWARE",
@@ -1994,9 +1994,9 @@
     "reason": "requires pinned firmware and unchanged donor download trace fixtures"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_firmware_and_linux_capability_reports_cross_native_dma_query",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mailbox/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_CAPABILITIES_ORACLE",
@@ -2005,9 +2005,9 @@
     "reason": "requires pinned firmware and unchanged NIC parser reports"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pci_callbacks_select_three_second_deadline_and_exact_queue",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mailbox/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_PCI_MCU_ORACLE"
@@ -2015,9 +2015,9 @@
     "reason": "requires freshly generated unchanged PCI send-callback oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "images_and_eeprom_source_reports_cross_native_dma_with_kept_clc_owner",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mailbox/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_EEPROM_ORACLE",
@@ -2026,9 +2026,9 @@
     "reason": "requires exact actual images and full unchanged EEPROM source oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "pinned_downloads_bind_same_owned_clc_input_past_provider_lifetime",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mailbox/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mailbox/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_FIRMWARE"
@@ -2036,9 +2036,9 @@
     "reason": "requires exact actual firmware images"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_full_mcu_writers_match_all_capability_command_bytes",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu/capabilities.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mcu/capabilities.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_CAP_WIRE_ORACLE"
@@ -2046,9 +2046,9 @@
     "reason": "requires fresh unchanged MCU capability request writer oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_full_capability_helpers_match_report_observations",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu/capabilities.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mcu/capabilities.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_CAPABILITIES_ORACLE"
@@ -2056,9 +2056,9 @@
     "reason": "requires fresh unchanged NIC/PHY/EML parser sanitizer oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "full_source_modern_peer_bss_edca_ba_and_puncture_match_exact_requests",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu/client/modern/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mcu/client/modern/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT7925_MODERN_ORACLE"
@@ -2066,9 +2066,9 @@
     "reason": "requires fresh complete unchanged modern MT7925 firmware writers"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_full_client_helpers_match_selected_legacy_requests_and_wcid",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu/client/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mcu/client/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT7925_CLIENT_ORACLE"
@@ -2076,9 +2076,9 @@
     "reason": "requires fresh unchanged full MT7925 client source helpers"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_initial_device_helper_matches_both_full_requests_in_source_order",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu/device.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mcu/device.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_DEVICE_ORACLE"
@@ -2086,9 +2086,9 @@
     "reason": "requires fresh unchanged pinned Linux device registration oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "domain_helpers_match_linux_for_every_channel",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu/domain.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mcu/domain.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_DOMAIN_ORACLE"
@@ -2096,9 +2096,9 @@
     "reason": "requires unchanged full channel-domain helpers and MCU-writer oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "full_unchanged_eeprom_helpers_match_requests_bytes_and_selected_observations",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu/eeprom.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mcu/eeprom.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_EEPROM_ORACLE"
@@ -2106,9 +2106,9 @@
     "reason": "requires unchanged full EEPROM helpers and MCU fill writers"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "complete_unchanged_initial_helpers_and_full_writers_match",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu/init.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mcu/init.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_BOOTSTRAP_ORACLE"
@@ -2116,9 +2116,9 @@
     "reason": "requires unchanged full bootstrap helpers/writers in STELA_MT792X_BOOTSTRAP_ORACLE"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "raw_commands_and_asymmetric_parser_paths_match_source",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu/init.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mcu/init.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_BOOTSTRAP_ORACLE"
@@ -2126,9 +2126,9 @@
     "reason": "requires unchanged raw header helpers and full source parser discriminator"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_pinned_key_helpers_match_complete_station_requests",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu/key/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mcu/key/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_KEY_ORACLE"
@@ -2136,9 +2136,9 @@
     "reason": "requires fresh pinned Linux ASan/UBSan key oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "complete_source_sar_arithmetic_and_all_rate_batches_match_defined_bytes",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu/power.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mcu/power.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_POWER_ORACLE"
@@ -2146,9 +2146,9 @@
     "reason": "requires full unchanged SAR/SKU/rate-band/MCU source oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_unified_writers_match_all_bytes_across_sequence_wraps",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu/runtime.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mcu/runtime.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_UNI_ORACLE"
@@ -2156,9 +2156,9 @@
     "reason": "requires unchanged pinned UNI encoder oracle traces"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_pinned_mcu_encoders_match_all_bytes_over_repeated_sequence_wraps",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/mcu.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/mcu.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_MCU_ORACLE"
@@ -2166,9 +2166,9 @@
     "reason": "requires unchanged pinned MCU encoder oracle traces"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_pinned_register_mapper_matches_valid_windows_and_mmio_operations",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/registers.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/registers.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_REGISTER_ORACLE"
@@ -2176,9 +2176,9 @@
     "reason": "requires STELA_MT792X_REGISTER_ORACLE from the pinned unchanged C register mapper"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "complete_unchanged_source_matches_each_release_and_kept_queue",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/reorder.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/reorder.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT76_REORDER_ORACLE"
@@ -2186,9 +2186,9 @@
     "reason": "requires STELA_MT76_REORDER_ORACLE from complete unchanged pinned C implementation"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_dma_add_buf_matches_owned_queue_descriptors",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/ring/data/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/ring/data/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_DATA_ORACLE"
@@ -2196,9 +2196,9 @@
     "reason": "requires freshly built unchanged Linux descriptor oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_full_receive_helpers_match_flags_pn_groups_rcpi_and_normalized_bytes",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/rx/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/rx/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_RX_ORACLE"
@@ -2206,9 +2206,9 @@
     "reason": "requires freshly built unchanged full Linux RX helper oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_pinned_free_helpers_match_token_order_wcid_and_accounting",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/tx_free.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/tx_free.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_TX_FREE_ORACLE"
@@ -2216,9 +2216,9 @@
     "reason": "requires STELA_MT792X_TX_FREE_ORACLE from unchanged pinned TX-free helpers"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_pinned_hw_txp_matches_every_scatter_byte_and_txwi_size",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/txp.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/txp.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_TXP_ORACLE"
@@ -2226,9 +2226,9 @@
     "reason": "requires STELA_MT792X_TXP_ORACLE from the unchanged pinned TXP encoder"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_pinned_raw80211_writers_match_every_descriptor_word",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/txwi/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/txwi/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT792X_TXWI_ORACLE"
@@ -2236,9 +2236,9 @@
     "reason": "requires STELA_MT792X_TXWI_ORACLE from unchanged pinned raw80211 descriptor writers"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_pinned_mt7925_writers_match_protected_block_ack_and_sa_query_words",
-    "source": "crates/stela-drivers/src/net/wifi/mediatek/txwi/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/mediatek/txwi/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MT7925_PROTECTED_ACTION_TXWI_ORACLE"
@@ -2246,9 +2246,9 @@
     "reason": "requires STELA_MT7925_PROTECTED_ACTION_TXWI_ORACLE from unchanged pinned Linux writers"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "every_length_band_and_multicast_descriptor_matches_unchanged_c_helpers",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/beacon/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/beacon/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_BEACON_ORACLE"
@@ -2256,9 +2256,9 @@
     "reason": "requires unchanged pinned C beacon descriptor oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "firmware_download_register_and_packet_trace_matches_unchanged_c",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/download/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/download/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_IMAGES",
@@ -2267,9 +2267,9 @@
     "reason": "requires pinned actual RTL8822C image and C transport oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "download_uses_native_pinned_beacon_dma_with_each_new_completion",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/download/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/download/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_IMAGES",
@@ -2278,9 +2278,9 @@
     "reason": "requires actual RTL8822C image and unchanged C transport oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "physical_transport_logical_maps_and_all_board_fields_match_unchanged_c",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/efuse/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/efuse/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_EFUSE_ORACLE"
@@ -2288,9 +2288,9 @@
     "reason": "requires unchanged pinned C efuse physical/logical/board oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "every_capability_combination_and_complete_mailbox_trace_matches_unchanged_c",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/features.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/features.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_FEATURES_ORACLE"
@@ -2298,9 +2298,9 @@
     "reason": "requires unchanged pinned C hardware-feature mailbox and decoder"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "all_access_widths_bits_and_geometry_match_unchanged_c_helpers",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/fifo.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/fifo.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_FIFO_ORACLE"
@@ -2308,9 +2308,9 @@
     "reason": "requires unchanged pinned C FIFO/H2C functions and geometry"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "vendor_layouts_are_borrowed_complete_and_versioned",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/firmware.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/firmware.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_IMAGES"
@@ -2318,9 +2318,9 @@
     "reason": "requires STELA_REALTEK_WIFI_IMAGES from pinned linux-firmware"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "unchanged_linux_selection_and_complete_payloads_agree",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/firmware.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/firmware.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_IMAGES",
@@ -2329,9 +2329,9 @@
     "reason": "requires actual images and STELA_REALTEK_WIFI_ORACLE from the pinned C script"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "every_mailbox_busy_boundary_and_complete_source_rfk_traces_match",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/firmware_control/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/firmware_control/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_FIRMWARE_CONTROL_ORACLE"
@@ -2339,9 +2339,9 @@
     "reason": "requires unchanged register-mailbox and RFK polling source oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "full_source_reset_sequence_and_widths_match_unchanged_c",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/hci/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/hci/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_HCI_ORACLE"
@@ -2349,9 +2349,9 @@
     "reason": "requires unchanged pinned C HCI reset/base oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "masks_w1c_widths_order_and_rx_exclusion_match_unchanged_c",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/interrupt.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/interrupt.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_INTERRUPT_ORACLE"
@@ -2359,9 +2359,9 @@
     "reason": "requires unchanged pinned C interrupt mask/W1C oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "whole_factory_and_sparse_source_tables_match_every_prepared_byte",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/board_power.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/phy/board_power.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_BOARD_POWER_ORACLE"
@@ -2369,9 +2369,9 @@
     "reason": "requires unchanged full source factory PG/by-rate/limit oracle and exact data export"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "packed_nvm_all_rate_width_samples_and_real_signed_wrap_negatives_match_source",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/channel_power.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/phy/channel_power.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_CHANNEL_POWER_ORACLE"
@@ -2379,9 +2379,9 @@
     "reason": "requires unchanged channel gain/SAR/packed calibration source oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "compensation_matches_all_accepted_source_constant_samples",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/dac.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/phy/dac.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_DAC_ORACLE"
@@ -2389,9 +2389,9 @@
     "reason": "requires actual unchanged step2 source results for every accepted signed constant sample"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "signed_sample_algorithms_match_whole_source_vectors",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/dac.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/phy/dac.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_DAC_ORACLE"
@@ -2399,9 +2399,9 @@
     "reason": "requires unchanged source signed min/max/sort/trimmed-offset vectors"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "rtl8822c_mac_matches_linux",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/mac.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/phy/tests/mac.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_SOURCE_MAC_ORACLE"
@@ -2409,9 +2409,9 @@
     "reason": "requires unchanged whole MAC protocol/driver-info/PCI interface source oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "rtl8822c_channel_matches_linux",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/channel_state.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/phy/tests/channel_state.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_CHANNEL_ORACLE"
@@ -2419,9 +2419,9 @@
     "reason": "requires unchanged complete source BB/MAC/RF channel oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "rtl8822c_power_matches_linux",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/power.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/phy/tests/power.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_CHANNEL_POWER_ORACLE"
@@ -2429,9 +2429,9 @@
     "reason": "requires unchanged complete board/channel gain/SAR/TXAGC oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "rtl8822c_tail_matches_linux",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/tail.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/phy/tests/tail.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_PHY_TAIL_ORACLE"
@@ -2439,9 +2439,9 @@
     "reason": "requires unchanged source thermal reset/EWMA initialization and complete beamforming IO/BAR oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "rtl8822c_factory_matches_linux",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/factory.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/phy/tests/factory.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_TRIM_ORACLE"
@@ -2449,9 +2449,9 @@
     "reason": "requires unchanged pinned source complete factory RF trim traces and real OTP provenance"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "rtl8822c_dac_matches_linux",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/calibration.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/phy/tests/calibration.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_DAC_ORACLE"
@@ -2459,9 +2459,9 @@
     "reason": "requires unchanged pinned initial empty-cache DAC oracle and donor negative evidence"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "rtl8822c_dynamic_matches_linux",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/dynamic.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/phy/tests/dynamic.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_DYNAMIC_ORACLE"
@@ -2469,9 +2469,9 @@
     "reason": "requires unchanged pinned C dynamic hardware/tracking oracle; no jurisdiction selection"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "rtl8822c_trx_matches_linux",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/paths.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/phy/tests/paths.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_TRX_ORACLE"
@@ -2479,9 +2479,9 @@
     "reason": "requires unchanged pinned C initial AB/AB/false TRX oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "rtl8822c_tables_match_linux",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/tables.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/phy/tests/tables.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_PHY_TABLES_ORACLE"
@@ -2489,9 +2489,9 @@
     "reason": "requires unchanged pinned C complete pre-TRX PHY table phase"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "complete_power_trace_matches_unchanged_c_for_every_source_cut_and_entry_state",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/power.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/power.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_POWER_ORACLE"
@@ -2499,9 +2499,9 @@
     "reason": "requires pinned unchanged C MAC power and table oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "raw_parser_rearm_tags_and_all_ring_indices_match_unchanged_c",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/receive/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/receive/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_RECEIVE_ORACLE"
@@ -2509,9 +2509,9 @@
     "reason": "requires unchanged pinned C RX descriptor/ring oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "all_registers_masks_paths_and_full_io_traces_match_unchanged_c",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/rf/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/rf/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_RF_ORACLE"
@@ -2519,9 +2519,9 @@
     "reason": "requires unchanged pinned C RF direct/mixed access oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "full_phydm_iqk_packets_and_iqk_ready_deadlines_match_unchanged_source",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/transmit/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/transmit/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_FIRMWARE_CONTROL_ORACLE"
@@ -2529,9 +2529,9 @@
     "reason": "requires unchanged source PHYDM/IQK packet and IQK polling oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "every_sequence_full_packet_and_descriptors_match_unchanged_c",
-    "source": "crates/stela-drivers/src/net/wifi/realtek/transmit/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/realtek/transmit/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_REALTEK_WIFI_TRANSMIT_ORACLE"
@@ -2539,9 +2539,9 @@
     "reason": "requires unchanged pinned C H2C firmware packet oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-net",
     "test": "full_source_amsdu_station_conversion_matches_all_bytes",
-    "source": "crates/stela-drivers/src/net/wifi/station/data/tests.rs",
+    "source": "crates/stela-driver-net/src/wifi/station/data/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_WIFI_AMSDU_ORACLE"
@@ -2549,18 +2549,18 @@
     "reason": "requires fresh pinned full A-MSDU helper trace via STELA_WIFI_AMSDU_ORACLE"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "native_amd_factory_opregion_retirement_and_fresh_rebind",
-    "source": "crates/stela-drivers/src/platform/acpi/resources/gpio/tests.rs",
+    "source": "crates/stela-driver-base/src/platform/acpi/resources/gpio/tests.rs",
     "kind": "oracle",
     "inputs": [],
     "reason": "requires a fresh process for the production native MMIO authority singleton",
     "precondition": "fresh-process"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "evaluate_captured_firmware_with_real_acpica",
-    "source": "crates/stela-drivers/src/platform/acpi/tests.rs",
+    "source": "crates/stela-driver-base/src/platform/acpi/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_ACPI_DSDT"
@@ -2571,9 +2571,9 @@
     ]
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_query_dispatch_identity_and_io_resource_order",
-    "source": "crates/stela-drivers/src/platform/ec/tests.rs",
+    "source": "crates/stela-driver-base/src/platform/ec/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_EC_ORACLE"
@@ -2581,9 +2581,9 @@
     "reason": "requires a fresh unchanged Linux EC query/resource oracle trace"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-base",
     "test": "unchanged_linux_protocol_trace_matches_native_effects_with_explicit_oracle_limits",
-    "source": "crates/stela-drivers/src/platform/ec_smbus/tests.rs",
+    "source": "crates/stela-driver-base/src/platform/ec_smbus/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_EC_SMBUS_ORACLE"
@@ -2591,9 +2591,9 @@
     "reason": "requires fresh exact-source ASan/UBSan trace from ec_smbus_oracle.py"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-storage",
     "test": "unchanged_linux_hs200_hs400_and_strobe_procedure_order_matches_native",
-    "source": "crates/stela-drivers/src/storage/mmc/protocol/fast/tests.rs",
+    "source": "crates/stela-driver-storage/src/mmc/protocol/fast/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MMC_FAST_ORACLE"
@@ -2601,9 +2601,9 @@
     "reason": "requires integrity-checked original MMC fast-mode procedure records"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-storage",
     "test": "unchanged_linux_ddr52_hardware_busy_switch_order_matches_native",
-    "source": "crates/stela-drivers/src/storage/mmc/protocol/fast/tests.rs",
+    "source": "crates/stela-driver-storage/src/mmc/protocol/fast/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MMC_DDR52_ORACLE"
@@ -2611,9 +2611,9 @@
     "reason": "requires integrity-checked original MMC DDR52 procedure records"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-storage",
     "test": "unchanged_linux_ordinary_mmc_hs_status_clock_and_power_class_order_matches_native",
-    "source": "crates/stela-drivers/src/storage/mmc/protocol/hs/tests.rs",
+    "source": "crates/stela-driver-storage/src/mmc/protocol/hs/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MMC_HS_ORACLE"
@@ -2621,9 +2621,9 @@
     "reason": "requires integrity-checked ordinary MMC HS original procedure records"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-storage",
     "test": "unchanged_linux_explicit_mmc_hs400_downgrade_tune_and_restore_match_native",
-    "source": "crates/stela-drivers/src/storage/mmc/protocol/retune/tests.rs",
+    "source": "crates/stela-driver-storage/src/mmc/protocol/retune/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_MMC_RETUNE_ORACLE"
@@ -2631,9 +2631,9 @@
     "reason": "requires integrity-checked explicit MMC retuning procedure records"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-storage",
     "test": "unchanged_linux_rts5229_setup_drive_pull_and_power_effects_match_native",
-    "source": "crates/stela-drivers/src/storage/rtsx/tests/rts5229.rs",
+    "source": "crates/stela-driver-storage/src/rtsx/tests/rts5229.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_RTSX5229_ORACLE"
@@ -2641,9 +2641,9 @@
     "reason": "requires pinned original RTS5229 setup/voltage/power effect records"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-storage",
     "test": "unchanged_linux_clock_enable_v4_pll_phases_and_independent_deadlines_match_native",
-    "source": "crates/stela-drivers/src/storage/sdhci/tests/clock.rs",
+    "source": "crates/stela-driver-storage/src/sdhci/tests/clock.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_SDHCI_CLOCK_ORACLE"
@@ -2651,9 +2651,9 @@
     "reason": "requires integrity-checked unchanged Linux sdhci_enable_clk records"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-storage",
     "test": "unchanged_linux_v4_capability_controls_and_adma_descriptors_match_native",
-    "source": "crates/stela-drivers/src/storage/sdhci/gli/dma/tests.rs",
+    "source": "crates/stela-driver-storage/src/sdhci/gli/dma/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_SDHCI_ADMA_ORACLE"
@@ -2661,9 +2661,9 @@
     "reason": "requires unchanged pinned SDHCI v4 DMA/ADMA source oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-storage",
     "test": "unchanged_linux_gl9755_phy_pll_dual_rail_and_reset_functions_match_native",
-    "source": "crates/stela-drivers/src/storage/sdhci/gli/gl9755/tests.rs",
+    "source": "crates/stela-driver-storage/src/sdhci/gli/gl9755/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_SDHCI_GLI55_ORACLE"
@@ -2671,9 +2671,9 @@
     "reason": "requires integrity-checked unchanged Linux GL9755 PCI PHY/PLL/power/reset records"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-storage",
     "test": "unchanged_linux_gl9763e_phy_lpn_and_mmc_hs_signaling_match_native",
-    "source": "crates/stela-drivers/src/storage/sdhci/gli/gl9763e/tests.rs",
+    "source": "crates/stela-driver-storage/src/sdhci/gli/gl9763e/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_SDHCI_GLI63E_ORACLE"
@@ -2681,9 +2681,9 @@
     "reason": "requires integrity-checked original GL9763E PHY/signaling records"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-storage",
     "test": "unchanged_linux_gl9767_phy_clock_power_and_stronger_observed_reset_ack_match_native",
-    "source": "crates/stela-drivers/src/storage/sdhci/gli/gl9767/tests.rs",
+    "source": "crates/stela-driver-storage/src/sdhci/gli/gl9767/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_SDHCI_GLI67_ORACLE"
@@ -2691,9 +2691,9 @@
     "reason": "requires integrity-checked GL9767 source and exact atomic-poll macro records"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-storage",
     "test": "unchanged_linux_gl9750_phy_clocks_and_two_polarity_tuning_match_native",
-    "source": "crates/stela-drivers/src/storage/sdhci/gli/tests.rs",
+    "source": "crates/stela-driver-storage/src/sdhci/gli/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_SDHCI_GLI_ORACLE"
@@ -2701,9 +2701,9 @@
     "reason": "requires unchanged pinned GL9750 PHY/clock/tuning source oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-storage",
     "test": "real_paused_qemu_sd_card_runs_native_initialization_pio_and_durable_io",
-    "source": "crates/stela-drivers/src/storage/sdhci/qtest.rs",
+    "source": "crates/stela-driver-storage/src/sdhci/qtest.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_SDHCI_QEMU"
@@ -2714,9 +2714,9 @@
     ]
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-storage",
     "test": "unchanged_linux_clock_divisors_and_card_capacity_match_native_decoders",
-    "source": "crates/stela-drivers/src/storage/sdhci/tests.rs",
+    "source": "crates/stela-driver-storage/src/sdhci/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_SDHCI_ORACLE"
@@ -2724,9 +2724,9 @@
     "reason": "requires pinned unchanged Linux SDHCI clock/CSD oracle"
   },
   {
-    "package": "stela-drivers",
+    "package": "stela-driver-storage",
     "test": "unchanged_linux_uhs_signaling_and_tuning_decisions_match_native_operations",
-    "source": "crates/stela-drivers/src/storage/sdhci/uhs/tests.rs",
+    "source": "crates/stela-driver-storage/src/sdhci/uhs/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_SDHCI_UHS_ORACLE"

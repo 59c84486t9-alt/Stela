@@ -194,7 +194,7 @@ impl Domain {
     }
 }
 struct Time(AtomicU64);
-impl Timer for Arc<Time> {
+impl Timer for Time {
     fn start(&self) -> u64 {
         !self.now_us().rotate_left(17)
     }

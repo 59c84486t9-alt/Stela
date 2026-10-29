@@ -1,0 +1,8 @@
+[package]
+name = "stela-c-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

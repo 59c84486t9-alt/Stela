@@ -27,7 +27,7 @@ def main():
     parser.add_argument("--cc", default="clang")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[4]
-    intel = root / "crates/stela-drivers/src/gpu/intel"
+    intel = root / "crates/stela-driver-gpu/src/intel"
     donor = (args.linux / DONOR).read_bytes()
     if hashlib.sha256(donor).hexdigest() != SHA256:
         raise SystemExit("pinned original Xe MMIO source integrity mismatch")
