@@ -22,6 +22,20 @@ nir_def *stela_metal_load_table(nir_builder *b, enum stela_metal_table table)
    return load_push(b, 64, STELA_METAL_PUSH_TABLES + 8u * (unsigned)table);
 }
 
+nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_value value,
+                                       void *stage)
+{
+   (void)stage;
+   switch (value) {
+   case STELA_AIR_DISPATCH_GRID:
+      return nir_load_push_constant(b, 3, 32, nir_imm_int(b, 0), .base = STELA_METAL_PUSH_GRID,
+                                    .range = 12, .align_mul = 4);
+   case STELA_AIR_AMPLIFICATION:
+      return load_push(b, 32, STELA_METAL_PUSH_AMPLIFICATION);
+   }
+   return NULL;
+}
+
 nir_def *stela_metal_bind_buffer(nir_builder *b, const struct stela_air_buffer *buffer,
                                  void *stage)
 {

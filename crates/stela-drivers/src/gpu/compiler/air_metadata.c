@@ -642,6 +642,59 @@ stela_air_metadata_stage_buffer_type(struct stela_air_metadata *m,
    return true;
 }
 
+/* The builtin input an argument descriptor's kind names, when the stage has
+ * it. Positions and sizes have up to three lanes; the rest are scalars. */
+static enum stela_air_builtin
+builtin_input(LLVMValueRef kind, const struct stela_air_render *render, unsigned *lanes)
+{
+   enum { KERNEL = 1, VERTEX = 2, FRAGMENT = 4, RENDER = VERTEX | FRAGMENT, ALL = 7 };
+   static const struct {
+      const char *name;
+      enum stela_air_builtin builtin;
+      unsigned stages, lanes;
+   } builtins[] = {
+      {"air.thread_position_in_grid", STELA_AIR_THREAD_POSITION_IN_GRID, KERNEL, 3},
+      {"air.thread_position_in_threadgroup", STELA_AIR_THREAD_POSITION_IN_THREADGROUP, KERNEL, 3},
+      {"air.threadgroup_position_in_grid", STELA_AIR_THREADGROUP_POSITION_IN_GRID, KERNEL, 3},
+      {"air.threads_per_threadgroup", STELA_AIR_THREADS_PER_THREADGROUP, KERNEL, 3},
+      {"air.dispatch_threads_per_threadgroup", STELA_AIR_DISPATCH_THREADS_PER_THREADGROUP, KERNEL, 3},
+      {"air.threadgroups_per_grid", STELA_AIR_THREADGROUPS_PER_GRID, KERNEL, 3},
+      {"air.threads_per_grid", STELA_AIR_THREADS_PER_GRID, KERNEL, 3},
+      {"air.thread_index_in_threadgroup", STELA_AIR_THREAD_INDEX_IN_THREADGROUP, KERNEL, 1},
+      {"air.simdgroup_index_in_threadgroup", STELA_AIR_SIMDGROUP_INDEX_IN_THREADGROUP, KERNEL, 1},
+      {"air.simdgroups_per_threadgroup", STELA_AIR_SIMDGROUPS_PER_THREADGROUP, KERNEL, 1},
+      {"air.dispatch_simdgroups_per_threadgroup", STELA_AIR_DISPATCH_SIMDGROUPS_PER_THREADGROUP,
+       KERNEL, 1},
+      {"air.quadgroup_index_in_threadgroup", STELA_AIR_QUADGROUP_INDEX_IN_THREADGROUP, KERNEL, 1},
+      {"air.quadgroups_per_threadgroup", STELA_AIR_QUADGROUPS_PER_THREADGROUP, KERNEL, 1},
+      {"air.dispatch_quadgroups_per_threadgroup", STELA_AIR_DISPATCH_QUADGROUPS_PER_THREADGROUP,
+       KERNEL, 1},
+      {"air.thread_index_in_simdgroup", STELA_AIR_THREAD_INDEX_IN_SIMDGROUP, ALL, 1},
+      {"air.threads_per_simdgroup", STELA_AIR_THREADS_PER_SIMDGROUP, ALL, 1},
+      {"air.thread_execution_width", STELA_AIR_THREAD_EXECUTION_WIDTH, ALL, 1},
+      {"air.thread_index_in_quadgroup", STELA_AIR_THREAD_INDEX_IN_QUADGROUP, ALL, 1},
+      {"air.vertex_id", STELA_AIR_VERTEX_ID, VERTEX, 1},
+      {"air.instance_id", STELA_AIR_INSTANCE_ID, VERTEX, 1},
+      {"air.base_vertex", STELA_AIR_BASE_VERTEX, VERTEX, 1},
+      {"air.base_instance", STELA_AIR_BASE_INSTANCE, VERTEX, 1},
+      {"air.amplification_id", STELA_AIR_AMPLIFICATION_ID, RENDER, 1},
+      {"air.front_facing", STELA_AIR_FRONT_FACING, FRAGMENT, 1},
+      {"air.sample_id", STELA_AIR_SAMPLE_ID, FRAGMENT, 1},
+      {"air.sample_mask_in", STELA_AIR_SAMPLE_MASK_IN, FRAGMENT, 1},
+      {"air.primitive_id", STELA_AIR_PRIMITIVE_ID, FRAGMENT, 1},
+      {"air.render_target_array_index", STELA_AIR_RENDER_TARGET_ARRAY_INDEX_IN, FRAGMENT, 1},
+      {"air.viewport_array_index", STELA_AIR_VIEWPORT_ARRAY_INDEX_IN, FRAGMENT, 1},
+   };
+   unsigned stage = !render ? KERNEL : render->entry.stage == STELA_AIR_VERTEX ? VERTEX : FRAGMENT;
+   for (unsigned i = 0; i < ARRAY_SIZE(builtins); i++) {
+      if (stela_air_md_string(kind, builtins[i].name)) {
+         *lanes = builtins[i].lanes;
+         return builtins[i].stages & stage ? builtins[i].builtin : STELA_AIR_BUILTIN_NONE;
+      }
+   }
+   return STELA_AIR_BUILTIN_NONE;
+}
+
 static bool
 metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef args_node,
                    struct stela_air_kernel *kernel, struct stela_air_render *render)
@@ -658,6 +711,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
    bool shared_indices[AIR_MAX_ARGUMENTS] = {false};
    bool texture_indices[AIR_MAX_TEXTURES] = {false};
    bool sampler_indices[AIR_MAX_SAMPLERS] = {false};
+   bool builtins[STELA_AIR_BUILTIN_COUNT] = {false};
    for (unsigned a = 0; a < argc; a++) {
       LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
       unsigned fields_count, index;
@@ -685,18 +739,19 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          }
       }
       bool buffer = stela_air_md_string(fields[1], "air.buffer");
-      bool thread_id = stela_air_md_string(fields[1], "air.thread_position_in_grid");
-      bool vertex_id = render && render->entry.stage == STELA_AIR_VERTEX &&
-                       stela_air_md_string(fields[1], "air.vertex_id");
+      unsigned lanes = 0;
+      enum stela_air_builtin builtin = builtin_input(fields[1], render, &lanes);
       bool position = render && render->entry.stage == STELA_AIR_FRAGMENT &&
                       stela_air_md_string(fields[1], "air.position");
       bool varying = render && render->entry.stage == STELA_AIR_FRAGMENT &&
                      stela_air_md_string(fields[1], "air.fragment_input");
       bool texture = stela_air_md_string(fields[1], "air.texture");
       bool sampler = stela_air_md_string(fields[1], "air.sampler");
-      if ((render && thread_id) ||
-          (!buffer && !thread_id && !vertex_id && !position && !varying && !texture && !sampler))
+      if (!buffer && !builtin && !position && !varying && !texture && !sampler)
          return fail(t, STELA_AIR_ARGUMENT, "unsupported AIR argument kind at %u", index);
+      if (builtin && builtins[builtin])
+         return fail(t, STELA_AIR_METADATA, "duplicate builtin argument");
+      builtins[builtin] = true;
       struct stela_air_buffer desc = {.argument = index};
       struct stela_air_texture texture_desc = {.argument = index};
       struct stela_air_sampler sampler_desc = {.argument = index};
@@ -704,7 +759,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       struct stela_air_stage_io *io = render ? &render->inputs[a] : NULL;
       if (io) {
          *io = (struct stela_air_stage_io){.argument = index,
-            .semantic = buffer ? STELA_AIR_STAGE_BUFFER : vertex_id ? STELA_AIR_VERTEX_ID :
+            .semantic = buffer ? STELA_AIR_STAGE_BUFFER : builtin ? STELA_AIR_STAGE_BUILTIN :
                         position ? STELA_AIR_POSITION : texture ? STELA_AIR_STAGE_TEXTURE :
                         sampler ? STELA_AIR_STAGE_SAMPLER : STELA_AIR_VARYING};
       }
@@ -847,30 +902,29 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          components = 1;
          if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
             components = LLVMGetVectorSize(type);
-            if (components != 3)
-               return fail(t, STELA_AIR_ARGUMENT, "unsupported thread-position vector width");
             type = LLVMGetElementType(type);
          }
-         if (LLVMGetTypeKind(type) != LLVMIntegerTypeKind || LLVMGetIntTypeWidth(type) != 32 ||
-             (components != 1 && components != 3))
-            return fail(t, STELA_AIR_ARGUMENT, "unsupported thread-position type");
+         unsigned width = LLVMGetTypeKind(type) == LLVMIntegerTypeKind ? LLVMGetIntTypeWidth(type) : 0;
+         if (components > lanes ||
+             (builtin == STELA_AIR_FRONT_FACING ? width != 1 : width != 16 && width != 32))
+            return fail(t, STELA_AIR_ARGUMENT, "unsupported builtin type at %u", index);
       }
       if (io) {
-         io->buffer = desc; io->primitive = primitive; io->components = type_components;
-         io->texture = texture_desc; io->sampler = sampler_desc;
+         io->buffer = desc; io->primitive = primitive;
+         io->components = builtin ? components : type_components;
+         io->texture = texture_desc; io->sampler = sampler_desc; io->builtin = builtin;
          io->name = name; io->name_bytes = name_bytes;
          io->type_name = type_name; io->type_name_bytes = type_name_bytes;
          io->used = LLVMGetFirstUse(param) != NULL;
          if (unused && io->used)
             return fail(t, STELA_AIR_METADATA, "used fragment input marked unused");
-         if (vertex_id && (primitive != STELA_AIR_UINT || type_components != 1 || components != 1))
-            return fail(t, STELA_AIR_ARGUMENT, "vertex ID must be uint");
          if (buffer && !stage_struct(t, render, io, struct_info))
             return false;
       }
       kernel->arguments[a] = (struct stela_air_argument) {
          .value = param, .buffer = desc, .is_buffer = buffer, .components = components,
          .texture = texture_desc, .sampler = sampler_desc, .is_texture = texture, .is_sampler = sampler,
+         .builtin = builtin,
          .plain_buffer_type = primitive != STELA_AIR_PRIMITIVE_UNKNOWN,
          .name = name, .name_bytes = name_bytes, .type_name = type_name, .type_name_bytes = type_name_bytes,
          .primitive = primitive, .type_components = type_components, .used = LLVMGetFirstUse(param) != NULL,
@@ -952,15 +1006,14 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
       return fail(m, STELA_AIR_METADATA, "selected entry is not a supported render stage");
    r->entry.input_count = r->arguments.count;
    r->entry.inputs = r->inputs; r->entry.outputs = r->outputs;
-   unsigned builtin_mask = 0;
+   bool position = false;
    for (unsigned i = 0; i < r->entry.input_count; i++) {
       struct stela_air_stage_io *io = &r->inputs[i];
       if (!stage_text(io->name, io->name_bytes) || !stage_text(io->type_name, io->type_name_bytes))
          return fail(m, STELA_AIR_METADATA, "missing/invalid stage argument name/type");
-      if (io->semantic == STELA_AIR_VERTEX_ID || io->semantic == STELA_AIR_POSITION) {
-         unsigned bit = 1u << io->semantic;
-         if (builtin_mask & bit) return fail(m, STELA_AIR_METADATA, "duplicate render builtin argument");
-         builtin_mask |= bit;
+      if (io->semantic == STELA_AIR_POSITION) {
+         if (position) return fail(m, STELA_AIR_METADATA, "duplicate render builtin argument");
+         position = true;
       }
       if (io->semantic == STELA_AIR_VARYING) {
          for (unsigned j = 0; j < i; j++) {
@@ -1254,7 +1307,8 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
          const struct stela_air_argument *arg = &entries[i].kernel.arguments[a];
          args[a] = (struct stela_air_argument_info) {
             .buffer = arg->buffer, .kind = arg->is_buffer ? 1 : arg->is_texture ? 3 : arg->is_sampler ? 4 : 2,
-            .texture = arg->texture, .sampler = arg->sampler, .components = arg->components,
+            .texture = arg->texture, .sampler = arg->sampler, .builtin = arg->builtin,
+            .components = arg->components,
             .plain_buffer_type = arg->plain_buffer_type,
             .name = arg->name, .name_bytes = arg->name_bytes,
             .type_name = arg->type_name, .type_name_bytes = arg->type_name_bytes,

@@ -330,6 +330,178 @@ binding_prelude(struct translator *t)
    return true;
 }
 
+static nir_def *
+device_value(struct translator *t, enum stela_air_device_value value)
+{
+   if (!t->options->load_device_value) {
+      fail(t, STELA_AIR_ARGUMENT, "builtin needs a device value the target does not supply");
+      return NULL;
+   }
+   nir_def *def = t->options->load_device_value(&t->b, value, t->options->binding_data);
+   unsigned components = value == STELA_AIR_DISPATCH_GRID ? 3 : 1;
+   if (!def || def->num_components != components || def->bit_size != 32 || !binding_prelude(t)) {
+      fail(t, STELA_AIR_ARGUMENT, "invalid device value");
+      return NULL;
+   }
+   return def;
+}
+
+static nir_def *
+workgroup_size(struct translator *t)
+{
+   const unsigned *size = t->options->workgroup_size;
+   return nir_imm_ivec3(&t->b, (int)size[0], (int)size[1], (int)size[2]);
+}
+
+/* Metal's grid starts at zero, with no dispatch-base parameter. Form its ID
+ * directly from NIR's workgroup/local builtins; a generic global-ID lowering
+ * may add a Vulkan base input. */
+static nir_def *
+grid_position(struct translator *t)
+{
+   return nir_iadd(&t->b, nir_imul(&t->b, nir_load_workgroup_id(&t->b), workgroup_size(t)),
+                   nir_load_local_invocation_id(&t->b));
+}
+
+/* The threads of this threadgroup that a dispatchThreads grid holds. */
+static nir_def *
+dispatch_size(struct translator *t)
+{
+   nir_def *grid = device_value(t, STELA_AIR_DISPATCH_GRID);
+   if (!grid)
+      return NULL;
+   nir_def *size = workgroup_size(t);
+   nir_def *first = nir_imul(&t->b, nir_load_workgroup_id(&t->b), size);
+   nir_def *edge = nir_umin(&t->b, size, nir_isub(&t->b, grid, first));
+   return nir_bcsel(&t->b, nir_ieq_imm(&t->b, nir_channel(&t->b, grid, 0), 0), size, edge);
+}
+
+static nir_def *
+volume(nir_builder *b, nir_def *size)
+{
+   return nir_imul(b, nir_imul(b, nir_channel(b, size, 0), nir_channel(b, size, 1)),
+                   nir_channel(b, size, 2));
+}
+
+/* A fragment input the rasterizer supplies as a flat uint varying. */
+static nir_def *
+flat_input(struct translator *t, gl_varying_slot slot, const char *name)
+{
+   nir_variable *var = nir_variable_create(t->b.shader, nir_var_shader_in, glsl_uint_type(), name);
+   if (!var) {
+      fail(t, STELA_AIR_ALLOCATION, "builtin variable allocation failed");
+      return NULL;
+   }
+   var->data.location = slot;
+   var->data.interpolation = INTERP_MODE_FLAT;
+   return nir_load_var(&t->b, var);
+}
+
+/* A builtin input's 32-bit value; positions and sizes are uvec3. */
+static nir_def *
+builtin_value(struct translator *t, enum stela_air_builtin builtin)
+{
+   nir_builder *b = &t->b;
+   const unsigned *size = t->options->workgroup_size;
+   nir_def *value;
+   switch (builtin) {
+   case STELA_AIR_THREAD_POSITION_IN_GRID:
+      return grid_position(t);
+   case STELA_AIR_THREAD_POSITION_IN_THREADGROUP:
+      return nir_load_local_invocation_id(b);
+   case STELA_AIR_THREADGROUP_POSITION_IN_GRID:
+      return nir_load_workgroup_id(b);
+   case STELA_AIR_THREADS_PER_THREADGROUP:
+      return workgroup_size(t);
+   case STELA_AIR_DISPATCH_THREADS_PER_THREADGROUP:
+      return dispatch_size(t);
+   case STELA_AIR_THREADGROUPS_PER_GRID:
+      return nir_load_num_workgroups(b);
+   case STELA_AIR_THREADS_PER_GRID: {
+      nir_def *grid = device_value(t, STELA_AIR_DISPATCH_GRID);
+      if (!grid)
+         return NULL;
+      nir_def *uniform = nir_imul(b, nir_load_num_workgroups(b), workgroup_size(t));
+      return nir_bcsel(b, nir_ieq_imm(b, nir_channel(b, grid, 0), 0), uniform, grid);
+   }
+   case STELA_AIR_THREAD_INDEX_IN_THREADGROUP:
+      return nir_load_local_invocation_index(b);
+   case STELA_AIR_SIMDGROUP_INDEX_IN_THREADGROUP:
+      return nir_load_subgroup_id(b);
+   case STELA_AIR_SIMDGROUPS_PER_THREADGROUP:
+      return nir_load_num_subgroups(b);
+   case STELA_AIR_DISPATCH_SIMDGROUPS_PER_THREADGROUP:
+      value = dispatch_size(t);
+      if (!value)
+         return NULL;
+      return nir_udiv(b, nir_iadd(b, volume(b, value), nir_iadd_imm(b, nir_load_subgroup_size(b), -1)),
+                      nir_load_subgroup_size(b));
+   case STELA_AIR_QUADGROUP_INDEX_IN_THREADGROUP:
+      return nir_ushr_imm(b, nir_load_local_invocation_index(b), 2);
+   case STELA_AIR_QUADGROUPS_PER_THREADGROUP:
+      return nir_imm_int(b, (int)DIV_ROUND_UP(size[0] * size[1] * size[2], 4));
+   case STELA_AIR_DISPATCH_QUADGROUPS_PER_THREADGROUP:
+      value = dispatch_size(t);
+      if (!value)
+         return NULL;
+      return nir_ushr_imm(b, nir_iadd_imm(b, volume(b, value), 3), 2);
+   case STELA_AIR_THREAD_INDEX_IN_SIMDGROUP:
+      return nir_load_subgroup_invocation(b);
+   case STELA_AIR_THREADS_PER_SIMDGROUP:
+   case STELA_AIR_THREAD_EXECUTION_WIDTH:
+      return nir_load_subgroup_size(b);
+   case STELA_AIR_THREAD_INDEX_IN_QUADGROUP:
+      return nir_iand_imm(b, nir_load_subgroup_invocation(b), 3);
+   case STELA_AIR_VERTEX_ID:
+      /* Metal's vertex_id includes the base vertex, as NIR's vertex_id
+       * does, unlike vertex_id_zero_base. */
+      return nir_load_vertex_id(b);
+   case STELA_AIR_INSTANCE_ID:
+      /* Metal's instance_id includes the base instance; NIR's does not. */
+      return nir_iadd(b, nir_load_instance_id(b), nir_load_base_instance(b));
+   case STELA_AIR_BASE_VERTEX:
+      return nir_load_base_vertex(b);
+   case STELA_AIR_BASE_INSTANCE:
+      return nir_load_base_instance(b);
+   case STELA_AIR_AMPLIFICATION_ID:
+      return device_value(t, STELA_AIR_AMPLIFICATION);
+   case STELA_AIR_FRONT_FACING:
+      return nir_load_front_face(b, 1);
+   case STELA_AIR_SAMPLE_ID:
+      return nir_load_sample_id(b);
+   case STELA_AIR_SAMPLE_MASK_IN:
+      return nir_load_sample_mask_in(b);
+   case STELA_AIR_PRIMITIVE_ID:
+      return flat_input(t, VARYING_SLOT_PRIMITIVE_ID, "air.primitive_id");
+   case STELA_AIR_RENDER_TARGET_ARRAY_INDEX_IN:
+      return flat_input(t, VARYING_SLOT_LAYER, "air.render_target_array_index");
+   case STELA_AIR_VIEWPORT_ARRAY_INDEX_IN:
+      return flat_input(t, VARYING_SLOT_VIEWPORT, "air.viewport_array_index");
+   case STELA_AIR_BUILTIN_NONE:
+   case STELA_AIR_BUILTIN_COUNT:
+      break;
+   }
+   UNREACHABLE("builtins are validated with their stage");
+}
+
+/* A builtin input in its argument's type: the leading lanes, narrowed to
+ * 16-bit lanes for ushort forms. */
+static nir_def *
+builtin_argument(struct translator *t, enum stela_air_builtin builtin, LLVMValueRef param)
+{
+   nir_def *value = builtin_value(t, builtin);
+   if (!value)
+      return NULL;
+   LLVMTypeRef type = LLVMTypeOf(param);
+   unsigned components = 1;
+   if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
+      components = LLVMGetVectorSize(type);
+      type = LLVMGetElementType(type);
+   }
+   value = nir_trim_vector(&t->b, value, components);
+   return LLVMGetIntTypeWidth(type) == 16 ? nir_u2u16(&t->b, value) : value;
+}
+
 static bool
 kernel_arguments(struct translator *t, LLVMValueRef fn)
 {
@@ -347,7 +519,7 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
          continue;
       }
       struct stela_air_buffer desc = argument->buffer;
-      unsigned index = desc.argument, components = argument->components;
+      unsigned index = desc.argument;
       bool buffer = argument->is_buffer;
       nir_def *def;
       unsigned ssbo_slot = 0;
@@ -385,16 +557,9 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
                return fail(t, STELA_AIR_ARGUMENT, "binding callback refused/invalid buffer %u", index);
          }
       } else {
-         /* Metal's grid starts at zero, with no dispatch-base parameter.
-          * Form its ID directly from existing NIR workgroup/local builtins;
-          * a generic global-ID lowering may add an OpenCL/Vulkan base input. */
-         nir_def *size = nir_imm_ivec3(&t->b,
-            t->options->workgroup_size[0], t->options->workgroup_size[1],
-            t->options->workgroup_size[2]);
-         def = nir_iadd(&t->b, nir_imul(&t->b, nir_load_workgroup_id(&t->b), size),
-                        nir_load_local_invocation_id(&t->b));
-         if (components == 1)
-            def = nir_channel(&t->b, def, 0);
+         def = builtin_argument(t, argument->builtin, param);
+         if (!def)
+            return false;
       }
       if (!put_value(t, param, def, desc.access))
          return false;
@@ -939,10 +1104,10 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
             if (!def || def->num_components != 1 || def->bit_size != 64)
                return fail(t, STELA_AIR_ARGUMENT, "invalid/unbound readonly constant view");
          }
-      } else if (io->semantic == STELA_AIR_VERTEX_ID) {
-         /* Metal vertex_id includes the base vertex; this is NIR's vertex_id,
-          * not vertex_id_zero_base. Actual draw arguments belong to runtime. */
-         def = nir_load_vertex_id(&t->b);
+      } else if (io->semantic == STELA_AIR_STAGE_BUILTIN) {
+         def = builtin_argument(t, io->builtin, param);
+         if (!def)
+            return false;
       } else if (io->semantic == STELA_AIR_POSITION) {
          t->b.shader->info.fs.origin_upper_left = true;
          t->b.shader->info.fs.pixel_center_integer = false;
@@ -2172,6 +2337,18 @@ cfg_declare(struct translator *t)
    if (!binding_prelude(t))
       return false;
    t->b.impl->structured = false;
+   if (!t->stage_options && t->options->load_device_value) {
+      /* Threads outside a dispatchThreads grid end before the function. */
+      t->b.cursor = nir_after_block(entry);
+      nir_def *grid = device_value(t, STELA_AIR_DISPATCH_GRID);
+      nir_block *body = new_block(t);
+      if (!grid || !body)
+         return false;
+      nir_def *inside = nir_ball(&t->b, nir_ult(&t->b, grid_position(t), grid));
+      nir_goto_if(&t->b, body, nir_ior(&t->b, inside, nir_ieq_imm(&t->b, nir_channel(&t->b, grid, 0), 0)),
+                  t->b.impl->end_block);
+      entry = body;
+   }
    t->work[0]->start = entry;
    for (unsigned i = 1; i < t->reachable_count; i++) {
       t->work[i]->start = new_block(t);

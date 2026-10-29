@@ -91,6 +91,17 @@ enum stela_air_fp_profile {
    STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41 = 1,
 };
 
+/* Values the device supplies rather than the stage. */
+enum stela_air_device_value {
+   /* A dispatchThreads grid's threads as a uvec3; zero for threadgroup
+    * dispatches. */
+   STELA_AIR_DISPATCH_GRID,
+   /* The amplification ID of an amplified draw, as a uint. */
+   STELA_AIR_AMPLIFICATION,
+};
+typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_device_value,
+                                                void *binding_data);
+
 struct stela_air_options {
    unsigned workgroup_size[3]; /* Exact nonzero pipeline specialization. */
    unsigned max_instructions; /* Nonzero caller-supplied compilation budget. */
@@ -113,6 +124,10 @@ struct stela_air_options {
    /* Texture and sampler arguments; zero refuses them. */
    stela_air_bind_texture bind_texture;
    stela_air_bind_sampler bind_sampler;
+   /* Device values; NULL refuses the builtins that read them. With it,
+    * kernel threads outside a dispatchThreads grid return before the
+    * function runs, as Metal's smaller edge threadgroups never run them. */
+   stela_air_load_device_value load_device_value;
 };
 
 /* Additive VS/FS frontend. No runtime/Metal pipeline is constructed. resources

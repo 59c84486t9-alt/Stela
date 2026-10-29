@@ -2374,7 +2374,7 @@ tests(void)
    free(disabled_fetch);
    metadata_refusal("air.read_write", "air.read", STELA_AIR_MEMORY);
    metadata_refusal("i32 7, i32 1", "i32 7, i32 2", STELA_AIR_METADATA);
-   metadata_refusal("air.thread_position_in_grid", "air.threadgroup_position_in_grid", STELA_AIR_ARGUMENT);
+   metadata_refusal("air.thread_position_in_grid", "air.thread_position_in_universe", STELA_AIR_ARGUMENT);
    metadata_refusal("air.arg_type_align_size\", i32 4", "air.arg_type_align_size\", i32 3", STELA_AIR_METADATA);
    metadata_refusal("air.compile.fast_math_enable", "air.compile.future_semantics", STELA_AIR_METADATA);
    expect_refusal("%v = fadd float 1.0, 2.0\nret void\n", "", 100, STELA_AIR_METADATA);

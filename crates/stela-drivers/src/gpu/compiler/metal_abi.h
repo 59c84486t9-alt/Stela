@@ -3,7 +3,7 @@
 #define STELA_METAL_ABI_H
 
 #include "compiler/nir/nir_builder.h"
-#include "air_metadata.h"
+#include "air_to_nir.h"
 
 /* The Metal device's binding ABI as compiled shaders read it; the device
  * side is metal/binding.rs, whose tests check these values against its own.
@@ -77,6 +77,10 @@ struct stela_metal_stage {
 
 /* The 64-bit address of the stage's argument table. */
 nir_def *stela_metal_load_table(nir_builder *b, enum stela_metal_table table);
+
+/* stela_air_load_device_value over the push constants. */
+nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_value value,
+                                       void *stage);
 
 /* stela_air_bind_buffer over the argument table: the bound address of the
  * buffer at Metal index buffer->index. Refuses indices past the table. */

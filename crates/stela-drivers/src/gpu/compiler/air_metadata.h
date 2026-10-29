@@ -98,9 +98,52 @@ struct stela_air_sampler {
 #define AIR_MAX_TEXTURES 128u
 #define AIR_MAX_SAMPLERS 16u
 
+/* Metal's builtin inputs. AIR names each after its MSL attribute,
+ * "air.<attribute>"; each is an integer scalar or vector of up to three
+ * 16- or 32-bit lanes, or front_facing's bool. */
+enum stela_air_builtin {
+   STELA_AIR_BUILTIN_NONE,
+   /* Kernels. */
+   STELA_AIR_THREAD_POSITION_IN_GRID,
+   STELA_AIR_THREAD_POSITION_IN_THREADGROUP,
+   STELA_AIR_THREADGROUP_POSITION_IN_GRID,
+   STELA_AIR_THREADS_PER_THREADGROUP,
+   STELA_AIR_DISPATCH_THREADS_PER_THREADGROUP,
+   STELA_AIR_THREADGROUPS_PER_GRID,
+   STELA_AIR_THREADS_PER_GRID,
+   STELA_AIR_THREAD_INDEX_IN_THREADGROUP,
+   STELA_AIR_SIMDGROUP_INDEX_IN_THREADGROUP,
+   STELA_AIR_SIMDGROUPS_PER_THREADGROUP,
+   STELA_AIR_DISPATCH_SIMDGROUPS_PER_THREADGROUP,
+   STELA_AIR_QUADGROUP_INDEX_IN_THREADGROUP,
+   STELA_AIR_QUADGROUPS_PER_THREADGROUP,
+   STELA_AIR_DISPATCH_QUADGROUPS_PER_THREADGROUP,
+   /* Every stage. */
+   STELA_AIR_THREAD_INDEX_IN_SIMDGROUP,
+   STELA_AIR_THREADS_PER_SIMDGROUP,
+   STELA_AIR_THREAD_EXECUTION_WIDTH,
+   STELA_AIR_THREAD_INDEX_IN_QUADGROUP,
+   /* Vertex functions. */
+   STELA_AIR_VERTEX_ID,
+   STELA_AIR_INSTANCE_ID,
+   STELA_AIR_BASE_VERTEX,
+   STELA_AIR_BASE_INSTANCE,
+   /* Vertex and fragment functions. */
+   STELA_AIR_AMPLIFICATION_ID,
+   /* Fragment functions. */
+   STELA_AIR_FRONT_FACING,
+   STELA_AIR_SAMPLE_ID,
+   STELA_AIR_SAMPLE_MASK_IN,
+   STELA_AIR_PRIMITIVE_ID,
+   STELA_AIR_RENDER_TARGET_ARRAY_INDEX_IN,
+   STELA_AIR_VIEWPORT_ARRAY_INDEX_IN,
+   STELA_AIR_BUILTIN_COUNT,
+};
+
 struct stela_air_argument_info {
    struct stela_air_buffer buffer;
-   unsigned kind; /* 1=buffer, 2=thread_position_in_grid, 3=texture, 4=sampler. */
+   unsigned kind; /* 1=buffer, 2=builtin, 3=texture, 4=sampler. */
+   enum stela_air_builtin builtin; /* kind 2 */
    struct stela_air_texture texture; /* kind 3 */
    struct stela_air_sampler sampler; /* kind 4 */
    unsigned components;
@@ -129,7 +172,7 @@ bool stela_air_inspect(const void *bitcode, size_t size, unsigned max_entries,
  * Legacy stela_air_inspect continues its original compute-only acceptance. */
 enum stela_air_stage { STELA_AIR_VERTEX = 1, STELA_AIR_FRAGMENT = 2 };
 enum stela_air_stage_semantic {
-   STELA_AIR_STAGE_BUFFER = 1, STELA_AIR_VERTEX_ID, STELA_AIR_POSITION,
+   STELA_AIR_STAGE_BUFFER = 1, STELA_AIR_STAGE_BUILTIN, STELA_AIR_POSITION,
    STELA_AIR_VARYING, STELA_AIR_RENDER_TARGET, STELA_AIR_STAGE_TEXTURE,
    STELA_AIR_STAGE_SAMPLER,
 };
@@ -150,6 +193,7 @@ struct stela_air_stage_io {
    struct stela_air_buffer buffer; /* Only STAGE_BUFFER; AS2 remains readonly. */
    struct stela_air_texture texture; /* Only STAGE_TEXTURE. */
    struct stela_air_sampler sampler; /* Only STAGE_SAMPLER. */
+   enum stela_air_builtin builtin; /* Only STAGE_BUILTIN. */
    enum stela_air_primitive primitive;
    unsigned components;
    enum stela_air_interpolation interpolation;
@@ -236,7 +280,8 @@ struct stela_air_argument {
    struct stela_air_texture texture;
    struct stela_air_sampler sampler;
    bool is_buffer, is_texture, is_sampler;
-   unsigned components; /* Scalar/uint3 thread-position input. */
+   enum stela_air_builtin builtin; /* Otherwise a builtin input. */
+   unsigned components; /* The builtin's lanes. */
    bool plain_buffer_type; /* Reflected MSL builtin scalar/vector, not a struct. */
    const char *name, *type_name;
    size_t name_bytes, type_name_bytes;
