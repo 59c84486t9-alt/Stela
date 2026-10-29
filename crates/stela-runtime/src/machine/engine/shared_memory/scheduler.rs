@@ -208,6 +208,22 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         self.run_blocks(limit)
     }
 
+    /// Serialized execution with a soft host-time limit at engine boundaries.
+    /// Entered native chains, maintenance and host callbacks may overrun.
+    ///
+    /// # Safety
+    /// The complete [`Self::run_serialized`] contract applies.
+    pub unsafe fn run_serialized_with_budget(&mut self, budget: super::super::RunBudget) -> Stop {
+        if let Some(pending) = self.pending_native_device_access() {
+            return pending;
+        }
+        // SAFETY: the caller retains the run_serialized ownership contract.
+        if let Err(stop) = unsafe { self.hold_serialized() } {
+            return stop;
+        }
+        self.run_blocks_with_budget(budget)
+    }
+
     /// Hold every assigned physical worker for [`Self::run_serialized`], as
     /// its first call does, after which their cores take no more of the
     /// native scheduler's work: they can run machines of their own

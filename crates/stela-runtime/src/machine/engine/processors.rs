@@ -277,6 +277,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// run's wait limit, follows a device's bytes for the host, or that only
     /// the host's inputs can end, returns to the host.
     pub(super) fn schedule(&mut self) -> Step {
+        self.schedule_with_deadline(None)
+    }
+
+    pub(super) fn schedule_with_deadline(
+        &mut self,
+        run_deadline: Option<super::budget::Deadline>,
+    ) -> Step {
         if self.parallel.is_some() {
             self.forward_power()?;
             self.read_mail()?;
@@ -294,6 +301,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let mut waited = false;
         loop {
             let pass = self.host.counter();
+            if run_deadline.is_some_and(|deadline| deadline.remaining(pass).is_none()) {
+                if waited {
+                    self.host.arm_timer(None);
+                }
+                return Err(Stop::Budget);
+            }
             if self.parallel.is_some() {
                 self.read_mail()?;
             }
@@ -365,7 +378,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.statistics.spin_ticks += self.host.counter().wrapping_sub(pass);
             } else {
                 self.statistics.waits += 1;
-                self.host.arm_timer(Some(self.clock.host_deadline(until)));
+                let until = self.clock.host_deadline(until);
+                let until = match run_deadline {
+                    Some(deadline) => {
+                        let Some(until) = deadline.timer(self.host.counter(), until) else {
+                            if waited {
+                                self.host.arm_timer(None);
+                            }
+                            return Err(Stop::Budget);
+                        };
+                        until
+                    }
+                    None => until,
+                };
+                self.host.arm_timer(Some(until));
                 let slept = self.host.counter();
                 self.sleep();
                 self.statistics.sleep_ticks += self.host.counter().wrapping_sub(slept);

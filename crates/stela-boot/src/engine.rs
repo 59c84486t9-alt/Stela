@@ -1670,7 +1670,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                         handoff.tsc_hz / WAIT_POLLS_PER_SECOND,
                     )
                 } else {
-                    machine.run_serialized(limit)
+                    machine.run_serialized_with_budget(parallel::RunBudget {
+                        blocks: limit,
+                        host_ticks: Some(host::COUNTER_HZ / WAIT_POLLS_PER_SECOND),
+                    })
                 }
             }
         },

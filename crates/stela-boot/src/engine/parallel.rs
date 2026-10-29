@@ -9,7 +9,7 @@ use super::{SLICE, WAIT_POLLS_PER_SECOND, host, output};
 use crate::{apic::Apic, native_smp::executor::Executors};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use stela_compiler::TargetCpu;
-pub(crate) use stela_runtime::machine::engine::{Counts, SourcePhase};
+pub(crate) use stela_runtime::machine::engine::{Counts, RunBudget, SourcePhase};
 use stela_runtime::machine::{
     Cpu, CpuProfile, Host, Machine, Stop,
     apple::AppleDevices,
@@ -160,7 +160,10 @@ impl Pe {
         output::arguments(format_args!("PARALLEL PE {pe} starts at {address:#x}\n"));
         loop {
             let limit = machine.statistics.blocks + SLICE;
-            let stop = machine.run(limit);
+            let stop = machine.run_with_budget(RunBudget {
+                blocks: limit,
+                host_ticks: Some(host::COUNTER_HZ / WAIT_POLLS_PER_SECOND),
+            });
             // Like the home PE, drain outside guest execution and before a
             // terminal stop. Retention is bounded by TRACE_HITS/WATCH_HITS;
             // output uses the shared bounded serial queue, never an ISR.

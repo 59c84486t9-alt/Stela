@@ -2,6 +2,7 @@
 //! every exit back from native code.
 mod amx;
 mod apple_maintenance;
+mod budget;
 mod chain_control;
 mod clock;
 mod compression;
@@ -41,6 +42,7 @@ mod table;
 mod tags;
 mod unprivileged;
 mod watch;
+pub use budget::RunBudget;
 
 use crate::{pauth, scalable::ScalableState};
 use alloc::string::ToString;
@@ -3400,6 +3402,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Run until a stop. `budget` limits executed blocks (0 = unlimited).
     pub fn run(&mut self, budget: u64) -> Stop {
+        self.run_with_budget(RunBudget {
+            blocks: budget,
+            host_ticks: None,
+        })
+    }
+
+    /// Run within block and optional host-time limits, yielding between
+    /// engine steps. An entered native chain or host callback may overrun.
+    pub fn run_with_budget(&mut self, budget: RunBudget) -> Stop {
         if let Some(pending) = self.pending_native_device_access() {
             return pending;
         }
@@ -3409,24 +3420,44 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 "converted shared-memory PEs run only through run_serialized or the native scheduler",
             ));
         }
-        self.run_blocks(budget)
+        self.run_blocks_with_budget(budget)
     }
 
     /// The serial scheduler and chained native blocks, until a stop.
     pub(super) fn run_blocks(&mut self, budget: u64) -> Stop {
+        self.run_blocks_with_budget(RunBudget {
+            blocks: budget,
+            host_ticks: None,
+        })
+    }
+
+    pub(super) fn run_blocks_with_budget(&mut self, budget: RunBudget) -> Stop {
+        let deadline = budget
+            .host_ticks
+            .map(|ticks| budget::Deadline::new(self.host.counter(), ticks));
         self.observe_parallel_source(SourcePhase::SliceEnter);
-        self.block_limit = if budget == 0 { u64::MAX } else { budget };
+        self.block_limit = if budget.blocks == 0 {
+            u64::MAX
+        } else {
+            budget.blocks
+        };
         self.waited = 0;
         // The host may have changed the devices between runs (`devices` is
         // theirs too): their lines are asked again.
         self.device_lines = None;
         loop {
-            if self.statistics.blocks >= self.block_limit {
+            if self.statistics.blocks >= self.block_limit
+                || deadline
+                    .is_some_and(|deadline| deadline.remaining(self.host.counter()).is_none())
+            {
                 self.observe_parallel_source(SourcePhase::SliceExit);
                 return Stop::Budget;
             }
             let started = self.timing_start();
-            let scheduled = self.schedule();
+            let scheduled = match deadline {
+                Some(deadline) => self.schedule_with_deadline(Some(deadline)),
+                None => self.schedule(),
+            };
             self.timing_charge(step_timing::Phase::Schedule, started);
             if let Err(stop) = scheduled
                 .and_then(|()| self.step())
@@ -7059,6 +7090,8 @@ mod tests {
         pub(super) counter_reads: usize,
         /// Counts the counter moves on after each read.
         pub(super) counter_step: u64,
+        pub(super) execute_ticks: u64,
+        pub(super) timers: Vec<Option<u64>>,
         /// What [`Host::tsc_counter`] answers.
         pub(super) tsc_counter: Option<(u64, u64)>,
         placement: mmu::placement::Placement,
@@ -7162,6 +7195,7 @@ mod tests {
                     core::ptr::addr_of_mut!((*control).linked).write(chained.linked);
                 }
             }
+            self.now = self.now.wrapping_add(self.execute_ticks);
             self.exits.remove(0)
         }
         fn set_regime(&mut self, regime: &Regime) {
@@ -7203,7 +7237,9 @@ mod tests {
             self.now += self.counter_step;
             now
         }
-        fn arm_timer(&mut self, _: Option<u64>) {}
+        fn arm_timer(&mut self, until: Option<u64>) {
+            self.timers.push(until);
+        }
         fn wait_for_interrupt(&mut self) {
             self.now += 1000;
         }
@@ -7320,6 +7356,8 @@ mod tests {
             fetch_checks: 0,
             counter_reads: 0,
             counter_step: 0,
+            execute_ticks: 0,
+            timers: Vec::new(),
             tsc_counter: None,
             placement: mmu::placement::Placement::FiveLevel,
             translation_helper: None,
