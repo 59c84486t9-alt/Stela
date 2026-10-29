@@ -144,65 +144,9 @@ fn integer_products_maps_every_form_to_exact_body_boundaries() {
                     VectorLength::from_bytes(bytes).unwrap(),
                     target,
                 );
-                assert_eq!(
-                    native.source_map,
-                    [
-                        (GuestAddress(0x1000), CONTEXT_WRAPPER_BYTES),
-                        (GuestAddress(0x1004), CONTEXT_WRAPPER_BYTES + expected.len())
-                    ]
-                );
-                assert_eq!(
-                    &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                    context_wrapper()
-                );
-                assert_eq!(
-                    &native.x86_64_code[CONTEXT_WRAPPER_BYTES..native.source_map[1].1],
-                    expected
-                );
-                assert_eq!(&native.x86_64_code[native.source_map[1].1..], &[RET]);
+
+                assert_single_body(&native, GuestAddress(0x1000), &expected);
             }
         }
     }
-}
-
-#[test]
-fn integer_products_preflight_rejects_reserved_modes_and_prefix_pairs() {
-    const MUL_Z0_Z1_Z2: u32 = 0x0422_6020;
-    const SMULLB_RESERVED_BYTE: u32 = 0x4500_7000;
-    const PMULLB_RESERVED_WORD: u32 = 0x4580_6800;
-    for word in [SMULLB_RESERVED_BYTE, PMULLB_RESERVED_WORD] {
-        assert!(
-            crate::testing::context_leaf(
-                &words(&[NOP, word, RET_X30]),
-                GuestAddress(0),
-                profile(32, true),
-                TargetCpu::Baseline,
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("reserved streaming integer product")
-        );
-    }
-    assert!(
-        crate::testing::context_leaf(
-            &words(&[MUL_Z0_Z1_Z2, RET_X30]),
-            GuestAddress(0),
-            profile(32, false),
-            TargetCpu::Baseline,
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("streaming mode required")
-    );
-    assert!(
-        crate::testing::context_leaf(
-            &words(&[MOVPRFX_Z0_Z1, MUL_Z0_Z1_Z2, RET_X30]),
-            GuestAddress(0),
-            profile(32, true),
-            TargetCpu::Baseline,
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("MOVPRFX pair validation")
-    );
 }

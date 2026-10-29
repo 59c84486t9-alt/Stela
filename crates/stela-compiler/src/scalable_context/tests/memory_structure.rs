@@ -5,12 +5,9 @@ use crate::context::memory::{SpAlignmentRequirement, flags, host_caps, profile_r
 use alloc::vec;
 use alloc::vec::Vec;
 
-const RET_X30: u32 = 0xd65f_03c0;
-const NOP: u32 = 0xd503_201f;
 const GUEST_BASE: GuestAddress = GuestAddress(0x1000);
 const MAXIMUM_VECTOR_BYTES: usize = 256;
 const LENGTHS: [usize; 5] = [16, 32, 64, 128, 256];
-const SOURCE_BYTES: u64 = size_of::<u32>() as u64;
 const DESTINATION_Z31: u32 = 31;
 const PREDICATE_P7: u32 = 7 << 10;
 const BASE_X5: u32 = 5 << 5;
@@ -96,25 +93,8 @@ fn all_structure_forms_dispatch_exact_bodies_and_source_maps_at_every_length() {
                 TargetCpu::Baseline,
                 GUEST_BASE.0,
             );
-            assert_eq!(
-                &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                context_wrapper()
-            );
-            assert_eq!(
-                native.source_map,
-                [
-                    (GUEST_BASE, CONTEXT_WRAPPER_BYTES),
-                    (
-                        GuestAddress(GUEST_BASE.0 + SOURCE_BYTES),
-                        CONTEXT_WRAPPER_BYTES + expected.len()
-                    ),
-                ]
-            );
-            assert_eq!(
-                &native.x86_64_code[CONTEXT_WRAPPER_BYTES..native.source_map[1].1],
-                expected
-            );
-            assert_eq!(&native.x86_64_code[native.source_map[1].1..], [RET]);
+
+            assert_single_body(&native, GUEST_BASE, &expected);
             assert_eq!(
                 crate::testing::context_leaf_memory(
                     &input,

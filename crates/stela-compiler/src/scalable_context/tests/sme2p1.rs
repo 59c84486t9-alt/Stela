@@ -2,8 +2,6 @@
 use super::*;
 use crate::aarch64::sve::{rearrange, reductions};
 use alloc::vec::Vec;
-const RET_X30: u32 = 0xd65f_03c0;
-const NOP: u32 = 0xd503_201f;
 const PARENT_Q_WORDS: [u32; 105] = [
     0x052037ff, // tbxq_z_zz_
     0x05212421, // dupq_z_zi_
@@ -184,26 +182,8 @@ fn sme2p1_q_dispatch_has_exact_body_and_maps_for_all_declared_lengths_modes_targ
                         ));
                         x86_64::sve::rearrange::emit(&mut expected, operand, length, target);
                     }
-                    assert_eq!(
-                        &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                        context_wrapper()
-                    );
-                    assert_eq!(
-                        native.source_map,
-                        [
-                            (GuestAddress(0x1000), CONTEXT_WRAPPER_BYTES),
-                            (GuestAddress(0x1004), CONTEXT_WRAPPER_BYTES + 1),
-                            (
-                                GuestAddress(0x1008),
-                                CONTEXT_WRAPPER_BYTES + 1 + expected.len()
-                            ),
-                        ]
-                    );
-                    assert_eq!(
-                        &native.x86_64_code[CONTEXT_WRAPPER_BYTES + 1..native.source_map[2].1],
-                        expected
-                    );
-                    assert_eq!(&native.x86_64_code[native.source_map[2].1..], [RET]);
+
+                    assert_bodies(&native, GuestAddress(0x1000), &[NOP_BODY, &expected]);
                 }
             }
         }

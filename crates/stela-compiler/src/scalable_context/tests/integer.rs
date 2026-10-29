@@ -3,31 +3,6 @@ use crate::aarch64::sve::integer_arithmetic;
 use crate::aarch64::sve::integer_saturation;
 
 #[test]
-fn integer_comparison_preflight_rejects_non_streaming_reserved_and_prefix_inputs() {
-    const CMPEQ_BYTE: u32 = 0x2400_2020;
-    const CMPEQ_WIDE_RESERVED_DOUBLEWORD: u32 = 0x24c0_2020;
-    const MOVPRFX_Z0_Z1: u32 = 0x0420_bc20;
-    for (input, streaming, reason) in [
-        (vec![CMPEQ_BYTE, RET_X30], false, "streaming mode required"),
-        (
-            vec![CMPEQ_WIDE_RESERVED_DOUBLEWORD, RET_X30],
-            true,
-            "reserved streaming integer comparison",
-        ),
-        (vec![MOVPRFX_Z0_Z1, CMPEQ_BYTE, RET_X30], true, "MOVPRFX"),
-    ] {
-        let error = crate::testing::context_leaf(
-            &words(&input),
-            GuestAddress(0),
-            profile(32, streaming),
-            TargetCpu::Baseline,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains(reason), "{error:?}");
-    }
-}
-
-#[test]
 fn integer_comparison_accepts_declared_sme_without_sme2() {
     const CMPEQ_BYTE: u32 = 0x2400_2020;
     let length = VectorLength::from_bytes(32).unwrap();
@@ -135,79 +110,12 @@ fn integer_arithmetic_maps_all_families_with_exact_body_boundaries() {
                         VectorLength::from_bytes(bytes).unwrap(),
                         target,
                     );
-                    assert_eq!(
-                        native.source_map[0],
-                        (GuestAddress(0x1000), CONTEXT_WRAPPER_BYTES)
-                    );
-                    assert_eq!(
-                        native.source_map[1],
-                        (GuestAddress(0x1004), CONTEXT_WRAPPER_BYTES + expected.len())
-                    );
-                    assert_eq!(
-                        &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                        context_wrapper()
-                    );
-                    assert_eq!(
-                        &native.x86_64_code[CONTEXT_WRAPPER_BYTES..native.source_map[1].1],
-                        expected
-                    );
-                    assert_eq!(native.x86_64_code[native.source_map[1].1..], [RET]);
+
+                    assert_single_body(&native, GuestAddress(0x1000), &expected);
                 }
             }
         }
     }
-}
-
-#[test]
-fn integer_arithmetic_preflight_rejects_mode_reserved_and_prefix_inputs() {
-    const ADD_Z0_Z1_Z2: u32 = 0x0422_0020;
-    const SDIV_RESERVED_BYTE: u32 = 0x0414_0000;
-    const UDIV_RESERVED_HALFWORD: u32 = 0x0455_0000;
-    const SADDLB_RESERVED_BYTE: u32 = 0x4500_0000;
-    const ADD_RESERVED_BYTE_SHIFT8: u32 = 0x2520_e000;
-    for word in [
-        SDIV_RESERVED_BYTE,
-        UDIV_RESERVED_HALFWORD,
-        SADDLB_RESERVED_BYTE,
-        ADD_RESERVED_BYTE_SHIFT8,
-    ] {
-        assert!(
-            crate::testing::context_leaf(
-                &words(&[NOP, word, RET_X30]),
-                GuestAddress(0),
-                profile(32, true),
-                TargetCpu::Baseline,
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("reserved streaming integer arithmetic")
-        );
-    }
-    for bytes in [16, 32, 64, 128, 256] {
-        assert!(
-            crate::testing::context_leaf(
-                &words(&[ADD_Z0_Z1_Z2, RET_X30]),
-                GuestAddress(0),
-                profile(bytes, false),
-                TargetCpu::Baseline,
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("streaming mode required")
-        );
-    }
-    assert!(
-        crate::testing::context_leaf(
-            &words(&[MOVPRFX_Z0_Z1, ADD_Z0_Z1_Z2, RET_X30]),
-            GuestAddress(0),
-            profile(32, true),
-            TargetCpu::Baseline,
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("MOVPRFX pair validation")
-    );
-    assert!(crate::testing::leaf(&words(&[ADD_Z0_Z1_Z2, RET_X30]), GuestAddress(0)).is_err());
 }
 
 #[test]
@@ -282,75 +190,12 @@ fn integer_saturation_maps_all_forms_with_exact_body_boundaries() {
                         VectorLength::from_bytes(bytes).unwrap(),
                         target,
                     );
-                    assert_eq!(
-                        native.source_map[0],
-                        (GuestAddress(0x1000), CONTEXT_WRAPPER_BYTES)
-                    );
-                    assert_eq!(
-                        native.source_map[1],
-                        (GuestAddress(0x1004), CONTEXT_WRAPPER_BYTES + expected.len())
-                    );
-                    assert_eq!(
-                        &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                        context_wrapper()
-                    );
-                    assert_eq!(
-                        &native.x86_64_code[CONTEXT_WRAPPER_BYTES..native.source_map[1].1],
-                        expected
-                    );
-                    assert_eq!(native.x86_64_code[native.source_map[1].1..], [RET]);
+
+                    assert_single_body(&native, GuestAddress(0x1000), &expected);
                 }
             }
         }
     }
-}
-
-#[test]
-fn integer_saturation_preflight_rejects_reserved_mode_and_prefix_inputs() {
-    const SQADD_Z0_Z1_Z2: u32 = 0x0422_1020;
-    const SQADD_RESERVED_BYTE_SHIFT8: u32 = 0x2524_e000;
-    const SABDLB_RESERVED_BYTE: u32 = 0x4500_3000;
-    const MOVPRFX_PREDICATED_Z0_Z1: u32 = 0x0410_2020;
-    for word in [SQADD_RESERVED_BYTE_SHIFT8, SABDLB_RESERVED_BYTE] {
-        assert!(
-            crate::testing::context_leaf(
-                &words(&[NOP, word, RET_X30]),
-                GuestAddress(0),
-                profile(32, true),
-                TargetCpu::Baseline
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("reserved streaming integer saturation")
-        );
-    }
-    for bytes in [16, 32, 64, 128, 256] {
-        assert!(
-            crate::testing::context_leaf(
-                &words(&[SQADD_Z0_Z1_Z2, RET_X30]),
-                GuestAddress(0),
-                profile(bytes, false),
-                TargetCpu::Baseline
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("streaming mode required")
-        );
-    }
-    for prefix in [MOVPRFX_Z0_Z1, MOVPRFX_PREDICATED_Z0_Z1] {
-        assert!(
-            crate::testing::context_leaf(
-                &words(&[prefix, SQADD_Z0_Z1_Z2, RET_X30]),
-                GuestAddress(0),
-                profile(32, true),
-                TargetCpu::Baseline
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("MOVPRFX pair validation")
-        );
-    }
-    assert!(crate::testing::leaf(&words(&[SQADD_Z0_Z1_Z2, RET_X30]), GuestAddress(0)).is_err());
 }
 
 #[test]

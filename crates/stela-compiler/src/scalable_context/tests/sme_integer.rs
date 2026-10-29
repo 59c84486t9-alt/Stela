@@ -4,7 +4,6 @@ use crate::aarch64::scalable::profile::ScalableControls;
 use crate::aarch64::sme::{integer_dots, integer_matrix};
 use alloc::vec::Vec;
 
-const RET_X30: u32 = 0xd65f_03c0;
 const DOT_WORD: u32 = 0xc150_1000;
 const DOT_DOUBLEWORD: u32 = 0xc1d0_0008;
 const GUEST_BASE: GuestAddress = GuestAddress(0x1000);
@@ -109,25 +108,8 @@ fn canonical_dots_emit_exact_bodies_and_maps() {
                     profile.vector_length(),
                     target,
                 );
-                assert_eq!(
-                    native.source_map,
-                    [
-                        (GUEST_BASE, CONTEXT_WRAPPER_BYTES),
-                        (
-                            GuestAddress(GUEST_BASE.0 + size_of::<u32>() as u64),
-                            CONTEXT_WRAPPER_BYTES + expected.len()
-                        ),
-                    ]
-                );
-                assert_eq!(
-                    &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                    context_wrapper()
-                );
-                assert_eq!(
-                    &native.x86_64_code[CONTEXT_WRAPPER_BYTES..native.source_map[1].1],
-                    expected
-                );
-                assert_eq!(native.x86_64_code[native.source_map[1].1..], [RET]);
+
+                assert_single_body(&native, GUEST_BASE, &expected);
             }
         }
         assert!(crate::testing::leaf(&dot_body(word), GUEST_BASE).is_err());
@@ -271,15 +253,7 @@ fn integer_matrix_admission_checks_features_mode_and_source_maps() {
                                     length,
                                     TargetCpu::Baseline,
                                 );
-                                let map = &native.source_map;
-                                assert_eq!(map.len(), 2);
-                                assert_eq!(map[0], (GuestAddress(0), CONTEXT_WRAPPER_BYTES));
-                                assert_eq!(
-                                    map[1],
-                                    (GuestAddress(4), CONTEXT_WRAPPER_BYTES + body.len())
-                                );
-                                assert_eq!(&native.x86_64_code[map[0].1..map[1].1], body);
-                                assert_eq!(&native.x86_64_code[map[1].1..], &[RET]);
+                                assert_single_body(&native, GuestAddress(0), &body);
                             }
                         }
                     }

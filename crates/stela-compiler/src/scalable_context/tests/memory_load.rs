@@ -5,8 +5,6 @@ use crate::context::memory::{SpAlignmentRequirement, flags, host_caps, profile_r
 use alloc::vec;
 use alloc::vec::Vec;
 
-const RET_X30: u32 = 0xd65f_03c0;
-const NOP: u32 = 0xd503_201f;
 const BRANCH_PAST_LEAF: u32 = 0x1400_0002;
 const LD1B_Z1_P0_X5: u32 = 0xa400_a0a1;
 const LD1D_Z1_P0_X5: u32 = 0xa5e0_a0a1;
@@ -117,25 +115,8 @@ fn all_load_forms_dispatch_exact_bodies_and_source_maps_at_every_length() {
                 TargetCpu::Baseline,
                 GUEST_BASE.0,
             );
-            assert_eq!(
-                &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                context_wrapper()
-            );
-            assert_eq!(
-                native.source_map,
-                [
-                    (GUEST_BASE, CONTEXT_WRAPPER_BYTES),
-                    (
-                        GuestAddress(GUEST_BASE.0 + INSTRUCTION_BYTES as u64),
-                        CONTEXT_WRAPPER_BYTES + expected.len()
-                    ),
-                ]
-            );
-            assert_eq!(
-                &native.x86_64_code[CONTEXT_WRAPPER_BYTES..native.source_map[1].1],
-                expected
-            );
-            assert_eq!(&native.x86_64_code[native.source_map[1].1..], [RET]);
+
+            assert_single_body(&native, GUEST_BASE, &expected);
             assert_eq!(
                 crate::testing::context_leaf_memory(
                     &source(&[word, RET_X30]),

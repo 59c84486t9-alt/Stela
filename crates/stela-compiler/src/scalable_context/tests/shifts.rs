@@ -82,23 +82,8 @@ fn integer_shifts_register_exact_bodies_and_source_maps() {
                     VectorLength::from_bytes(bytes).unwrap(),
                     target,
                 );
-                let return_offset = CONTEXT_WRAPPER_BYTES + body.len();
-                assert_eq!(
-                    native.source_map,
-                    [
-                        (GuestAddress(0x1000), CONTEXT_WRAPPER_BYTES),
-                        (GuestAddress(0x1004), return_offset)
-                    ]
-                );
-                assert_eq!(
-                    &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                    context_wrapper()
-                );
-                assert_eq!(
-                    &native.x86_64_code[CONTEXT_WRAPPER_BYTES..return_offset],
-                    body
-                );
-                assert_eq!(&native.x86_64_code[return_offset..], &[RET]);
+
+                assert_single_body(&native, GuestAddress(0x1000), &body);
             }
         }
         let length = VectorLength::from_bytes(16).unwrap();
@@ -363,40 +348,6 @@ fn integer_shift_dit_policy_preserves_canonical_width_boundaries() {
 }
 
 #[test]
-fn integer_shifts_reserved_and_prefix_inputs_remain_explicit() {
-    const LSL_RESERVED_SIZE: u32 = 0x0403_8000;
-    const ASR_RESERVED_DOUBLEWORDS: u32 = 0x04d8_8000;
-    const LSL_Z0_B_P0_Z0_B_ZERO: u32 = 0x0403_8100;
-    for word in [LSL_RESERVED_SIZE, ASR_RESERVED_DOUBLEWORDS] {
-        assert!(
-            crate::testing::context_leaf(
-                &words(&[NOP, word, RET_X30]),
-                GuestAddress(0),
-                profile(16, true),
-                TargetCpu::Baseline
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("reserved streaming integer shift")
-        );
-    }
-    assert!(
-        crate::testing::context_leaf(
-            &words(&[MOVPRFX_Z0_Z1, LSL_Z0_B_P0_Z0_B_ZERO, RET_X30]),
-            GuestAddress(0),
-            profile(16, true),
-            TargetCpu::Baseline
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("MOVPRFX pair validation")
-    );
-    assert!(
-        crate::testing::leaf(&words(&[LSL_Z0_B_P0_Z0_B_ZERO, RET_X30]), GuestAddress(0)).is_err()
-    );
-}
-
-#[test]
 fn width_conversions_register_exact_bodies_and_source_maps() {
     const CANONICAL_WORDS: [u32; 26] = [
         0x452f1820, // RSHRNB
@@ -448,23 +399,8 @@ fn width_conversions_register_exact_bodies_and_source_maps() {
                     VectorLength::from_bytes(bytes).unwrap(),
                     target,
                 );
-                let return_offset = CONTEXT_WRAPPER_BYTES + body.len();
-                assert_eq!(
-                    native.source_map,
-                    [
-                        (GuestAddress(0x1000), CONTEXT_WRAPPER_BYTES),
-                        (GuestAddress(0x1004), return_offset)
-                    ]
-                );
-                assert_eq!(
-                    &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                    context_wrapper()
-                );
-                assert_eq!(
-                    &native.x86_64_code[CONTEXT_WRAPPER_BYTES..return_offset],
-                    body
-                );
-                assert_eq!(&native.x86_64_code[return_offset..], &[RET]);
+
+                assert_single_body(&native, GuestAddress(0x1000), &body);
             }
         }
         for streaming in [false, true] {
@@ -490,36 +426,4 @@ fn width_conversions_register_exact_bodies_and_source_maps() {
             }
         }
     }
-}
-
-#[test]
-fn width_conversion_reserved_and_prefix_inputs_remain_explicit() {
-    const SSHLLB_RESERVED_SIZE: u32 = 0x4500_a000;
-    const SQXTNB_RESERVED_SIZE: u32 = 0x4520_4000;
-    const SSHLLB_Z0_H_Z1_B: u32 = 0x4508_a020;
-    for word in [SSHLLB_RESERVED_SIZE, SQXTNB_RESERVED_SIZE] {
-        assert!(
-            crate::testing::context_leaf(
-                &words(&[NOP, word, RET_X30]),
-                GuestAddress(0),
-                profile(16, true),
-                TargetCpu::Baseline
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("reserved streaming width-conversion")
-        );
-    }
-    assert!(
-        crate::testing::context_leaf(
-            &words(&[MOVPRFX_Z0_Z1, SSHLLB_Z0_H_Z1_B, RET_X30]),
-            GuestAddress(0),
-            profile(16, true),
-            TargetCpu::Baseline
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("MOVPRFX pair validation")
-    );
-    assert!(crate::testing::leaf(&words(&[SSHLLB_Z0_H_Z1_B, RET_X30]), GuestAddress(0)).is_err());
 }

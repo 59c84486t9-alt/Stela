@@ -3,7 +3,6 @@ use super::*;
 use crate::aarch64::sve::integer_predicate_move;
 use alloc::vec::Vec;
 
-const RET_X30: u32 = 0xd65f_03c0;
 const BASES: [u32; 4] = [0x052b_3800, 0x052d_3800, 0x0569_3800, 0x05a9_3800];
 const PORTION_LOW_SHIFT: u32 = 17;
 const PORTION_HIGH_SHIFT: u32 = 22;
@@ -62,22 +61,8 @@ fn predicate_move_dispatch_preserves_complete_bodies_and_maps() {
                             VectorLength::from_bytes(bytes).unwrap(),
                             target,
                         );
-                        assert_eq!(
-                            native.source_map,
-                            [
-                                (GuestAddress(0x1000), CONTEXT_WRAPPER_BYTES),
-                                (GuestAddress(0x1004), CONTEXT_WRAPPER_BYTES + expected.len())
-                            ]
-                        );
-                        assert_eq!(
-                            &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                            context_wrapper()
-                        );
-                        assert_eq!(
-                            &native.x86_64_code[CONTEXT_WRAPPER_BYTES..native.source_map[1].1],
-                            expected
-                        );
-                        assert_eq!(&native.x86_64_code[native.source_map[1].1..], [RET]);
+
+                        assert_single_body(&native, GuestAddress(0x1000), &expected);
                     }
                 }
             }
