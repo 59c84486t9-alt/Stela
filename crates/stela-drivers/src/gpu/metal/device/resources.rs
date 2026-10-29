@@ -2,7 +2,7 @@
 use super::{BufferId, Device, HeapId, SamplerId, Slab, TextureId};
 use crate::gpu::metal::{
     abi::{HeapType, ResourceOptions, StorageMode, TextureType},
-    binding::{HeapArray, ResourceId},
+    binding::{HeapArray, NULL_DESCRIPTOR, ResourceId},
     command_buffer::{BufferRef, blit::BufferLayout},
     error::{Error, Result, ensure, require},
     hazard::FULL,
@@ -21,7 +21,7 @@ use crate::gpu::metal::{
         command::{BufferImageCopy, Command, SparseBind},
         object::{
             Buffer, BufferInfo, BufferView, Image, ImageView, ImageViewInfo, Memory, MemoryRequest,
-            Sampler,
+            Sampler, SubresourceRange,
         },
     },
 };
@@ -277,26 +277,81 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.release_memory(copy.memory, copy.allocated);
     }
 
-    /// Creates the sampled and storage views and their descriptors.
+    /// Creates the sampled view and a storage view of each level, which a
+    /// storage image holds one of, with their descriptors. On failure nothing
+    /// it created remains.
     fn shader_views(
         &mut self,
         image: Image,
         views: &ShaderViews,
     ) -> Result<(ResourceId, Vec<ImageView>)> {
-        let mut created = Vec::new();
-        let mut indices = [super::super::binding::NULL_DESCRIPTOR; 2];
-        for (slot, info) in [views.sampled, views.storage].into_iter().enumerate() {
-            let Some(info) = info else { continue };
-            let view = self.backend.create_image_view(image, &info)?;
-            created.push(view);
-            let descriptor = if slot == 0 {
-                Descriptor::SampledImage(view)
-            } else {
-                Descriptor::StorageImage(view)
-            };
-            indices[slot] = self.descriptor(descriptor)?;
+        let levels = views.storage.iter().flat_map(|info| {
+            (0..info.range.level_count).map(|level| ImageViewInfo {
+                range: SubresourceRange {
+                    base_mip_level: info.range.base_mip_level + level,
+                    level_count: 1,
+                    ..info.range
+                },
+                ..*info
+            })
+        });
+        let infos: Vec<_> = views.sampled.into_iter().chain(levels).collect();
+        let mut created = Vec::with_capacity(infos.len());
+        let mut descriptors = Ok(ResourceId::NULL);
+        for info in &infos {
+            match self.backend.create_image_view(image, info) {
+                Ok(view) => created.push(view),
+                Err(error) => {
+                    descriptors = Err(error);
+                    break;
+                }
+            }
         }
-        Ok((ResourceId::new(indices[0], indices[1]), created))
+        if descriptors.is_ok() {
+            let (sampled, storage) = created.split_at(usize::from(views.sampled.is_some()));
+            descriptors = self.view_descriptors(sampled.first().copied(), storage);
+        }
+        match descriptors {
+            Ok(id) => Ok((id, created)),
+            Err(error) => {
+                for view in created {
+                    self.backend.destroy(Object::ImageView(view));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Writes the descriptors of a sampled view and of consecutive storage
+    /// views, one per level.
+    fn view_descriptors(
+        &mut self,
+        sampled: Option<ImageView>,
+        storage: &[ImageView],
+    ) -> Result<ResourceId> {
+        let sampled = match sampled {
+            Some(view) => self.descriptor(Descriptor::SampledImage(view))?,
+            None => NULL_DESCRIPTOR,
+        };
+        if storage.is_empty() {
+            return Ok(ResourceId::new(sampled, NULL_DESCRIPTOR));
+        }
+        let levels = storage.len() as u32;
+        let first = match self
+            .descriptors
+            .allocate_run(HeapArray::StorageImages, levels)
+        {
+            Ok(first) => first,
+            Err(error) => {
+                self.release_id(ResourceId::new(sampled, NULL_DESCRIPTOR), TEXTURE_ARRAYS);
+                return Err(error);
+            }
+        };
+        for (level, view) in (first..).zip(storage) {
+            self.backend
+                .write_descriptor(level, Descriptor::StorageImage(*view));
+        }
+        Ok(ResourceId::texture(sampled, first, levels))
     }
 
     /// `gpuResourceID` of a texture.

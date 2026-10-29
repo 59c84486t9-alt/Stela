@@ -51,10 +51,12 @@
 /* Descriptor set 0 is the device's bindless heap: one array per
  * binding.rs HeapArray, indexed by the halves of a texture's or sampler's
  * MTLResourceID. A texture's low half names its sampled image or uniform
- * texel buffer, its high half its storage image or storage texel buffer; a
- * sampler's low half names its float-border sampler, its high half its
- * integer-border twin. */
+ * texel buffer, its high half its storage texel buffer or storage images, one
+ * per level from the index below STELA_METAL_LEVEL_SHIFT, whose bits from
+ * there count them less one; a sampler's low half names its float-border
+ * sampler, its high half its integer-border twin. */
 #define STELA_METAL_HEAP_SET 0u
+#define STELA_METAL_LEVEL_SHIFT 27u
 enum stela_metal_heap_array {
    STELA_METAL_HEAP_SAMPLED_IMAGES,
    STELA_METAL_HEAP_STORAGE_IMAGES,
@@ -88,10 +90,12 @@ nir_def *stela_metal_bind_buffer(nir_builder *b, const struct stela_air_buffer *
                                  void *stage);
 
 /* stela_air_bind_texture over the argument table and the heap: the heap
- * element the texture's MTLResourceID names. Refuses indices past the
- * table. */
+ * element the texture's MTLResourceID names, of the level for a storage
+ * image, or the null descriptor for a level past the texture's. Refuses
+ * indices past the table. */
 nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air_texture *texture,
-                                          const struct glsl_type *type, void *stage);
+                                          const struct glsl_type *type, nir_def *level,
+                                          void *stage);
 
 /* stela_air_bind_sampler likewise, of the sampler's float- or integer-border
  * descriptor. */
@@ -101,7 +105,8 @@ nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air
 /* stela_air_bind_texture_id and stela_air_bind_sampler_id: the heap element
  * a loaded MTLResourceID names, as for an argument table's. */
 nir_deref_instr *stela_metal_bind_texture_id(nir_builder *b, nir_def *id,
-                                             const struct glsl_type *type, void *stage);
+                                             const struct glsl_type *type, nir_def *level,
+                                             void *stage);
 nir_deref_instr *stela_metal_bind_sampler_id(nir_builder *b, nir_def *id, bool integer,
                                              void *stage);
 

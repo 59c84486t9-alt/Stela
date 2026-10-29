@@ -493,6 +493,38 @@ fn textures_publish_descriptors_and_release_them() {
 }
 
 #[test]
+fn storage_textures_have_a_descriptor_per_level() {
+    let mut device = device();
+    let mut descriptor = texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_WRITE);
+    descriptor.mipmap_level_count = 8;
+    let id = device.new_texture(&descriptor).unwrap();
+    let resource = device.texture_resource_id(id).unwrap();
+    assert_eq!(resource.low(), 0, "write-only textures are not sampled");
+    assert_eq!(resource.high_count(), 8);
+    let storage: Vec<_> = device
+        .backend()
+        .descriptors
+        .iter()
+        .filter(|(_, descriptor)| descriptor.array() == HeapArray::StorageImages)
+        .map(|(index, _)| *index)
+        .collect();
+    let first = resource.high_index();
+    assert_eq!(storage, (first..first + 8).collect::<Vec<_>>());
+    assert_eq!(device.descriptors.in_use(HeapArray::StorageImages), 8);
+    let serial = submit(&mut device);
+    device.destroy_texture(id).unwrap();
+    complete(&mut device, serial);
+    assert_eq!(device.descriptors.in_use(HeapArray::StorageImages), 0);
+    let views = device
+        .backend()
+        .destroyed
+        .iter()
+        .filter(|object| matches!(object, Object::ImageView(_)))
+        .count();
+    assert_eq!(views, 8, "each level's view is destroyed");
+}
+
+#[test]
 fn texture_buffers_and_linear_textures_alias_their_buffer() {
     let mut device = device();
     let buffer = device

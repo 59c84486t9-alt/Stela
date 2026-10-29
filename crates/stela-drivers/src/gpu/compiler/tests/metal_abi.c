@@ -51,6 +51,9 @@ static void check_heap_index(nir_deref_instr *deref, unsigned table_offset, bool
 {
    nir_def *index = deref->arr.index.ssa;
    nir_alu_instr *half = nir_def_as_alu(index);
+   /* A storage image's first level is the half below the level count. */
+   if (half->op == nir_op_iand)
+      half = nir_def_as_alu(half->src[0].src.ssa);
    if (half->op == nir_op_i2i32 || half->op == nir_op_u2u32 || half->op == nir_op_i2i64 ||
        half->op == nir_op_u2u64)
       half = nir_def_as_alu(half->src[0].src.ssa);
@@ -80,23 +83,23 @@ static void textures_and_samplers_index_the_heap(void)
    const struct glsl_type *buffer = glsl_image_type(GLSL_SAMPLER_DIM_BUF, false, GLSL_TYPE_FLOAT);
    const struct stela_air_texture texture = {.index = 3};
 
-   nir_deref_instr *deref = stela_metal_bind_texture(&b, &texture, sampled, (void *)&stage);
+   nir_deref_instr *deref = stela_metal_bind_texture(&b, &texture, sampled, NULL, (void *)&stage);
    nir_variable *images = check_heap(deref, STELA_METAL_HEAP_SAMPLED_IMAGES, nir_var_uniform,
                                      sampled);
    check_heap_index(deref, STELA_METAL_TABLE_TEXTURES + 3 * 8, false);
    /* One variable per element type. */
-   deref = stela_metal_bind_texture(&b, &texture, sampled, (void *)&stage);
+   deref = stela_metal_bind_texture(&b, &texture, sampled, NULL, (void *)&stage);
    assert(nir_deref_instr_get_variable(deref) == images);
 
-   deref = stela_metal_bind_texture(&b, &texture, storage, (void *)&stage);
+   deref = stela_metal_bind_texture(&b, &texture, storage, NULL, (void *)&stage);
    nir_variable *image = check_heap(deref, STELA_METAL_HEAP_STORAGE_IMAGES, nir_var_image,
                                     storage);
    assert(image->data.image.format == PIPE_FORMAT_NONE);
    check_heap_index(deref, STELA_METAL_TABLE_TEXTURES + 3 * 8, true);
 
-   deref = stela_metal_bind_texture(&b, &texture, texels, (void *)&stage);
+   deref = stela_metal_bind_texture(&b, &texture, texels, NULL, (void *)&stage);
    check_heap(deref, STELA_METAL_HEAP_UNIFORM_TEXEL_BUFFERS, nir_var_uniform, texels);
-   deref = stela_metal_bind_texture(&b, &texture, buffer, (void *)&stage);
+   deref = stela_metal_bind_texture(&b, &texture, buffer, NULL, (void *)&stage);
    check_heap(deref, STELA_METAL_HEAP_STORAGE_TEXEL_BUFFERS, nir_var_image, buffer);
 
    const struct stela_air_sampler sampler = {.index = 15};
@@ -108,9 +111,28 @@ static void textures_and_samplers_index_the_heap(void)
 
    const struct stela_air_texture past_textures = {.index = STELA_METAL_TEXTURES};
    const struct stela_air_sampler past_samplers = {.index = STELA_METAL_SAMPLERS};
-   assert(!stela_metal_bind_texture(&b, &past_textures, sampled, (void *)&stage));
+   assert(!stela_metal_bind_texture(&b, &past_textures, sampled, NULL, (void *)&stage));
    assert(!stela_metal_bind_sampler(&b, &past_samplers, false, (void *)&stage));
    ralloc_free(b.shader);
+}
+
+/* A storage image's level indexes its texture's run of descriptors, and a
+ * level past the run indexes the null descriptor. */
+static void storage_levels_index_their_run(void)
+{
+   const struct glsl_type *storage = glsl_image_type(GLSL_SAMPLER_DIM_2D, false, GLSL_TYPE_FLOAT);
+   /* Three levels from descriptor 9. */
+   const uint64_t id = (uint64_t)(9u | 2u << STELA_METAL_LEVEL_SHIFT) << 32 | 4u;
+   const unsigned expected[] = {9, 10, 11, 0};
+   for (unsigned level = 0; level < ARRAY_SIZE(expected); level++) {
+      nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL, "level");
+      nir_deref_instr *deref = stela_metal_bind_texture_id(&b, nir_imm_int64(&b, id), storage,
+                                                           nir_imm_int(&b, level), NULL);
+      nir_opt_constant_folding(b.shader);
+      assert(nir_src_is_const(deref->arr.index) &&
+             nir_src_as_uint(deref->arr.index) == expected[level]);
+      ralloc_free(b.shader);
+   }
 }
 
 /* An argument buffer's IDs take the same halves of the same arrays. */
@@ -121,12 +143,14 @@ static void loaded_ids_index_the_heap(void)
    const struct glsl_type *storage = glsl_image_type(GLSL_SAMPLER_DIM_3D, false, GLSL_TYPE_INT);
    nir_def *id = nir_imm_int64(&b, 0x0000000700000005ull);
 
-   nir_deref_instr *deref = stela_metal_bind_texture_id(&b, id, sampled, NULL);
+   nir_deref_instr *deref = stela_metal_bind_texture_id(&b, id, sampled, NULL, NULL);
    check_heap(deref, STELA_METAL_HEAP_SAMPLED_IMAGES, nir_var_uniform, sampled);
    assert(nir_def_as_alu(deref->arr.index.ssa)->op == nir_op_unpack_64_2x32_split_x);
-   deref = stela_metal_bind_texture_id(&b, id, storage, NULL);
+   deref = stela_metal_bind_texture_id(&b, id, storage, NULL, NULL);
    check_heap(deref, STELA_METAL_HEAP_STORAGE_IMAGES, nir_var_image, storage);
-   assert(nir_def_as_alu(deref->arr.index.ssa)->op == nir_op_unpack_64_2x32_split_y);
+   nir_alu_instr *first = nir_def_as_alu(deref->arr.index.ssa);
+   assert(first->op == nir_op_iand);
+   assert(nir_def_as_alu(first->src[0].src.ssa)->op == nir_op_unpack_64_2x32_split_y);
 
    deref = stela_metal_bind_sampler_id(&b, id, true, NULL);
    check_heap(deref, STELA_METAL_HEAP_SAMPLERS, nir_var_uniform, glsl_bare_sampler_type());
@@ -332,6 +356,7 @@ int main(void)
    buffers_load_their_table_slot();
    textures_and_samplers_index_the_heap();
    loaded_ids_index_the_heap();
+   storage_levels_index_their_run();
    accumulate_sums_each_run_in_a_loop();
    select_flags_each_command();
    tessellation_factors_follow_metal_rules();

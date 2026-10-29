@@ -299,15 +299,16 @@ finished(const struct call *call)
 }
 
 static nir_deref_instr *
-texture_deref(const struct call *call)
+texture_deref(const struct call *call, nir_def *level)
 {
    const struct stela_air_options *options = call->c->options;
    const struct glsl_type *type = descriptor_type(call->texture);
    nir_deref_instr *deref = NULL;
    if (call->texture_id && options->bind_texture_id)
-      deref = options->bind_texture_id(call->b, call->texture_id, type, options->binding_data);
+      deref = options->bind_texture_id(call->b, call->texture_id, type, level,
+                                       options->binding_data);
    else if (!call->texture_id && options->bind_texture)
-      deref = options->bind_texture(call->b, call->texture, type, options->binding_data);
+      deref = options->bind_texture(call->b, call->texture, type, level, options->binding_data);
    if (!deref || deref->type != type) {
       fail(call, "texture %u is unbound or bound to another type", call->texture->index);
       return NULL;
@@ -440,7 +441,7 @@ sample(struct call *call, enum operation op, nir_def **result)
    if (!pair_type(call, false))
       return fail(call, "texture sample has an unexpected result type");
    struct tex t = {.op = nir_texop_tex, .shadow = compare};
-   if (!(t.texture = texture_deref(call)) || !(t.sampler = sampler_deref(call)))
+   if (!(t.texture = texture_deref(call, NULL)) || !(t.sampler = sampler_deref(call)))
       return false;
    if (call->texture->depth && !expect(call, 32, 1, "depth operand"))
       return false;
@@ -512,7 +513,7 @@ gather(struct call *call, enum operation op, nir_def **result)
    if (!pair_type(call, true))
       return fail(call, "texture gather has an unexpected result type");
    struct tex t = {.op = nir_texop_tg4, .shadow = compare};
-   if (!(t.texture = texture_deref(call)) || !(t.sampler = sampler_deref(call)))
+   if (!(t.texture = texture_deref(call, NULL)) || !(t.sampler = sampler_deref(call)))
       return false;
    if (call->texture->depth && !expect(call, 32, 1, "depth operand"))
       return false;
@@ -558,20 +559,22 @@ image_coord(const struct call *call, nir_def *position, nir_def *face, nir_def *
    return nir_vec(b, components, 4);
 }
 
-/* The optional constant lod of an image access, which must be 0: a storage
- * view holds one level. */
+/* The level operand of a mipmapped texture's image access, which selects its
+ * descriptor; NULL for other textures. */
 static bool
-image_lod(struct call *call)
+image_level(struct call *call, nir_def **level)
 {
-   if (!call->shape->mipmapped)
-      return true;
-   LLVMValueRef value = take(call);
-   if (!value)
-      return false;
-   if (!type_is(LLVMTypeOf(value), 1, LLVMIntegerTypeKind, 32) || !LLVMIsAConstantInt(value) ||
-       LLVMConstIntGetZExtValue(value))
-      return fail(call, "accessing a storage texture level other than a constant 0");
-   return true;
+   *level = NULL;
+   return !call->shape->mipmapped || (*level = uint_operand(call));
+}
+
+/* The access of an image intrinsic through a deref of level: the binding
+ * indexes descriptors by level, which may differ between invocations. */
+static enum gl_access_qualifier
+image_access(const struct call *call, nir_def *level)
+{
+   return (call->coherent ? ACCESS_COHERENT : 0) |
+          (level && !nir_src_is_const(nir_src_for_ssa(level)) ? ACCESS_NON_UNIFORM : 0);
 }
 
 static bool
@@ -586,8 +589,8 @@ read_texel(struct call *call, nir_def **result)
    bool image = texture->access == STELA_AIR_TEXTURE_READ_WRITE;
    if (shape->dim == GLSL_SAMPLER_DIM_CUBE && !image)
       return fail(call, "reading a cube texture without read_write access");
-   nir_deref_instr *deref = texture_deref(call);
-   if (!deref)
+   nir_deref_instr *deref = image ? NULL : texture_deref(call, NULL);
+   if (!image && !deref)
       return false;
    if (texture->depth && !expect(call, 32, 1, "depth operand"))
       return false;
@@ -601,13 +604,14 @@ read_texel(struct call *call, nir_def **result)
    nir_builder *b = call->b;
    nir_def *value;
    if (image) {
-      if (!image_lod(call) || !expect(call, 32, texture->access, "access operand") ||
-          !finished(call))
+      nir_def *level;
+      if (!image_level(call, &level) || !expect(call, 32, texture->access, "access operand") ||
+          !finished(call) || !(deref = texture_deref(call, level)))
          return false;
       value = nir_image_deref_load(b, 4, 32, &deref->def, image_coord(call, position, face, layer),
                                    sample ? sample : nir_undef(b, 1, 32), nir_imm_int(b, 0),
                                    .image_dim = shape->dim, .image_array = shape->array,
-                                   .access = call->coherent ? ACCESS_COHERENT : 0,
+                                   .access = image_access(call, level),
                                    .dest_type = nir_get_nir_type_for_glsl_base_type(base_type(texture)));
    } else {
       struct tex t = {.op = sample ? nir_texop_txf_ms : nir_texop_txf, .texture = deref,
@@ -633,9 +637,6 @@ write_texel(struct call *call)
       return fail(call, "writing a depth or multisample texture");
    if (LLVMGetTypeKind(LLVMTypeOf(call->inst)) != LLVMVoidTypeKind)
       return fail(call, "texture write has a result");
-   nir_deref_instr *deref = texture_deref(call);
-   if (!deref)
-      return false;
    nir_def *position = operand(call, shape->positions, LLVMIntegerTypeKind, 32);
    nir_def *face = position && shape->dim == GLSL_SAMPLER_DIM_CUBE ? uint_operand(call) : NULL;
    nir_def *layer = position && shape->array ? uint_operand(call) : NULL;
@@ -645,8 +646,11 @@ write_texel(struct call *call)
    LLVMTypeKind kind;
    texel_shape(texture, false, &components, &kind, &bits);
    nir_def *value = operand(call, components, kind, bits);
-   if (!value || !image_lod(call) || !expect(call, 32, texture->access, "access operand") ||
-       !finished(call))
+   nir_def *level;
+   nir_deref_instr *deref;
+   if (!value || !image_level(call, &level) ||
+       !expect(call, 32, texture->access, "access operand") || !finished(call) ||
+       !(deref = texture_deref(call, level)))
       return false;
    nir_builder *b = call->b;
    switch (texture->primitive) {
@@ -657,8 +661,7 @@ write_texel(struct call *call)
    }
    nir_image_deref_store(b, &deref->def, image_coord(call, position, face, layer),
                          nir_undef(b, 1, 32), value, nir_imm_int(b, 0), .image_dim = shape->dim,
-                         .image_array = shape->array,
-                         .access = call->coherent ? ACCESS_COHERENT : 0,
+                         .image_array = shape->array, .access = image_access(call, level),
                          .src_type = nir_get_nir_type_for_glsl_base_type(base_type(texture)));
    return true;
 }
@@ -722,7 +725,7 @@ atomic(struct call *call, unsigned index, bool is_signed, nir_def **result)
       return fail(call, "texture atomics act on read-write 32-bit integer textures, not cube or multisample");
    if (!type_is(LLVMTypeOf(call->inst), exchange ? 1 : 4, LLVMIntegerTypeKind, exchange ? 1 : 32))
       return fail(call, "texture atomic has an unexpected result type");
-   nir_deref_instr *deref = texture_deref(call);
+   nir_deref_instr *deref = texture_deref(call, NULL);
    if (!deref)
       return false;
    nir_def *position = operand(call, shape->positions, LLVMIntegerTypeKind, 32);
@@ -783,31 +786,26 @@ query(struct call *call, enum operation op, nir_def **result)
        (op == ARRAY_SIZE && !shape->array) || (op == SAMPLES && shape->dim != GLSL_SAMPLER_DIM_MS) ||
        (op == MIP_LEVELS && !shape->mipmapped))
       return fail(call, "texture query does not apply to its texture type");
-   nir_deref_instr *deref = texture_deref(call);
-   if (!deref)
-      return false;
+   if (image && op == MIP_LEVELS)
+      return fail(call, "querying the levels of a storage texture");
    nir_builder *b = call->b;
    bool sized = op == WIDTH || op == HEIGHT || op == DEPTH || op == ARRAY_SIZE;
    nir_def *lod = NULL;
-   if ((op == WIDTH || op == HEIGHT || op == DEPTH) && shape->mipmapped) {
-      if (image) {
-         if (!image_lod(call))
-            return false;
-      } else if (!(lod = uint_operand(call))) {
-         return false;
-      }
-   }
-   if (!finished(call))
+   if ((op == WIDTH || op == HEIGHT || op == DEPTH) && shape->mipmapped &&
+       !(lod = uint_operand(call)))
+      return false;
+   /* A storage texture's level selects its descriptor. */
+   nir_deref_instr *deref;
+   if (!finished(call) || !(deref = texture_deref(call, image ? lod : NULL)))
       return false;
    unsigned size = dimensions + shape->array;
    if (image) {
-      if (op == MIP_LEVELS)
-         return fail(call, "querying the levels of a storage texture");
       nir_def *value = op == SAMPLES ?
          nir_image_deref_samples(b, 32, &deref->def, .image_dim = shape->dim,
                                  .image_array = shape->array) :
          nir_image_deref_size(b, size, 32, &deref->def, nir_imm_int(b, 0),
-                              .image_dim = shape->dim, .image_array = shape->array);
+                              .image_dim = shape->dim, .image_array = shape->array,
+                              .access = image_access(call, lod));
       *result = sized ? nir_channel(b, value, channel) : value;
       return true;
    }
@@ -836,7 +834,7 @@ lod(struct call *call, enum operation op, nir_def **result)
    if (!type_is(LLVMTypeOf(call->inst), 1, LLVMFloatTypeKind, 32))
       return fail(call, "level of detail has an unexpected result type");
    struct tex t = {.op = nir_texop_lod};
-   if (!(t.texture = texture_deref(call)) || !(t.sampler = sampler_deref(call)) ||
+   if (!(t.texture = texture_deref(call, NULL)) || !(t.sampler = sampler_deref(call)) ||
        !(t.coord = float_operand(call, shape->coords)) ||
        !expect(call, 32, STELA_AIR_TEXTURE_SAMPLE, "access operand") || !finished(call))
       return false;

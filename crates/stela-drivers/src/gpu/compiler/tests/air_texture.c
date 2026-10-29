@@ -277,6 +277,29 @@ refuse(const char *body, const char *metadata, enum stela_air_error_kind kind, c
    assert(!shader && error.kind == kind && strstr(error.detail, detail));
 }
 
+/* A storage texture's level selects its descriptor, which an access whose
+ * level varies between threads indexes non-uniformly. */
+static void
+storage_levels_select_their_descriptor(void)
+{
+   const char *levels[] = {"i32 1", "i32 %tid"};
+   for (unsigned i = 0; i < ARRAY_SIZE(levels); i++) {
+      char to[64];
+      snprintf(to, sizeof(to), "<4 x float> %%t, %s, i32 2", levels[i]);
+      struct stela_air_error error = {0};
+      nir_shader *shader = kernel(replace(kernel_body, "<4 x float> %t, i32 0, i32 2", to),
+                                  kernel_metadata, &error);
+      if (!shader)
+         fprintf(stderr, "level %s: %u %s\n", levels[i], error.kind, error.detail);
+      assert(shader);
+      nir_intrinsic_instr *store = count(shader).store;
+      nir_deref_instr *deref = nir_src_as_deref(store->src[0]);
+      assert(nir_def_as_alu(deref->arr.index.ssa)->op == nir_op_bcsel);
+      assert(!(nir_intrinsic_access(store) & ACCESS_NON_UNIFORM) == !i);
+      ralloc_free(shader);
+   }
+}
+
 static void
 unsupported_texture_uses_are_refused(void)
 {
@@ -293,9 +316,6 @@ unsupported_texture_uses_are_refused(void)
    refuse(replace(kernel_body, "@air.get_width_texture_2d(ptr addrspace(1) %src",
                   "@air.get_width_texture_2d(ptr addrspace(1) %layers"),
           kernel_metadata, STELA_AIR_INSTRUCTION, "unsupported texture function");
-   /* Writing a storage texture level other than 0. */
-   refuse(replace(kernel_body, "<4 x float> %t, i32 0, i32 2", "<4 x float> %t, i32 1, i32 2"),
-          kernel_metadata, STELA_AIR_INSTRUCTION, "level other than");
    /* Texture arrays. */
    refuse(kernel_body,
           replace(kernel_metadata, "i32 2, i32 1, !\"air.sample\"", "i32 2, i32 4, !\"air.sample\""),
@@ -411,10 +431,12 @@ main(void)
    glsl_type_singleton_init_or_ref();
    kernels_sample_write_read_and_query();
    fragments_sample_with_derivatives_compare_and_gather();
+   storage_levels_select_their_descriptor();
    unsupported_texture_uses_are_refused();
    kernels_take_texture_atomics();
    glsl_type_singleton_decref();
    puts("AIR textures: sample/level/offset, write, read_write array read, size queries, "
-        "implicit-derivative fragment sampling, depth compare, gather, atomics and refusals passed");
+        "implicit-derivative fragment sampling, depth compare, gather, storage levels, atomics and "
+        "refusals passed");
    return 0;
 }

@@ -68,13 +68,30 @@ static nir_variable *heap(nir_shader *shader, enum stela_metal_heap_array array,
 }
 
 /* The heap element a half of the resource ID id names. */
-static nir_deref_instr *heap_element(nir_builder *b, nir_def *id, bool high,
+static nir_deref_instr *heap_element(nir_builder *b, nir_def *index,
                                      enum stela_metal_heap_array array,
                                      const struct glsl_type *type, nir_variable_mode mode)
 {
-   nir_def *index = high ? nir_unpack_64_2x32_split_y(b, id) : nir_unpack_64_2x32_split_x(b, id);
    return nir_build_deref_array(b, nir_build_deref_var(b, heap(b->shader, array, type, mode)),
                                 index);
+}
+
+/* The descriptor index of an MTLResourceID's half. */
+static nir_def *id_half(nir_builder *b, nir_def *id, bool high)
+{
+   return high ? nir_unpack_64_2x32_split_y(b, id) : nir_unpack_64_2x32_split_x(b, id);
+}
+
+/* The storage descriptor of level in a texture ID's high half: the index plus
+ * the level, or the null descriptor for a level past its count. */
+static nir_def *storage_level(nir_builder *b, nir_def *id, nir_def *level)
+{
+   nir_def *high = id_half(b, id, true);
+   nir_def *first = nir_iand_imm(b, high, (1u << STELA_METAL_LEVEL_SHIFT) - 1);
+   if (!level)
+      return first;
+   nir_def *levels = nir_iadd_imm(b, nir_ushr_imm(b, high, STELA_METAL_LEVEL_SHIFT), 1);
+   return nir_bcsel(b, nir_ult(b, level, levels), nir_iadd(b, first, level), nir_imm_int(b, 0));
 }
 
 /* The resource ID at offset in the stage's table. */
@@ -84,7 +101,8 @@ static nir_def *table_id(nir_builder *b, const struct stela_metal_stage *stage, 
 }
 
 nir_deref_instr *stela_metal_bind_texture_id(nir_builder *b, nir_def *id,
-                                             const struct glsl_type *type, void *stage)
+                                             const struct glsl_type *type, nir_def *level,
+                                             void *stage)
 {
    (void)stage;
    bool image = glsl_type_is_image(type);
@@ -92,24 +110,27 @@ nir_deref_instr *stela_metal_bind_texture_id(nir_builder *b, nir_def *id,
    enum stela_metal_heap_array array =
       image ? (buffer ? STELA_METAL_HEAP_STORAGE_TEXEL_BUFFERS : STELA_METAL_HEAP_STORAGE_IMAGES)
             : (buffer ? STELA_METAL_HEAP_UNIFORM_TEXEL_BUFFERS : STELA_METAL_HEAP_SAMPLED_IMAGES);
-   return heap_element(b, id, image, array, type, image ? nir_var_image : nir_var_uniform);
+   nir_def *index = image ? storage_level(b, id, level) : id_half(b, id, false);
+   return heap_element(b, index, array, type, image ? nir_var_image : nir_var_uniform);
 }
 
 nir_deref_instr *stela_metal_bind_sampler_id(nir_builder *b, nir_def *id, bool integer,
                                              void *stage)
 {
    (void)stage;
-   return heap_element(b, id, integer, STELA_METAL_HEAP_SAMPLERS, glsl_bare_sampler_type(),
-                       nir_var_uniform);
+   return heap_element(b, id_half(b, id, integer), STELA_METAL_HEAP_SAMPLERS,
+                       glsl_bare_sampler_type(), nir_var_uniform);
 }
 
 nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air_texture *texture,
-                                          const struct glsl_type *type, void *stage)
+                                          const struct glsl_type *type, nir_def *level,
+                                          void *stage)
 {
    if (texture->index >= STELA_METAL_TEXTURES)
       return NULL;
    return stela_metal_bind_texture_id(
-      b, table_id(b, stage, STELA_METAL_TABLE_TEXTURES + 8u * texture->index), type, stage);
+      b, table_id(b, stage, STELA_METAL_TABLE_TEXTURES + 8u * texture->index), type, level,
+      stage);
 }
 
 nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air_sampler *sampler,

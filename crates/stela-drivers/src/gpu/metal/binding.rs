@@ -14,10 +14,12 @@
 //! [`ResourceId`]s, the same 64-bit values `gpuResourceID` reports and
 //! argument buffers store. A texture's ID names its read descriptor (sampled
 //! image, or uniform texel buffer for texture buffers) in the low half and
-//! its write descriptor (storage image or storage texel buffer) in the high
-//! half; the compiler selects the array from the texture's declared type and
-//! access. A sampler's ID names its float-border descriptor in the low half
-//! and its integer-border twin in the high half.
+//! its write descriptors (storage images or a storage texel buffer) in the
+//! high half; the compiler selects the array from the texture's declared type
+//! and access. A storage image holds one level, so a texture has one per
+//! level, consecutive from the high half's index, which carries their count
+//! (see [`ResourceId::texture`]). A sampler's ID names its float-border
+//! descriptor in the low half and its integer-border twin in the high half.
 //!
 //! Encoders write a table to the command buffer's upload ring whenever its
 //! slots change and push its address before the next draw or dispatch.
@@ -29,7 +31,10 @@ use super::{
     error::{Error, Result},
     vulkan::physical::Limits,
 };
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    vec::Vec,
+};
 
 raw_enum! {
     /// The bindless arrays of descriptor set 0, by binding number.
@@ -53,9 +58,32 @@ pub struct ResourceId(pub u64);
 
 impl ResourceId {
     pub const NULL: Self = Self(0);
+    /// The high half's bits from which it counts its descriptors, less one;
+    /// the index is below them.
+    pub const LEVEL_SHIFT: u32 = 27;
+    /// Descriptors one high half names: levels of a texture.
+    pub const MAX_LEVELS: u32 = 1 << (32 - Self::LEVEL_SHIFT);
 
     pub const fn new(low: u32, high: u32) -> Self {
         Self(low as u64 | (high as u64) << 32)
+    }
+
+    /// A texture's ID: its read descriptor, and its `levels` write
+    /// descriptors from `storage`.
+    pub const fn texture(sampled: u32, storage: u32, levels: u32) -> Self {
+        debug_assert!(storage >> Self::LEVEL_SHIFT == 0);
+        debug_assert!(levels >= 1 && levels <= Self::MAX_LEVELS);
+        Self::new(sampled, storage | (levels - 1) << Self::LEVEL_SHIFT)
+    }
+
+    /// The first descriptor the high half names.
+    pub const fn high_index(self) -> u32 {
+        self.high() & ((1 << Self::LEVEL_SHIFT) - 1)
+    }
+
+    /// The descriptors the high half names.
+    pub const fn high_count(self) -> u32 {
+        (self.high() >> Self::LEVEL_SHIFT) + 1
     }
 
     pub const fn low(self) -> u32 {
@@ -333,6 +361,8 @@ impl HeapLayout {
             .max_descriptor_set_update_after_bind_samplers
             .min(limits.max_per_stage_update_after_bind_samplers)
             .min(limits.max_sampler_allocation_count);
+        // Storage indices leave the high half's level count bits free.
+        let storage = storage.min(1 << ResourceId::LEVEL_SHIFT);
         Self {
             counts: [
                 sampled - sampled / 4,
@@ -349,59 +379,91 @@ impl HeapLayout {
     }
 }
 
-/// Allocates indices in one heap array. Released indices are reused only
-/// after the GPU completes the submission that last could read them.
+/// Allocates runs of consecutive indices in one heap array, first fit.
+/// Released runs are reused only after the GPU completes the submission that
+/// last could read them, and adjacent free runs merge.
 #[derive(Clone, Debug)]
 pub struct DescriptorIndices {
-    count: u32,
-    next: u32,
-    free: Vec<u32>,
-    /// (serial, index) in release order; serials never decrease.
-    retiring: VecDeque<(u64, u32)>,
+    /// Free runs as first index to length; no two are adjacent.
+    free: BTreeMap<u32, u32>,
+    /// (serial, first index, length) in release order; serials never
+    /// decrease.
+    retiring: VecDeque<(u64, u32, u32)>,
+    in_use: u32,
 }
 
 impl DescriptorIndices {
     pub fn new(count: u32) -> Self {
+        let first = NULL_DESCRIPTOR + 1;
         Self {
-            count,
-            next: NULL_DESCRIPTOR + 1,
-            free: Vec::new(),
+            free: (count > first)
+                .then_some((first, count - first))
+                .into_iter()
+                .collect(),
             retiring: VecDeque::new(),
+            in_use: 0,
         }
     }
 
     pub fn allocate(&mut self) -> Result<u32> {
-        if let Some(index) = self.free.pop() {
-            return Ok(index);
-        }
-        if self.next >= self.count {
-            return Err(Error::OutOfMemory);
-        }
-        self.next += 1;
-        Ok(self.next - 1)
+        self.allocate_run(1)
     }
 
-    /// Releases `index` once submission `serial` completes. Callers pass the
-    /// last submitted serial, which never decreases.
+    /// The first of `length` consecutive indices.
+    pub fn allocate_run(&mut self, length: u32) -> Result<u32> {
+        debug_assert!(length > 0);
+        let (&first, &free) = self
+            .free
+            .iter()
+            .find(|&(_, &free)| free >= length)
+            .ok_or(Error::OutOfMemory)?;
+        self.free.remove(&first);
+        if free > length {
+            self.free.insert(first + length, free - length);
+        }
+        self.in_use += length;
+        Ok(first)
+    }
+
     pub fn release(&mut self, index: u32, serial: u64) {
-        debug_assert!(index != NULL_DESCRIPTOR && index < self.next);
-        debug_assert!(self.retiring.back().is_none_or(|&(last, _)| last <= serial));
-        self.retiring.push_back((serial, index));
+        self.release_run(index, 1, serial);
     }
 
-    /// Returns indices whose submissions have completed to the free list.
+    /// Releases a run once submission `serial` completes. Callers pass the
+    /// last submitted serial, which never decreases.
+    pub fn release_run(&mut self, first: u32, length: u32, serial: u64) {
+        debug_assert!(first != NULL_DESCRIPTOR && length > 0);
+        debug_assert!(
+            self.retiring
+                .back()
+                .is_none_or(|&(last, ..)| last <= serial)
+        );
+        self.retiring.push_back((serial, first, length));
+    }
+
+    /// Returns runs whose submissions have completed to the free runs.
     pub fn retire(&mut self, completed: u64) {
-        while let Some(&(serial, index)) = self.retiring.front() {
+        while let Some(&(serial, mut first, mut length)) = self.retiring.front() {
             if serial > completed {
                 break;
             }
             self.retiring.pop_front();
-            self.free.push(index);
+            self.in_use -= length;
+            if let Some((&before, &free)) = self.free.range(..first).next_back()
+                && before + free == first
+            {
+                self.free.remove(&before);
+                (first, length) = (before, free + length);
+            }
+            if let Some(after) = self.free.remove(&(first + length)) {
+                length += after;
+            }
+            self.free.insert(first, length);
         }
     }
 
     pub fn in_use(&self) -> u32 {
-        self.next - 1 - self.free.len() as u32
+        self.in_use
     }
 }
 
@@ -428,8 +490,12 @@ impl DescriptorHeap {
         self.arrays[array.raw() as usize].allocate()
     }
 
-    pub fn release(&mut self, array: HeapArray, index: u32, serial: u64) {
-        self.arrays[array.raw() as usize].release(index, serial);
+    pub fn allocate_run(&mut self, array: HeapArray, length: u32) -> Result<u32> {
+        self.arrays[array.raw() as usize].allocate_run(length)
+    }
+
+    pub fn release_run(&mut self, array: HeapArray, first: u32, length: u32, serial: u64) {
+        self.arrays[array.raw() as usize].release_run(first, length, serial);
     }
 
     pub fn retire(&mut self, completed: u64) {
@@ -483,6 +549,7 @@ mod tests {
             ("STELA_METAL_TEXTURES", MAX_TEXTURE_BINDINGS),
             ("STELA_METAL_SAMPLERS", MAX_SAMPLER_BINDINGS),
             ("STELA_METAL_HEAP_SET", HEAP_SET),
+            ("STELA_METAL_LEVEL_SHIFT", ResourceId::LEVEL_SHIFT),
             (
                 "STELA_METAL_TABLE_BUFFER_ADDRESSES",
                 ArgumentTable::BUFFER_ADDRESSES_OFFSET,
@@ -785,6 +852,35 @@ mod tests {
         assert_eq!(indices.in_use(), 3, "index 1 is released but still pending");
         indices.retire(11);
         assert_eq!(indices.in_use(), 2);
+    }
+
+    #[test]
+    fn runs_are_consecutive_and_merge_when_retired() {
+        let mut indices = DescriptorIndices::new(12);
+        assert_eq!(indices.allocate_run(4), Ok(1));
+        assert_eq!(indices.allocate_run(3), Ok(5));
+        assert_eq!(indices.allocate_run(3), Ok(8));
+        assert_eq!(indices.allocate_run(2), Err(Error::OutOfMemory));
+        assert_eq!(indices.allocate(), Ok(11));
+        indices.release_run(1, 4, 1);
+        indices.release_run(5, 3, 1);
+        indices.retire(1);
+        assert_eq!(indices.in_use(), 4);
+        assert_eq!(indices.allocate_run(7), Ok(1), "the two runs merged");
+        indices.release_run(8, 3, 2);
+        indices.release(11, 2);
+        indices.retire(2);
+        assert_eq!(indices.allocate_run(4), Ok(8));
+        assert_eq!(indices.in_use(), 11);
+    }
+
+    #[test]
+    fn texture_ids_count_their_storage_levels() {
+        let id = ResourceId::texture(7, 9, 15);
+        assert_eq!((id.low(), id.high_index(), id.high_count()), (7, 9, 15));
+        let sampler = ResourceId::new(3, 4);
+        assert_eq!((sampler.high_index(), sampler.high_count()), (4, 1));
+        assert_eq!(ResourceId::MAX_LEVELS, 32);
     }
 
     #[test]

@@ -183,11 +183,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         }
     }
 
-    /// Frees both descriptors of `id` after the submitted work completes.
+    /// Frees the descriptors of `id` after the submitted work completes.
     fn release_id(&mut self, id: ResourceId, arrays: [HeapArray; 2]) {
-        for (index, array) in [id.low(), id.high()].into_iter().zip(arrays) {
-            if index != super::binding::NULL_DESCRIPTOR {
-                self.descriptors.release(array, index, self.submitted);
+        let runs = [(id.low(), 1), (id.high_index(), id.high_count())];
+        for ((first, length), array) in runs.into_iter().zip(arrays) {
+            if first != super::binding::NULL_DESCRIPTOR {
+                self.descriptors
+                    .release_run(array, first, length, self.submitted);
             }
         }
     }
