@@ -374,7 +374,8 @@ simd_functions_lower_to_subgroup_operations(void)
       "declare i64 @air.simd_ballot.i64(i1)\n"
       "declare i1 @air.quad_is_first()\n"
       "declare float @air.simd_shuffle_and_fill_down.f32(float, float, i16, i16)\n"
-      "declare i32 @air.quad_shuffle_and_fill_up.u.i32(i32, i32, i16, i16)\n",
+      "declare i32 @air.quad_shuffle_and_fill_up.u.i32(i32, i32, i16, i16)\n"
+      "declare i16 @air.get_simdgroup_size.i16()\n",
       "%a = call i32 @air.simd_shuffle.u.i32(i32 1, i16 3)\n"
       "%f = bitcast i32 %a to float\n"
       "%b = call float @air.simd_shuffle_down.f32(float %f, i16 1)\n"
@@ -394,7 +395,8 @@ simd_functions_lower_to_subgroup_operations(void)
       "%me = sext i16 %m to i32\n%qb = bitcast float %q to i32\n"
       "%x0 = xor i32 %hb, %wt\n%x1 = xor i32 %x0, %bt\n%x2 = xor i32 %x1, %me\n"
       "%x3 = xor i32 %x2, %qb\n%fz = zext i1 %first to i32\n%x4 = xor i32 %x3, %fz\n"
-      "%fd = call float @air.simd_shuffle_and_fill_down.f32(float %f, float %q, i16 2, i16 8)\n"
+      "%lanes = call i16 @air.get_simdgroup_size.i16()\n"
+      "%fd = call float @air.simd_shuffle_and_fill_down.f32(float %f, float %q, i16 2, i16 %lanes)\n"
       "%fu = call i32 @air.quad_shuffle_and_fill_up.u.i32(i32 %x4, i32 %a, i16 1, i16 4)\n"
       "%fb = bitcast float %fd to i32\n%x5 = xor i32 %fu, %fb\n"
       "store i32 %x5, ptr addrspace(1) %out, align 4\nret void\n");

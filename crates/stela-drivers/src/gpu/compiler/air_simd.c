@@ -284,6 +284,20 @@ stela_air_simd_call(const struct stela_air_call_context *c, LLVMValueRef call, L
                     const char *name, size_t bytes, nir_def **result)
 {
    *result = NULL;
+   char expected[96];
+   /* The SIMD-group's lanes, which a shuffle and fill without a modulo
+    * wraps at. */
+   if (LLVMGetTypeKind(LLVMTypeOf(call)) == LLVMIntegerTypeKind) {
+      char overload[16];
+      stela_air_call_overload(LLVMTypeOf(call), overload, sizeof(overload));
+      snprintf(expected, sizeof(expected), "air.get_simdgroup_size.%s", overload);
+      if (stela_air_call_named(name, bytes, expected)) {
+         if (!stela_air_call_plain(c, call, callee, 0))
+            return STELA_AIR_CALL_FAILED;
+         *result = nir_u2uN(c->b, nir_load_subgroup_size(c->b), LLVMGetIntTypeWidth(LLVMTypeOf(call)));
+         return STELA_AIR_CALL_LOWERED;
+      }
+   }
    bool quad;
    if (bytes > strlen("air.simd_") && !memcmp(name, "air.simd_", strlen("air.simd_")))
       quad = false;
@@ -292,7 +306,6 @@ stela_air_simd_call(const struct stela_air_call_context *c, LLVMValueRef call, L
    else
       return STELA_AIR_CALL_OTHER;
    const char *prefix = quad ? "air.quad_" : "air.simd_";
-   char expected[96];
    for (unsigned i = 0; i < ARRAY_SIZE(votes); i++) {
       /* A ballot is named by the mask it returns. */
       char mask[16] = "";
