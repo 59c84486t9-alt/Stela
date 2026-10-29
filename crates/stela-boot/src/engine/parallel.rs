@@ -236,7 +236,7 @@ pub(super) fn report_source_observations<H: Host>(home: &Machine<H, Board>) {
             Some(observed) => {
                 let source = observed.source;
                 output::arguments(format_args!(
-                    "PE SOURCE pe={pe} sequence={} observed_host_counter={:#x} phase={:?} pc={:#x} el={} daif={:#x} sp={:#x} lr={:#x}\n",
+                    "PE SOURCE pe={pe} sequence={} observed_host_counter={:#x} phase={:?} pc={:#x} el={} daif={:#x} sp={:#x} fp={:#x} lr={:#x}\n",
                     observed.sequence,
                     source.host_counter,
                     source.phase,
@@ -244,6 +244,7 @@ pub(super) fn report_source_observations<H: Host>(home: &Machine<H, Board>) {
                     source.el,
                     source.daif,
                     source.sp,
+                    source.fp,
                     source.lr
                 ));
             }

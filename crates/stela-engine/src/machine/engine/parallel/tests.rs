@@ -290,6 +290,7 @@ fn source_observation_uses_only_the_attached_owner_and_remains_stale() {
     hub.set_source_observations(true);
     worker.cpu.pc = BASE + 4;
     worker.cpu.state.sp = 0x8000;
+    worker.cpu.state.x[29] = 0x8010;
     worker.cpu.state.x[30] = BASE + 8;
     worker.cpu.pstate.daif = 3;
     worker.host.now = 1000;
@@ -306,6 +307,7 @@ fn source_observation_uses_only_the_attached_owner_and_remains_stale() {
             phase: SourcePhase::BroadcastEnter,
             pc: BASE + 4,
             sp: 0x8000,
+            fp: 0x8010,
             lr: BASE + 8,
             el: 2,
             daif: 3,

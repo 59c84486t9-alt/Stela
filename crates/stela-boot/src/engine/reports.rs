@@ -290,18 +290,16 @@ pub(super) fn exit_report<H: Host>(machine: &Machine<H, parallel::Board>) {
     }
 }
 
-/// The frame records from X29 (each the caller's X29 and the return
-/// address, Arm's AAPCS64 frame chain) and the stack words above SP, read
-/// through the stopped PE's translation, so that a guest's own panic or
-/// wait path can be located.
-/// The frame records from `frame` on, read through the running PE's
-/// translation regime (a parked PE's kernel frames share it).
+/// The frame records from `frame` on (each the caller's X29 and the return
+/// address, Arm's AAPCS64 frame chain), read through the running PE's
+/// translation regime, which another PE's kernel frames share. Deep enough
+/// to reach a kernel caller through nested lock and interrupt frames.
 pub(super) fn frames<H: Host>(
     machine: &mut Machine<H, parallel::Board>,
     label: &str,
     mut frame: u64,
 ) {
-    for depth in 0..16 {
+    for depth in 0..64 {
         let mut record = [0u8; 16];
         if frame == 0 || !frame.is_multiple_of(8) || !machine.read_virtual(frame, &mut record) {
             break;

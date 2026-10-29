@@ -7,6 +7,7 @@ fn state(value: u64) -> MaterializedSource {
         phase: SourcePhase::BroadcastEnter,
         pc: value * 4,
         sp: !value,
+        fp: value << 4,
         lr: value ^ 0x1234_5678,
         el: (value % 3) as u8,
         daif: (value & 15) as u8,

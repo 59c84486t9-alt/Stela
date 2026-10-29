@@ -672,6 +672,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             phase,
             pc: self.cpu.pc,
             sp: self.cpu.state.sp,
+            fp: self.cpu.state.x[29],
             lr: self.cpu.state.x[30],
             el: self.cpu.pstate.el,
             daif: self.cpu.pstate.daif,

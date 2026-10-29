@@ -508,6 +508,19 @@ impl Heartbeat {
     ) {
         // Each PE on its own host core counts for itself.
         parallel::report_source_observations(machine);
+        if machine.runs_parallel() {
+            let clock = machine.devices.hub().clock(host::fresh_counter);
+            match clock.holder {
+                Some((pe, horizon)) => output::arguments(format_args!(
+                    "CLOCK count={:#x} held_by={pe} horizon={horizon:#x}\n",
+                    clock.count
+                )),
+                None => output::arguments(format_args!(
+                    "CLOCK count={:#x} held_by=none\n",
+                    clock.count
+                )),
+            }
+        }
         let per_pe = parallel::counts(machine);
         let retired = per_pe
             .iter()

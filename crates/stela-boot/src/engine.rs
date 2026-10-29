@@ -826,6 +826,20 @@ fn finish<H: Host>(
     for (number, frame) in parked_frames {
         frames(machine, &alloc::format!("PE {number} FRAME"), frame);
     }
+    // Every other PE's last materialized frame chain, stale but enough to
+    // name what it was doing when the run stopped.
+    let sources = {
+        let hub = machine.devices.hub();
+        (0..hub.pes())
+            .filter(|&pe| pe != machine.processor())
+            .filter_map(|pe| Some((pe, hub.source_observation(pe)?.source)))
+            .filter(|(_, source)| source.el > 0)
+            .map(|(pe, source)| (pe, source.fp))
+            .collect::<Vec<_>>()
+    };
+    for (pe, frame) in sources {
+        frames(machine, &alloc::format!("PE {pe} SOURCE FRAME"), frame);
+    }
     let cpu = &machine.cpu;
     for (entry, reads, writes) in cpu.apple.impdef.used() {
         output::arguments(format_args!(
