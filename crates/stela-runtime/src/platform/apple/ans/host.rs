@@ -11,8 +11,9 @@
 //! looks, so it looks otherwise only for a lost signal; for one that does
 //! not, it looks after half the disk's recent latency, then more often
 //! (Linux's hybrid polling). Nothing waits for the disk and nothing wakes
-//! while no transfer runs. A disk that runs nothing queued completes each
-//! transfer at once, the PE that rang waiting.
+//! while no transfer runs. A disk that runs nothing queued executes each
+//! command on the calling PE. One poll admits at most 64 commands, so larger
+//! transfers retain their partial progress until later polls.
 use alloc::{boxed::Box, vec::Vec};
 use stela_drivers::block::{BlockDevice, BlockError, Finished, Identity, Request, Submission};
 
@@ -76,8 +77,9 @@ impl HostDisk {
     }
 
     /// Submit `requests`, one after another, under `key` at counter `now`:
-    /// their result at once from a disk that runs nothing queued, else
-    /// `None` until [`Self::poll`] gives it.
+    /// their result if the first poll finishes them, else `None` until
+    /// [`Self::poll`] gives it. Synchronous providers can also yield after
+    /// the block layer's command admission limit.
     pub(super) fn submit(
         &mut self,
         key: u32,
