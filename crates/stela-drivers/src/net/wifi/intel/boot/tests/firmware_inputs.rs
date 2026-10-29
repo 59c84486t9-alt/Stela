@@ -65,6 +65,8 @@ fn actual_ax210_ucode_external_pnvm_source_dma_doorbell_and_notification() {
     boot.poll().unwrap().unwrap();
     assert_eq!(domain.records.lock().unwrap().live.len(), 65);
     assert_eq!(
+        // SAFETY: The PNVM bytes are hash-verified against this model profile requirement;
+        // the original boot Domain retains them with exclusive Source RAM through completion.
         unsafe { boot.begin_pnvm(&provider, observations, &source) }.unwrap(),
         PnvmProgress::Waiting
     );

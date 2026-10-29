@@ -43,6 +43,8 @@ fn pnvm_each_new_mapping_visibility_and_partial_stop_failure_preserves_epoch() {
                 }
             }
             state.lock().unwrap().ops.clear();
+            // SAFETY: This same AX210 epoch owns the provider data and exclusive Source/Domain;
+            // serialized allocation/visibility failures retain any potentially exposed backing.
             let result = unsafe { boot.begin_pnvm(&provider, observations, &source) };
             assert!(
                 matches!(result, Err(Error::PnvmDma(_)) | Err(Error::Dma(_))),
@@ -82,6 +84,8 @@ fn pnvm_each_new_mapping_visibility_and_partial_stop_failure_preserves_epoch() {
             &state,
             &drops,
         );
+        // SAFETY: This sole AX210 model owner retains provider data and its Source/Domain;
+        // PNVM mappings stay owned through the later injected invalidation-failure retries.
         unsafe {
             boot.begin_pnvm(&provider, observations, &source).unwrap();
         }
@@ -123,6 +127,8 @@ fn pnvm_wrong_short_and_failed_doorbell_never_release_or_synthesize_status() {
             let mut model = state.lock().unwrap();
             model.fail = Some(model.ops.len());
         }
+        // SAFETY: The original model profile/provider and Source/Domain remain owned;
+        // the injected doorbell failure is serialized and cannot release uncertain DMA.
         let result = unsafe { boot.begin_pnvm(&provider, observations, &source) };
         let live = domain.records.lock().unwrap().live.len();
         if mode == 2 {

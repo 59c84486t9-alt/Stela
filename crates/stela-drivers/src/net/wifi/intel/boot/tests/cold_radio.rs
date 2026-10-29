@@ -62,6 +62,8 @@ fn cold_radio_preflight_rfkill_wrong_response_and_uncertain_publication_fail_clo
             }
             _ => (),
         }
+        // SAFETY: The original model owner retains exclusive Source RAM in its Domain;
+        // schema/RF-kill/publication failures are serialized without a competing device user.
         let result = unsafe { radio.advance(&source) };
         match case {
             0 => {
@@ -96,6 +98,8 @@ fn cold_radio_preflight_rfkill_wrong_response_and_uncertain_publication_fail_clo
                     ),
                 );
                 assert_eq!(
+                    // SAFETY: The wrong response completed synchronously in this retained model Domain;
+                    // radio and the same Source keep all pending backing alive through its refusal.
                     unsafe { radio.advance(&source) },
                     Err(Error::InitializationResponse {
                         group: 2,
@@ -111,6 +115,8 @@ fn cold_radio_preflight_rfkill_wrong_response_and_uncertain_publication_fail_clo
         assert_eq!(radio.phase(), ColdRadioPhase::Failed);
         assert!(radio.prefix_responses().is_empty());
         let ops = state.lock().unwrap().ops.len();
+        // SAFETY: The failed radio still owns its original Source/Domain and pending RAM;
+        // this state-error reentry neither adds a publisher nor releases uncertain backing.
         assert_eq!(unsafe { radio.advance(&source) }, Err(Error::State));
         assert_eq!(state.lock().unwrap().ops.len(), ops);
         if case == 3 {

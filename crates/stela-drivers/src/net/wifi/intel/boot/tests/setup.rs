@@ -209,6 +209,8 @@ pub(super) fn start_ax210<'a>(
     state: &Arc<Mutex<ModelState>>,
     drops: &Arc<AtomicUsize>,
 ) -> RomBoot<'a, Model> {
+    // SAFETY: All helper callers supply this sole AX210 model owner's Source/Domain;
+    // fresh RAM and serialized register effects have no real DMA, IRQ or active SAP user.
     unsafe {
         RomBoot::start_ax210(
             awake_profile(state.clone(), drops.clone(), ax210_profile()),
