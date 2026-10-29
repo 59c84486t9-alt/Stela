@@ -15,9 +15,10 @@ use super::{
     hazard::{FULL, Hazards, Use},
     pipeline::{ComputePipelinePlan, RenderPipelinePlan},
     shader::{Interface, Specialization, Stage},
+    sparse::MappingRequest,
     upload::{Chunk, ChunkSource, Upload, UploadArena},
     vulkan::{
-        command::Command,
+        command::{Command, SparseBind},
         object::{Buffer, Pipeline, QueryPool, QueryType, Semaphore},
     },
 };
@@ -27,6 +28,7 @@ pub mod blit;
 pub mod compute;
 pub mod counters;
 pub mod render;
+pub mod resource_state;
 
 /// A Metal buffer as commands see it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -127,6 +129,9 @@ impl DynamicFeatures {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Segment {
     pub waits: Vec<(Semaphore, u64)>,
+    /// Sparse bindings applied after the waits and everything submitted
+    /// before, ahead of `commands`.
+    pub binds: Vec<SparseBind>,
     pub commands: Vec<Command>,
     pub signals: Vec<(Semaphore, u64)>,
 }
@@ -140,6 +145,8 @@ pub struct Recording {
     pub uploads: Vec<(Chunk, Vec<u8>)>,
     /// Query pools to reset and recycle on completion.
     pub query_pools: Vec<(QueryType, QueryPool)>,
+    /// Sparse mapping updates and the segment whose binds they become.
+    pub mappings: Vec<(usize, MappingRequest)>,
 }
 
 /// One stage's argument table and whether the GPU copy is current.
@@ -272,6 +279,7 @@ struct Recorder {
     uploads: UploadArena,
     query_pools: Vec<(QueryType, QueryPool)>,
     statistics: Option<counters::Statistics>,
+    mappings: Vec<(usize, MappingRequest)>,
 }
 
 impl Recorder {
@@ -282,6 +290,7 @@ impl Recorder {
             uploads: UploadArena::default(),
             query_pools: Vec::new(),
             statistics: None,
+            mappings: Vec::new(),
         };
         recorder.start_segment(Vec::new());
         recorder
@@ -290,6 +299,7 @@ impl Recorder {
     fn start_segment(&mut self, waits: Vec<(Semaphore, u64)>) {
         self.segments.push(Segment {
             waits,
+            binds: Vec::new(),
             commands: alloc::vec![Command::Barrier(FULL)],
             signals: Vec::new(),
         });
@@ -336,6 +346,7 @@ enum Encoder {
     Render(Box<render::RenderState>),
     Compute(Box<compute::ComputeState>),
     Blit,
+    ResourceState,
 }
 
 /// A command buffer being encoded.
@@ -380,7 +391,7 @@ impl CommandBuffer {
         match core::mem::replace(&mut self.encoder, Encoder::None) {
             Encoder::None => Err(Error::Invalid("no encoder is encoding")),
             Encoder::Render(state) => self.end_render(resolver, *state),
-            Encoder::Compute(_) | Encoder::Blit => Ok(()),
+            Encoder::Compute(_) | Encoder::Blit | Encoder::ResourceState => Ok(()),
         }?;
         self.bindings.reset();
         Ok(())
@@ -448,6 +459,7 @@ impl CommandBuffer {
             segments: self.recorder.segments,
             uploads: self.recorder.uploads.finish(),
             query_pools: self.recorder.query_pools,
+            mappings: self.recorder.mappings,
         })
     }
 }

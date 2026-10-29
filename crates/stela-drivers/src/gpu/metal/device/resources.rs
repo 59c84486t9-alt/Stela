@@ -4,7 +4,7 @@ use crate::gpu::metal::{
     abi::{HeapType, ResourceOptions, StorageMode, TextureType},
     binding::{HeapArray, ResourceId},
     command_buffer::{BufferRef, blit::BufferLayout},
-    error::{Error, Result, ensure},
+    error::{Error, Result, ensure, require},
     hazard::FULL,
     heap::{self, HeapAllocator, HeapDescriptor, SizeAndAlign},
     pass::AttachmentView,
@@ -14,17 +14,18 @@ use crate::gpu::metal::{
     },
     sampler::{self, SamplerDescriptor},
     shader::Compiler,
+    sparse::{self, MappingRequest, SparseLayout, SparsePages, SparseTexture},
     vulkan::{
         BufferCreate, BufferUsage, MemoryProperties,
         backend::{Backend, BufferAllocation, Descriptor, Object},
-        command::{BufferImageCopy, Command},
+        command::{BufferImageCopy, Command, SparseBind},
         object::{
             Buffer, BufferInfo, BufferView, Image, ImageView, ImageViewInfo, Memory, MemoryRequest,
             Sampler,
         },
     },
 };
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 
 const TEXTURE_ARRAYS: [HeapArray; 2] = [HeapArray::SampledImages, HeapArray::StorageImages];
 const TEXEL_BUFFER_ARRAYS: [HeapArray; 2] = [
@@ -47,6 +48,8 @@ enum Backing {
     },
     /// Aliases a buffer's memory (linear textures and texture buffers).
     Buffer(BufferId),
+    /// Maps pages of a sparse heap.
+    Sparse(HeapId),
 }
 
 #[derive(Debug)]
@@ -96,7 +99,15 @@ struct HeapObject {
     descriptor: HeapDescriptor,
     memory: Memory,
     allocator: Option<HeapAllocator>,
+    sparse: Option<SparseHeap>,
     resources: u32,
+}
+
+/// A sparse heap's pages and the memory types its textures must accept.
+#[derive(Debug)]
+struct SparseHeap {
+    pages: SparsePages,
+    memory_types: u32,
 }
 
 #[derive(Debug, Default)]
@@ -107,6 +118,8 @@ pub(super) struct Resources {
     heaps: Slab<HeapObject>,
     /// CPU-copy regions of managed textures that the next commit uploads.
     cpu_copy_uploads: Vec<(TextureId, BufferImageCopy)>,
+    /// Sparse textures by image, with their heaps.
+    sparse: BTreeMap<Image, (HeapId, SparseTexture)>,
 }
 
 impl<B: Backend, C: Compiler> Device<B, C> {
@@ -616,6 +629,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             Some(parent) => self.resources.textures.get_mut(parent.0)?.dependents -= 1,
             None => {
                 if let Some(image) = texture.image {
+                    self.release_sparse(image)?;
                     self.defer(Object::Image(image));
                 }
                 if let Some(copy) = texture.cpu_copy {
@@ -649,6 +663,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             (Backing::Buffer(buffer), _) => {
                 self.resources.buffers.get_mut(buffer.0)?.dependents -= 1
             }
+            (Backing::Sparse(heap), _) => self.resources.heaps.get_mut(heap.0)?.resources -= 1,
         }
         Ok(())
     }
@@ -768,9 +783,24 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             descriptor,
             crate::gpu::metal::capabilities::ApiFeatures::IMPLEMENTED,
         )?;
+        let sparse = match descriptor.heap_type {
+            HeapType::Sparse => {
+                let probe = sparse::probe(&self.capabilities, descriptor.options)?;
+                let page = self
+                    .capabilities
+                    .sparse_tile_bytes(descriptor.sparse_page_size)
+                    .ok_or(Error::Unsupported("sparse page size"))?;
+                Some(SparseHeap {
+                    pages: SparsePages::new(plan.size, page),
+                    memory_types: self.backend.image_requirements(&probe)?.memory_types,
+                })
+            }
+            HeapType::Automatic | HeapType::Placement => None,
+        };
+        let memory_types = sparse.as_ref().map_or(u32::MAX, |heap| heap.memory_types);
         let memory = self
             .backend
-            .allocate_memory(plan.size, plan.memory, u32::MAX)?;
+            .allocate_memory(plan.size, plan.memory, memory_types)?;
         self.allocated += plan.size;
         let allocator =
             (descriptor.heap_type == HeapType::Automatic).then(|| HeapAllocator::new(plan.size));
@@ -778,6 +808,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             descriptor: *descriptor,
             memory,
             allocator,
+            sparse,
             resources: 0,
         })))
     }
@@ -887,6 +918,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         descriptor: &TextureDescriptor,
         offset: Option<u64>,
     ) -> Result<TextureId> {
+        if self.resources.heaps.get(id.0)?.sparse.is_some() {
+            ensure(offset.is_none(), "sparse heaps place textures themselves")?;
+            return self.new_sparse_texture(id, descriptor);
+        }
         let requirement = self.heap_texture_size_and_align(descriptor)?;
         let (memory, offset) = self.place(id, descriptor.options, requirement, offset)?;
         let backing = Backing::Heap {
@@ -907,6 +942,146 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             }
         };
         self.finish_texture(image, descriptor, &plan, backing, None)
+    }
+
+    /// A texture on a sparse heap, with every tile unmapped.
+    fn new_sparse_texture(
+        &mut self,
+        id: HeapId,
+        descriptor: &TextureDescriptor,
+    ) -> Result<TextureId> {
+        let (plan, tile) = sparse::texture(&self.capabilities, descriptor)?;
+        let heap = self.resources.heaps.get(id.0)?;
+        ensure(
+            descriptor.options.storage_mode == heap.descriptor.options.storage_mode,
+            "heap resources share the heap's storage mode",
+        )?;
+        let memory_types = heap.sparse.as_ref().map_or(0, |sparse| sparse.memory_types);
+        let page = self
+            .capabilities
+            .sparse_tile_bytes(heap.descriptor.sparse_page_size)
+            .ok_or(Error::Unsupported("sparse page size"))?;
+        let (image, requirements) = self.backend.create_sparse_image(&plan.image)?;
+        let layout = require(
+            requirements.memory_types & memory_types == memory_types,
+            "sparse textures in this heap's memory",
+        )
+        .and_then(|()| SparseLayout::new(descriptor, tile, &requirements, page));
+        let layout = match layout {
+            Ok(layout) => layout,
+            Err(error) => {
+                self.backend.destroy(Object::Image(image));
+                return Err(error);
+            }
+        };
+        self.resources.heaps.get_mut(id.0)?.resources += 1;
+        let texture = self.finish_texture(image, descriptor, &plan, Backing::Sparse(id), None)?;
+        self.resources
+            .sparse
+            .insert(image, (id, SparseTexture::new(image, layout)));
+        Ok(texture)
+    }
+
+    /// The image a resource state encoder names for a sparse texture.
+    pub fn sparse_image(&self, id: TextureId) -> Result<Image> {
+        let image = self.resources.textures.get(id.0)?.image;
+        image
+            .filter(|image| self.resources.sparse.contains_key(image))
+            .ok_or(Error::Invalid("the texture is not sparse"))
+    }
+
+    /// `firstMipmapInTail` and `tailSizeInBytes`; `None` unless the texture
+    /// is sparse (`isSparse`).
+    pub fn sparse_tail(&self, id: TextureId) -> Result<Option<(u64, u64)>> {
+        let image = self.resources.textures.get(id.0)?.image;
+        Ok(image
+            .and_then(|image| self.resources.sparse.get(&image))
+            .map(|(_, texture)| (texture.layout.first_mip_in_tail, texture.layout.tail_bytes)))
+    }
+
+    fn sparse_texture(&self, image: Image) -> Result<&(HeapId, SparseTexture)> {
+        self.resources
+            .sparse
+            .get(&image)
+            .ok_or(Error::Invalid("the texture is not sparse"))
+    }
+
+    /// Fails as [`Self::sparse_binds`] would, without changing anything, so
+    /// a commit either applies all its mapping updates or none.
+    pub(super) fn check_mapping(&self, request: &MappingRequest) -> Result<()> {
+        match request {
+            MappingRequest::Update { image, updates, .. } => {
+                let (_, texture) = self.sparse_texture(*image)?;
+                updates
+                    .iter()
+                    .try_for_each(|update| texture.check_update(update))
+            }
+            MappingRequest::Move {
+                source,
+                destination,
+                size,
+            } => {
+                let (heap, from) = self.sparse_texture(source.image)?;
+                let (other, to) = self.sparse_texture(destination.image)?;
+                ensure(heap == other, "moved mappings stay in one heap")?;
+                ensure(
+                    from.check_move(source, *size)? == to.check_move(destination, *size)?,
+                    "moves cover the same tiles in both textures",
+                )
+            }
+        }
+    }
+
+    /// The sparse binds of a resource state encoder's request, applied to
+    /// the device's tile and page state.
+    pub(super) fn sparse_binds(&mut self, request: &MappingRequest) -> Result<Vec<SparseBind>> {
+        let mut binds = Vec::new();
+        let resources = &mut self.resources;
+        match request {
+            MappingRequest::Update {
+                image,
+                mode,
+                updates,
+            } => {
+                let (heap, texture) = resources
+                    .sparse
+                    .get_mut(image)
+                    .ok_or(Error::Invalid("the texture is not sparse"))?;
+                let heap = resources.heaps.get_mut(heap.0)?;
+                let pages = &mut heap.sparse.as_mut().expect("sparse heap").pages;
+                for update in updates {
+                    texture.update(*mode, update, pages, heap.memory, &mut binds)?;
+                }
+            }
+            MappingRequest::Move {
+                source,
+                destination,
+                size,
+            } => {
+                let (heap, texture) = resources
+                    .sparse
+                    .get_mut(&source.image)
+                    .ok_or(Error::Invalid("the texture is not sparse"))?;
+                let heap = resources.heaps.get_mut(heap.0)?;
+                let moved = texture.take_region(source, *size, heap.memory, &mut binds)?;
+                let (_, texture) = resources
+                    .sparse
+                    .get_mut(&destination.image)
+                    .ok_or(Error::Invalid("the texture is not sparse"))?;
+                let pages = &mut heap.sparse.as_mut().expect("sparse heap").pages;
+                texture.place_region(destination, *size, moved, pages, heap.memory, &mut binds)?;
+            }
+        }
+        Ok(binds)
+    }
+
+    /// Returns a destroyed sparse texture's pages to its heap.
+    fn release_sparse(&mut self, image: Image) -> Result<()> {
+        if let Some((heap, mut texture)) = self.resources.sparse.remove(&image) {
+            let heap = self.resources.heaps.get_mut(heap.0)?;
+            texture.release(&mut heap.sparse.as_mut().expect("sparse heap").pages);
+        }
+        Ok(())
     }
 
     /// `makeAliasable` of a heap buffer: its range returns to the heap now.
@@ -933,9 +1108,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// `usedSize` and `maxAvailableSizeWithAlignment:` of a heap.
     pub fn heap_usage(&self, id: HeapId, alignment: u64) -> Result<(u64, u64)> {
         let heap = self.resources.heaps.get(id.0)?;
-        Ok(match &heap.allocator {
-            Some(allocator) => (allocator.used(), allocator.max_available(alignment)),
-            None => (heap.descriptor.size, heap.descriptor.size),
+        Ok(match (&heap.allocator, &heap.sparse) {
+            (Some(allocator), _) => (allocator.used(), allocator.max_available(alignment)),
+            (None, Some(sparse)) => (sparse.pages.used_bytes(), sparse.pages.free_bytes()),
+            (None, None) => (heap.descriptor.size, heap.descriptor.size),
         })
     }
 

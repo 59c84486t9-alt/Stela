@@ -306,6 +306,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let serial = self.submitted + 1;
         let completion = (self.timeline, serial);
         let mut recording = commands.commit(&mut self.resolver(), completion)?;
+        let mappings = core::mem::take(&mut recording.mappings);
+        for (_, request) in &mappings {
+            self.check_mapping(request)?;
+        }
+        for (segment, request) in &mappings {
+            let binds = self.sparse_binds(request)?;
+            recording.segments[*segment].binds.extend(binds);
+        }
         // CPU-copy writes reach the images first, after the opening barrier.
         let uploads = self.take_cpu_copy_uploads();
         recording.segments[0].commands.splice(1..1, uploads);

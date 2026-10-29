@@ -222,6 +222,22 @@ impl SparsePageSize {
 }
 
 raw_enum! {
+    /// `MTLSparseTextureMappingMode`.
+    pub enum SparseTextureMappingMode: u64 {
+        Map = 0,
+        Unmap = 1,
+    }
+}
+
+raw_enum! {
+    /// `MTLSparseTextureRegionAlignmentMode`.
+    pub enum SparseTextureRegionAlignmentMode: u64 {
+        Outward = 0,
+        Inward = 1,
+    }
+}
+
+raw_enum! {
     /// `MTLPurgeableState`.
     pub enum PurgeableState: u64 {
         KeepCurrent = 1,

@@ -15,7 +15,7 @@ use super::{
     object::{
         Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo, GraphicsPipelineInfo,
         Image, ImageInfo, ImageView, ImageViewInfo, Memory, MemoryRequest, Pipeline, QueryPool,
-        QueryPoolInfo, Sampler, SamplerInfo, Semaphore,
+        QueryPoolInfo, Sampler, SamplerInfo, Semaphore, SparseImageRequirements,
     },
     physical::{Features, PhysicalDevice},
 };
@@ -111,6 +111,10 @@ pub trait Backend {
         memory: Memory,
         offset: u64,
     ) -> Result<Image>;
+    /// A sparse-residency color image with no memory bound; segments bind
+    /// its blocks.
+    fn create_sparse_image(&mut self, info: &ImageInfo)
+    -> Result<(Image, SparseImageRequirements)>;
     fn create_image_view(&mut self, image: Image, info: &ImageViewInfo) -> Result<ImageView>;
     fn create_buffer_view(&mut self, buffer: Buffer, info: &BufferViewInfo) -> Result<BufferView>;
     fn create_sampler(&mut self, info: &SamplerInfo) -> Result<Sampler>;
@@ -157,8 +161,9 @@ pub trait Backend {
     /// Waits until `semaphore` reaches `value` or `timeout` nanoseconds pass.
     fn wait_semaphore(&mut self, semaphore: Semaphore, value: u64, timeout: u64) -> Result<bool>;
 
-    /// Records each segment into a command buffer and submits them in order
-    /// in one `vkQueueSubmit2`.
+    /// Records each segment into a command buffer and submits them in
+    /// order. A segment's sparse binds wait for everything submitted before
+    /// it, and its commands wait for the binds.
     fn submit(&mut self, segments: &[Segment]) -> Result<()>;
 
     /// `vkGetCalibratedTimestampsKHR`: (host nanoseconds, GPU ticks).

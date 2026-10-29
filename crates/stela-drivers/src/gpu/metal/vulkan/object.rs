@@ -55,6 +55,21 @@ pub struct ImageInfo {
     pub linear: Option<LinearLayout>,
 }
 
+/// A color sparse-residency image's `VkMemoryRequirements` memory types and
+/// its `VkSparseImageMemoryRequirements`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SparseImageRequirements {
+    pub memory_types: u32,
+    /// `imageGranularity`: texels per sparse block.
+    pub granularity: [u32; 3],
+    pub mip_tail_first_lod: u32,
+    pub mip_tail_size: u64,
+    pub mip_tail_offset: u64,
+    pub mip_tail_stride: u64,
+    /// One mip tail for every layer (`VK_SPARSE_IMAGE_FORMAT_SINGLE_MIPTAIL_BIT`).
+    pub single_mip_tail: bool,
+}
+
 /// `VkImageSubresourceRange`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SubresourceRange {

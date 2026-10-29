@@ -11,7 +11,7 @@ use super::{
     AttachmentLoadOp, AttachmentStoreOp, CompareOp, CullMode, Filter, FrontFace, ImageAspects,
     IndexType, PipelineBindPoint, PipelineStages, PolygonMode, PrimitiveTopology, ResolveModes,
     SampleCounts, StencilOp,
-    object::{Buffer, Image, ImageView, Pipeline, QueryPool},
+    object::{Buffer, Image, ImageView, Memory, Pipeline, QueryPool},
 };
 use crate::gpu::metal::{binding::PushConstants, pass::ClearValue};
 use alloc::vec::Vec;
@@ -123,6 +123,26 @@ pub struct ImageBlit {
     pub src_bounds: [[i32; 3]; 2],
     pub dst: Subresource,
     pub dst_bounds: [[i32; 3]; 2],
+}
+
+/// One sparse binding of `vkQueueBindSparse`; `None` memory unbinds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SparseBind {
+    /// `VkSparseImageMemoryBind`: one block of one subresource.
+    Block {
+        image: Image,
+        subresource: Subresource,
+        offset: [i32; 3],
+        extent: [u32; 3],
+        memory: Option<(Memory, u64)>,
+    },
+    /// `VkSparseMemoryBind` of an image's opaque range: its mip tails.
+    Opaque {
+        image: Image,
+        offset: u64,
+        size: u64,
+        memory: Option<(Memory, u64)>,
+    },
 }
 
 /// `vkCmdBindVertexBuffers2` element; a `None` stride keeps the pipeline's.

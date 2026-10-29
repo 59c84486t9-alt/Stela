@@ -16,6 +16,7 @@
 mod objects;
 mod physical;
 mod record;
+mod sparse;
 #[cfg(test)]
 mod tests;
 
@@ -30,7 +31,7 @@ use super::{
             Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo,
             GraphicsPipelineInfo, Image, ImageInfo, ImageView, ImageViewInfo, Memory,
             MemoryRequest, Pipeline, QueryPool, QueryPoolInfo, Sampler, SamplerInfo, Semaphore,
-            ShaderCode,
+            ShaderCode, SparseImageRequirements,
         },
         physical::{PciBusInfo, PhysicalDevice},
     },
@@ -107,6 +108,10 @@ pub struct NativeBackend {
     mappings: BTreeMap<u64, Mapping>,
     /// Images still in `VK_IMAGE_LAYOUT_UNDEFINED`, with their aspects.
     new_images: Vec<(vk::Image, vk::ImageAspectFlags)>,
+    /// Orders sparse binds between command buffers: before a segment's
+    /// binds the queue signals an odd value, and the binds signal the next.
+    bind_timeline: vk::Semaphore,
+    bind_value: u64,
     accumulate: vk::Pipeline,
 }
 
@@ -214,10 +219,13 @@ impl NativeBackend {
             in_flight: Vec::new(),
             mappings: BTreeMap::new(),
             new_images: Vec::new(),
+            bind_timeline: vk::Semaphore::null(),
+            bind_value: 0,
             accumulate: vk::Pipeline::null(),
         };
         // Dropping a partly built backend destroys what was created.
         backend.create_layout(family)?;
+        backend.bind_timeline = handle(backend.create_semaphore(0)?.0);
         backend.accumulate = backend.create_compute(&ComputePipelineInfo {
             code: kernels.accumulate,
             required_subgroup_size: 0,
@@ -247,9 +255,29 @@ impl NativeBackend {
             let families =
                 unsafe { instance.get_physical_device_queue_family_properties(physical) };
             let universal = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE;
-            let family = families.iter().position(|family| {
+            let candidates = families.iter().enumerate().filter(|(_, family)| {
                 family.queue_flags.contains(universal) && family.timestamp_valid_bits > 0
-            })?;
+            });
+            let sparse = |(_, family): &(usize, &vk::QueueFamilyProperties)| {
+                family.queue_flags.contains(vk::QueueFlags::SPARSE_BINDING)
+            };
+            let (family, properties) = candidates
+                .clone()
+                .find(sparse)
+                .or_else(|| candidates.clone().next())?;
+            let mut snapshot = snapshot;
+            if !properties
+                .queue_flags
+                .contains(vk::QueueFlags::SPARSE_BINDING)
+            {
+                // Sparse binds run on the universal queue.
+                let features = &mut snapshot.features;
+                features.sparse_binding = false;
+                features.sparse_residency_buffer = false;
+                features.sparse_residency_image_2d = false;
+                features.sparse_residency_image_3d = false;
+                features.sparse_residency_aliased = false;
+            }
             Some((physical, extensions, snapshot, family as u32))
         })
     }
@@ -499,6 +527,7 @@ impl Drop for NativeBackend {
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline_layout(self.layout, None);
             self.device.destroy_sampler(self.null_sampler, None);
+            self.device.destroy_semaphore(self.bind_timeline, None);
             self.device.destroy_descriptor_pool(self.heap.pool, None);
             self.device
                 .destroy_descriptor_set_layout(self.heap.layout, None);
@@ -669,6 +698,50 @@ impl Backend for NativeBackend {
         let adopted = bound.and_then(|()| self.adopt_image(image, info));
         self.or_destroy(adopted, &[Object::Image(Image(raw(image)))])?;
         Ok(Image(raw(image)))
+    }
+
+    fn create_sparse_image(
+        &mut self,
+        info: &ImageInfo,
+    ) -> Result<(Image, SparseImageRequirements)> {
+        let image = objects::image(info, |create| {
+            // SAFETY: the create info and its chain outlive the call.
+            unsafe { self.device.create_image(create, None) }.map_err(failure)
+        })?;
+        // SAFETY: the image was just created.
+        let (needs, sparse) = unsafe {
+            (
+                self.device.get_image_memory_requirements(image),
+                self.device.get_image_sparse_memory_requirements(image),
+            )
+        };
+        let color = sparse.iter().find(|requirements| {
+            requirements
+                .format_properties
+                .aspect_mask
+                .contains(vk::ImageAspectFlags::COLOR)
+        });
+        let requirements = color
+            .map(|color| {
+                let granularity = color.format_properties.image_granularity;
+                SparseImageRequirements {
+                    memory_types: needs.memory_type_bits,
+                    granularity: [granularity.width, granularity.height, granularity.depth],
+                    mip_tail_first_lod: color.image_mip_tail_first_lod,
+                    mip_tail_size: color.image_mip_tail_size,
+                    mip_tail_offset: color.image_mip_tail_offset,
+                    mip_tail_stride: color.image_mip_tail_stride,
+                    single_mip_tail: color
+                        .format_properties
+                        .flags
+                        .contains(vk::SparseImageFormatFlags::SINGLE_MIPTAIL),
+                }
+            })
+            .ok_or(Error::Unsupported("sparse residency of this image"));
+        let adopted = requirements
+            .and_then(|requirements| self.adopt_image(image, info).map(|()| requirements));
+        let requirements = self.or_destroy(adopted, &[Object::Image(Image(raw(image)))])?;
+        Ok((Image(raw(image)), requirements))
     }
 
     fn create_image_view(&mut self, image: Image, info: &ImageViewInfo) -> Result<ImageView> {
@@ -942,41 +1015,15 @@ impl Backend for NativeBackend {
                     let adopt = if index == 0 { &new_images[..] } else { &[] };
                     record::segment(self, buffer, adopt, segment)
                 });
-        let submitted = recorded.and_then(|()| {
-            let waits: Vec<Vec<vk::SemaphoreSubmitInfo>> = segments
-                .iter()
-                .map(|segment| objects::semaphores(&segment.waits))
-                .collect();
-            let signals: Vec<Vec<vk::SemaphoreSubmitInfo>> = segments
-                .iter()
-                .map(|segment| objects::semaphores(&segment.signals))
-                .collect();
-            let commands: Vec<[vk::CommandBufferSubmitInfo; 1]> = buffers
-                .iter()
-                .map(|&buffer| [vk::CommandBufferSubmitInfo::default().command_buffer(buffer)])
-                .collect();
-            let submits: Vec<vk::SubmitInfo2> = (0..segments.len())
-                .map(|index| {
-                    vk::SubmitInfo2::default()
-                        .wait_semaphore_infos(&waits[index])
-                        .command_buffer_infos(&commands[index])
-                        .signal_semaphore_infos(&signals[index])
-                })
-                .collect();
-            // SAFETY: every command buffer is recorded, and the queue is
-            // used only by this backend.
-            unsafe {
-                self.device
-                    .queue_submit2(self.queue, &submits, vk::Fence::null())
-            }
-            .map_err(failure)
-        });
+        let submitted = recorded.and_then(|()| self.queue_segments(segments, &buffers));
         if let Err(error) = submitted {
-            // SAFETY: nothing was submitted, so nothing uses the buffers.
+            // SAFETY: after the queue idles nothing uses the buffers, part
+            // of which may have been submitted.
             unsafe {
+                let _ = self.device.queue_wait_idle(self.queue);
                 self.device
-                    .free_command_buffers(self.command_pool, &buffers)
-            };
+                    .free_command_buffers(self.command_pool, &buffers);
+            }
             self.new_images = new_images;
             return Err(error);
         }
@@ -1020,7 +1067,95 @@ impl Backend for NativeBackend {
     }
 }
 
+/// Submits `pending` in one `vkQueueSubmit2` and empties it.
+fn flush(
+    device: &ash::Device,
+    queue: vk::Queue,
+    pending: &mut Vec<vk::SubmitInfo2<'_>>,
+) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    // SAFETY: every command buffer is recorded and every array outlives the
+    // call; the queue is used only by this backend.
+    let submitted = unsafe { device.queue_submit2(queue, pending, vk::Fence::null()) };
+    pending.clear();
+    submitted.map_err(failure)
+}
+
 impl NativeBackend {
+    /// Submits the recorded segments in order. A segment with sparse binds
+    /// splits the submission: the queue signals the bind timeline once
+    /// everything before is done, the binds wait for that and the
+    /// segment's own waits, and the segment's commands wait for the binds.
+    fn queue_segments(
+        &mut self,
+        segments: &[Segment],
+        buffers: &[vk::CommandBuffer],
+    ) -> Result<()> {
+        let bound: Vec<Option<u64>> = segments
+            .iter()
+            .map(|segment| {
+                (!segment.binds.is_empty()).then(|| {
+                    self.bind_value += 2;
+                    self.bind_value
+                })
+            })
+            .collect();
+        let timeline = |value| {
+            [vk::SemaphoreSubmitInfo::default()
+                .semaphore(self.bind_timeline)
+                .value(value)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)]
+        };
+        let ready: Vec<_> = bound
+            .iter()
+            .map(|value| timeline(value.map_or(0, |value| value - 1)))
+            .collect();
+        let waits: Vec<Vec<vk::SemaphoreSubmitInfo>> = segments
+            .iter()
+            .zip(&bound)
+            .map(|(segment, bound)| match bound {
+                Some(value) => timeline(*value).to_vec(),
+                None => objects::semaphores(&segment.waits),
+            })
+            .collect();
+        let signals: Vec<Vec<vk::SemaphoreSubmitInfo>> = segments
+            .iter()
+            .map(|segment| objects::semaphores(&segment.signals))
+            .collect();
+        let commands: Vec<[vk::CommandBufferSubmitInfo; 1]> = buffers
+            .iter()
+            .map(|&buffer| [vk::CommandBufferSubmitInfo::default().command_buffer(buffer)])
+            .collect();
+        let mut pending = Vec::new();
+        for (index, segment) in segments.iter().enumerate() {
+            if let Some(value) = bound[index] {
+                pending.push(vk::SubmitInfo2::default().signal_semaphore_infos(&ready[index]));
+                flush(&self.device, self.queue, &mut pending)?;
+                let mut waits: Vec<_> = segment
+                    .waits
+                    .iter()
+                    .map(|&(semaphore, value)| (handle(semaphore.0), value))
+                    .collect();
+                waits.push((self.bind_timeline, value - 1));
+                sparse::SparseBatch::new(&segment.binds).submit(
+                    &self.device,
+                    self.queue,
+                    &waits,
+                    (self.bind_timeline, value),
+                )?;
+            }
+            pending.push(
+                vk::SubmitInfo2::default()
+                    .wait_semaphore_infos(&waits[index])
+                    .command_buffer_infos(&commands[index])
+                    .signal_semaphore_infos(&signals[index]),
+            );
+        }
+        flush(&self.device, self.queue, &mut pending)
+    }
+
     /// `vkGetBufferDeviceAddress` when the buffer allows it.
     fn address(&self, buffer: vk::Buffer, info: &BufferInfo) -> u64 {
         if !info

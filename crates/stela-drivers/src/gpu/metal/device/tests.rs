@@ -7,12 +7,13 @@ use crate::gpu::metal::{
     abi::{
         CpuCacheMode, DispatchType, HazardTrackingMode, HeapType, LoadAction,
         MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, PrimitiveTopologyClass,
-        PrimitiveType, ResourceOptions, SparsePageSize, StorageMode, StoreAction,
-        StoreActionOptions, SwizzleChannels, TessellationPartitionMode, TextureType, TextureUsage,
+        PrimitiveType, ResourceOptions, SparsePageSize, SparseTextureMappingMode, StorageMode,
+        StoreAction, StoreActionOptions, SwizzleChannels, TessellationPartitionMode, TextureType,
+        TextureUsage,
     },
     capabilities::{ShaderFeatures, Size},
     command_buffer::{
-        Segment,
+        BufferRef, Segment,
         counters::{COUNTER_ERROR_VALUE, CounterSample},
     },
     heap::HeapDescriptor,
@@ -27,6 +28,7 @@ use crate::gpu::metal::{
         Access, BufferUse, CompiledShader, Interface, Patch, PatchDomain, Provenance,
         Specialization, Stage, Tessellation, TessellationStages, tests::interface,
     },
+    sparse::{MappingUpdate, SparseRegion},
     vulkan::{
         ImageAspects, PrimitiveTopology, ShaderStages,
         backend::{BufferAllocation, Descriptor, Requirements},
@@ -35,6 +37,7 @@ use crate::gpu::metal::{
             Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo,
             GraphicsPipelineInfo, Image, ImageInfo, ImageView, ImageViewInfo, MemoryRequest,
             Pipeline, QueryPool, QueryPoolInfo, Sampler, SamplerInfo, ShaderCode,
+            SparseImageRequirements,
         },
         physical::PhysicalDevice,
     },
@@ -125,6 +128,20 @@ impl Backend for MockBackend {
     }
     fn create_placed_image(&mut self, _: &ImageInfo, _: Memory, _: u64) -> Result<Image> {
         Ok(Image(self.id()))
+    }
+    /// RGBA8's standard block, with each layer's tail of one block from
+    /// level 2.
+    fn create_sparse_image(&mut self, _: &ImageInfo) -> Result<(Image, SparseImageRequirements)> {
+        let requirements = SparseImageRequirements {
+            memory_types: u32::MAX,
+            granularity: [128, 128, 1],
+            mip_tail_first_lod: 2,
+            mip_tail_size: 64 << 10,
+            mip_tail_offset: 1 << 20,
+            mip_tail_stride: 64 << 10,
+            single_mip_tail: false,
+        };
+        Ok((Image(self.id()), requirements))
     }
     fn create_image_view(&mut self, _: Image, _: &ImageViewInfo) -> Result<ImageView> {
         Ok(ImageView(self.id()))
@@ -1030,4 +1047,100 @@ fn statistic_samples_start_as_error_values() {
         "commit resolves the sample's seven counted members"
     );
     device.destroy_counter_sample_buffer(counters).unwrap();
+}
+
+#[test]
+fn sparse_textures_map_heap_pages_at_commit() {
+    let mut device = device();
+    let heap = device
+        .new_heap(&HeapDescriptor {
+            size: 4 << 16,
+            options: options(StorageMode::Private),
+            heap_type: HeapType::Sparse,
+            sparse_page_size: SparsePageSize::Size64,
+        })
+        .unwrap();
+    let descriptor = TextureDescriptor {
+        width: 256,
+        height: 256,
+        mipmap_level_count: 4,
+        ..texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ)
+    };
+    assert!(
+        device.new_heap_texture(heap, &descriptor, Some(0)).is_err(),
+        "sparse heaps place textures themselves"
+    );
+    let sparse = device.new_heap_texture(heap, &descriptor, None).unwrap();
+    assert_eq!(device.sparse_tail(sparse), Ok(Some((2, 64 << 10))));
+    let image = device.sparse_image(sparse).unwrap();
+    let plain = device
+        .new_texture(&texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ))
+        .unwrap();
+    assert_eq!(device.sparse_tail(plain), Ok(None));
+    assert!(device.sparse_image(plain).is_err());
+
+    let mut commands = device.new_command_buffer();
+    commands.begin_blit().unwrap();
+    let scratch = BufferRef {
+        buffer: Buffer(99),
+        offset: 0,
+        address: 99 << 32,
+        length: 64,
+    };
+    commands.copy_buffer(scratch, 0, scratch, 32, 32).unwrap();
+    commands.end_encoding(&mut device.resolver()).unwrap();
+    commands
+        .begin_resource_state(&mut device.resolver())
+        .unwrap();
+    let tiles = |level, origin, size| MappingUpdate {
+        level,
+        slice: 0,
+        region: SparseRegion { origin, size },
+    };
+    commands
+        .update_texture_mappings(
+            image,
+            SparseTextureMappingMode::Map,
+            alloc::vec![tiles(0, [0; 3], [2, 1, 1]), tiles(3, [0; 3], [1; 3])],
+        )
+        .unwrap();
+    assert_eq!(
+        commands.update_texture_mapping_indirect(),
+        Err(Error::Unsupported("indirect sparse mapping updates"))
+    );
+    commands.end_encoding(&mut device.resolver()).unwrap();
+    device.commit(commands).unwrap();
+    let segments = device.backend().submissions.last().unwrap().clone();
+    assert_eq!(
+        segments.len(),
+        2,
+        "the encoder's updates bind between segments"
+    );
+    assert!(segments[0].binds.is_empty());
+    assert_eq!(segments[1].binds.len(), 3, "two blocks and the tail");
+    assert_eq!(device.heap_usage(heap, 1), Ok((3 << 16, 1 << 16)));
+
+    // A bad region fails the commit before any mapping changes.
+    let mut commands = device.new_command_buffer();
+    commands
+        .begin_resource_state(&mut device.resolver())
+        .unwrap();
+    commands
+        .update_texture_mappings(
+            image,
+            SparseTextureMappingMode::Unmap,
+            alloc::vec![tiles(0, [0; 3], [1; 3]), tiles(0, [2, 0, 0], [1; 3])],
+        )
+        .unwrap();
+    commands.end_encoding(&mut device.resolver()).unwrap();
+    assert!(device.commit(commands).is_err());
+    assert_eq!(device.heap_usage(heap, 1), Ok((3 << 16, 1 << 16)));
+
+    assert!(
+        device.destroy_heap(heap).is_err(),
+        "the texture lives in it"
+    );
+    device.destroy_texture(sparse).unwrap();
+    assert_eq!(device.heap_usage(heap, 1), Ok((0, 4 << 16)));
+    device.destroy_heap(heap).unwrap();
 }

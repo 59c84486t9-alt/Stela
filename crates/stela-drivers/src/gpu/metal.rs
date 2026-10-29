@@ -30,6 +30,7 @@ pub mod pixel_format;
 pub mod resource;
 pub mod sampler;
 pub mod shader;
+pub mod sparse;
 pub mod upload;
 pub mod vertex;
 pub mod vulkan;

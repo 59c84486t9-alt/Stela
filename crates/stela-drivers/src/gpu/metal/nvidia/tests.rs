@@ -358,11 +358,8 @@ fn sparse_tiles_use_the_standard_64k_block_shapes() {
     );
     assert_eq!(
         tile(P::R8Unorm, TextureType::D2Multisample, 4),
-        Some(Size {
-            width: 128,
-            height: 128,
-            depth: 1
-        })
+        None,
+        "multisample residency is not probed"
     );
     assert_eq!(
         tile(P::Bc1Rgba, TextureType::D2, 1),

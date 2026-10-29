@@ -74,6 +74,7 @@ impl ApiFeatures {
     /// The paths this build implements.
     pub const IMPLEMENTED: Self = Self::HEAPS
         .union(Self::INDIRECT_DRAW_DISPATCH)
+        .union(Self::SPARSE_TEXTURES)
         .union(Self::TIMESTAMP_COUNTERS)
         .union(Self::STATISTIC_COUNTERS)
         .union(Self::PROGRAMMABLE_SAMPLE_POSITIONS)
@@ -271,6 +272,8 @@ pub struct Capabilities {
     /// `MTLVertexStepFunctionConstant`, which needs zero divisors.
     pub constant_vertex_step: bool,
     counter_sampling: [bool; 5],
+    /// Sparse 3D textures, with Vulkan's 3D residency and block shapes.
+    sparse_volumes: bool,
     vertex_formats: Vec<VertexFormat>,
     families: Vec<GpuFamily>,
     formats: Vec<(PixelFormat, FormatCapabilities)>,
@@ -368,19 +371,26 @@ impl Capabilities {
         (bytes != 0 && page.bytes() == bytes).then_some(bytes)
     }
 
-    /// Texels per sparse tile, following Vulkan's standard block shapes.
+    /// Texels per sparse tile, following Vulkan's standard block shapes:
+    /// single-sample 2D textures and arrays, and 3D textures where the
+    /// driver has 3D residency.
     pub fn sparse_tile_size(
         &self,
         texture_type: TextureType,
         format: PixelFormat,
         samples: u64,
     ) -> Option<Size> {
+        let shape = match (texture_type, samples) {
+            (TextureType::D2 | TextureType::D2Array, 1) => Shape::Planar,
+            (TextureType::D3, 1) if self.sparse_volumes => Shape::Volume,
+            _ => return None,
+        };
         if !self.format(format).contains(FormatCapabilities::SPARSE)
             || self.limits.sparse_tile_bytes != STANDARD_SPARSE_TILE_BYTES
         {
             return None;
         }
-        standard_tile_shape(texture_type, format.describe(), samples)
+        standard_tile_shape(shape, format.describe())
     }
 
     /// `minimumLinearTextureAlignmentForPixelFormat:`; zero when the format
@@ -412,13 +422,16 @@ impl Capabilities {
     }
 }
 
+/// The standard sparse block shapes this device uses.
+#[derive(Clone, Copy)]
+enum Shape {
+    Planar,
+    Volume,
+}
+
 /// Texels in one 64 KiB standard sparse block (Vulkan specification,
 /// "Standard Sparse Image Block Shapes"), scaled by the format's block size.
-fn standard_tile_shape(
-    texture_type: TextureType,
-    description: &Description,
-    samples: u64,
-) -> Option<Size> {
+fn standard_tile_shape(shape: Shape, description: &Description) -> Option<Size> {
     let bytes = description.block.bytes;
     let index = match bytes {
         1 => 0,
@@ -428,13 +441,7 @@ fn standard_tile_shape(
         16 => 4,
         _ => return None,
     };
-    const SHAPES_2D: [[(u64, u64); 5]; 5] = [
-        [(256, 256), (256, 128), (128, 128), (128, 64), (64, 64)],
-        [(128, 256), (128, 128), (64, 128), (64, 64), (32, 64)],
-        [(128, 128), (128, 64), (64, 64), (64, 32), (32, 32)],
-        [(64, 128), (64, 64), (32, 64), (32, 32), (16, 32)],
-        [(64, 64), (64, 32), (32, 32), (32, 16), (16, 16)],
-    ];
+    const SHAPES_2D: [(u64, u64); 5] = [(256, 256), (256, 128), (128, 128), (128, 64), (64, 64)];
     const SHAPES_3D: [(u64, u64, u64); 5] = [
         (64, 32, 32),
         (32, 32, 32),
@@ -442,17 +449,12 @@ fn standard_tile_shape(
         (32, 16, 16),
         (16, 16, 16),
     ];
-    let (width, height, depth) = match (texture_type, samples) {
-        (TextureType::D2 | TextureType::D2Array, 1) => {
-            let (width, height) = SHAPES_2D[0][index];
+    let (width, height, depth) = match shape {
+        Shape::Planar => {
+            let (width, height) = SHAPES_2D[index];
             (width, height, 1)
         }
-        (TextureType::D2Multisample | TextureType::D2MultisampleArray, 2 | 4 | 8 | 16) => {
-            let (width, height) = SHAPES_2D[samples.trailing_zeros() as usize][index];
-            (width, height, 1)
-        }
-        (TextureType::D3, 1) => SHAPES_3D[index],
-        _ => return None,
+        Shape::Volume => SHAPES_3D[index],
     };
     let block = description.block;
     Some(Size {
@@ -718,6 +720,17 @@ impl Derivation<'_> {
                 && self.platform.sparse_page_bytes != 0,
             ApiFeatures::SPARSE_TEXTURES,
         ));
+        let sparse_volumes = sparse
+            && self.check(driver(
+                "sparse 3D textures",
+                features.sparse_residency_image_3d
+                    && limits.sparse.residency_standard_3d_block_shape,
+            ));
+        if sparse {
+            // Multisample residency needs the per-count sparse features,
+            // which the device does not probe.
+            self.gap("sparse multisample textures", Cause::Api);
+        }
 
         let step_rates = self.check(driver(
             "vertex step rates",
@@ -871,6 +884,7 @@ impl Derivation<'_> {
             statistic_counters: statistics,
             constant_vertex_step,
             counter_sampling,
+            sparse_volumes,
             vertex_formats,
             families: Vec::new(),
             formats,
