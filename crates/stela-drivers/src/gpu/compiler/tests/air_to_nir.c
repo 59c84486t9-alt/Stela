@@ -2307,6 +2307,27 @@ module_flag_test(const char *extra, enum stela_air_error_kind expected)
 #include "air_minmax_tests.h"
 #include "air_funnel_tests.h"
 
+/* Kernels build vectors lane by lane and shuffle them; a vector with an
+ * undefined lane is refused where it is used whole. */
+static void
+vector_semantics(void)
+{
+   constant_store("%v = insertelement <4 x i32> poison, i32 7, i32 0\n"
+                  "%s = shufflevector <4 x i32> %v, <4 x i32> poison, <4 x i32> zeroinitializer\n"
+                  "%l = extractelement <4 x i32> %s, i32 3\n"
+                  "store i32 %l, ptr addrspace(1) %out, align 4\nret void\n", 7, 0x100000);
+   constant_store("%s = shufflevector <4 x i32> <i32 1, i32 2, i32 3, i32 4>,"
+                  " <4 x i32> <i32 5, i32 6, i32 7, i32 8>, <3 x i32> <i32 6, i32 1, i32 4>\n"
+                  "%l = extractelement <3 x i32> %s, i32 0\n"
+                  "store i32 %l, ptr addrspace(1) %out, align 4\nret void\n", 7, 0x100000);
+   constant_store("%s = shufflevector <2 x i32> <i32 1, i32 2>, <2 x i32> poison, <2 x i32> <i32 1, i32 poison>\n"
+                  "%l = extractelement <2 x i32> %s, i32 0\n"
+                  "store i32 %l, ptr addrspace(1) %out, align 4\nret void\n", 2, 0x100000);
+   expect_refusal("%s = shufflevector <2 x i32> <i32 1, i32 2>, <2 x i32> poison, <2 x i32> <i32 1, i32 poison>\n"
+                  "store <2 x i32> %s, ptr addrspace(1) %out, align 8\nret void\n", "", 100,
+                  STELA_AIR_INSTRUCTION);
+}
+
 static void
 tests(void)
 {
@@ -2328,6 +2349,7 @@ tests(void)
    integer_permutation_tests();
    integer_minmax_tests();
    integer_funnel_tests();
+   vector_semantics();
    conditional_semantics();
    loop_semantics();
    cfg_semantics();

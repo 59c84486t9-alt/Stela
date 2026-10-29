@@ -45,8 +45,8 @@ struct value {
    struct stela_air_fields fields;
    bool offset_known;
    uint64_t offset, steps;
-   /* Partial render values have no vector def until every lane is defined.
-    * Missing lanes are tracked symbolically, never replaced with zero/undef. */
+   /* Partial values have no vector def until every lane is defined. Missing
+    * lanes are tracked symbolically, never replaced with zero/undef. */
    nir_def *lanes[4];
    unsigned components, bits, aggregate_count;
    struct value **elements;
@@ -1506,12 +1506,12 @@ partial_value(struct translator *t, LLVMValueRef llvm)
    if (v) return v;
    unsigned n, bits;
    if (!value_shape(LLVMTypeOf(llvm), &n, &bits)) {
-      fail(t, STELA_AIR_TYPE, "unsupported partial render value type"); return NULL;
+      fail(t, STELA_AIR_TYPE, "unsupported partial value type"); return NULL;
    }
    if (LLVMIsUndef(llvm) || LLVMIsPoison(llvm)) {
       v = rzalloc(t->values, struct value);
       if (!v) {
-         fail(t, STELA_AIR_ALLOCATION, "partial render value allocation failed"); return NULL;
+         fail(t, STELA_AIR_ALLOCATION, "partial value allocation failed"); return NULL;
       }
       v->components = n; v->bits = bits;
       return v;
@@ -1545,13 +1545,13 @@ static bool
 put_lanes(struct translator *t, LLVMValueRef llvm, nir_def **lanes, unsigned n, unsigned bits)
 {
    struct value *v = rzalloc(t->values, struct value);
-   if (!v) return fail(t, STELA_AIR_ALLOCATION, "render lane allocation failed");
+   if (!v) return fail(t, STELA_AIR_ALLOCATION, "vector lane allocation failed");
    v->components = n; v->bits = bits;
    bool complete = true;
    for (unsigned i = 0; i < n; i++) { v->lanes[i] = lanes[i]; complete &= lanes[i] != NULL; }
    if (complete) v->def = nir_vec(&t->b, lanes, n);
    return _mesa_hash_table_insert(t->values, llvm, v) != NULL ||
-      fail(t, STELA_AIR_ALLOCATION, "render lane map allocation failed");
+      fail(t, STELA_AIR_ALLOCATION, "vector lane map allocation failed");
 }
 
 /* A clip-distance array, the one aggregate a render aggregate holds. */
@@ -1652,40 +1652,46 @@ aggregate_insert(struct translator *t, const struct value *a, LLVMTypeRef type,
    return v->elements[indices[0]] ? v : NULL;
 }
 
+/* A render aggregate's insertvalue or extractvalue. Paths are a struct
+ * leaf, an array element or a struct's array element. */
 static bool
-stage_value_instruction(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
+aggregate_instruction(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
 {
-   if (op == LLVMInsertValue || op == LLVMExtractValue) {
-      /* Paths are a struct leaf, an array element or a struct's array element. */
-      unsigned depth = LLVMGetNumIndices(inst);
-      const unsigned *indices = LLVMGetIndices(inst);
-      struct value *a = aggregate_value(t, LLVMGetOperand(inst, 0));
-      if (!a || !depth || depth > 2)
-         return fail(t, STELA_AIR_INSTRUCTION, "invalid aggregate index path");
-      if (op == LLVMExtractValue) {
-         struct value *leaf = a;
-         for (unsigned i = 0; leaf && i < depth; i++)
-            leaf = indices[i] < leaf->aggregate_count ? leaf->elements[indices[i]] : NULL;
-         if (leaf && leaf->aggregate_count)
-            return _mesa_hash_table_insert(t->values, inst, leaf) != NULL ||
-               fail(t, STELA_AIR_ALLOCATION, "aggregate extraction map failed");
-         return (leaf && leaf->def && put_value(t, inst, leaf->def, 0)) ||
-            fail(t, STELA_AIR_INSTRUCTION, "undefined/poison aggregate leaf escapes");
-      }
-      LLVMValueRef inserted = LLVMGetOperand(inst, 1);
-      struct value *leaf = aggregate_count(LLVMTypeOf(inserted)) ? aggregate_value(t, inserted) :
-                                                                   partial_value(t, inserted);
-      struct value *v = leaf ? aggregate_insert(t, a, LLVMTypeOf(LLVMGetOperand(inst, 0)), indices,
-                                                depth, leaf) : NULL;
-      return v && (_mesa_hash_table_insert(t->values, inst, v) != NULL ||
-                   fail(t, STELA_AIR_ALLOCATION, "aggregate insertion map failed"));
+   unsigned depth = LLVMGetNumIndices(inst);
+   const unsigned *indices = LLVMGetIndices(inst);
+   struct value *a = aggregate_value(t, LLVMGetOperand(inst, 0));
+   if (!a || !depth || depth > 2)
+      return fail(t, STELA_AIR_INSTRUCTION, "invalid aggregate index path");
+   if (op == LLVMExtractValue) {
+      struct value *leaf = a;
+      for (unsigned i = 0; leaf && i < depth; i++)
+         leaf = indices[i] < leaf->aggregate_count ? leaf->elements[indices[i]] : NULL;
+      if (leaf && leaf->aggregate_count)
+         return _mesa_hash_table_insert(t->values, inst, leaf) != NULL ||
+            fail(t, STELA_AIR_ALLOCATION, "aggregate extraction map failed");
+      return (leaf && leaf->def && put_value(t, inst, leaf->def, 0)) ||
+         fail(t, STELA_AIR_INSTRUCTION, "undefined/poison aggregate leaf escapes");
    }
+   LLVMValueRef inserted = LLVMGetOperand(inst, 1);
+   struct value *leaf = aggregate_count(LLVMTypeOf(inserted)) ? aggregate_value(t, inserted) :
+                                                                partial_value(t, inserted);
+   struct value *v = leaf ? aggregate_insert(t, a, LLVMTypeOf(LLVMGetOperand(inst, 0)), indices,
+                                             depth, leaf) : NULL;
+   return v && (_mesa_hash_table_insert(t->values, inst, v) != NULL ||
+                fail(t, STELA_AIR_ALLOCATION, "aggregate insertion map failed"));
+}
+
+/* An extractelement, insertelement or shufflevector, whose operands and
+ * result may be partially defined vectors. */
+static bool
+vector_instruction(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
+{
    struct value *a = partial_value(t, LLVMGetOperand(inst, 0));
    if (!a) return false;
    if (op == LLVMExtractElement || op == LLVMInsertElement) {
       LLVMValueRef index = LLVMGetOperand(inst, op == LLVMInsertElement ? 2 : 1);
       if (!LLVMIsAConstantInt(index) || LLVMConstIntGetZExtValue(index) >= a->components)
-         return fail(t, STELA_AIR_INSTRUCTION, "invalid/dynamic render vector index");
+         return fail(t, STELA_AIR_INSTRUCTION, "invalid/dynamic vector index");
       unsigned channel = LLVMConstIntGetZExtValue(index);
       if (op == LLVMExtractElement) {
          nir_def *lane = value_lane(t, a, channel);
@@ -1702,14 +1708,14 @@ stage_value_instruction(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
    struct value *b = partial_value(t, LLVMGetOperand(inst, 1));
    unsigned n = LLVMGetNumMaskElements(inst);
    if (!b || a->components != b->components || a->bits != b->bits || !n || n > 4)
-      return fail(t, STELA_AIR_TYPE, "unsupported render shuffle shape");
+      return fail(t, STELA_AIR_TYPE, "unsupported shuffle shape");
    nir_def *lanes[4] = {0};
    for (unsigned i = 0; i < n; i++) {
       int mask = LLVMGetMaskValue(inst, i);
       if (mask < 0) continue; /* Undefined result lane stays symbolic. */
       unsigned channel = (unsigned)mask;
       if (channel >= a->components + b->components)
-         return fail(t, STELA_AIR_INSTRUCTION, "invalid render shuffle selector");
+         return fail(t, STELA_AIR_INSTRUCTION, "invalid shuffle selector");
       lanes[i] = channel < a->components ? value_lane(t, a, channel) : value_lane(t, b, channel - a->components);
    }
    return put_lanes(t, inst, lanes, n, a->bits);
@@ -3319,9 +3325,10 @@ instruction(struct translator *t, LLVMValueRef inst)
       return private_allocation(t, inst) != NULL;
    if (op == LLVMLoad && LLVMGetTypeKind(LLVMTypeOf(inst)) == LLVMPointerTypeKind)
       return argument_load(t, inst);
-   if (t->stage_options && (op == LLVMInsertValue || op == LLVMExtractValue || op == LLVMShuffleVector ||
-                            op == LLVMExtractElement || op == LLVMInsertElement))
-      return stage_value_instruction(t, inst, op);
+   if (t->stage_options && (op == LLVMInsertValue || op == LLVMExtractValue))
+      return aggregate_instruction(t, inst, op);
+   if (op == LLVMShuffleVector || op == LLVMExtractElement || op == LLVMInsertElement)
+      return vector_instruction(t, inst, op);
    if (op != LLVMStore && op != LLVMGetElementPtr && op != LLVMBitCast && op != LLVMCall &&
        !value_shape(LLVMTypeOf(inst), &components, &bits))
       return fail(t, STELA_AIR_TYPE, "unsupported AIR instruction result type (opcode %u)", op);
@@ -3625,7 +3632,7 @@ instruction(struct translator *t, LLVMValueRef inst)
    case LLVMAnd: case LLVMOr: case LLVMXor:
    case LLVMShl: case LLVMLShr: case LLVMAShr: case LLVMICmp:
    case LLVMTrunc: case LLVMZExt: case LLVMSExt:
-   case LLVMSelect: case LLVMExtractElement: case LLVMInsertElement:
+   case LLVMSelect:
       a = get_value(t, LLVMGetOperand(inst, 0));
       if (!a)
          return false;
@@ -3643,20 +3650,7 @@ instruction(struct translator *t, LLVMValueRef inst)
       def = nir_u2uN(&t->b, a, bits);
    else if (op == LLVMSExt)
       def = nir_i2iN(&t->b, a, bits);
-   else if (op == LLVMExtractElement || op == LLVMInsertElement) {
-      LLVMValueRef index = LLVMGetOperand(inst, op == LLVMInsertElement ? 2 : 1);
-      if (!LLVMIsAConstantInt(index) || LLVMConstIntGetZExtValue(index) >= a->num_components)
-         return fail(t, STELA_AIR_INSTRUCTION, "dynamic/out-of-range vector index unsupported");
-      unsigned channel = LLVMConstIntGetZExtValue(index);
-      if (op == LLVMExtractElement)
-         def = nir_channel(&t->b, a, channel);
-      else {
-         b = get_value(t, LLVMGetOperand(inst, 1));
-         if (!b)
-            return false;
-         def = nir_vector_insert_imm(&t->b, a, b, channel);
-      }
-   } else {
+   else {
       b = get_value(t, LLVMGetOperand(inst, 1));
       if (!b)
          return false;
