@@ -76,14 +76,21 @@ pub(in crate::engine) unsafe fn check(
     if !matches!(
         unsafe { KernelWork::prepare_plan(handoff, owner, wrong) },
         Err(Error::Inventory)
-    ) || PROTOTYPE_CLAIMED.load(Ordering::Acquire)
+    ) || handoff
+        .native_task_allocations
+        .claim_state(native_smp::resources::TaskPool::Prototype)
+        != Ok(false)
     {
         return Err(Error::Qualification);
     }
     // A real fallible metadata capacity refusal must also occur before claim;
     // this is allocation-overflow coverage, not a claim of firmware OOM testing.
     let mut impossible = Vec::<Case>::new();
-    if impossible.try_reserve_exact(usize::MAX).is_ok() || PROTOTYPE_CLAIMED.load(Ordering::Acquire)
+    if impossible.try_reserve_exact(usize::MAX).is_ok()
+        || handoff
+            .native_task_allocations
+            .claim_state(native_smp::resources::TaskPool::Prototype)
+            != Ok(false)
     {
         return Err(Error::Qualification);
     }
@@ -197,7 +204,7 @@ pub(in crate::engine) unsafe fn check(
     if retained.released_stack_views.load(Ordering::Acquire) != 32 {
         return Err(Error::Qualification);
     }
-    let raw = retained._physical;
+    let raw = retained.allocation.region();
     drop(retained);
     drop(ManuallyDrop::into_inner(cases));
     crate::output::arguments(format_args!(

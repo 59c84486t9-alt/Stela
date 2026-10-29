@@ -701,6 +701,7 @@ fn load(
     let memory::EngineMemory {
         heap,
         native_resources,
+        native_task_allocations,
         stack,
         code,
         pool,
@@ -809,6 +810,7 @@ fn load(
                 physical: wifi_key.as_ptr() as u64,
                 bytes: wifi_key.len() as u64,
             },
+            native_task_allocations,
         });
     }
     // SAFETY: boot services ended; the completed root maps this code and

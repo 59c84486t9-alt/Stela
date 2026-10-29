@@ -17,6 +17,7 @@ pub(super) struct EngineImage {
 pub(super) struct EngineMemory {
     pub heap: Region,
     pub native_resources: NativeResources,
+    pub native_task_allocations: crate::native_smp::resources::TaskAllocations,
     pub stack: Region,
     pub code: Region,
     pub pool: Region,
@@ -93,27 +94,45 @@ pub(super) fn reserve(
     }) {
         return Err("engine heap is outside the retained RAM physmap");
     }
+    let stacks = allocate(STACK_BYTES * cores as u64)?;
+    let invocations = allocate(
+        crate::native_smp::resources::invocation_stacks(cores)
+            .map_err(|_| "invalid native invocation-stack geometry")?
+            .physical_bytes(),
+    )?;
+    use crate::native_smp::resources::{TaskAllocations, TaskPool};
+    let prototype_bytes = if system.native_mmio_check {
+        if cores != 1 {
+            return Err("mixed32 diagnostic requires one actual host core");
+        }
+        Some(
+            crate::native_smp::resources::prototype_tasks(layout::prototype_task_stacks())
+                .map_err(|_| "mixed32 diagnostic stack geometry overflow")?
+                .raw_allocation_bytes(),
+        )
+    } else {
+        None
+    };
+    let native_task_allocations = TaskAllocations::reserve(
+        crate::native_smp::resources::task_stacks().physical_bytes(),
+        prototype_bytes,
+    )
+    .map_err(|error| {
+        output::arguments(format_args!("TASK MEMORY allocation failed: {error}\n"));
+        "firmware task allocation unavailable"
+    })?;
     let mut native_resources = NativeResources {
         cores: cores as u32,
-        stacks: allocate(STACK_BYTES * cores as u64)?,
-        invocations: allocate(
-            crate::native_smp::resources::invocation_stacks(cores)
-                .map_err(|_| "invalid native invocation-stack geometry")?
-                .physical_bytes(),
-        )?,
-        tasks: allocate(crate::native_smp::resources::task_stacks().physical_bytes())?,
+        stacks,
+        invocations,
+        tasks: native_task_allocations
+            .region(TaskPool::Uniform)
+            .ok_or("task allocation absent")?,
         ..NativeResources::default()
     };
     // Only the existing explicit UP MMIO diagnostic requests this additional
     // plan. Production's uniform16 reservation and constructor stay separate.
-    if system.native_mmio_check {
-        if cores != 1 {
-            return Err("mixed32 diagnostic requires one actual host core");
-        }
-        let geometry =
-            crate::native_smp::resources::prototype_tasks(layout::prototype_task_stacks())
-                .map_err(|_| "mixed32 diagnostic stack geometry overflow")?;
-        let raw = allocate(geometry.raw_allocation_bytes())?;
+    if let Some(raw) = native_task_allocations.region(TaskPool::Prototype) {
         native_resources.prototype_tasks = raw;
         native_resources.prototype_task_plan =
             crate::native_smp::resources::PrototypeTaskPlan::FirmwarePrototype32Mixed;
@@ -148,6 +167,7 @@ pub(super) fn reserve(
     Ok(EngineMemory {
         heap,
         native_resources,
+        native_task_allocations,
         stack,
         code,
         pool,

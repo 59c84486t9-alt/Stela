@@ -25,8 +25,7 @@ use stela_drivers::{
 };
 const SLOTS: usize = 64;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
-static CLAIMED: AtomicBool = AtomicBool::new(false);
-static PROTOTYPE_CLAIMED: AtomicBool = AtomicBool::new(false);
+mod pin;
 mod plan;
 use plan::Plan;
 #[cfg(feature = "diagnostics")]
@@ -68,13 +67,14 @@ struct Reservation {
     identity: Arc<RootIdentity>,
     _wire: &'static native_mmio::Wire,
     _handoff: &'static Handoff,
-    _physical: Region,
+    allocation: native_smp::resources::AllocationClaim,
     released_stack_views: AtomicUsize,
 }
 struct Backing {
     _reservation: Arc<Reservation>,
     bounds: Range<usize>,
     guard: Range<usize>,
+    physical: u64,
 }
 // SAFETY: prepare consumes one actual loader allocation exactly once, verifies
 // every root's exact RW/NX/supervisor/WB backing and absent guards, and verifies
@@ -88,6 +88,14 @@ unsafe impl StackBacking for Backing {
     }
     fn guard(&self) -> Range<usize> {
         self.guard.clone()
+    }
+    unsafe fn pin_cold_pages(
+        &self,
+    ) -> Result<stela_drivers::bus::dma::memory::PinnedPages, MemoryError> {
+        // SAFETY: the work owner holds this never-entered slot in Preparing
+        // and has zeroed only its usable range. The allocation and qualified
+        // mappings remain retained by this backing throughout export.
+        unsafe { pin::export(self) }
     }
 }
 impl Drop for Backing {
@@ -273,6 +281,7 @@ impl KernelWork {
                     ..usize::try_from(slot.usable.end).map_err(|_| Error::Geometry)?,
                 usize::try_from(slot.lower_guard.start).map_err(|_| Error::Geometry)?
                     ..usize::try_from(slot.lower_guard.end).map_err(|_| Error::Geometry)?,
+                physical,
             ));
         }
         if plan.mixed() {
@@ -291,20 +300,25 @@ impl KernelWork {
             )
             .map_err(Error::Cache)?;
         }
-        let claimed = if plan.mixed() {
-            &PROTOTYPE_CLAIMED
+        let pool = if plan.mixed() {
+            native_smp::resources::TaskPool::Prototype
         } else {
-            &CLAIMED
+            native_smp::resources::TaskPool::Uniform
         };
-        claimed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| Error::AlreadyOwned)?;
+        let allocation = handoff
+            .native_task_allocations
+            .claim(pool, region)
+            .map_err(|error| match error {
+                native_smp::resources::ClaimError::AlreadyOwned => Error::AlreadyOwned,
+                native_smp::resources::ClaimError::Absent
+                | native_smp::resources::ClaimError::DescriptorMismatch => Error::Inventory,
+            })?;
         // A failed/uncertain admission intentionally never reuses this pool.
         let reservation = Arc::new(Reservation {
             identity,
             _wire: wire,
             _handoff: handoff,
-            _physical: region,
+            allocation,
             released_stack_views: AtomicUsize::new(0),
         });
         let clock = Clock {
@@ -319,12 +333,13 @@ impl KernelWork {
         stacks
             .try_reserve_exact(spans.len())
             .map_err(|_| Error::Allocation)?;
-        for (bounds, guard) in spans {
+        for (bounds, guard, physical) in spans {
             stacks.push(
                 Stack::new(Box::new(Backing {
                     _reservation: reservation.clone(),
                     bounds,
                     guard,
+                    physical,
                 }))
                 .map_err(Error::Work)?,
             );

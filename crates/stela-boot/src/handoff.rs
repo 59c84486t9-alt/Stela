@@ -196,6 +196,9 @@ pub struct Handoff {
     /// `--wifi` names no network or the file could not be read. The engine
     /// parses and wipes them.
     pub wifi_key: Region,
+    /// Firmware-created task allocation owners; the preceding wire fields keep
+    /// their offsets. The engine can claim each owner once, after mapping checks.
+    pub(crate) native_task_allocations: crate::native_smp::resources::TaskAllocations,
 }
 
 #[cfg(test)]

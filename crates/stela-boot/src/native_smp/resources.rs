@@ -3,6 +3,8 @@
 //! frames are partitioned, never concurrently reclaimed or patched by peers.
 use super::topology::MAX_CORES;
 use crate::{handoff::Region, tables::PAGE};
+mod allocation;
+pub(crate) use allocation::{AllocationClaim, ClaimError, TaskAllocations, TaskPool};
 
 pub(crate) const STACK_BYTES: u64 = 2 * 1024 * 1024;
 pub(crate) const STACK_STRIDE: u64 = STACK_BYTES + PAGE;
