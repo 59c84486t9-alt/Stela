@@ -65,7 +65,7 @@ fn usb_and_phy_resource_owners_require_qualified_complete_lists() {
 }
 
 #[test]
-fn generic_pmgr_selects_its_register_implementation_without_borrowing_another_family() {
+fn pmgr_register_child_must_match_parent_family() {
     let parent = encode(&[("name", b"pmgr"), ("compatible", b"pmgr2,arch")], &[]);
     let child = encode(
         &[("name", b"pmgr-child"), ("compatible", b"pmgr2,t8152")],
@@ -212,7 +212,7 @@ fn tree(records: &[(u16, Option<u8>, [u16; 2])], children: &[Vec<u8>]) -> Vec<u8
 }
 
 #[test]
-fn physical_candidates_require_actual_registration_and_only_qualified_views_share_ownership() {
+fn mmio_ownership_follows_supported_parent_aliases() {
     use crate::board::UART;
     let reg = |address: u64| {
         [address, 0x1000]
@@ -287,7 +287,7 @@ fn physical_candidates_require_actual_registration_and_only_qualified_views_shar
 }
 
 #[test]
-fn complete_inventory_keeps_gate_kinds_and_distinguishes_mapper_ownership_from_dma_dependencies() {
+fn dma_dependencies_do_not_inherit_mapper_power_ownership() {
     let mapper = encode(
         &[
             ("name", b"mapper"),
@@ -702,7 +702,7 @@ fn inventory_uses_exact_admitted_dart_profiles_and_legacy_mapper_default() {
 }
 
 #[test]
-fn usb_root_port_views_share_the_controller_and_unknown_children_keep_their_requirements() {
+fn usb_port_ownership_requires_valid_number_and_no_register_range() {
     let port = |number: u32, register: bool| {
         let number = words(&[number]);
         let mut properties = alloc::vec![

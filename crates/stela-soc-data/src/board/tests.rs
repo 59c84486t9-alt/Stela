@@ -917,7 +917,7 @@ fn a_board_places_its_darts_and_the_aes_engine_behind_one() {
 }
 
 #[test]
-fn multiple_darts_preserve_numbered_windows_sids_and_remap_without_guessing_dma_routing() {
+fn darts_decode_distinct_windows_and_validate_stream_maps() {
     use stela_contracts::adt::encode;
     let cells = |values: &[u32]| {
         values

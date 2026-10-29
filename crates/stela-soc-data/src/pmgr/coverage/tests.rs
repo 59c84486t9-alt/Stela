@@ -64,8 +64,7 @@ fn repeated_display_names_preserve_distinct_consumers_and_sink_obligations() {
 }
 
 #[test]
-fn unavailable_resources_preserve_requirements_without_claiming_sinks_or_waiving_admitted_clients()
-{
+fn unavailable_consumers_do_not_waive_required_lifecycle_sinks() {
     let domains = [
         domain(1, Some(0x100), &[]),
         domain(2, Some(0x200), &[1]),
