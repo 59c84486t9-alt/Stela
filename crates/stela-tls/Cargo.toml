@@ -5,6 +5,12 @@ edition.workspace=true
 license.workspace=true
 publish=false
 links="stela_mbedcrypto"
+[features]
+# Independent hosted Ring peers need the target C toolchain/sysroot. The shared
+# native all-feature test gate always runs them; production TLS uses this crate's
+# checked provider regardless of whether this reference feature is enabled.
+native-reference-peer = ["rustls/ring"]
+
 [build-dependencies]
 cc="1"
 sha2={version="0.10",default-features=false}
@@ -27,7 +33,7 @@ der={version="=0.7.10",default-features=false}
 
 zeroize={version="=1.9.1",default-features=false,features=["alloc"]}
 [target.'cfg(not(target_os="uefi"))'.dev-dependencies]
-rustls={version="=0.23.45",default-features=false,features=["std","ring","tls12"]}
+rustls={version="=0.23.45",default-features=false,features=["std","tls12"]}
 getrandom={version="=0.2.17"}
 
 [lints]

@@ -648,7 +648,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
 #[cfg(test)]
 pub(crate) mod tests {
     mod http_flow;
-    #[cfg(not(target_os = "uefi"))]
+    #[cfg(all(not(target_os = "uefi"), feature = "native-reference-peer"))]
     mod tls;
     use super::*;
     use alloc::{collections::VecDeque, rc::Rc};

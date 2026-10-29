@@ -5,9 +5,11 @@ use crate::provider::{
 };
 use alloc::vec;
 use alloc::vec::Vec;
+#[cfg(feature = "native-reference-peer")]
+use rustls::pki_types::PrivatePkcs8KeyDer;
 use rustls::{NamedGroup, crypto::GetRandomFailed};
 use rustls::{
-    pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime},
+    pki_types::{CertificateDer, ServerName, UnixTime},
     time_provider::TimeProvider,
 };
 use std::io::{Read, Write};
@@ -69,6 +71,7 @@ fn certs(rsa: bool) -> (&'static [u8], &'static [u8], &'static [u8]) {
         )
     }
 }
+#[cfg(feature = "native-reference-peer")]
 struct Case<'a> {
     version: &'static rustls::SupportedProtocolVersion,
     group: NamedGroup,
@@ -79,6 +82,7 @@ struct Case<'a> {
     tamper: bool,
     suite: Option<rustls::CipherSuite>,
 }
+#[cfg(feature = "native-reference-peer")]
 impl Default for Case<'_> {
     fn default() -> Self {
         Self {
@@ -93,6 +97,7 @@ impl Default for Case<'_> {
         }
     }
 }
+#[cfg(feature = "native-reference-peer")]
 fn exchange(case: Case<'_>) -> Result<Vec<u8>, ChannelError> {
     let Case {
         version,
@@ -195,6 +200,7 @@ fn exchange(case: Case<'_>) -> Result<Vec<u8>, ChannelError> {
     }
     panic!("bounded TLS interoperability pump did not complete")
 }
+#[cfg(feature = "native-reference-peer")]
 #[test]
 fn tls12_and_tls13_interoperate_with_independent_ring_for_all_suites_groups_and_signatures() {
     let _serial = SERIAL.lock().unwrap();
@@ -235,6 +241,7 @@ fn tls12_and_tls13_interoperate_with_independent_ring_for_all_suites_groups_and_
         }
     }
 }
+#[cfg(feature = "native-reference-peer")]
 #[test]
 fn ordinary_verification_rejects_unknown_roots_names_and_invalid_validity() {
     let _serial = SERIAL.lock().unwrap();

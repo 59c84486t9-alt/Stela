@@ -8,6 +8,8 @@ license.workspace = true
 workspace = true
 
 [features]
+# Independent hosted TLS peers; kept in mandatory native all-feature tests.
+native-reference-peer = ["stela-tls/native-reference-peer"]
 default = ["std"]
 # Host-side native hardware-reference runners; never enables guest OS services.
 test-support = ["stela-engine/test-support"]
@@ -62,5 +64,5 @@ stela-drivers = { path = "../stela-drivers", features = ["ram-disk"] }
 lzfse_rust = "0.2"
 
 [target.'cfg(not(target_os = "uefi"))'.dev-dependencies]
-rustls = { version = "=0.23.45", default-features = false, features = ["std", "ring", "tls12"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["std", "tls12"] }
 getrandom = "=0.2.17"
