@@ -2328,6 +2328,23 @@ vector_semantics(void)
                   STELA_AIR_INSTRUCTION);
 }
 
+/* A PHI's undefined incoming value takes NIR's undef, which any edge that
+ * observes it may read as anything. */
+static void
+undefined_phi_values(void)
+{
+   nir_shader *nir = translate_body(
+      "entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %set, label %join\n"
+      "set:\nbr label %join\n"
+      "join:\n%v = phi i32 [7, %set], [undef, %entry]\n"
+      "store i32 %v, ptr addrspace(1) %out, align 4\nret void\n");
+   specialize_invocation(nir, 0);
+   const uint64_t address = 0x100000;
+   const uint32_t value = 7;
+   check_stores(nir, &address, &value, 1);
+   ralloc_free(nir);
+}
+
 static void
 tests(void)
 {
@@ -2350,6 +2367,7 @@ tests(void)
    integer_minmax_tests();
    integer_funnel_tests();
    vector_semantics();
+   undefined_phi_values();
    conditional_semantics();
    loop_semantics();
    cfg_semantics();

@@ -4237,11 +4237,14 @@ cfg_emit(struct translator *t)
                return fail(t, STELA_AIR_TYPE, "aggregate PHI incoming shape mismatch");
             unsigned leaves = target->aggregate_count ? target->aggregate_count : 1;
             for (unsigned leaf = 0; leaf < leaves; leaf++) {
+               nir_def *def = target->aggregate_count ? target->elements[leaf]->def : target->def;
+               /* An undefined incoming value may be any value, as NIR's undef is. */
                nir_def *value = aggregate ?
-                  (aggregate->elements[leaf] ? aggregate->elements[leaf]->def : NULL) : get_value(t, incoming);
+                  (aggregate->elements[leaf] ? aggregate->elements[leaf]->def : NULL) :
+                  LLVMIsUndef(incoming) || LLVMIsPoison(incoming) ?
+                  nir_undef(&t->b, def->num_components, def->bit_size) : get_value(t, incoming);
                if (!value)
                   return fail(t, STELA_AIR_INSTRUCTION, "undefined/poison aggregate PHI leaf/lane");
-               nir_def *def = target->aggregate_count ? target->elements[leaf]->def : target->def;
                if (value->num_components != def->num_components || value->bit_size != def->bit_size)
                   return fail(t, STELA_AIR_TYPE, "PHI incoming leaf shape mismatch");
                nir_phi_instr *phi = nir_instr_as_phi(nir_def_instr(def));
