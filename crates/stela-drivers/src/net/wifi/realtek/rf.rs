@@ -460,9 +460,10 @@ mod tests {
         assert_eq!(m.lock().unwrap().quarantined, 2);
     }
     #[test]
-    // NativeIo deliberately retains Arc<dyn Any> without Send/Sync; this
-    // CPU-affine register fixture must not invent a cross-CPU owner promise.
-    #[allow(clippy::arc_with_non_send_sync)]
+    #[expect(
+        clippy::arc_with_non_send_sync,
+        reason = "NativeIo holds Arc<dyn Any> without Send; this CPU-affine fixture keeps its registers !Sync"
+    )]
     fn native_mmio_uses_real_rf_offsets_widths_and_retains_actual_uncertain_owner() {
         use core::{
             cell::UnsafeCell,

@@ -14,9 +14,9 @@ pub(crate) mod diagnostic;
 mod platform;
 
 pub(crate) use capture::{Prepared, Wire};
+pub(crate) use platform::{ExclusiveHpet, HpetMapping};
 #[cfg(feature = "diagnostics")]
-pub(crate) use platform::ScopedSource;
-pub(crate) use platform::{ExclusiveHpet, HpetMapping, QualifiedRam, RootPublication};
+pub(crate) use platform::{QualifiedRam, RootPublication, ScopedSource};
 pub(crate) use shared::{
     IoapicRegisters, IoapicUnit, NativeExclusiveHpet, NativeHpetMapping, PROCESSORS, Source,
 };

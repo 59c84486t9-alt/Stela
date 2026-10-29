@@ -7,6 +7,8 @@ use super::apple::AicInput;
 use super::apple::AppleDevices;
 use super::apple::AscLines;
 use super::apple::ConsoleSink;
+use super::apple::DcpextDma;
+use super::apple::DcpextNub;
 use super::apple::Range;
 use super::apple::RtcEpoch;
 use super::apple::Scanout;
@@ -457,27 +459,31 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         let scanout = scanout.ok_or("visible external DCP requires one actual scanout")?;
         let range = |(physical, bytes): (u64, u64)| Range { physical, bytes };
         devices.add_dcpext(
-            range(dcp.wrapper),
-            dcp.interrupts,
-            dcp.quiesced,
-            dcp.role,
-            dcp.identity,
+            DcpextNub {
+                wrapper: range(dcp.wrapper),
+                interrupts: dcp.interrupts,
+                quiesced: dcp.quiesced,
+                role: dcp.role,
+                identity: dcp.identity,
+            },
             scanout,
-            (native_dart(dcp.iommu, dcp.instance)?, dcp.stream as usize),
-            dcp.window,
-            match (
-                dcp.surface,
-                dcp.surface_instance,
-                dcp.surface_routes.first(),
-            ) {
-                (Some((iommu, stream)), Some(instance), Some(primary))
-                    if (primary.iommu, primary.instance, primary.stream)
-                        == (iommu, instance, stream) =>
-                {
-                    Some((native_dart(iommu, instance)?, stream as usize))
-                }
-                (None, None, None) => None,
-                _ => return Err("DCP surface DMA owner metadata is incomplete".into()),
+            DcpextDma {
+                link: (native_dart(dcp.iommu, dcp.instance)?, dcp.stream as usize),
+                window: dcp.window,
+                surface: match (
+                    dcp.surface,
+                    dcp.surface_instance,
+                    dcp.surface_routes.first(),
+                ) {
+                    (Some((iommu, stream)), Some(instance), Some(primary))
+                        if (primary.iommu, primary.instance, primary.stream)
+                            == (iommu, instance, stream) =>
+                    {
+                        Some((native_dart(iommu, instance)?, stream as usize))
+                    }
+                    (None, None, None) => None,
+                    _ => return Err("DCP surface DMA owner metadata is incomplete".into()),
+                },
             },
             build,
         )?;

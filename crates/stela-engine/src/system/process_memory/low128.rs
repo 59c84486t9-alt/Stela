@@ -1,11 +1,20 @@
 //! FP/AdvSIMD access combined with checked memory.
 
 use super::{
-    EntryBoundary, EventEndpoint, FixedProcessMemoryControls, GuestState, MemoryContextView,
-    MemoryControls, MemoryRequirements, MemoryStatus, MemoryThread, PreparedProcessMemory,
-    ProcessMemoryError, SystemState, flags,
+    EntryBoundary, FixedProcessMemoryControls, GuestState, MemoryContextView, MemoryControls,
+    MemoryRequirements, MemoryStatus, PeThread, PreparedProcessMemory, ProcessMemoryError,
+    SystemState, flags,
 };
-use crate::system::fp_access::Low128FpContext;
+use crate::system::{debug::DebugControls, fp_access::Low128FpContext};
+use stela_compiler::block::CheckedMemoryProfile;
+
+/// What a low128 entry runs under: its boundary, the system state and the
+/// live FP context.
+pub(crate) struct Low128Entry<'run, 'loan, 'id> {
+    pub boundary: &'run EntryBoundary,
+    pub system: &'run SystemState,
+    pub context: &'run Low128FpContext<'loan, 'id>,
+}
 
 /// Borrows from the owners themselves, not a snapshot of CPACR or PSTATE.
 /// Cannot be constructed outside this module.
@@ -42,69 +51,40 @@ pub struct PreparedLow128ProcessMemory<'run, 'loan, 'id> {
 
 impl FixedProcessMemoryControls {
     /// The same owner with the FEAT_CPA specialization from the source.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_profile_with_low128<'run, 'loan, 'id>(
         &'run self,
-        boundary: &'run EntryBoundary,
-        profile: stela_compiler::block::CheckedMemoryProfile,
+        entry: Low128Entry<'run, 'loan, 'id>,
+        profile: CheckedMemoryProfile,
         requirements: MemoryRequirements,
-        system: &'run SystemState,
-        debug: &'run crate::system::debug::DebugControls,
-        context: &'run Low128FpContext<'loan, 'id>,
+        debug: &'run DebugControls,
         registers: &GuestState,
-        thread: &'run mut MemoryThread<MemoryControls>,
-        endpoint: Option<&'run EventEndpoint>,
+        thread: PeThread<'run>,
     ) -> Result<PreparedLow128ProcessMemory<'run, 'loan, 'id>, ProcessMemoryError> {
-        self.prepare_low128_profile(
+        let Low128Entry {
             boundary,
-            requirements,
             system,
             context,
-            registers,
-            thread,
-            endpoint,
-            if matches!(
-                profile,
-                stela_compiler::block::CheckedMemoryProfile::AddressChecks(_)
-            ) {
-                Some((profile, debug))
-            } else {
-                None
-            },
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn prepare_low128_profile<'run, 'loan, 'id>(
-        &'run self,
-        boundary: &'run EntryBoundary,
-        requirements: MemoryRequirements,
-        system: &'run SystemState,
-        context: &'run Low128FpContext<'loan, 'id>,
-        registers: &GuestState,
-        thread: &'run mut MemoryThread<MemoryControls>,
-        endpoint: Option<&'run EventEndpoint>,
-        pointer_profile: Option<(
-            stela_compiler::block::CheckedMemoryProfile,
-            &'run crate::system::debug::DebugControls,
-        )>,
-    ) -> Result<PreparedLow128ProcessMemory<'run, 'loan, 'id>, ProcessMemoryError> {
+        } = entry;
+        let PeThread {
+            memory: thread,
+            events: endpoint,
+        } = thread;
         let execution_loan = self.acquire_source_loan(boundary, system, registers, thread)?;
-        let pointer = match pointer_profile {
-            Some((profile, debug)) => Some(self.qualify_pointer(
+        let pointer = if matches!(profile, CheckedMemoryProfile::AddressChecks(_)) {
+            Some(self.qualify_pointer(
                 profile,
                 requirements,
                 system,
                 debug,
                 thread,
                 &execution_loan,
-            )?),
-            None if self.features.cpa == super::pointer_checks::CpaFeature::Checked => {
-                return Err(ProcessMemoryError::PointerChecks(
-                    super::PointerChecksError::UnsupportedProfile,
-                ));
-            }
-            None => None,
+            )?)
+        } else if self.features.cpa == super::pointer_checks::CpaFeature::Checked {
+            return Err(ProcessMemoryError::PointerChecks(
+                super::PointerChecksError::UnsupportedProfile,
+            ));
+        } else {
+            None
         };
 
         let authorization = Low128ProcessMemoryAuthorization {

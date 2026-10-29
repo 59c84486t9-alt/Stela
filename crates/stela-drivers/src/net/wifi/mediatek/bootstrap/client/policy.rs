@@ -849,8 +849,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         unsafe {
             self.client.join_modern_pmf(
                 &mut self.authority,
-                join,
-                &beacon,
+                PmfJoin {
+                    join,
+                    observed: &beacon,
+                },
                 profile,
                 now,
                 source,
@@ -1241,9 +1243,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
                 &mut self.authority,
                 admission,
                 epoch,
-                ethernet,
-                class,
-                tid,
+                Msdu {
+                    ethernet,
+                    class,
+                    tid,
+                },
                 source,
                 &mut check,
             )

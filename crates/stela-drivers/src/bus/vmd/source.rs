@@ -15,6 +15,12 @@ pub struct ChildSource {
 /// child quiescence, native CPU/callback drain and successful host retirement.
 /// Final mapping retirement remains the native MMIO authority's responsibility.
 pub struct RetiredHandle<R>(Rc<RefCell<Option<R>>>);
+
+/// A started parent source, the fanout its children share and the handle
+/// that returns its host.
+pub type Started<S, R> = (S, Arc<remap::Fanout>, RetiredHandle<R>);
+/// A refused start: the cause, and the host and children it was given.
+pub type Refused<R> = (Error, Host<R>, Vec<ChildSource>);
 impl<R> RetiredHandle<R> {
     /// # Safety
     /// The exact native IRQ registration built from this source has completed
@@ -45,16 +51,14 @@ impl<R: Registers> ParentSource<R> {
     /// own genuinely retained function/register grants. Actual child DMA alias
     /// and resource authorities must exist independently; this wrapper grants
     /// none. The owning native CPU/process context remains fixed until retire.
-    #[allow(clippy::type_complexity)]
-    #[allow(
+    #[expect(
         clippy::result_large_err,
         reason = "failure returns the original host and every child source without allocating a replacement owner"
     )]
     pub unsafe fn new(
         host: Host<R>,
         children: Vec<ChildSource>,
-    ) -> Result<(Self, Arc<remap::Fanout>, RetiredHandle<R>), (Error, Host<R>, Vec<ChildSource>)>
-    {
+    ) -> Result<Started<Self, R>, Refused<R>> {
         if children.is_empty()
             || children
                 .iter()

@@ -122,8 +122,10 @@ fn scan_observation_provenance() {
         unsafe {
             driver.join_modern_pmf(
                 &mut owner,
-                join.clone(),
-                &foreign,
+                PmfJoin {
+                    join: join.clone(),
+                    observed: &foreign,
+                },
                 profile(),
                 100,
                 &PmfSource(state.clone()),
@@ -146,8 +148,10 @@ fn scan_observation_provenance() {
         unsafe {
             driver.join_modern_pmf(
                 &mut owner,
-                join.clone(),
-                &old,
+                PmfJoin {
+                    join: join.clone(),
+                    observed: &old,
+                },
                 profile(),
                 100,
                 &PmfSource(state.clone()),
@@ -164,8 +168,10 @@ fn scan_observation_provenance() {
     unsafe {
         driver.join_modern_pmf(
             &mut owner,
-            join,
-            &fresh,
+            PmfJoin {
+                join,
+                observed: &fresh,
+            },
             profile(),
             100,
             &PmfSource(state.clone()),

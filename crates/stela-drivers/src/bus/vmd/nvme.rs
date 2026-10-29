@@ -36,6 +36,11 @@ impl<R> Drop for Returned<R> {
 /// mapping and its register mapping and then successfully stopped this Host.
 /// This handoff does not detach the IOMMU domain or unmap parent configuration.
 pub struct RetiredHierarchy<R = NativeRegisters>(Rc<RefCell<Returned<R>>>);
+
+/// An attached controller with the handle that returns its hierarchy, or the
+/// refusal with that same handle.
+pub type Attachment<R = NativeRegisters> =
+    Result<(Attached, RetiredHierarchy<R>), (BlockError, RetiredHierarchy<R>)>;
 impl<R> RetiredHierarchy<R> {
     /// The owned NVMe teardown and actual Host stop published original owners.
     /// This does not certify domain detach or final parent mapping retirement.
@@ -191,7 +196,6 @@ fn block(error: Error) -> BlockError {
 /// native mapping authority for these retained resources and native CPU roots.
 /// `bar` was claimed from this same actual host and complete firmware assignment.
 /// All calls/final releases obey the providers' process/deferred context rules.
-#[allow(clippy::type_complexity)]
 pub unsafe fn attach(
     host: Host<NativeRegisters>,
     bar: FirmwareBar,
@@ -200,7 +204,7 @@ pub unsafe fn attach(
     pages: &dyn PageSource,
     clock: Clock,
     label: String,
-) -> Result<(Attached, RetiredHierarchy), (BlockError, RetiredHierarchy)> {
+) -> Attachment {
     // SAFETY: the public native boundary retains the actual mapping authority;
     // only this private factory seam varies in independent protocol tests.
     unsafe {
@@ -220,7 +224,6 @@ pub unsafe fn attach(
 // cfg(test) register peer. This never exposes a public model attachment route.
 // SAFETY: the caller retains the matching original hierarchy/domain authority,
 // and the factory retains registers for that exact selected controller.
-#[allow(clippy::type_complexity)]
 unsafe fn attach_with_registers<R: Registers + 'static>(
     host: Host<R>,
     bar: FirmwareBar,
@@ -229,7 +232,7 @@ unsafe fn attach_with_registers<R: Registers + 'static>(
     clock: Clock,
     label: String,
     registers: impl FnOnce(&FirmwareBar) -> Result<Box<dyn owned::Registers>, BlockError>,
-) -> Result<(Attached, RetiredHierarchy<R>), (BlockError, RetiredHierarchy<R>)> {
+) -> Attachment<R> {
     // SAFETY: the native/public path always uses the unchanged owned controller
     // policy. Only a cfg(test) model caller supplies the bounded model policy.
     unsafe {
@@ -253,7 +256,6 @@ type AttachPolicy = unsafe fn(
     String,
 ) -> Result<Attached, BlockError>;
 
-#[allow(clippy::type_complexity)]
 unsafe fn attach_with_registers_using<R: Registers + 'static>(
     host: Host<R>,
     bar: FirmwareBar,
@@ -265,7 +267,7 @@ unsafe fn attach_with_registers_using<R: Registers + 'static>(
         impl FnOnce(&FirmwareBar) -> Result<Box<dyn owned::Registers>, BlockError>,
         AttachPolicy,
     ),
-) -> Result<(Attached, RetiredHierarchy<R>), (BlockError, RetiredHierarchy<R>)> {
+) -> Attachment<R> {
     let (registers, attach_policy) = factories;
     let returned = Rc::new(RefCell::new(Returned(None)));
     let handle = RetiredHierarchy(Rc::clone(&returned));

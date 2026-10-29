@@ -41,8 +41,13 @@ impl core::fmt::Display for SharedBindingError {
 impl core::error::Error for SharedBindingError {}
 
 /// One group/system, retained by its facades and returned immutable snapshot.
-// Only shared-binding lifecycle reads the attributes back.
-#[cfg_attr(not(host_memory), allow(dead_code))]
+#[cfg_attr(
+    not(host_memory),
+    expect(
+        dead_code,
+        reason = "only the host shared-binding lifecycle reads the attributes back"
+    )
+)]
 pub(super) struct SharedBinding {
     system: Arc<MemorySystem>,
     pub(super) domain: Arc<MemoryDomain>,

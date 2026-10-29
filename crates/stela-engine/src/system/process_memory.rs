@@ -40,7 +40,15 @@ pub use source::SourceNormalWbDomain;
 #[cfg(feature = "std")]
 mod low128;
 #[cfg(feature = "std")]
-pub(crate) use low128::Low128ProcessMemoryAuthorization;
+pub(crate) use low128::{Low128Entry, Low128ProcessMemoryAuthorization};
+
+/// The memory thread an entry runs on, and the endpoint that takes its guest
+/// events when it has one.
+#[cfg(feature = "std")]
+pub struct PeThread<'a> {
+    pub memory: &'a mut MemoryThread<MemoryControls>,
+    pub events: Option<&'a EventEndpoint>,
+}
 mod scalable;
 
 const SCTLR_MMU_ENABLE: u64 = 1;
@@ -1065,9 +1073,7 @@ mod tests {
     }
 
     #[test]
-    // Intentionally exercise both ways an unused opaque token can end. Neither
-    // may install the capability, even when no destructor runs.
-    #[allow(clippy::forget_non_drop, clippy::drop_non_drop)]
+    // Both ways an unused token can end leave the capability uninstalled.
     fn unused_and_forgotten_tokens_never_install_authorization() {
         let actual = domain();
         let controls = controls(&actual);

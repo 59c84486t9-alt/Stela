@@ -381,8 +381,10 @@ fn awaiting_with(
     unsafe {
         driver.join_modern_pmf(
             &mut owner,
-            join,
-            &observed,
+            PmfJoin {
+                join,
+                observed: &observed,
+            },
             profile(),
             100,
             &PmfSource(state.clone()),

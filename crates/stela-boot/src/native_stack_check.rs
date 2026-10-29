@@ -15,7 +15,6 @@ use stela_drivers::platform::work::{Cpu, Executor, Kind, Queue, Runtime, WorkErr
 
 const JOBS: usize = 8;
 pub(crate) struct Observation {
-    pub(crate) stacks: [Range<usize>; 4],
     pub(crate) rsp: [usize; 2],
 }
 struct Probe {
@@ -153,10 +152,7 @@ fn run_stacks(source: Arc<Source>, cpu: Arc<dyn Cpu>) -> Result<Observation, Wor
     {
         return Err(WorkError::CorruptContext);
     }
-    let observed = Observation {
-        stacks: probe.stacks.clone(),
-        rsp,
-    };
+    let observed = Observation { rsp };
     queue.close()?;
     // SAFETY: both actual jobs returned; there are no external handles/bindings,
     // callbacks, services or IRQ producers in this finite generic diagnostic.

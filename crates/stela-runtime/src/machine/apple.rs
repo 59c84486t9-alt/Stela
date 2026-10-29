@@ -518,6 +518,25 @@ impl Default for AppleDevices {
     }
 }
 
+/// A DCPEXT nub as the board describes it: its register aperture, AIC
+/// interrupts, whether it starts quiesced, and its role and identity.
+pub struct DcpextNub {
+    pub wrapper: Range,
+    pub interrupts: [u32; 4],
+    pub quiesced: bool,
+    pub role: &'static str,
+    pub identity: stela_soc_data::dcp::ExternalIdentity,
+}
+
+/// The DART streams a DCPEXT masters: its link region's stream, the
+/// `window` its firmware maps through it, and the display pipe's surface
+/// stream when it is placed.
+pub struct DcpextDma {
+    pub link: (DartId, usize),
+    pub window: Option<u64>,
+    pub surface: Option<(DartId, usize)>,
+}
+
 impl AppleDevices {
     #[cfg(feature = "native-profile")]
     pub fn advance_statistics(&self) -> stela_contracts::bus::AdvanceStatistics {
@@ -1291,20 +1310,25 @@ impl AppleDevices {
     /// AP's wake once RTKit enumeration completes behind the boot-chain
     /// handoff. This does not admit DCPEXT in `stela_soc_data::board::models` (see
     /// `platform::apple::dcp`).
-    #[allow(clippy::too_many_arguments)]
     pub fn add_dcpext(
         &mut self,
-        wrapper: Range,
-        interrupts: [u32; 4],
-        quiesced: bool,
-        role: &'static str,
-        identity: stela_soc_data::dcp::ExternalIdentity,
+        nub: DcpextNub,
         scanout: Box<dyn Scanout>,
-        (dart, stream): (DartId, usize),
-        window: Option<u64>,
-        surface: Option<(DartId, usize)>,
+        dma: DcpextDma,
         build: &stela_formats::builds::Build,
     ) -> Result<(), String> {
+        let DcpextNub {
+            wrapper,
+            interrupts,
+            quiesced,
+            role,
+            identity,
+        } = nub;
+        let DcpextDma {
+            link: (dart, stream),
+            window,
+            surface,
+        } = dma;
         if wrapper.bytes < asc::WRAPPER_BYTES {
             return Err("DCPEXT register aperture is incomplete".into());
         }
@@ -5669,18 +5693,22 @@ mod tests {
             );
             assert!(
                 d.add_dcpext(
-                    Range {
-                        physical: WRAPPER,
-                        bytes: 0x6c000
+                    DcpextNub {
+                        wrapper: Range {
+                            physical: WRAPPER,
+                            bytes: 0x6c000
+                        },
+                        interrupts: [1, 2, 3, 4],
+                        quiesced: false,
+                        role: "DCPEXT",
+                        identity: stela_soc_data::dcp::ExternalIdentity::Unnumbered
                     },
-                    [1, 2, 3, 4],
-                    false,
-                    "DCPEXT",
-                    stela_soc_data::dcp::ExternalIdentity::Unnumbered,
                     Box::new(UnusedScreen),
-                    (dart, input),
-                    None,
-                    None,
+                    DcpextDma {
+                        link: (dart, input),
+                        window: None,
+                        surface: None
+                    },
                     stela_formats::builds::DEFAULT
                 )
                 .unwrap_err()
@@ -5733,18 +5761,22 @@ mod tests {
             refuse(&mut d, owner, u32::MAX as usize);
             assert!(
                 d.add_dcpext(
-                    Range {
-                        physical: WRAPPER,
-                        bytes: 0x6c000
+                    DcpextNub {
+                        wrapper: Range {
+                            physical: WRAPPER,
+                            bytes: 0x6c000
+                        },
+                        interrupts: [1, 2, 3, 4],
+                        quiesced: false,
+                        role: "DCPEXT",
+                        identity: stela_soc_data::dcp::ExternalIdentity::Unnumbered
                     },
-                    [1, 2, 3, 4],
-                    false,
-                    "DCPEXT",
-                    stela_soc_data::dcp::ExternalIdentity::Unnumbered,
                     Box::new(UnusedScreen),
-                    (owner, 1),
-                    None,
-                    Some((owner, 2)),
+                    DcpextDma {
+                        link: (owner, 1),
+                        window: None,
+                        surface: Some((owner, 2))
+                    },
                     stela_formats::builds::DEFAULT
                 )
                 .unwrap_err()
@@ -5873,18 +5905,22 @@ mod tests {
             .unwrap();
         let frames = Rc::new(RefCell::new(0));
         d.add_dcpext(
-            Range {
-                physical: WRAPPER,
-                bytes: 0x6c000,
+            DcpextNub {
+                wrapper: Range {
+                    physical: WRAPPER,
+                    bytes: 0x6c000,
+                },
+                interrupts: [0x243, 0x242, 0x245, 0x244],
+                quiesced: false,
+                role: "DCPEXT",
+                identity: stela_soc_data::dcp::ExternalIdentity::Unnumbered,
             },
-            [0x243, 0x242, 0x245, 0x244],
-            false,
-            "DCPEXT",
-            stela_soc_data::dcp::ExternalIdentity::Unnumbered,
             Box::new(Screen(frames.clone())),
-            (dart, 5),
-            Some(RAM),
-            Some((dart, 5)),
+            DcpextDma {
+                link: (dart, 5),
+                window: Some(RAM),
+                surface: Some((dart, 5)),
+            },
             stela_formats::builds::DEFAULT,
         )
         .unwrap();
@@ -5983,18 +6019,22 @@ mod tests {
             .unwrap();
         devices
             .add_dcpext(
-                Range {
-                    physical: WRAPPER,
-                    bytes: 0x6c000,
+                DcpextNub {
+                    wrapper: Range {
+                        physical: WRAPPER,
+                        bytes: 0x6c000,
+                    },
+                    interrupts: [0x242, 0x242, 0x245, 0x244],
+                    quiesced: true,
+                    role: "DCPEXT",
+                    identity: stela_soc_data::dcp::ExternalIdentity::Unnumbered,
                 },
-                [0x242, 0x242, 0x245, 0x244],
-                true,
-                "DCPEXT",
-                stela_soc_data::dcp::ExternalIdentity::Unnumbered,
                 Box::new(Screen),
-                (dart, 5),
-                Some(0x8_0000_0000),
-                None,
+                DcpextDma {
+                    link: (dart, 5),
+                    window: Some(0x8_0000_0000),
+                    surface: None,
+                },
                 stela_formats::builds::DEFAULT,
             )
             .unwrap();

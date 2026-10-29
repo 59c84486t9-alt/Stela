@@ -161,6 +161,25 @@ pub struct Controller<R, T> {
     dma_contained: bool,
 }
 
+/// The bits under `mask` of a register write or of the value a poll waits for.
+#[derive(Clone, Copy)]
+struct Field {
+    mask: u32,
+    value: u32,
+}
+impl Field {
+    const fn new(mask: u32, value: u32) -> Self {
+        Self { mask, value }
+    }
+}
+/// A poll's start, its allowed microseconds and the phase a timeout names.
+#[derive(Clone, Copy)]
+struct Deadline {
+    start: u64,
+    timeout: u64,
+    phase: Phase,
+}
+
 impl<R: Registers, T: Timer> Controller<R, T> {
     pub fn claim(mut registers: R, timer: T, config: Config) -> Result<Self, (Error, R, T)> {
         let result = (|| {
@@ -241,46 +260,53 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let old = self.read(bar, offset)?;
         self.write(bar, offset, (old & !mask) | (bits & mask))
     }
-    #[allow(clippy::too_many_arguments)] // one register phase and its pre-write deadline
+    /// Read until the bits under `until.mask` equal `until.value`, or the
+    /// deadline, measured from before the request that started it, passes.
     fn poll(
         &mut self,
         bar: Bar,
         offset: usize,
-        mask: u32,
-        expected: u32,
-        start: u64,
-        timeout: u64,
-        phase: Phase,
+        until: Field,
+        deadline: Deadline,
     ) -> Result<u32, Error> {
+        let expired = |timer: &T| timer.now_us().wrapping_sub(deadline.start) >= deadline.timeout;
         loop {
-            if self.timer.now_us().wrapping_sub(start) >= timeout {
-                return Err(Error::Timeout(phase));
+            if expired(&self.timer) {
+                return Err(Error::Timeout(deadline.phase));
             }
             let value = self.read(bar, offset)?;
-            if self.timer.now_us().wrapping_sub(start) >= timeout {
-                return Err(Error::Timeout(phase));
+            if expired(&self.timer) {
+                return Err(Error::Timeout(deadline.phase));
             }
-            if value & mask == expected {
+            if value & until.mask == until.value {
                 return Ok(value);
             }
             self.timer.relax();
         }
     }
-    #[allow(clippy::too_many_arguments)] // requested and observed fields differ for power
+    /// Write `request`, then poll for `until`: power requests and their
+    /// completion reports use different bits.
     fn transition(
         &mut self,
         bar: Bar,
         offset: usize,
-        mask: u32,
-        bits: u32,
-        observed: u32,
-        expected: u32,
+        request: Field,
+        until: Field,
         timeout: u64,
         phase: Phase,
     ) -> Result<(), Error> {
         let start = self.timer.now_us();
-        self.update(bar, offset, mask, bits)?;
-        self.poll(bar, offset, observed, expected, start, timeout, phase)?;
+        self.update(bar, offset, request.mask, request.value)?;
+        self.poll(
+            bar,
+            offset,
+            until,
+            Deadline {
+                start,
+                timeout,
+                phase,
+            },
+        )?;
         Ok(())
     }
     fn delay(&self, micros: u64) {
@@ -332,9 +358,23 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             };
             self.write(Bar::Hda, INTCTL, 0)?;
             self.registers.misc_clock_gate(false)?;
-            self.transition(Bar::Hda, GCTL, 1, 0, 1, 0, 100_000, Phase::LinkReset)?;
+            self.transition(
+                Bar::Hda,
+                GCTL,
+                Field::new(1, 0),
+                Field::new(1, 0),
+                100_000,
+                Phase::LinkReset,
+            )?;
             self.delay(500);
-            self.transition(Bar::Hda, GCTL, 1, 1, 1, 1, 100_000, Phase::LinkReset)?;
+            self.transition(
+                Bar::Hda,
+                GCTL,
+                Field::new(1, 1),
+                Field::new(1, 1),
+                100_000,
+                Phase::LinkReset,
+            )?;
             self.delay(1000);
             self.registers.misc_clock_gate(true)?;
             let (new_pp, new_spib) =
@@ -410,10 +450,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             self.transition(
                 Bar::Dsp,
                 ADSPCS,
-                1 << 16,
-                1 << 16,
-                1 << 24,
-                1 << 24,
+                Field::new(1 << 16, 1 << 16),
+                Field::new(1 << 24, 1 << 24),
                 50_000,
                 Phase::CorePower,
             )?;
@@ -422,22 +460,39 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             }
             let start = self.timer.now_us();
             self.write(Bar::Dsp, IPC_REQ, BUSY | 0x01004000)?;
-            self.transition(Bar::Dsp, ADSPCS, 1, 0, 1, 0, 50_000, Phase::CoreReset)?;
+            self.transition(
+                Bar::Dsp,
+                ADSPCS,
+                Field::new(1, 0),
+                Field::new(1, 0),
+                50_000,
+                Phase::CoreReset,
+            )?;
             self.update(Bar::Dsp, ADSPCS, 1 << 8, 0)?;
             if self.read(Bar::Dsp, ADSPCS)? & 0x01010101 != 0x01010000 {
                 return Err(Error::Rejected(Bar::Dsp, ADSPCS));
             }
-            self.poll(Bar::Dsp, IPC_ACK, BUSY, BUSY, start, 500_000, Phase::Rom)?;
+            self.poll(
+                Bar::Dsp,
+                IPC_ACK,
+                Field::new(BUSY, BUSY),
+                Deadline {
+                    start,
+                    timeout: 500_000,
+                    phase: Phase::Rom,
+                },
+            )?;
             self.update(Bar::Dsp, IPC_ACK, BUSY, BUSY)?;
             let start = self.timer.now_us();
             self.poll(
                 Bar::Dsp,
                 ROM_STATUS,
-                0x80ffffff,
-                1,
-                start,
-                300_000,
-                Phase::Rom,
+                Field::new(0x80ffffff, 1),
+                Deadline {
+                    start,
+                    timeout: 300_000,
+                    phase: Phase::Rom,
+                },
             )?;
             // Polled transport keeps all PCI and DSP interrupt delivery masked.
             self.stream_run(true, false, true)?;
@@ -445,11 +500,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             self.poll(
                 Bar::Dsp,
                 ROM_STATUS,
-                0x80ffffff,
-                5,
-                start,
-                3_000_000,
-                Phase::Firmware,
+                Field::new(0x80ffffff, 5),
+                Deadline {
+                    start,
+                    timeout: 3_000_000,
+                    phase: Phase::Firmware,
+                },
             )?;
             self.stream_run(true, false, false)?;
             self.stream_run(true, true, false)?;
@@ -502,20 +558,16 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             self.transition(
                 Bar::Dsp,
                 ADSPCS,
-                0x101,
-                0x101,
-                0x101,
-                0x101,
+                Field::new(0x101, 0x101),
+                Field::new(0x101, 0x101),
                 50_000,
                 Phase::CoreReset,
             )?;
             self.transition(
                 Bar::Dsp,
                 ADSPCS,
-                1 << 16,
-                0,
-                0x0f000000,
-                0,
+                Field::new(1 << 16, 0),
+                Field::new(0x0f000000, 0),
                 50_000,
                 Phase::CoreOff,
             )?;

@@ -180,18 +180,22 @@ mod tests {
             .unwrap();
         devices
             .add_dcpext(
-                Range {
-                    physical: WRAPPER,
-                    bytes: 0x6c000,
+                DcpextNub {
+                    wrapper: Range {
+                        physical: WRAPPER,
+                        bytes: 0x6c000,
+                    },
+                    interrupts: [873; 4],
+                    quiesced: false,
+                    role: "DCPEXT0",
+                    identity: stela_soc_data::dcp::ExternalIdentity::Numbered(0),
                 },
-                [873; 4],
-                false,
-                "DCPEXT0",
-                stela_soc_data::dcp::ExternalIdentity::Numbered(0),
                 Box::new(Screen),
-                (owners[1], 5),
-                None,
-                Some((owners[0], 0)),
+                DcpextDma {
+                    link: (owners[1], 5),
+                    window: None,
+                    surface: Some((owners[0], 0)),
+                },
                 stela_formats::builds::DEFAULT,
             )
             .unwrap();

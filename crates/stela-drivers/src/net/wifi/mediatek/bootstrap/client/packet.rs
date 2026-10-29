@@ -218,7 +218,6 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// `configure_modern` applies. Both real canonical guards stay held through
     /// actual DMA preparation and producer publication; the original key,
     /// context and radio-policy owners survive all hardware/deferred users.
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn transmit_modern<
         H: wifi::regulatory::HardwarePolicy,
         O: wifi::regulatory::OsPolicy,
@@ -227,12 +226,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         authority: &mut wifi::regulatory::Owner<H, O>,
         admission: wifi::regulatory::AssociationAdmission,
         epoch: u64,
-        ethernet: &[u8],
-        class: TxClass,
-        tid: Option<u8>,
+        msdu: Msdu<'_>,
         source: &dyn PageSource,
         policy: &mut impl station::RegulatoryPolicy,
     ) -> Result<Receipt, Error> {
+        let Msdu {
+            ethernet,
+            class,
+            tid,
+        } = msdu;
         let s = self.state_mut();
         if s.phase != Phase::Associated {
             return Err(Error::WrongPhase);
@@ -250,8 +252,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let gtk = s.gtk.as_mut().ok_or(Error::NoKey)?;
         let mut keys = [ptk.slot_mut(), gtk.slot_mut()];
         let plan = if let Some(tid) = tid {
-            s.station
-                .prepare_qos_msdu_refs(epoch, ethernet, class, &context, tid, &mut keys, policy)
+            s.station.prepare_qos_msdu_refs(
+                epoch,
+                ethernet,
+                class,
+                station::data::Qos {
+                    context: &context,
+                    tid,
+                },
+                &mut keys,
+                policy,
+            )
         } else {
             s.station.prepare_msdu_refs(
                 epoch,

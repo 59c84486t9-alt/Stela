@@ -7,13 +7,11 @@
 use super::{context::ContextLoan, floating_environment::HostFloatingEnvironment, platform};
 use crate::{
     blocks::ThreadState,
-    memory::{domain::MemoryThread, policy::MemoryControls},
     system::{
         debug::DebugControls,
-        events::EventEndpoint,
         execution::EntryBoundary,
         fp_access::{Low128FpAccess, Low128FpContext},
-        process_memory::FixedProcessMemoryControls,
+        process_memory::{FixedProcessMemoryControls, Low128Entry, PeThread},
         state::SystemState,
     },
 };
@@ -219,8 +217,7 @@ impl CheckedMemoryBlock {
         &self,
         controls: &FixedProcessMemoryControls,
         system: &SystemState,
-        memory: &mut MemoryThread<MemoryControls>,
-        event: &EventEndpoint,
+        thread: PeThread<'_>,
         state: &mut ThreadState,
     ) -> Result<Observation> {
         // SAFETY: forwards the unchanged caller contract with no FP authority.
@@ -228,8 +225,7 @@ impl CheckedMemoryBlock {
             self.run_registers(
                 controls,
                 system,
-                memory,
-                event,
+                thread,
                 &mut state.registers,
                 &mut state.pc,
                 None,
@@ -247,14 +243,12 @@ impl CheckedMemoryBlock {
     /// it must remain unchanged throughout this synchronous invocation. The
     /// caller obtains `access` through `with_nonstreaming_low128`, retaining
     /// that authority and the original register bank through PC settlement.
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn run_with_low128(
         &self,
         controls: &FixedProcessMemoryControls,
         system: &SystemState,
         debug: &DebugControls,
-        memory: &mut MemoryThread<MemoryControls>,
-        event: &EventEndpoint,
+        thread: PeThread<'_>,
         pc: &mut GuestAddress,
         access: &mut Low128FpAccess<'_, '_>,
     ) -> Result<Observation> {
@@ -265,8 +259,7 @@ impl CheckedMemoryBlock {
                 self.run_registers(
                     controls,
                     system,
-                    memory,
-                    event,
+                    thread,
                     registers,
                     pc,
                     Some((debug, context)),
@@ -275,13 +268,11 @@ impl CheckedMemoryBlock {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     unsafe fn run_registers(
         &self,
         controls: &FixedProcessMemoryControls,
         system: &SystemState,
-        memory: &mut MemoryThread<MemoryControls>,
-        event: &EventEndpoint,
+        thread: PeThread<'_>,
         registers: &mut stela_compiler::GuestState,
         pc: &mut GuestAddress,
         low128: Option<(&DebugControls, &Low128FpContext<'_, '_>)>,
@@ -291,7 +282,8 @@ impl CheckedMemoryBlock {
             "thread PC differs from checked source entry"
         );
         // Retain this outer loan through exact architectural PC settlement.
-        let _publication = memory
+        let _publication = thread
+            .memory
             .execution_loan()
             .map_err(|status| anyhow::anyhow!("checked publication loan refused: {status:?}"))?;
         let boundary = EntryBoundary::new(
@@ -307,15 +299,16 @@ impl CheckedMemoryBlock {
         let finalized = if let Some((debug, context)) = low128 {
             let entry = controls
                 .prepare_profile_with_low128(
-                    &boundary,
+                    Low128Entry {
+                        boundary: &boundary,
+                        system,
+                        context,
+                    },
                     self.profile,
                     self.requirements,
-                    system,
                     debug,
-                    context,
                     registers,
-                    memory,
-                    Some(event),
+                    thread,
                 )
                 .map_err(|error| anyhow::anyhow!("checked low128 CPU entry refused: {error:?}"))?;
             ensure!(
@@ -351,8 +344,8 @@ impl CheckedMemoryBlock {
                     self.requirements,
                     system,
                     registers,
-                    memory,
-                    Some(event),
+                    thread.memory,
+                    thread.events,
                 )
                 .map_err(|error| anyhow::anyhow!("checked CPU entry refused: {error:?}"))?;
             ensure!(
@@ -458,6 +451,10 @@ mod tests {
             profile::BaseSpeAbsence,
             state::El1Registers,
         },
+    };
+    use crate::{
+        memory::{domain::MemoryThread, policy::MemoryControls},
+        system::events::EventEndpoint,
     };
     use std::{
         alloc::{Layout, alloc_zeroed, dealloc},
@@ -647,8 +644,10 @@ mod tests {
                 block.run(
                     &self.controls,
                     &self.system,
-                    &mut self.memory,
-                    &self.event,
+                    PeThread {
+                        memory: &mut self.memory,
+                        events: Some(&self.event),
+                    },
                     &mut thread,
                 )
             }?;
@@ -785,8 +784,10 @@ mod tests {
                                 &worker.controls,
                                 &worker.system,
                                 &DebugControls::default(),
-                                &mut worker.memory,
-                                &worker.event,
+                                PeThread {
+                                    memory: &mut worker.memory,
+                                    events: Some(&worker.event),
+                                },
                                 &mut pc,
                                 &mut access,
                             )
@@ -884,8 +885,10 @@ mod tests {
                                     &worker.controls,
                                     &worker.system,
                                     &DebugControls::default(),
-                                    &mut worker.memory,
-                                    &worker.event,
+                                    PeThread {
+                                        memory: &mut worker.memory,
+                                        events: Some(&worker.event),
+                                    },
                                     &mut pc,
                                     &mut access,
                                 )
@@ -938,8 +941,10 @@ mod tests {
                         &worker.controls,
                         &worker.system,
                         &DebugControls::default(),
-                        &mut worker.memory,
-                        &worker.event,
+                        PeThread {
+                            memory: &mut worker.memory,
+                            events: Some(&worker.event),
+                        },
                         &mut pc,
                         &mut access,
                     )
@@ -1322,8 +1327,10 @@ mod tests {
                 load.run(
                     &worker.controls,
                     &worker.system,
-                    &mut worker.memory,
-                    &other_pe.event,
+                    PeThread {
+                        memory: &mut worker.memory,
+                        events: Some(&other_pe.event),
+                    },
                     &mut registers,
                 )
             }
@@ -1334,8 +1341,10 @@ mod tests {
                 load.run(
                     &worker.controls,
                     &worker.system,
-                    &mut foreign.memory,
-                    &foreign.event,
+                    PeThread {
+                        memory: &mut foreign.memory,
+                        events: Some(&foreign.event),
+                    },
                     &mut registers,
                 )
             }
@@ -1347,8 +1356,10 @@ mod tests {
                 load.run(
                     &worker.controls,
                     &el1,
-                    &mut worker.memory,
-                    &worker.event,
+                    PeThread {
+                        memory: &mut worker.memory,
+                        events: Some(&worker.event),
+                    },
                     &mut registers,
                 )
             }
@@ -2060,8 +2071,10 @@ mod tests {
                                         increment.run(
                                             &worker.controls,
                                             &worker.system,
-                                            &mut worker.memory,
-                                            &worker.event,
+                                            PeThread {
+                                                memory: &mut worker.memory,
+                                                events: Some(&worker.event),
+                                            },
                                             &mut thread,
                                         )
                                     }

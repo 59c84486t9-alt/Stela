@@ -14,6 +14,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicPtr, Ordering},
 };
 pub(crate) use hpet::{ExclusiveHpet, HpetMapping};
+#[cfg(feature = "diagnostics")]
 pub(crate) use publication::{QualifiedRam, RootPublication};
 use stela_drivers::bus::{
     mmio::owned::{

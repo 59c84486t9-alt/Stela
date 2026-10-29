@@ -68,6 +68,13 @@ pub enum ScalableExecutionError {
     },
 }
 
+/// A guest's general and FP registers with its scalable vector, predicate
+/// and matrix state.
+pub struct ScalableGuest<'a> {
+    pub registers: &'a mut GuestState,
+    pub scalable: &'a mut ScalableState,
+}
+
 impl FixedProcessMemoryControls {
     /// Run one compiler-prepared body under the held CPU controls. This scope
     /// is EL0 without MTE. The CPU owner checks every helper and feature clause
@@ -84,17 +91,19 @@ impl FixedProcessMemoryControls {
     /// rights and coherent storage pinned throughout. No asynchronous re-entry,
     /// host protection change, unwinding or signal recovery through native code
     /// is allowed.
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn execute_scalable_leaf(
         &self,
         access: &ScalableControlOwner<'_>,
         prepared: &PreparedScalableLeaf,
         system: &mut SystemState,
-        registers: &mut GuestState,
-        scalable: &mut ScalableState,
+        guest: ScalableGuest<'_>,
         memory: &mut MemoryThread<MemoryControls>,
         context: &mut ExecutionContext,
     ) -> Result<ScalableLeafExit, ScalableExecutionError> {
+        let ScalableGuest {
+            registers,
+            scalable,
+        } = guest;
         let identity = prepared.identity();
         let pc = identity.guest_base;
         let memory_error = |cause| ScalableExecutionError::MemoryAuthority { pc, cause };
@@ -500,6 +509,19 @@ mod tests {
             }
         }
 
+        /// The source a fixture runs, and the targets and placement it runs with.
+        pub(super) struct Program<'a> {
+            pub(super) words: &'a [u32],
+            pub(super) guest_base: u64,
+            pub(super) ram_base: u64,
+            pub(super) svl_bytes: usize,
+            pub(super) compiler_target: TargetCpu,
+            pub(super) domain_target: TargetCpu,
+            pub(super) split: Option<(usize, bool)>,
+            pub(super) sme_version: u64,
+            pub(super) mode: ScalableMode,
+        }
+
         pub(super) struct Fixture {
             pub(super) storage: Arc<Storage>,
             pub(super) domain: Arc<MemoryDomain>,
@@ -522,17 +544,17 @@ mod tests {
                 domain_target: TargetCpu,
                 split: Option<(usize, bool)>,
             ) -> Self {
-                Self::new_program_at(
-                    &[MOV_X3_SEVEN, word, RET_X30],
-                    PC,
-                    RAM,
-                    VL,
+                Self::build(Program {
+                    words: &[MOV_X3_SEVEN, word, RET_X30],
+                    guest_base: PC,
+                    ram_base: RAM,
+                    svl_bytes: VL,
                     compiler_target,
                     domain_target,
                     split,
-                    1,
-                    ScalableMode::new(true, true),
-                )
+                    sme_version: 1,
+                    mode: ScalableMode::new(true, true),
+                })
             }
             pub(super) fn new_program(
                 words: &[u32],
@@ -542,31 +564,20 @@ mod tests {
                 domain_target: TargetCpu,
                 split: Option<(usize, bool)>,
             ) -> Self {
-                Self::new_program_at(
+                Self::build(Program {
                     words,
                     guest_base,
-                    RAM,
+                    ram_base: RAM,
                     svl_bytes,
                     compiler_target,
                     domain_target,
                     split,
-                    2,
-                    ScalableMode::new(true, true),
-                )
+                    sme_version: 2,
+                    mode: ScalableMode::new(true, true),
+                })
             }
-            #[allow(clippy::too_many_arguments)]
-            pub(super) fn new_program_at(
-                words: &[u32],
-                guest_base: u64,
-                ram_base: u64,
-                svl_bytes: usize,
-                compiler_target: TargetCpu,
-                domain_target: TargetCpu,
-                split: Option<(usize, bool)>,
-                sme_version: u64,
-                mode: ScalableMode,
-            ) -> Self {
-                Self::new_program_at_with_lower_bits(
+            pub(super) fn build(program: Program<'_>) -> Self {
+                let Program {
                     words,
                     guest_base,
                     ram_base,
@@ -576,80 +587,8 @@ mod tests {
                     split,
                     sme_version,
                     mode,
-                    LOWER_BITS,
-                )
-            }
-            #[allow(clippy::too_many_arguments)]
-            pub(super) fn new_program_at_with_lower_bits(
-                words: &[u32],
-                guest_base: u64,
-                ram_base: u64,
-                svl_bytes: usize,
-                compiler_target: TargetCpu,
-                domain_target: TargetCpu,
-                split: Option<(usize, bool)>,
-                sme_version: u64,
-                mode: ScalableMode,
-                lower_bits: u8,
-            ) -> Self {
-                Self::new_program_at_with_lower_bits_and_data_rights(
-                    words,
-                    guest_base,
-                    ram_base,
-                    svl_bytes,
-                    compiler_target,
-                    domain_target,
-                    split,
-                    sme_version,
-                    mode,
-                    lower_bits,
-                    DATA_RIGHTS,
-                )
-            }
-            #[allow(clippy::too_many_arguments)]
-            pub(super) fn new_program_at_with_lower_bits_and_data_rights(
-                words: &[u32],
-                guest_base: u64,
-                ram_base: u64,
-                svl_bytes: usize,
-                compiler_target: TargetCpu,
-                domain_target: TargetCpu,
-                split: Option<(usize, bool)>,
-                sme_version: u64,
-                mode: ScalableMode,
-                lower_bits: u8,
-                data_rights: AccessPermissions,
-            ) -> Self {
-                Self::new_program_at_with_source_code_page(
-                    words,
-                    guest_base,
-                    ram_base,
-                    svl_bytes,
-                    compiler_target,
-                    domain_target,
-                    split,
-                    sme_version,
-                    mode,
-                    lower_bits,
-                    data_rights,
-                    None,
-                )
-            }
-            #[allow(clippy::too_many_arguments)]
-            fn new_program_at_with_source_code_page(
-                words: &[u32],
-                guest_base: u64,
-                ram_base: u64,
-                svl_bytes: usize,
-                compiler_target: TargetCpu,
-                domain_target: TargetCpu,
-                split: Option<(usize, bool)>,
-                sme_version: u64,
-                mode: ScalableMode,
-                lower_bits: u8,
-                data_rights: AccessPermissions,
-                original_code_page: Option<&[u8]>,
-            ) -> Self {
+                } = program;
+                let (lower_bits, data_rights, original_code_page) = (LOWER_BITS, DATA_RIGHTS, None);
                 assert!(
                     compiler_target.supported(),
                     "host lacks required native test recipe"
@@ -825,8 +764,10 @@ mod tests {
                         &access,
                         &self.prepared,
                         &mut self.system,
-                        &mut self.registers,
-                        &mut self.scalable,
+                        ScalableGuest {
+                            registers: &mut self.registers,
+                            scalable: &mut self.scalable,
+                        },
                         &mut self.memory,
                         &mut self.context,
                     )
@@ -866,6 +807,7 @@ mod tests {
     }
     mod retained {
         //! Repeated scalable entry on one retained CPU.
+        use super::super::ScalableGuest;
         use super::fixture::{Fixture, access};
         use crate::{
             memory::{domain::MemoryThread, policy::MemoryControls},
@@ -918,8 +860,10 @@ mod tests {
                         &self.access,
                         self.prepared,
                         self.system,
-                        self.registers,
-                        self.scalable,
+                        ScalableGuest {
+                            registers: self.registers,
+                            scalable: self.scalable,
+                        },
                         self.memory,
                         self.context,
                     )
@@ -969,17 +913,17 @@ mod tests {
             (LD1D_Z1_P0_X5, 8, wide_target(), RAM),
             (LD1B_Z1_P0_X5, 2, TargetCpu::Baseline, 0x800_1400_7400),
         ] {
-            let mut f = Fixture::new_program_at(
-                &[MOV_X3_SEVEN, word, RET_X30],
-                PC,
+            let mut f = Fixture::build(Program {
+                words: &[MOV_X3_SEVEN, word, RET_X30],
+                guest_base: PC,
                 ram_base,
-                VL,
-                target,
-                target,
-                None,
-                1,
-                ScalableMode::new(true, true),
-            );
+                svl_bytes: VL,
+                compiler_target: target,
+                domain_target: target,
+                split: None,
+                sme_version: 1,
+                mode: ScalableMode::new(true, true),
+            });
             assert!(
                 f.ids
                     .same_snapshot(f.controls.identification_snapshot().unwrap())
@@ -1021,17 +965,17 @@ mod tests {
                 true,
             ),
         ] {
-            let mut f = Fixture::new_program_at(
-                &[MOV_X3_SEVEN, word, RET_X30],
-                PC,
-                RAM,
-                VL,
-                TargetCpu::Baseline,
-                TargetCpu::Baseline,
-                None,
-                1,
-                ScalableMode::new(false, true),
-            );
+            let mut f = Fixture::build(Program {
+                words: &[MOV_X3_SEVEN, word, RET_X30],
+                guest_base: PC,
+                ram_base: RAM,
+                svl_bytes: VL,
+                compiler_target: TargetCpu::Baseline,
+                domain_target: TargetCpu::Baseline,
+                split: None,
+                sme_version: 1,
+                mode: ScalableMode::new(false, true),
+            });
             let mut ram = f.storage.bytes();
             let mut expected = f.registers.clone();
             expected.x[3] = 7;

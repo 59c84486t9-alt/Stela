@@ -15,9 +15,11 @@ fn prekey_control_port_transport() {
             &mut owner,
             admission,
             epoch,
-            &frame,
-            TxClass::ControlPortPlaintext,
-            None,
+            Msdu {
+                ethernet: &frame,
+                class: TxClass::ControlPortPlaintext,
+                tid: None,
+            },
             &PmfSource(state.clone()),
             &mut Policy(true),
         )

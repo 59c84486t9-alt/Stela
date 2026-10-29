@@ -390,9 +390,11 @@ fn fixture_with_schedule(
             &configurations,
             speed,
             &mut function,
-            version,
-            hcs2,
-            hcc1,
+            model::CapabilityImage {
+                version,
+                hcs2,
+                hcc1,
+            },
             wrap,
         )
     } else {

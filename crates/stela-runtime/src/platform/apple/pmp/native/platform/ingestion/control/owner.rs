@@ -113,6 +113,24 @@ struct Completed {
 /// provider ready, installs a copied hardware image, consumes a second Frames
 /// receipt, or acknowledges a native command. Registration/configuration
 /// producers of member byte0, saved flags and timer limits remain separate.
+/// The lifecycle operation a source call belongs to, and its step within
+/// it: the activation path's reset and restore calls differ only here.
+#[derive(Clone, Copy)]
+pub struct SourceStep<'a> {
+    pub request: &'a super::super::super::owner::Request,
+    pub step: u64,
+}
+
+/// One auxiliary slot's source configuration operands.
+#[derive(Clone, Copy)]
+pub struct AuxiliaryConfiguration {
+    pub slot: usize,
+    pub flags: u16,
+    pub thresholds: u16,
+    pub period: u32,
+    pub activation: u32,
+}
+
 pub struct Owner {
     configuration: Configuration,
     image: SoftwareImage,
@@ -219,19 +237,24 @@ impl Owner {
     /// Actual101ced0 configuration producer. Inputs are source software
     /// configuration, never measured readiness. The typed resource must retain
     /// actual callback registration before the source transition can advance.
-    #[allow(clippy::too_many_arguments)]
     pub fn configure_auxiliary(
         &mut self,
-        request: &super::super::super::owner::Request,
-        source_step: u64,
-        slot: usize,
-        flags: u16,
-        thresholds: u16,
-        period: u32,
-        activation: u32,
+        step: SourceStep<'_>,
+        configuration: AuxiliaryConfiguration,
         resources: &mut impl Resources,
         access: &mut Access<'_>,
     ) -> Completion<Value> {
+        let SourceStep {
+            request,
+            step: source_step,
+        } = step;
+        let AuxiliaryConfiguration {
+            slot,
+            flags,
+            thresholds,
+            period,
+            activation,
+        } = configuration;
         if slot >= 4 {
             return Completion::Refused("auxiliary configuration exceeds source slots");
         }
@@ -354,19 +377,19 @@ impl Owner {
     /// step distinguishes the activation path's reset/restore invocations;
     /// it is an operation cursor, never a native address or completion flag.
     /// Modes0/1/2 change only the actual source software/controller effects.
-    // Keep source operands separate from the retained caller cursor and actual
-    // resource/access owners so this boundary mirrors one source invocation.
-    #[allow(clippy::too_many_arguments)]
     pub fn transition(
         &mut self,
-        request: &super::super::super::owner::Request,
-        source_step: u64,
+        step: SourceStep<'_>,
         slot: usize,
         mode: u32,
         activation: u32,
         resources: &mut impl Resources,
         access: &mut Access<'_>,
     ) -> Completion<Value> {
+        let SourceStep {
+            request,
+            step: source_step,
+        } = step;
         let result = (|| {
             if slot >= 4 || mode > 2 {
                 return Err(Error::Contract(

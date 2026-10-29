@@ -23,6 +23,28 @@ mod txs;
 use crate::net::wifi::station::operations::ChannelDefinition;
 pub use txs::TxStatus;
 pub use wifi::station::NativeBssObservation as PmfBssObservation;
+
+/// One MSDU to transmit: its Ethernet frame, transmit class and QoS TID.
+#[derive(Clone, Copy)]
+pub struct Msdu<'a> {
+    pub ethernet: &'a [u8],
+    pub class: TxClass,
+    pub tid: Option<u8>,
+}
+
+/// The OS's PMF join request and the BSS observation it selected.
+pub struct PmfJoin<'a> {
+    pub join: Join,
+    pub observed: &'a Arc<PmfBssObservation>,
+}
+
+/// A join request, the scanned BSS it names when known, and the profile
+/// selected for it.
+struct JoinTarget {
+    join: Join,
+    beacon: Option<scan::result::Bss>,
+    profile: Profile,
+}
 mod policy;
 pub use policy::{
     AttachError, BssHandle, Environment, LinkAttachError, LinkControlError, LinkEvent, LinkNotice,
@@ -428,19 +450,31 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if join.request.pmf().is_some() {
             return Err(Error::ModernAdmissionRequired);
         }
-        self.join_inner_guarded(join, beacon, profile, now, source, policy, None)
+        self.join_inner_guarded(
+            JoinTarget {
+                join,
+                beacon,
+                profile,
+            },
+            now,
+            source,
+            policy,
+            None,
+        )
     }
-    #[allow(clippy::too_many_arguments)]
     fn join_inner_guarded(
         &mut self,
-        join: Join,
-        beacon: Option<scan::result::Bss>,
-        profile: Profile,
+        target: JoinTarget,
         now: u64,
         source: &dyn PageSource,
         policy: &mut impl station::RegulatoryPolicy,
         mut guard: Option<&mut wifi::regulatory::PmfAuthenticationGuard<'_>>,
     ) -> Result<(), Error> {
+        let JoinTarget {
+            join,
+            beacon,
+            profile,
+        } = target;
         let s = self.state_mut();
         if s.phase != Phase::Idle || s.authentication_end.is_some() {
             return Err(Error::Busy);

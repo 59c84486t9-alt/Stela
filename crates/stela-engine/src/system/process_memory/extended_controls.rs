@@ -35,8 +35,13 @@ const CPA_WITH_CHECKING: u8 = 2;
 /// The constructor rejects nonzero TCR2 and all unimplemented SCTLR2 bits.
 /// Future EnFPM or mutation belongs to this same owner.
 #[derive(Debug)]
-// The checked-memory borrow reads the control bank.
-#[cfg_attr(not(feature = "std"), allow(dead_code))]
+#[cfg_attr(
+    not(feature = "std"),
+    expect(
+        dead_code,
+        reason = "only the host checked-memory borrow reads the control bank"
+    )
+)]
 pub(super) struct ExtendedControlBank {
     sctlr2_el1: u64,
 }

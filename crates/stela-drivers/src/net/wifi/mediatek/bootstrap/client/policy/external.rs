@@ -122,8 +122,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             self.client.associate_external_pmf(
                 &mut self.authority,
                 session,
-                join,
-                &beacon,
+                PmfJoin {
+                    join,
+                    observed: &beacon,
+                },
                 now,
                 source,
                 &mut check,

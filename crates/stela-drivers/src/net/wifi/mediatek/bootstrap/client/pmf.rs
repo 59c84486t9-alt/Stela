@@ -24,17 +24,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// programming, uncertain commands and every pending/deferred native user.
     /// The actual OS selects these exact RSNE/BSS bytes; no parser/scan result
     /// authenticates the peer or substitutes for that OS selection service.
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn join_modern_pmf<H: HardwarePolicy, O: OsPolicy>(
         &mut self,
         authority: &mut Owner<H, O>,
-        join: Join,
-        observed: &Arc<PmfBssObservation>,
+        target: PmfJoin<'_>,
         profile: Profile,
         now: u64,
         source: &dyn PageSource,
         policy: &mut impl station::RegulatoryPolicy,
     ) -> Result<(), Error> {
+        let PmfJoin { join, observed } = target;
         if join.request.pmf().is_none()
             || !self
                 .state()
@@ -60,9 +59,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 let beacon = observed.bss.clone();
                 client.state_mut().pmf_selected = Some(observed);
                 client.join_inner_guarded(
-                    join,
-                    Some(beacon),
-                    profile,
+                    JoinTarget {
+                        join,
+                        beacon: Some(beacon),
+                        profile,
+                    },
                     now,
                     source,
                     policy,
@@ -113,17 +114,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     ///
     /// # Safety
     /// As `join_modern_pmf`.
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn associate_external_pmf<H: HardwarePolicy, O: OsPolicy>(
         &mut self,
         authority: &mut Owner<H, O>,
         session: &station::external::Session,
-        join: Join,
-        observed: &Arc<PmfBssObservation>,
+        target: PmfJoin<'_>,
         now: u64,
         source: &dyn PageSource,
         policy: &mut impl station::RegulatoryPolicy,
     ) -> Result<(), Error> {
+        let PmfJoin { join, observed } = target;
         let s = self.state();
         s.station
             .validate_external_authentication(session)

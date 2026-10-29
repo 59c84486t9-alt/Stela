@@ -1063,6 +1063,14 @@ mod tests {
     /// NVMe reserves 11b; Apple's controllers take it as the suspend notice.
     const SUSPEND: u32 = 3 << 14;
 
+    /// One NVMe submission's command fields.
+    struct Command {
+        opcode: u8,
+        nsid: u32,
+        prp: u64,
+        words: [u32; 6],
+    }
+
     struct Rig {
         ans: Ans,
         sart: Sart,
@@ -1150,21 +1158,29 @@ mod tests {
             prp: u64,
             words: [u32; 6],
         ) -> Result<(), MmioError> {
-            self.submit_granting(queue, tag, opcode, nsid, prp, words, None)
+            let command = Command {
+                opcode,
+                nsid,
+                prp,
+                words,
+            };
+            self.submit_granting(queue, tag, command, None)
         }
         /// `submit` with TCB DMA permissions `grant` in place of the
         /// command's own direction.
-        #[allow(clippy::too_many_arguments)]
         fn submit_granting(
             &mut self,
             queue: usize,
             tag: u16,
-            opcode: u8,
-            nsid: u32,
-            prp: u64,
-            words: [u32; 6],
+            command: Command,
             grant: Option<u8>,
         ) -> Result<(), MmioError> {
+            let Command {
+                opcode,
+                nsid,
+                prp,
+                words,
+            } = command;
             let mut cmd = [0u8; 64];
             cmd[0] = opcode;
             cmd[2..4].copy_from_slice(&tag.to_le_bytes());
@@ -1467,12 +1483,32 @@ mod tests {
         rig.submit(1, 2, 1, 1, DATA, [3, 0, 0, 0, 0, 0]).unwrap();
         rig.retire(1, 2);
         assert!(rig.ram.write(DATA, &[0; 4096]));
-        rig.submit_granting(1, 3, 2, 1, DATA, [3, 0, 0, 0, 0, 0], Some(3))
-            .unwrap();
+        rig.submit_granting(
+            1,
+            3,
+            Command {
+                opcode: 2,
+                nsid: 1,
+                prp: DATA,
+                words: [3, 0, 0, 0, 0, 0],
+            },
+            Some(3),
+        )
+        .unwrap();
         rig.retire(1, 3);
         assert_eq!(rig.bytes(DATA, 4096), pattern);
         let error = rig
-            .submit_granting(1, 4, 2, 1, DATA, [3, 0, 0, 0, 0, 0], Some(2))
+            .submit_granting(
+                1,
+                4,
+                Command {
+                    opcode: 2,
+                    nsid: 1,
+                    prp: DATA,
+                    words: [3, 0, 0, 0, 0, 0],
+                },
+                Some(2),
+            )
             .unwrap_err();
         assert!(
             format!("{error:?}").contains("do not grant the command's direction"),

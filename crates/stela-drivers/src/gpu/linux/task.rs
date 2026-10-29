@@ -552,7 +552,10 @@ pub(crate) mod tests {
 
     /// Page-aligned backing, reached only through the raw storage pointer.
     #[repr(align(4096))]
-    struct Span(#[allow(dead_code)] [u8; 64 * 1024]);
+    struct Span(
+        #[expect(dead_code, reason = "reached only through the raw storage pointer")]
+        [u8; 64 * 1024],
+    );
     struct Raw {
         storage: UnsafeCell<Span>,
         enabled: AtomicBool,

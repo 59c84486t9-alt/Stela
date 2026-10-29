@@ -209,9 +209,10 @@ mod tests {
     type Native = NativeIo<Beacon<io::Bar>>;
     type Rx = receive::Ring<io::Bar>;
     type Tx = transmit::Rings<io::Bar>;
-    // Native owners intentionally use Arc<dyn Any> without a Send promise.
-    // This serialized CPU-affine fixture must not invent Sync for UnsafeCell.
-    #[allow(clippy::arc_with_non_send_sync)]
+    #[expect(
+        clippy::arc_with_non_send_sync,
+        reason = "native owners hold Arc<dyn Any> without Send; this CPU-affine fixture keeps its UnsafeCell registers !Sync"
+    )]
     fn native() -> (Native, Rx, Tx, Arc<Bar>, Arc<Mutex<Model>>) {
         let bar = Arc::new(Bar {
             words: UnsafeCell::new([0; 0x1800 / 4]),

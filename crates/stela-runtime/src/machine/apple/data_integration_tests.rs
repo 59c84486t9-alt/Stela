@@ -1,4 +1,5 @@
 //! Board metadata exercised through actual stateful Runtime device models.
+use super::{DcpextDma, DcpextNub};
 use crate::platform::apple::cluster::t6000::{Complex, T6000};
 use crate::platform::apple::power::t6000::native;
 use alloc::{vec, vec::Vec};
@@ -131,18 +132,22 @@ fn original_j314s_external_output_preserves_native_routes_and_identity() {
     }
     devices
         .add_dcpext(
-            Range {
-                physical: dcp.wrapper.0,
-                bytes: dcp.wrapper.1,
+            DcpextNub {
+                wrapper: Range {
+                    physical: dcp.wrapper.0,
+                    bytes: dcp.wrapper.1,
+                },
+                interrupts: dcp.interrupts,
+                quiesced: dcp.quiesced,
+                role: dcp.role,
+                identity: dcp.identity,
             },
-            dcp.interrupts,
-            dcp.quiesced,
-            dcp.role,
-            dcp.identity,
             alloc::boxed::Box::new(Screen),
-            (owners[1], dcp.stream as usize),
-            dcp.window,
-            Some((owners[0], dcp.surface.unwrap().1 as usize)),
+            DcpextDma {
+                link: (owners[1], dcp.stream as usize),
+                window: dcp.window,
+                surface: Some((owners[0], dcp.surface.unwrap().1 as usize)),
+            },
             stela_formats::builds::DEFAULT,
         )
         .unwrap();

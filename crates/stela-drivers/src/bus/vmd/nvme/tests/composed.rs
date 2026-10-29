@@ -166,17 +166,10 @@ impl Fixture {
             domain: Some(domain),
         }
     }
-    #[allow(clippy::type_complexity)]
-    fn attach(
-        &mut self,
-    ) -> Result<(Attached, RetiredHierarchy<Model>), (BlockError, RetiredHierarchy<Model>)> {
+    fn attach(&mut self) -> Attachment<Model> {
         self.attach_with_clock(model_clock())
     }
-    #[allow(clippy::type_complexity)]
-    fn attach_with_clock(
-        &mut self,
-        clock: Clock,
-    ) -> Result<(Attached, RetiredHierarchy<Model>), (BlockError, RetiredHierarchy<Model>)> {
+    fn attach_with_clock(&mut self, clock: Clock) -> Attachment<Model> {
         let protocol = &self.protocol;
         // SAFETY: this isolated fixture retains one actual configuration model,
         // its selected independent register peer and original model domain.

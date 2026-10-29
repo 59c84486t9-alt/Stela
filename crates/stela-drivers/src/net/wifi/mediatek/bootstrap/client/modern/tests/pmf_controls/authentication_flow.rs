@@ -30,8 +30,10 @@ fn preassociation_denial_and_guarded_retry() {
             unsafe {
                 driver.join_modern_pmf(
                     &mut owner,
-                    join.clone(),
-                    &observed,
+                    PmfJoin {
+                        join: join.clone(),
+                        observed: &observed,
+                    },
                     profile(),
                     100,
                     &PmfSource(state.clone()),
@@ -63,8 +65,10 @@ fn preassociation_denial_and_guarded_retry() {
         unsafe {
             driver.join_modern_pmf(
                 &mut owner,
-                join,
-                &observed,
+                PmfJoin {
+                    join,
+                    observed: &observed,
+                },
                 profile(),
                 101,
                 &PmfSource(state.clone()),
@@ -96,8 +100,10 @@ fn pending_publication_guard_revision() {
         unsafe {
             driver.join_modern_pmf(
                 &mut owner,
-                join.clone(),
-                &observed,
+                PmfJoin {
+                    join: join.clone(),
+                    observed: &observed,
+                },
                 profile(),
                 100,
                 &PmfSource(state.clone()),
@@ -185,8 +191,10 @@ fn authentication_retry_tickets() {
     unsafe {
         driver.join_modern_pmf(
             &mut owner,
-            join,
-            &observed,
+            PmfJoin {
+                join,
+                observed: &observed,
+            },
             profile(),
             100,
             &PmfSource(state.clone()),

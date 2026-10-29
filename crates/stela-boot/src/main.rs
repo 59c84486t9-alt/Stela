@@ -38,18 +38,23 @@ mod installer;
 mod la57;
 mod layout;
 mod log_file;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the native clock, IRQ root and MMIO platform services have no production consumer until the native counter and deadline work (R9, D6) wires them"
+)]
 pub(crate) mod native_clock;
 pub mod native_dma;
 pub mod native_irq;
 pub mod native_memory;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the native clock, IRQ root and MMIO platform services have no production consumer until the native counter and deadline work (R9, D6) wires them"
+)]
 pub(crate) mod native_mmio;
 mod native_smp;
-#[allow(dead_code)]
 #[cfg(feature = "diagnostics")]
 mod native_stack_check;
-#[allow(dead_code)]
+#[cfg(feature = "diagnostics")]
 mod native_stacks;
 #[cfg(feature = "diagnostics")]
 mod native_work_check;

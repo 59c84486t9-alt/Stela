@@ -168,9 +168,11 @@ fn igtk_rotation_revokes_old_session() {
             &mut owner,
             admission,
             epoch,
-            &eth(0x0800),
-            TxClass::Data,
-            None,
+            Msdu {
+                ethernet: &eth(0x0800),
+                class: TxClass::Data,
+                tid: None,
+            },
             &PmfSource(state.clone()),
             &mut Policy(true),
         )

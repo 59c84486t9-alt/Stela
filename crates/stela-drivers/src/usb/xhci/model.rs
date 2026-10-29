@@ -1139,20 +1139,30 @@ pub(crate) fn forwarding_fixture<C: crate::bus::pci::ConfigSpace>(
     (controller, model)
 }
 
+/// The interface version, HCSPARAMS2 and HCCPARAMS1 a fixture's
+/// capability registers report.
+pub(crate) struct CapabilityImage {
+    pub(crate) version: u16,
+    pub(crate) hcs2: u32,
+    pub(crate) hcc1: u32,
+}
+
 /// A forwarding peer whose capability-register image is installed and read
 /// before the original Controller captures its immutable scheduling policy.
 /// The existing fixture above retains its no-CFC/default capability path.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn forwarding_scheduled_fixture<C: crate::bus::pci::ConfigSpace>(
     dma: &mut dyn DmaAllocator,
     configurations: &[Vec<u8>],
     speed: u8,
     function: &mut Function<C>,
-    version: u16,
-    hcs2: u32,
-    hcc1: u32,
+    capabilities: CapabilityImage,
     wrap: impl FnOnce(Box<dyn Registers>, Rc<RefCell<CancelModel>>) -> Box<dyn Registers>,
 ) -> (Controller, Rc<RefCell<CancelModel>>) {
+    let CapabilityImage {
+        version,
+        hcs2,
+        hcc1,
+    } = capabilities;
     let (mut controller, model) = cancellation_controller_with_capabilities(
         dma,
         configurations,

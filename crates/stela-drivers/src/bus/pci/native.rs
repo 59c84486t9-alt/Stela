@@ -355,9 +355,10 @@ impl NativeFunction {
     /// IRQ/work and child owners are stopped/drained using their original
     /// authorities. No callback can reenter or retain this service. The caller
     /// continues the original epoch/context and mapping retirement obligations.
-    // Refusal must return this exact complete uncertain owner without a new
-    // allocation (which could itself fail after native/C effects).
-    #[allow(clippy::result_large_err)]
+    #[expect(
+        clippy::result_large_err,
+        reason = "refusal returns this owner without allocating, which could fail after native effects"
+    )]
     pub unsafe fn release(mut self) -> Result<Parts, Self> {
         if self.check_live().is_err() {
             return Err(self);

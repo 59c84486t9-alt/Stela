@@ -84,7 +84,6 @@ pub struct Refused {
 }
 
 impl Preparation {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         chip: Chip,
         admit: Arc<AdmitTable>,

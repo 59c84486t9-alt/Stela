@@ -3,6 +3,7 @@
 //! Adapted from pinned Linux intel/cnl.c, ipc3.c and info.h.
 //! Copyright(c) 2018, 2020 Intel Corporation
 use super::{Controller, Error, FirmwareReport, Mailboxes, Phase, Registers, registers::*};
+use super::{Deadline, Field};
 use crate::bus::i2c::Timer;
 
 pub(super) fn word(bytes: &[u8], offset: usize) -> Result<u32, Error> {
@@ -98,11 +99,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let notification = self.poll(
             Bar::Dsp,
             IPC_NOTIFY,
-            BUSY,
-            BUSY,
-            start,
-            3_000_000,
-            Phase::Firmware,
+            Field::new(BUSY, BUSY),
+            Deadline {
+                start,
+                timeout: 3_000_000,
+                phase: Phase::Firmware,
+            },
         )?;
         // IPC3 commands live in SRAM, not in the CNL doorbell. Only the
         // documented panic magic gives the lower doorbell bits meaning here.

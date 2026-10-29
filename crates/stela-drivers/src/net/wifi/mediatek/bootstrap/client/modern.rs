@@ -527,7 +527,9 @@ pub(super) mod tests {
     use crate::net::wifi::station::phy::{Mode, Width};
     use crate::net::wifi::{
         self,
-        mediatek::bootstrap::client::{Client, Error as ClientError, Event, Phase as ClientPhase},
+        mediatek::bootstrap::client::{
+            Client, Error as ClientError, Event, Msdu, Phase as ClientPhase, PmfJoin,
+        },
         scan,
         security::ReplaySeed,
         station::{self, Join, data::TxClass, wire::AssociationRequest},
@@ -746,9 +748,11 @@ pub(super) mod tests {
                     &mut authority,
                     stale,
                     epoch,
-                    &eth(0x0800),
-                    TxClass::Data,
-                    Some(6),
+                    Msdu {
+                        ethernet: &eth(0x0800),
+                        class: TxClass::Data,
+                        tid: Some(6),
+                    },
                     &GuardedSource(state.clone()),
                     &mut Policy(true),
                 )
@@ -763,9 +767,11 @@ pub(super) mod tests {
                 &mut authority,
                 permit,
                 epoch,
-                &eth(0x0800),
-                TxClass::Data,
-                Some(6),
+                Msdu {
+                    ethernet: &eth(0x0800),
+                    class: TxClass::Data,
+                    tid: Some(6),
+                },
                 &GuardedSource(state.clone()),
                 &mut Policy(true),
             )
@@ -897,9 +903,11 @@ pub(super) mod tests {
                     &mut self.authority,
                     permit,
                     epoch,
-                    &eth(0x0800),
-                    TxClass::Data,
-                    Some(6),
+                    Msdu {
+                        ethernet: &eth(0x0800),
+                        class: TxClass::Data,
+                        tid: Some(6),
+                    },
                     &GuardedSource(self.state.clone()),
                     &mut Policy(true),
                 )
@@ -914,9 +922,11 @@ pub(super) mod tests {
                     &mut self.authority,
                     permit,
                     epoch,
-                    &eth(0x0800),
-                    TxClass::Data,
-                    Some(6),
+                    Msdu {
+                        ethernet: &eth(0x0800),
+                        class: TxClass::Data,
+                        tid: Some(6),
+                    },
                     &GuardedSource(self.state.clone()),
                     &mut Policy(true),
                 )
@@ -1285,9 +1295,11 @@ pub(super) mod tests {
                     &mut authority,
                     permit,
                     epoch,
-                    &eth(0x0800),
-                    TxClass::Data,
-                    Some(6),
+                    Msdu {
+                        ethernet: &eth(0x0800),
+                        class: TxClass::Data,
+                        tid: Some(6),
+                    },
                     &GuardedSource(state.clone()),
                     &mut Policy(true),
                 )

@@ -62,7 +62,6 @@ pub struct Entry {
     /// Actual guest RAM after all fixed-offset runtime patches, not its input file.
     pub live_tree: live_tree::LiveTree,
     /// Verified immutable original input and exact selected manifest metadata.
-    #[allow(dead_code)] // Parent topology/owner adoption consumes this retained input.
     pub source: source::Intake,
     /// The AMCC CTRR-A region iBoot programs, `(base, bytes)`.
     pub read_only_region: Option<(u64, u64)>,

@@ -15,9 +15,11 @@ fn update_retains_outstanding_packet() {
             &mut owner,
             permit,
             epoch,
-            &eth(0x0800),
-            TxClass::Data,
-            Some(6),
+            Msdu {
+                ethernet: &eth(0x0800),
+                class: TxClass::Data,
+                tid: Some(6),
+            },
             &GuardedSource(state),
             &mut Policy(true),
         )

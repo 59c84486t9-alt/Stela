@@ -19,9 +19,11 @@ pub(crate) mod diagnostic;
 pub use stela_boot_core::ioapic;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod level_diagnostic;
-#[allow(dead_code)]
 pub mod madt;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the native clock, IRQ root and MMIO platform services have no production consumer until the native counter and deadline work (R9, D6) wires them"
+)]
 pub(crate) mod root;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod work_diagnostic;

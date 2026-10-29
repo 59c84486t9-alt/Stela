@@ -91,8 +91,6 @@ impl MemoryRegion {
 }
 
 #[derive(Debug)]
-// The freestanding mount does not create host mappings.
-#[cfg_attr(not(feature = "std"), allow(dead_code))]
 struct Allocation {
     shared_backing: Option<Arc<backing::MemoryBacking>>,
     storage: Arc<NativeStorage>,
@@ -104,7 +102,7 @@ struct Allocation {
     maximum_executable: bool,
     #[cfg_attr(
         not(host_memory),
-        allow(dead_code, reason = "only host-memory protection reads it")
+        expect(dead_code, reason = "only host-memory protection reads it")
     )]
     executable: bool,
     alias_tag: u8,

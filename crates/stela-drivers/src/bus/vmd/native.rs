@@ -40,7 +40,10 @@ impl NativeRegisters {
     /// casts. All access is process/deferred context; no callback or foreign
     /// config writer accesses the CFGBAR while a host/child borrow exists.
     /// No child BAR is reassigned without reserving its complete routed span.
-    #[allow(clippy::result_large_err)]
+    #[expect(
+        clippy::result_large_err,
+        reason = "refusal returns the caller's resources without allocating"
+    )]
     pub unsafe fn claim(mut resources: NativeResources) -> Result<Self, (Error, NativeResources)> {
         let valid = (|| {
             resources
@@ -110,16 +113,7 @@ impl NativeRegisters {
     }
     /// Actual stopped owners after Host::retire. Mappings still require their
     /// authority's acknowledged retire; dropping a Mapping quarantines it.
-    #[allow(clippy::type_complexity)]
-    pub fn into_parts(
-        self,
-    ) -> (
-        Function<OwnedConfig>,
-        [Resource; 3],
-        Mapping,
-        Option<Mapping>,
-        Option<crate::bus::pci::msix::MappedBar>,
-    ) {
+    pub fn into_parts(self) -> Parts {
         (
             self.function,
             self.bars,
@@ -129,6 +123,15 @@ impl NativeRegisters {
         )
     }
 }
+/// A retired host's function, BARs, CFGBAR and shadow mappings and MSI-X
+/// table, in that order.
+pub type Parts = (
+    Function<OwnedConfig>,
+    [Resource; 3],
+    Mapping,
+    Option<Mapping>,
+    Option<crate::bus::pci::msix::MappedBar>,
+);
 fn validate_mapping(mapping: &Mapping) -> Result<(), Error> {
     if mapping.attribute().map_err(|_| Error::Mapping)? != CacheAttribute::Uncached
         || mapping.protection().map_err(|_| Error::Mapping)? != Protection::ReadWrite

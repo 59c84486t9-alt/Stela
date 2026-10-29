@@ -271,9 +271,7 @@ pub(super) mod nibbles {
     pub(in super::super) fn available() -> bool {
         match SSSE3.load(Ordering::Relaxed) {
             UNKNOWN => {
-                #[allow(unused_unsafe)]
-                // SAFETY: CPUID leaf 1 exists on every x86-64 processor.
-                let present = unsafe { core::arch::x86_64::__cpuid(1) }.ecx & CPUID_SSSE3 != 0;
+                let present = core::arch::x86_64::__cpuid(1).ecx & CPUID_SSSE3 != 0;
                 SSSE3.store(if present { PRESENT } else { ABSENT }, Ordering::Relaxed);
                 present
             }

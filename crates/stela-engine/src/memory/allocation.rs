@@ -254,8 +254,10 @@ impl OwnedMemory {
 
 /// An unpublished mapping borrowing the same non-Send/Sync `OwnedMemory` owner.
 /// Initialization is private and serialized; it never grants host execute rights.
-// The freestanding mount does not create host mappings.
-#[cfg_attr(not(host_memory), allow(dead_code))]
+#[cfg_attr(
+    not(host_memory),
+    expect(dead_code, reason = "the freestanding mount creates no host mappings")
+)]
 pub struct PendingDataAllocation<'a> {
     owner: &'a mut OwnedMemory,
     storage: Option<Arc<NativeStorage>>,
@@ -481,8 +483,13 @@ impl PendingDataAllocation<'_> {
     }
 }
 
-// Uninhabited without std: the freestanding mount creates no host mappings.
-#[cfg_attr(not(host_memory), allow(dead_code))]
+#[cfg_attr(
+    not(host_memory),
+    expect(
+        dead_code,
+        reason = "uninhabited: the freestanding mount creates no host mappings"
+    )
+)]
 struct NewMapping {
     #[cfg(not(host_memory))]
     _unmounted: core::convert::Infallible,

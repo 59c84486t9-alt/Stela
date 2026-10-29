@@ -83,7 +83,10 @@ pub enum Kind {
     Notify,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+#[cfg_attr(
+    not(target_arch = "x86_64"),
+    expect(dead_code, reason = "only the x86-64 native work lanes use it")
+)]
 enum Lane {
     Foreground,
     General,
@@ -162,7 +165,10 @@ pub unsafe trait StackBacking: Send + Sync {
         Err(MemoryError::Unavailable)
     }
 }
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+#[cfg_attr(
+    not(target_arch = "x86_64"),
+    expect(dead_code, reason = "only the x86-64 native work lanes use it")
+)]
 pub struct Stack {
     backing: Box<dyn StackBacking>,
     bounds: Range<usize>,
@@ -196,7 +202,10 @@ impl Stack {
 }
 
 #[derive(Clone, Copy)]
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+#[cfg_attr(
+    not(target_arch = "x86_64"),
+    expect(dead_code, reason = "only the x86-64 native work lanes use it")
+)]
 struct Job {
     callback: Callback,
     context: usize,

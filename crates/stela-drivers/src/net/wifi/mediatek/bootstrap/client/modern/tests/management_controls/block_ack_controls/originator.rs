@@ -143,9 +143,11 @@ fn timeout_disables_before_guarded_delba() {
                 &mut owner,
                 permit,
                 epoch,
-                &eth(0x0800),
-                TxClass::Data,
-                Some(TID),
+                Msdu {
+                    ethernet: &eth(0x0800),
+                    class: TxClass::Data,
+                    tid: Some(TID),
+                },
                 &GuardedSource(state.clone()),
                 &mut Policy(true),
             )
@@ -186,9 +188,11 @@ fn timeout_disables_before_guarded_delba() {
             &mut owner,
             permit,
             epoch,
-            &eth(0x0800),
-            TxClass::Data,
-            Some(TID),
+            Msdu {
+                ethernet: &eth(0x0800),
+                class: TxClass::Data,
+                tid: Some(TID),
+            },
             &GuardedSource(state.clone()),
             &mut Policy(true),
         )

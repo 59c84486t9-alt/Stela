@@ -102,7 +102,10 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(deprecated)] // The independent std owner is specifically SipHash-2-4.
+    #[expect(
+        deprecated,
+        reason = "std's SipHasher is the independent SipHash-2-4 reference"
+    )]
     fn independent_std_hasher_compares_all_tails_blocks_and_long_lengths() {
         use std::hash::{Hasher, SipHasher};
         for (k0, k1) in [

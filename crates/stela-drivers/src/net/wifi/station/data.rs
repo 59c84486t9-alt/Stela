@@ -69,6 +69,14 @@ pub enum TxClass {
     ControlPortProtected(KeyIdentity),
 }
 
+/// The acknowledged association context whose WMM parameters a QoS MSDU
+/// uses, and the TID it is sent with.
+#[derive(Clone, Copy)]
+pub struct Qos<'a> {
+    pub context: &'a Arc<AssociationContext>,
+    pub tid: u8,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SequenceOwner {
     /// Preserve the shared host-prepared sequence in the vendor's MAC header/
@@ -496,17 +504,16 @@ impl Station {
     /// exact current acknowledged context supplies WMM; a copied capability or
     /// TID cannot bypass it. The TID is sent as given: `data_tid` chooses it
     /// as `ieee80211_select_queue` does. No BA/A-MSDU permission is implied.
-    #[allow(clippy::too_many_arguments)]
     pub fn prepare_qos_msdu_refs<K: BorrowMut<KeySlot>>(
         &mut self,
         epoch: u64,
         ethernet: &[u8],
         class: TxClass,
-        context: &Arc<AssociationContext>,
-        tid: u8,
+        qos: Qos<'_>,
         keys: &mut [K],
         policy: &mut impl RegulatoryPolicy,
     ) -> Result<TxPlan, Error> {
+        let Qos { context, tid } = qos;
         self.validate_association_context(context)
             .map_err(|_| Error::Stale)?;
         qos_access(context, tid)?;
