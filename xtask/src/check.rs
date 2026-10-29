@@ -21,7 +21,7 @@ pub const BOOT_TARGET: &str = "x86_64-unknown-uefi";
 pub const BOOT_TARGET_DIR: &str = "target/boot";
 /// `.cargo/config.toml`'s flags for [`BOOT_TARGET`]: the soft-float target
 /// takes the `aes` crate's software backend.
-const BOOT_RUSTFLAGS: &str = "--cfg aes_force_soft --cfg chacha20_backend=\"soft\"";
+const BOOT_RUSTFLAGS: &str = "--cfg aes_force_soft --cfg chacha20_backend=\"soft\" --cfg aes_backend=\"soft\" --cfg polyval_backend=\"soft\" --cfg poly1305_backend=\"soft\"";
 const BOOT: [&str; 2] = ["--manifest-path", BOOT_MANIFEST];
 /// The other hosts Stela ships for, with the packages Clippy checks there
 /// without linking: macOS compiles installer and native preparation tools,
@@ -54,6 +54,7 @@ pub fn run(fix: bool) -> Result<()> {
         uefi(["-p", "stela-soc-data", "--no-default-features"]),
         uefi(["-p", "stela-engine", "--no-default-features"]),
         uefi(["-p", "stela-runtime", "--no-default-features"]),
+        uefi(["-p", "stela-tls", "--no-default-features"]),
         uefi(BOOT),
         uefi([BOOT[0], BOOT[1], "--features", "diagnostics"]),
         // Native GPU hooks are optional while their larger vendor ports are

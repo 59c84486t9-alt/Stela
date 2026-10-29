@@ -15,6 +15,7 @@ members = [
     "crates/stela-soc-data",
     "crates/stela-engine",
     "crates/stela-runtime",
+    "crates/stela-tls",
     "xtask",
 ]
 # A plain `cargo build` builds the shipped crates and `stela-dev`, the
@@ -35,6 +36,7 @@ default-members = [
     "crates/stela-soc-data",
     "crates/stela-engine",
     "crates/stela-runtime",
+    "crates/stela-tls",
 ]
 # The UEFI application builds for its own target with aborting panics.
 exclude = ["crates/stela-boot", "third_party/smoltcp"]
@@ -65,6 +67,7 @@ stela-formats = { path = "crates/stela-formats" }
 stela-engine = { path = "crates/stela-engine" }
 stela-soc-data = { path = "crates/stela-soc-data" }
 stela-runtime = { path = "crates/stela-runtime" }
+stela-tls = { path = "crates/stela-tls" }
 stela-loader = { path = "crates/stela-loader" }
 stela-cli = { path = "crates/stela-cli" }
 

@@ -4,4 +4,4 @@ xtask = "run --quiet --locked --package xtask --"
 # The soft-float UEFI target cannot codegen the aes crate's AES-NI backend;
 # select its constant-time software backend there (see crates/stela-boot).
 [target.x86_64-unknown-uefi]
-rustflags = ["--cfg", "aes_force_soft", "--cfg", 'chacha20_backend="soft"']
+rustflags = ["--cfg", "aes_force_soft", "--cfg", 'chacha20_backend="soft"', "--cfg", 'aes_backend="soft"', "--cfg", 'polyval_backend="soft"', "--cfg", 'poly1305_backend="soft"']

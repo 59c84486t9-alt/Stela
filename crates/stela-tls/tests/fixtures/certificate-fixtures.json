@@ -1,0 +1,37 @@
+{
+  "generator": "Python cryptography independent OpenSSL backend",
+  "fixtures": {
+    "ec": {
+      "CA_validity": "2010-01-01..2050-01-01",
+      "leaf_validity": "2026-01-01..2027-01-01",
+      "SAN": [
+        "localhost",
+        "valid.test"
+      ],
+      "private_identity": "synthetic loopback fixture only; never product identity"
+    },
+    "rsa": {
+      "CA_validity": "2010-01-01..2050-01-01",
+      "leaf_validity": "2026-01-01..2027-01-01",
+      "SAN": [
+        "localhost",
+        "valid.test"
+      ],
+      "private_identity": "synthetic loopback fixture only; never product identity"
+    }
+  },
+  "files": {
+    "rsa-ca.pem": "a80b47ce06c79a61e15fc743febf9529bce2fd51ef4f2847b8830294e982acb6",
+    "rsa-leaf.der": "5d49e64ca2bee928772bda9a9372503bc2ac08dd0d4acbbaed2c63f2e2ccd2ac",
+    "rsa-leaf.pem": "28dc27c19800fc17e29d26f5d3e9727cba908db9391b2e30687f2e03589d116e",
+    "ec-key.pem": "8f76b005fc59b2f94f558acfc33d018bb5b7446ac8dcf751bb3ede844ae86ca2",
+    "ec-leaf.pem": "52a9b9dc77787c5a505e9a94b7a140f577b37aef2dcbfc3340d425bb661f3265",
+    "ec-ca.der": "b8398e294259046a600cda41028617341f9633c26c68c132edb3784347ca64e8",
+    "rsa-key.der": "df8b820e1cda3344bb7d466619f05fe55de5f8585c8fdf4869703be2db2894f3",
+    "ec-leaf.der": "9c84ad9de40dca5071528f4f04b5b39f9bb6d554140c04e1fcf9ff135730dbba",
+    "ec-ca.pem": "f1c58225babdaf1cbd2fea7024fe1514ef60b97f206f8d8eacc471a2c740f09d",
+    "rsa-ca.der": "a319e4ae29e7ff47c40f77ca04d1fb643b3a86459d8a84aac6df21715293e8cd",
+    "rsa-key.pem": "9a9bf4d65e39d6795880a02efdcef198d560f5fcb75cd61622f5c3a5fc298a2b",
+    "ec-key.der": "12440c0f58b17ca3c4e739a86d8ce8b23ca771f720cf11fc55f2c5f51794b06a"
+  }
+}

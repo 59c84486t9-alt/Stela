@@ -1,0 +1,96 @@
+{
+  "generator": "Python cryptography independent OpenSSL backend; discarded keys",
+  "message": "message.bin",
+  "cases": [
+    {
+      "public": "rsa.pub",
+      "kind": 1,
+      "hash_bits": 256,
+      "signature": "rsa-1-256.sig"
+    },
+    {
+      "public": "rsa.pub",
+      "kind": 2,
+      "hash_bits": 256,
+      "signature": "rsa-2-256.sig"
+    },
+    {
+      "public": "rsa.pub",
+      "kind": 1,
+      "hash_bits": 384,
+      "signature": "rsa-1-384.sig"
+    },
+    {
+      "public": "rsa.pub",
+      "kind": 2,
+      "hash_bits": 384,
+      "signature": "rsa-2-384.sig"
+    },
+    {
+      "public": "rsa.pub",
+      "kind": 1,
+      "hash_bits": 512,
+      "signature": "rsa-1-512.sig"
+    },
+    {
+      "public": "rsa.pub",
+      "kind": 2,
+      "hash_bits": 512,
+      "signature": "rsa-2-512.sig"
+    },
+    {
+      "public": "p256.pub",
+      "kind": 3,
+      "hash_bits": 256,
+      "signature": "p256-3-256.sig"
+    },
+    {
+      "public": "p256.pub",
+      "kind": 3,
+      "hash_bits": 384,
+      "signature": "p256-3-384.sig"
+    },
+    {
+      "public": "p256.pub",
+      "kind": 3,
+      "hash_bits": 512,
+      "signature": "p256-3-512.sig"
+    },
+    {
+      "public": "p384.pub",
+      "kind": 4,
+      "hash_bits": 256,
+      "signature": "p384-4-256.sig"
+    },
+    {
+      "public": "p384.pub",
+      "kind": 4,
+      "hash_bits": 384,
+      "signature": "p384-4-384.sig"
+    },
+    {
+      "public": "p384.pub",
+      "kind": 4,
+      "hash_bits": 512,
+      "signature": "p384-4-512.sig"
+    }
+  ],
+  "hashes": {
+    "p256-3-256.sig": "9bcb45cce49ac15edca2aafc518ad48ad45dd1b56f54a2d3b8f3c75977e77fb1",
+    "p384.pub": "23eba5e6e3a4804e03ac3f1abae37d4494bbaca4ccd89a7ccbfcf2223b11879a",
+    "rsa-2-384.sig": "a54fc812d0cbef57e07da4f2f7957db4eb364f412eb60b95b9001a2e6b242eef",
+    "p256-3-512.sig": "3ebc3669f2ae43be94d6862f9d0f717b502158949c65937400aabc47332d3a94",
+    "p384-4-384.sig": "a77287c2e29716f97ead6e516fb37c3784ca032f885062c2d6ff593028dbb59d",
+    "p384-4-256.sig": "c57d27c2e13a54304100d0e93105f027bc75ee7e61ef348c032913e70748f3d4",
+    "p384-4-512.sig": "8baa52b13cd82bf38dd8a6d6aa79916a29b138bf6ea242b72d7856c7020a130f",
+    "rsa-2-256.sig": "c245a91dab47f4e53797e354b4bd1270d4ca0b8ca017d4b835ef86323f558764",
+    "rsa-1-512.sig": "0c274b0482bc28cc83bc5ad247826301ff1d33256ce91b6419ab3c26b105a0f3",
+    "rsa-1-384.sig": "ea188538629bcfdacaaacbd3905c08d2e3f8dd08e1a9fc064a987b989b48f063",
+    "p256-3-384.sig": "d91025281826f40855248186917618776d9a13d45239f712abb8906055f37009",
+    "rsa-2-512.sig": "4bc74333bf18e133c8a263dd7853ba0dd09bfb236a1ab4e8f1e4d0d87e13829c",
+    "rsa.pub": "d48842cb7cccbabda753bd4d8b0d2107322ab08dfc553021a7fdbb0e66a04579",
+    "message.bin": "d7643fa6b2a054a2d1d04bcfe5e6ec3c684ee8e586b8d7fd2b5defeb1bf861eb",
+    "p256.pub": "79dfe836f39a4f559e834c600ff45bd06d67e9adf662f982290d76c2e8fb3405",
+    "rsa-1-256.sig": "5933ea8745013690cd6ffa6231a01f9c7b6e0c2f2438c49b4e4538c0e55014d6"
+  }
+}

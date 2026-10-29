@@ -4821,5 +4821,15 @@
     "kind": "manual",
     "inputs": [],
     "reason": "Actual supported GFNI hardware timing of complete compiled SM4 leaves versus constant-work SSE2 baseline; isolated pinned execution on request."
+  },
+  {
+    "package": "stela-tls",
+    "test": "independent_openssl_protocol_peer_accepts_every_suite_and_key_exchange",
+    "source": "crates/stela-tls/src/backend/tests/channel.rs",
+    "kind": "oracle",
+    "inputs": [
+      "STELA_TEST_OPENSSL_PYTHON"
+    ],
+    "reason": "Requires an explicit Python3 executable with OpenSSL-backed ssl, local loopback TCP sockets, TLS1.2/TLS1.3 and X25519/P256 support; runs all9standard client suites with generated generic fixture identities."
   }
 ]
