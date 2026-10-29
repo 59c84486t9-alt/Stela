@@ -1,5 +1,6 @@
 //! Gregorian and UEFI timezone normalization of firmware-reported calendar data.
 use core::fmt;
+pub mod interval;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Raw UEFI calendar fields. These copied values confer no source authority.
