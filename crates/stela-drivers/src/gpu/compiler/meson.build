@@ -315,6 +315,16 @@ if stela_air_llvm != ''
     build_rpath : fs.parent(stela_air_llvm),
   )
   test('stela_air_memory', stela_air_memory_test, suite : 'stela')
+  stela_air_argument_buffer_test = executable(
+    'stela_air_argument_buffer_test',
+    'tests/air_argument_buffer.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : stela_air_test_dependencies,
+    link_with : [stela_metal_abi, stela_air_test_links],
+    c_args : stela_air_test_args,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_argument_buffer', stela_air_argument_buffer_test, suite : 'stela')
   if with_nvidia
     stela_nvidia_air_render_test = executable(
       'stela_nvidia_air_render_test',

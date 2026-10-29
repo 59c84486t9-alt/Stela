@@ -13,9 +13,10 @@ struct stela_air_texture_context {
    void *translator;
    /* An operand's NIR value, or NULL after reporting why. */
    nir_def *(*operand)(void *translator, LLVMValueRef value);
-   /* The texture or sampler argument an operand names, or NULL. */
-   const struct stela_air_texture *(*texture)(void *translator, LLVMValueRef value);
-   const struct stela_air_sampler *(*sampler)(void *translator, LLVMValueRef value);
+   /* The texture or sampler an operand names, or NULL; *id is its
+    * MTLResourceID when an argument buffer holds it, otherwise NULL. */
+   const struct stela_air_texture *(*texture)(void *translator, LLVMValueRef value, nir_def **id);
+   const struct stela_air_sampler *(*sampler)(void *translator, LLVMValueRef value, nir_def **id);
    /* Loads or stores the 32-bit word a read-write pointer operand addresses;
     * NULL or false after reporting why. */
    nir_def *(*load_word)(void *translator, LLVMValueRef pointer);

@@ -79,6 +79,7 @@ struct call {
    nir_builder *b;
    LLVMValueRef inst;
    const struct stela_air_texture *texture;
+   nir_def *texture_id; /* An argument buffer's texture's ID, or NULL. */
    const struct shape *shape;
    unsigned next, count;
    bool coherent;
@@ -302,8 +303,11 @@ texture_deref(const struct call *call)
 {
    const struct stela_air_options *options = call->c->options;
    const struct glsl_type *type = descriptor_type(call->texture);
-   nir_deref_instr *deref = options->bind_texture ?
-      options->bind_texture(call->b, call->texture, type, options->binding_data) : NULL;
+   nir_deref_instr *deref = NULL;
+   if (call->texture_id && options->bind_texture_id)
+      deref = options->bind_texture_id(call->b, call->texture_id, type, options->binding_data);
+   else if (!call->texture_id && options->bind_texture)
+      deref = options->bind_texture(call->b, call->texture, type, options->binding_data);
    if (!deref || deref->type != type) {
       fail(call, "texture %u is unbound or bound to another type", call->texture->index);
       return NULL;
@@ -317,15 +321,19 @@ sampler_deref(struct call *call)
    LLVMValueRef value = take(call);
    if (!value)
       return NULL;
-   const struct stela_air_sampler *sampler = call->c->sampler(call->c->translator, value);
+   nir_def *id;
+   const struct stela_air_sampler *sampler = call->c->sampler(call->c->translator, value, &id);
    if (!sampler) {
-      fail(call, "texture call samples with a value that is not a sampler argument");
+      fail(call, "texture call samples with a value that is not a sampler");
       return NULL;
    }
    const struct stela_air_options *options = call->c->options;
-   nir_deref_instr *deref = options->bind_sampler ?
-      options->bind_sampler(call->b, sampler, integer_texels(call->texture), options->binding_data) :
-      NULL;
+   bool integer = integer_texels(call->texture);
+   nir_deref_instr *deref = NULL;
+   if (id && options->bind_sampler_id)
+      deref = options->bind_sampler_id(call->b, id, integer, options->binding_data);
+   else if (!id && options->bind_sampler)
+      deref = options->bind_sampler(call->b, sampler, integer, options->binding_data);
    if (!deref || deref->type != glsl_bare_sampler_type()) {
       fail(call, "sampler %u is unbound", sampler->index);
       return NULL;
@@ -858,12 +866,13 @@ stela_air_texture_call(const struct stela_air_texture_context *context, LLVMValu
    *pair = false;
    if (!LLVMGetNumArgOperands(inst))
       return STELA_AIR_TEXTURE_OTHER;
+   nir_def *texture_id;
    const struct stela_air_texture *texture =
-      context->texture(context->translator, LLVMGetOperand(inst, 0));
+      context->texture(context->translator, LLVMGetOperand(inst, 0), &texture_id);
    if (!texture)
       return STELA_AIR_TEXTURE_OTHER;
    struct call call = {
-      .c = context, .b = context->b, .inst = inst, .texture = texture,
+      .c = context, .b = context->b, .inst = inst, .texture = texture, .texture_id = texture_id,
       .shape = &shapes[texture->type], .next = 1, .count = LLVMGetNumArgOperands(inst),
    };
    LLVMValueRef callee = LLVMGetCalledValue(inst);

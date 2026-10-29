@@ -67,16 +67,40 @@ static nir_variable *heap(nir_shader *shader, enum stela_metal_heap_array array,
    return var;
 }
 
-/* The heap element of the resource ID at offset in the stage's table. */
-static nir_deref_instr *heap_element(nir_builder *b, const struct stela_metal_stage *stage,
-                                     unsigned offset, bool high,
+/* The heap element a half of the resource ID id names. */
+static nir_deref_instr *heap_element(nir_builder *b, nir_def *id, bool high,
                                      enum stela_metal_heap_array array,
                                      const struct glsl_type *type, nir_variable_mode mode)
 {
-   nir_def *id = load(b, stela_metal_load_table(b, stage->table), offset, 64);
    nir_def *index = high ? nir_unpack_64_2x32_split_y(b, id) : nir_unpack_64_2x32_split_x(b, id);
    return nir_build_deref_array(b, nir_build_deref_var(b, heap(b->shader, array, type, mode)),
                                 index);
+}
+
+/* The resource ID at offset in the stage's table. */
+static nir_def *table_id(nir_builder *b, const struct stela_metal_stage *stage, unsigned offset)
+{
+   return load(b, stela_metal_load_table(b, stage->table), offset, 64);
+}
+
+nir_deref_instr *stela_metal_bind_texture_id(nir_builder *b, nir_def *id,
+                                             const struct glsl_type *type, void *stage)
+{
+   (void)stage;
+   bool image = glsl_type_is_image(type);
+   bool buffer = glsl_get_sampler_dim(type) == GLSL_SAMPLER_DIM_BUF;
+   enum stela_metal_heap_array array =
+      image ? (buffer ? STELA_METAL_HEAP_STORAGE_TEXEL_BUFFERS : STELA_METAL_HEAP_STORAGE_IMAGES)
+            : (buffer ? STELA_METAL_HEAP_UNIFORM_TEXEL_BUFFERS : STELA_METAL_HEAP_SAMPLED_IMAGES);
+   return heap_element(b, id, image, array, type, image ? nir_var_image : nir_var_uniform);
+}
+
+nir_deref_instr *stela_metal_bind_sampler_id(nir_builder *b, nir_def *id, bool integer,
+                                             void *stage)
+{
+   (void)stage;
+   return heap_element(b, id, integer, STELA_METAL_HEAP_SAMPLERS, glsl_bare_sampler_type(),
+                       nir_var_uniform);
 }
 
 nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air_texture *texture,
@@ -84,13 +108,8 @@ nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air
 {
    if (texture->index >= STELA_METAL_TEXTURES)
       return NULL;
-   bool image = glsl_type_is_image(type);
-   bool buffer = glsl_get_sampler_dim(type) == GLSL_SAMPLER_DIM_BUF;
-   enum stela_metal_heap_array array =
-      image ? (buffer ? STELA_METAL_HEAP_STORAGE_TEXEL_BUFFERS : STELA_METAL_HEAP_STORAGE_IMAGES)
-            : (buffer ? STELA_METAL_HEAP_UNIFORM_TEXEL_BUFFERS : STELA_METAL_HEAP_SAMPLED_IMAGES);
-   return heap_element(b, stage, STELA_METAL_TABLE_TEXTURES + 8u * texture->index, image, array,
-                       type, image ? nir_var_image : nir_var_uniform);
+   return stela_metal_bind_texture_id(
+      b, table_id(b, stage, STELA_METAL_TABLE_TEXTURES + 8u * texture->index), type, stage);
 }
 
 nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air_sampler *sampler,
@@ -98,8 +117,8 @@ nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air
 {
    if (sampler->index >= STELA_METAL_SAMPLERS)
       return NULL;
-   return heap_element(b, stage, STELA_METAL_TABLE_SAMPLERS + 8u * sampler->index, integer,
-                       STELA_METAL_HEAP_SAMPLERS, glsl_bare_sampler_type(), nir_var_uniform);
+   return stela_metal_bind_sampler_id(
+      b, table_id(b, stage, STELA_METAL_TABLE_SAMPLERS + 8u * sampler->index), integer, stage);
 }
 
 /* A compute kernel's builder with its arguments address and thread index,

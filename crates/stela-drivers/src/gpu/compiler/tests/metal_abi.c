@@ -113,6 +113,28 @@ static void textures_and_samplers_index_the_heap(void)
    ralloc_free(b.shader);
 }
 
+/* An argument buffer's IDs take the same halves of the same arrays. */
+static void loaded_ids_index_the_heap(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL, "heap ids");
+   const struct glsl_type *sampled = glsl_texture_type(GLSL_SAMPLER_DIM_2D, false, GLSL_TYPE_FLOAT);
+   const struct glsl_type *storage = glsl_image_type(GLSL_SAMPLER_DIM_3D, false, GLSL_TYPE_INT);
+   nir_def *id = nir_imm_int64(&b, 0x0000000700000005ull);
+
+   nir_deref_instr *deref = stela_metal_bind_texture_id(&b, id, sampled, NULL);
+   check_heap(deref, STELA_METAL_HEAP_SAMPLED_IMAGES, nir_var_uniform, sampled);
+   assert(nir_def_as_alu(deref->arr.index.ssa)->op == nir_op_unpack_64_2x32_split_x);
+   deref = stela_metal_bind_texture_id(&b, id, storage, NULL);
+   check_heap(deref, STELA_METAL_HEAP_STORAGE_IMAGES, nir_var_image, storage);
+   assert(nir_def_as_alu(deref->arr.index.ssa)->op == nir_op_unpack_64_2x32_split_y);
+
+   deref = stela_metal_bind_sampler_id(&b, id, true, NULL);
+   check_heap(deref, STELA_METAL_HEAP_SAMPLERS, nir_var_uniform, glsl_bare_sampler_type());
+   assert(nir_def_as_alu(deref->arr.index.ssa)->op == nir_op_unpack_64_2x32_split_y);
+   assert(nir_def_as_alu(deref->arr.index.ssa)->src[0].src.ssa == id);
+   ralloc_free(b.shader);
+}
+
 struct census {
    unsigned push_constants, loads, stores, loops;
    unsigned push_base;
@@ -309,6 +331,7 @@ int main(void)
    glsl_type_singleton_init_or_ref();
    buffers_load_their_table_slot();
    textures_and_samplers_index_the_heap();
+   loaded_ids_index_the_heap();
    accumulate_sums_each_run_in_a_loop();
    select_flags_each_command();
    tessellation_factors_follow_metal_rules();

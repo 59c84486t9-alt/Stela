@@ -98,6 +98,13 @@ nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air
 nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air_sampler *sampler,
                                           bool integer, void *stage);
 
+/* stela_air_bind_texture_id and stela_air_bind_sampler_id: the heap element
+ * a loaded MTLResourceID names, as for an argument table's. */
+nir_deref_instr *stela_metal_bind_texture_id(nir_builder *b, nir_def *id,
+                                             const struct glsl_type *type, void *stage);
+nir_deref_instr *stela_metal_bind_sampler_id(nir_builder *b, nir_def *id, bool integer,
+                                             void *stage);
+
 /* The device's internal kernels, entry point "main", in workgroups of
  * STELA_METAL_KERNEL_WORKGROUP threads. Options may be NULL: the Vulkan
  * driver supplies its own when it compiles them. The caller frees the shader

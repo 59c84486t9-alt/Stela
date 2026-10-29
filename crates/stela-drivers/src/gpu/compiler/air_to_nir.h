@@ -46,6 +46,15 @@ typedef nir_deref_instr *(*stela_air_bind_sampler)(nir_builder *b,
                                                    const struct stela_air_sampler *sampler,
                                                    bool integer, void *data);
 
+/* Resolve a texture or sampler whose 64-bit MTLResourceID an argument buffer
+ * holds, as bind_texture and bind_sampler do: id is that loaded identifier.
+ * The identifier is the application's; an invalid one is undefined, as in
+ * Metal. */
+typedef nir_deref_instr *(*stela_air_bind_texture_id)(nir_builder *b, nir_def *id,
+                                                      const struct glsl_type *type, void *data);
+typedef nir_deref_instr *(*stela_air_bind_sampler_id)(nir_builder *b, nir_def *id, bool integer,
+                                                      void *data);
+
 struct stela_air_threadgroup_view {
    uint64_t size; /* Exact nonempty per-dispatch byte extent, not type_size. */
    unsigned alignment;
@@ -132,6 +141,10 @@ struct stela_air_options {
    /* Texture and sampler arguments; zero refuses them. */
    stela_air_bind_texture bind_texture;
    stela_air_bind_sampler bind_sampler;
+   /* Textures and samplers in argument buffers; zero refuses them. Argument
+    * buffers hold device addresses, so they require bind_buffer. */
+   stela_air_bind_texture_id bind_texture_id;
+   stela_air_bind_sampler_id bind_sampler_id;
    /* Device values; NULL refuses the builtins that read them. With it,
     * kernel threads outside a dispatchThreads grid return before the
     * function runs, as Metal's smaller edge threadgroups never run them. */

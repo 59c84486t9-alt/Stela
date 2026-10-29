@@ -744,6 +744,178 @@ stage_varying(enum stela_air_primitive p)
    return p != STELA_AIR_PRIMITIVE_UNKNOWN && p != STELA_AIR_LONG && p != STELA_AIR_ULONG;
 }
 
+static bool argument_fields(struct stela_air_metadata *m, struct stela_air_kernel *kernel,
+                            LLVMValueRef node, unsigned extent, unsigned argument,
+                            unsigned depth, struct stela_air_fields *fields);
+
+/* Whether key is an access key, whose texture or buffer access *access
+ * receives. */
+static bool
+field_access(LLVMValueRef key, bool texture, unsigned *access)
+{
+   if (texture && stela_air_md_string(key, "air.sample"))
+      *access = STELA_AIR_TEXTURE_SAMPLE;
+   else if (stela_air_md_string(key, "air.read"))
+      *access = texture ? STELA_AIR_TEXTURE_READ : STELA_AIR_READ;
+   else if (stela_air_md_string(key, "air.write"))
+      *access = texture ? STELA_AIR_TEXTURE_WRITE : STELA_AIR_WRITE;
+   else if (stela_air_md_string(key, "air.read_write"))
+      *access = texture ? STELA_AIR_TEXTURE_READ_WRITE : STELA_AIR_READ_WRITE;
+   else
+      return false;
+   return true;
+}
+
+/* One field's argument tuple: its position, its kind and its keyed
+ * reflection, as a top-level argument of that kind spells it. */
+static bool
+argument_field(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LLVMValueRef node,
+               unsigned argument, unsigned depth, struct stela_air_field *field)
+{
+   static const struct {
+      const char *name;
+      enum stela_air_field_kind kind;
+   } kinds[] = {
+      {"air.indirect_constant", STELA_AIR_FIELD_DATA},
+      {"air.buffer", STELA_AIR_FIELD_BUFFER},
+      {"air.indirect_buffer", STELA_AIR_FIELD_ARGUMENTS},
+      {"air.texture", STELA_AIR_FIELD_TEXTURE},
+      {"air.sampler", STELA_AIR_FIELD_SAMPLER},
+   };
+   LLVMValueRef operands[AIR_MAX_METADATA_OPERANDS];
+   unsigned count, position, k = 0;
+   if (!stela_air_md_node(m, node, operands, &count) || count < 2 ||
+       !stela_air_md_uint(operands[0], &position))
+      return fail(m, STELA_AIR_METADATA, "invalid argument buffer field");
+   while (k < ARRAY_SIZE(kinds) && !stela_air_md_string(operands[1], kinds[k].name))
+      k++;
+   if (k == ARRAY_SIZE(kinds))
+      return fail(m, STELA_AIR_ARGUMENT, "unsupported argument buffer field kind");
+   field->kind = kinds[k].kind;
+   bool texture = field->kind == STELA_AIR_FIELD_TEXTURE;
+   bool buffer = field->kind == STELA_AIR_FIELD_BUFFER || field->kind == STELA_AIR_FIELD_ARGUMENTS;
+   bool has_location = false, has_access = false, has_space = false, has_size = false;
+   unsigned index = 0, access = 0, keyed, buffer_size = 0;
+   const char *type_name = NULL;
+   unsigned type_name_bytes = 0;
+   LLVMValueRef info = NULL;
+   for (unsigned f = 2; f < count;) {
+      LLVMValueRef key = operands[f++];
+      unsigned *number = stela_air_md_string(key, "air.address_space") ? &field->buffer.address_space :
+                         stela_air_md_string(key, "air.buffer_size") ? &buffer_size :
+                         stela_air_md_string(key, "air.arg_type_size") ? &field->buffer.type_size :
+                         stela_air_md_string(key, "air.arg_type_align_size") ?
+                            &field->buffer.type_alignment : NULL;
+      if (stela_air_md_string(key, "air.location_index")) {
+         if (has_location || f + 2 > count || !stela_air_md_uint(operands[f], &index) ||
+             !stela_air_md_uint(operands[f + 1], &field->count) || !field->count)
+            return fail(m, STELA_AIR_METADATA, "invalid argument buffer field location");
+         has_location = true;
+         f += 2;
+      } else if (field_access(key, texture, &keyed)) {
+         if (has_access || (!buffer && !texture))
+            return fail(m, STELA_AIR_METADATA, "duplicate/inapplicable argument buffer field access");
+         access = keyed;
+         has_access = true;
+      } else if (number) {
+         if (!buffer || f == count || !stela_air_md_uint(operands[f++], number))
+            return fail(m, STELA_AIR_METADATA, "invalid argument buffer field size or space");
+         has_space |= number == &field->buffer.address_space;
+         has_size |= number == &buffer_size;
+      } else if (stela_air_md_string(key, "air.struct_type_info")) {
+         if (field->kind != STELA_AIR_FIELD_ARGUMENTS || info || f == count)
+            return fail(m, STELA_AIR_METADATA, "invalid argument buffer field structure");
+         info = operands[f++];
+      } else if (stela_air_md_string(key, "air.arg_type_name") ||
+                 stela_air_md_string(key, "air.arg_name")) {
+         if (f == count || !operands[f] || !LLVMIsAMDString(operands[f]))
+            return fail(m, STELA_AIR_METADATA, "invalid argument buffer field name");
+         if (stela_air_md_string(key, "air.arg_type_name"))
+            type_name = LLVMGetMDString(operands[f], &type_name_bytes);
+         f++;
+      } else {
+         return fail(m, STELA_AIR_METADATA, "unsupported argument buffer field metadata");
+      }
+   }
+   if (!has_location)
+      return fail(m, STELA_AIR_METADATA, "argument buffer field lacks a location");
+   switch (field->kind) {
+   case STELA_AIR_FIELD_DATA:
+      return true;
+   case STELA_AIR_FIELD_TEXTURE:
+      field->texture = (struct stela_air_texture){.argument = argument, .index = index,
+                                                  .access = access};
+      return (has_access && type_name && texture_type(type_name, type_name_bytes, &field->texture)) ||
+         fail(m, STELA_AIR_ARGUMENT, "unsupported argument buffer texture");
+   case STELA_AIR_FIELD_SAMPLER:
+      field->sampler = (struct stela_air_sampler){.argument = argument, .index = index};
+      return (type_name && type_name_bytes == strlen("sampler") &&
+              !memcmp(type_name, "sampler", type_name_bytes)) ||
+         fail(m, STELA_AIR_ARGUMENT, "unsupported argument buffer sampler");
+   case STELA_AIR_FIELD_BUFFER:
+   case STELA_AIR_FIELD_ARGUMENTS:
+      break;
+   }
+   struct stela_air_buffer *desc = &field->buffer;
+   desc->argument = argument;
+   desc->index = index;
+   desc->access = access;
+   if (!has_access || !has_space || desc->address_space < 1 || desc->address_space > 2 ||
+       (desc->address_space == 2 && access != STELA_AIR_READ) ||
+       (desc->type_alignment & (desc->type_alignment - 1)))
+      return fail(m, STELA_AIR_ARGUMENT, "unsupported buffer in an argument buffer");
+   if (field->kind == STELA_AIR_FIELD_BUFFER)
+      return true;
+   if (!info || !desc->type_size || (has_size && buffer_size != desc->type_size))
+      return fail(m, STELA_AIR_ARGUMENT, "unsupported nested argument buffer");
+   return argument_fields(m, kernel, info, desc->type_size, argument, depth + 1, &field->arguments);
+}
+
+/* An argument buffer's air.struct_type_info: per field its offset, byte size,
+ * element count (zero for one), type name, name, "air.indirect_argument" and
+ * argument tuple, in increasing offsets within extent bytes. */
+static bool
+argument_fields(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LLVMValueRef node,
+                unsigned extent, unsigned argument, unsigned depth, struct stela_air_fields *fields)
+{
+   enum { MEMBER = 7 };
+   LLVMValueRef operands[AIR_MAX_METADATA_OPERANDS];
+   unsigned count;
+   if (depth >= AIR_MAX_ARGUMENT_BUFFER_DEPTH)
+      return fail(m, STELA_AIR_LIMIT, "argument buffer nesting exceeded");
+   if (!stela_air_md_node(m, node, operands, &count) || !count || count % MEMBER)
+      return fail(m, STELA_AIR_METADATA, "invalid argument buffer structure");
+   if (count / MEMBER > AIR_MAX_FIELDS - kernel->field_count)
+      return fail(m, STELA_AIR_LIMIT, "argument buffer field budget exceeded");
+   /* Reserve this level's range before nested levels take theirs. */
+   *fields = (struct stela_air_fields){kernel->field_count, count / MEMBER};
+   kernel->field_count += fields->count;
+   unsigned end = 0;
+   for (unsigned i = 0; i < fields->count; i++) {
+      const LLVMValueRef *member = &operands[i * MEMBER];
+      struct stela_air_field *field = &kernel->fields[fields->first + i];
+      *field = (struct stela_air_field){0};
+      unsigned offset, size, elements;
+      if (!stela_air_md_uint(member[0], &offset) || !stela_air_md_uint(member[1], &size) ||
+          !stela_air_md_uint(member[2], &elements) || !member[3] || !LLVMIsAMDString(member[3]) ||
+          !member[4] || !LLVMIsAMDString(member[4]) ||
+          !stela_air_md_string(member[5], "air.indirect_argument"))
+         return fail(m, STELA_AIR_METADATA, "invalid argument buffer member");
+      if (!argument_field(m, kernel, member[6], argument, depth, field))
+         return false;
+      field->offset = offset;
+      field->size = size;
+      if (elements && elements != field->count)
+         return fail(m, STELA_AIR_METADATA, "argument buffer member and location counts differ");
+      if (!size || size % field->count || offset < end || offset > extent || size > extent - offset)
+         return fail(m, STELA_AIR_TYPE, "argument buffer members overlap or exceed the buffer");
+      if (field->kind != STELA_AIR_FIELD_DATA && (offset % 8 || size / field->count != 8))
+         return fail(m, STELA_AIR_TYPE, "argument buffer addresses and IDs are aligned 8-byte values");
+      end = offset + size;
+   }
+   return true;
+}
+
 static bool
 metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef args_node,
                    struct stela_air_kernel *kernel, struct stela_air_render *render)
@@ -762,6 +934,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
    bool sampler_indices[AIR_MAX_SAMPLERS] = {false};
    bool builtins[STELA_AIR_BUILTIN_COUNT] = {false};
    bool attribute_locations[AIR_MAX_VERTEX_ATTRIBUTES] = {false};
+   kernel->field_count = 0;
    for (unsigned a = 0; a < argc; a++) {
       LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
       unsigned fields_count, index;
@@ -788,7 +961,8 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
                return fail(t, STELA_AIR_ARGUMENT, "unsupported parameter ABI attribute: %s", abi_attributes[k]);
          }
       }
-      bool buffer = stela_air_md_string(fields[1], "air.buffer");
+      bool indirect = stela_air_md_string(fields[1], "air.indirect_buffer");
+      bool buffer = indirect || stela_air_md_string(fields[1], "air.buffer");
       unsigned lanes = 0;
       enum stela_air_builtin builtin = builtin_input(fields[1], render, &lanes);
       bool position = render && render->entry.stage == STELA_AIR_FRAGMENT &&
@@ -825,7 +999,9 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       bool unused = false;
       LLVMValueRef struct_info = NULL;
       bool has_location = false, has_as = false, has_size = false, has_align = false;
-      bool has_name = false, has_type_name = false;
+      bool has_name = false, has_type_name = false, has_buffer_size = false;
+      unsigned buffer_size = 0;
+      struct stela_air_fields argument_buffer = {0};
       enum stela_air_primitive primitive = STELA_AIR_PRIMITIVE_UNKNOWN;
       unsigned type_components = 0;
       const char *name = NULL, *type_name = NULL;
@@ -889,7 +1065,11 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             }
             f++;
             *present = true;
-         } else if (io && stela_air_md_string(key, "air.struct_type_info")) {
+         } else if (indirect && stela_air_md_string(key, "air.buffer_size")) {
+            if (has_buffer_size || f == fields_count || !stela_air_md_uint(fields[f++], &buffer_size))
+               return fail(t, STELA_AIR_METADATA, "invalid argument buffer size");
+            has_buffer_size = true;
+         } else if ((io || indirect) && stela_air_md_string(key, "air.struct_type_info")) {
             if (!buffer || struct_info || f == fields_count)
                return fail(t, STELA_AIR_METADATA, "invalid structure reflection");
             struct_info = fields[f++];
@@ -948,8 +1128,14 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          if (indices[desc.index] || (limit && desc.index >= limit))
             return fail(t, STELA_AIR_METADATA, "duplicate buffer or location exceeds AIR module limit");
          indices[desc.index] = true;
-         if (render && desc.address_space == 2 && (!has_size || !has_align ||
-                                                   !desc.type_size || !desc.type_alignment))
+         if (indirect && (shared || !struct_info || !desc.type_size ||
+                          (has_buffer_size && buffer_size != desc.type_size)))
+            return fail(t, STELA_AIR_ARGUMENT, "unsupported argument buffer %u", index);
+         if (indirect && !argument_fields(t, kernel, struct_info, desc.type_size, index, 0,
+                                          &argument_buffer))
+            return false;
+         if (render && !indirect && desc.address_space == 2 &&
+             (!has_size || !has_align || !desc.type_size || !desc.type_alignment))
             return fail(t, STELA_AIR_ARGUMENT, "render constant view must be reflected and readonly");
          if (shared && (!has_size || !has_align || !desc.type_size || !desc.type_alignment))
             return fail(t, STELA_AIR_ARGUMENT, "invalid/unbound threadgroup buffer %u", index);
@@ -992,11 +1178,12 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          io->used = LLVMGetFirstUse(param) != NULL;
          if (unused && io->used)
             return fail(t, STELA_AIR_METADATA, "used fragment input marked unused");
-         if (buffer && desc.address_space == 2 && !stage_struct(t, render, io, struct_info))
+         if (buffer && !indirect && desc.address_space == 2 && !stage_struct(t, render, io, struct_info))
             return false;
       }
       kernel->arguments[a] = (struct stela_air_argument) {
          .value = param, .buffer = desc, .is_buffer = buffer, .components = components,
+         .is_argument_buffer = indirect, .fields = argument_buffer,
          .texture = texture_desc, .sampler = sampler_desc, .is_texture = texture, .is_sampler = sampler,
          .builtin = builtin,
          .plain_buffer_type = primitive != STELA_AIR_PRIMITIVE_UNKNOWN,

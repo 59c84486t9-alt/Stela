@@ -37,14 +37,23 @@ struct value {
    unsigned storage_size, constant_base;
    const struct stela_air_stage_io *constant_view; /* Borrowed only during translation. */
    bool view_root;
+   /* A pointer into an argument buffer: the buffer's fields, the constant
+    * part of the pointer's offset and the greatest common divisor of the
+    * steps its dynamic indices add (zero without one). PHIs lose the
+    * offset. */
+   struct stela_air_fields fields;
+   bool offset_known;
+   uint64_t offset, steps;
    /* Partial render values have no vector def until every lane is defined.
     * Missing lanes are tracked symbolically, never replaced with zero/undef. */
    nir_def *lanes[4];
    unsigned components, bits, aggregate_count;
    struct value **elements;
-   /* Texture and sampler arguments, used only as texture call operands. */
+   /* Texture and sampler arguments, used only as texture call operands, and
+    * the MTLResourceID of one an argument buffer holds. */
    const struct stela_air_texture *texture;
    const struct stela_air_sampler *sampler;
+   nir_def *id;
    /* A two-member result: a texture call's {texel, residency} or cmpxchg's
     * {old value, exchanged}. A NULL member is unsupported. */
    nir_def *members[2];
@@ -81,6 +90,7 @@ struct translator {
    const struct stela_air_options *options;
    const struct stela_air_stage_options *stage_options;
    struct stela_air_render render;
+   const struct stela_air_field *fields; /* The entry's argument buffer fields. */
    nir_variable *outputs[AIR_MAX_ARGUMENTS];
    /* An amplified vertex function's layer and viewport outputs. */
    nir_variable *layer, *viewport;
@@ -321,6 +331,28 @@ pointer_authority(struct value *target, const struct value *root, bool view_root
    target->constant_base = root->constant_base;
    target->constant_view = root->constant_view;
    target->view_root = view_root;
+   target->fields = root->fields;
+}
+
+static uint64_t
+gcd(uint64_t a, uint64_t b)
+{
+   while (b) {
+      uint64_t rest = a % b;
+      a = b;
+      b = rest;
+   }
+   return a;
+}
+
+/* A derived pointer's offset within its argument buffer: origin's, plus
+ * offset and dynamic indices of steps. */
+static void
+pointer_offset(struct value *target, const struct value *origin, uint64_t offset, uint64_t steps)
+{
+   target->offset_known = origin->offset_known;
+   target->offset = origin->offset + offset;
+   target->steps = gcd(origin->steps, steps);
 }
 
 /* Thread, device, constant or threadgroup memory; roots validate the rest. */
@@ -588,15 +620,36 @@ builtin_argument(struct translator *t, enum stela_air_builtin builtin, LLVMValue
    return LLVMGetIntTypeWidth(type) == 16 ? nir_u2u16(&t->b, value) : value;
 }
 
+/* A buffer argument's value as the root of its pointers. Argument buffers
+ * hold device addresses, which SSBO bindings have no counterpart of. */
+static bool
+argument_root(struct translator *t, struct value *value, LLVMValueRef param,
+              const struct stela_air_argument *argument)
+{
+   value->pointer_root = param;
+   if (!argument->is_argument_buffer)
+      return true;
+   if (t->options->bind_ssbo)
+      return fail(t, STELA_AIR_ARGUMENT, "argument buffer %u requires device addresses",
+                  argument->buffer.argument);
+   value->fields = argument->fields;
+   value->offset_known = true;
+   return true;
+}
+
 static bool
 kernel_arguments(struct translator *t, LLVMValueRef fn)
 {
-   struct stela_air_kernel kernel;
-   if (!stela_air_metadata_kernel(&t->metadata, fn, &kernel))
+   /* The fields outlive this function in the translation's values. */
+   struct stela_air_kernel *kernel = ralloc(t->values, struct stela_air_kernel);
+   if (!kernel)
+      return fail(t, STELA_AIR_ALLOCATION, "AIR kernel reflection allocation failed");
+   if (!stela_air_metadata_kernel(&t->metadata, fn, kernel))
       return false;
+   t->fields = kernel->fields;
    bool ssbo_slots[UINT8_MAX + 1] = {false};
-   for (unsigned a = 0; a < kernel.count; a++) {
-      const struct stela_air_argument *argument = &kernel.arguments[a];
+   for (unsigned a = 0; a < kernel->count; a++) {
+      const struct stela_air_argument *argument = &kernel->arguments[a];
       LLVMValueRef param = argument->value;
       if (argument->is_texture || argument->is_sampler) {
          if (!put_resource(t, param, argument->is_texture ? &argument->texture : NULL,
@@ -649,8 +702,8 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
       }
       if (!put_value(t, param, def, desc.access))
          return false;
-      if (buffer)
-         find_value(t, param)->pointer_root = param;
+      if (buffer && !argument_root(t, find_value(t, param), param, argument))
+         return false;
       if (shared) {
          struct value *value = find_value(t, param);
          value->storage = shared;
@@ -886,8 +939,11 @@ thread_memory(const struct value *value)
    return value->storage && value->storage->data.mode == nir_var_function_temp;
 }
 
+/* A GEP's address, with the constant part of its offset and the greatest
+ * common divisor of its dynamic indices' steps. */
 static nir_def *
-gep(struct translator *t, LLVMValueRef inst, const struct value **origin)
+gep(struct translator *t, LLVMValueRef inst, const struct value **origin, uint64_t *constant,
+    uint64_t *steps)
 {
    struct value *base = pointer_value(t, LLVMGetOperand(inst, 0));
    LLVMTypeRef result_type = LLVMTypeOf(inst);
@@ -902,6 +958,7 @@ gep(struct translator *t, LLVMValueRef inst, const struct value **origin)
    if (!fixed_storage_type(t, type, 0, &type_budget))
       return NULL;
    nir_def *address = base->def;
+   *constant = *steps = 0;
    unsigned operands = LLVMGetNumOperands(inst);
    for (unsigned i = 1; i < operands; i++) {
       LLVMValueRef index = LLVMGetOperand(inst, i);
@@ -921,7 +978,9 @@ gep(struct translator *t, LLVMValueRef inst, const struct value **origin)
             fail(t, STELA_AIR_TYPE, "GEP struct index out of range");
             return NULL;
          }
-         address = nir_iadd_imm(&t->b, address, LLVMOffsetOfElement(t->layout, type, field));
+         uint64_t offset = LLVMOffsetOfElement(t->layout, type, field);
+         address = nir_iadd_imm(&t->b, address, offset);
+         *constant += offset;
          type = LLVMStructGetTypeAtIndex(type, field);
       } else {
          bool vector_element = false;
@@ -956,6 +1015,10 @@ gep(struct translator *t, LLVMValueRef inst, const struct value **origin)
          } else {
             stride = LLVMABISizeOfType(t->layout, type);
          }
+         if (LLVMIsAConstantInt(index))
+            *constant += (uint64_t)LLVMConstIntGetSExtValue(index) * stride;
+         else
+            *steps = gcd(*steps, stride);
          offset = nir_imul_imm(&t->b, offset, stride);
          address = nir_iadd(&t->b, address, offset);
       }
@@ -1579,8 +1642,10 @@ static bool
 stage_arguments(struct translator *t, LLVMValueRef fn)
 {
    bool slots[UINT8_MAX + 1] = {0};
+   t->fields = t->render.arguments.fields;
    for (unsigned i = 0; i < t->render.entry.input_count; i++) {
       const struct stela_air_stage_io *io = &t->render.inputs[i];
+      const struct stela_air_argument *argument = &t->render.arguments.arguments[i];
       LLVMValueRef param = LLVMGetParam(fn, io->argument);
       nir_def *def;
       unsigned slot = 0;
@@ -1626,11 +1691,12 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
       if (!put_value(t, param, def, io->buffer.access)) return false;
       if (io->semantic == STELA_AIR_STAGE_BUFFER) {
          struct value *v = find_value(t, param);
-         if (io->buffer.address_space == 2) {
+         if (io->buffer.address_space == 2 && !argument->is_argument_buffer) {
             v->constant_view = io;
             v->view_root = true;
          }
-         v->pointer_root = param;
+         if (!argument_root(t, v, param, argument))
+            return false;
          v->ssbo = t->options->bind_ssbo != NULL; v->ssbo_slot = slot;
       }
    }
@@ -1972,9 +2038,10 @@ texture_operand(void *translator, LLVMValueRef value)
 }
 
 static const struct stela_air_texture *
-texture_argument(void *translator, LLVMValueRef value)
+texture_argument(void *translator, LLVMValueRef value, nir_def **id)
 {
    const struct value *v = find_value(translator, value);
+   *id = v ? v->id : NULL;
    return v ? v->texture : NULL;
 }
 
@@ -2023,9 +2090,10 @@ fp_conversion(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
 }
 
 static const struct stela_air_sampler *
-sampler_argument(void *translator, LLVMValueRef value)
+sampler_argument(void *translator, LLVMValueRef value, nir_def **id)
 {
    const struct value *v = find_value(translator, value);
+   *id = v ? v->id : NULL;
    return v ? v->sampler : NULL;
 }
 
@@ -2324,6 +2392,74 @@ memory_intrinsic(struct translator *t, LLVMValueRef inst, unsigned intrinsic, bo
    return true;
 }
 
+/* The field of an argument buffer an element access at address reads: the
+ * field whose elements the constant offset names, which dynamic indices
+ * step through by whole elements. */
+static const struct stela_air_field *
+argument_field(struct translator *t, const struct value *address)
+{
+   if (!address->offset_known) {
+      fail(t, STELA_AIR_MEMORY, "argument buffer field access through a pointer PHI");
+      return NULL;
+   }
+   for (unsigned i = 0; i < address->fields.count; i++) {
+      const struct stela_air_field *field = &t->fields[address->fields.first + i];
+      if (address->offset < field->offset || address->offset - field->offset >= field->size)
+         continue;
+      unsigned element = field->size / field->count;
+      if ((address->offset - field->offset) % element || address->steps % element ||
+          (address->steps && field->count == 1))
+         break;
+      return field;
+   }
+   fail(t, STELA_AIR_MEMORY, "pointer load names no argument buffer element");
+   return NULL;
+}
+
+/* A load of an address or resource ID from an argument buffer. An address
+ * roots the pointers derived from it, with its field's access; an ID names
+ * its texture or sampler for texture calls. */
+static bool
+argument_load(struct translator *t, LLVMValueRef inst)
+{
+   const struct value *address = pointer_value(t, LLVMGetOperand(inst, 0));
+   if (!address || !address->fields.count || !(address->access & STELA_AIR_READ) ||
+       LLVMGetVolatile(inst) || LLVMGetOrdering(inst) != LLVMAtomicOrderingNotAtomic ||
+       !LLVMGetAlignment(inst))
+      return fail(t, STELA_AIR_MEMORY, "pointer loads read argument buffers");
+   const struct stela_air_field *field = argument_field(t, address);
+   if (!field)
+      return false;
+   LLVMTypeRef type = LLVMTypeOf(inst);
+   unsigned space = LLVMGetPointerAddressSpace(type);
+   unsigned expected = field->kind == STELA_AIR_FIELD_TEXTURE ? 1 :
+                       field->kind == STELA_AIR_FIELD_SAMPLER ? 2 :
+                       field->kind == STELA_AIR_FIELD_DATA ? 0 : field->buffer.address_space;
+   if (!expected || space != expected || LLVMPointerSizeForAS(t->layout, space) != 8)
+      return fail(t, STELA_AIR_TYPE, "pointer load differs from its argument buffer field");
+   nir_def *loaded = memory_access(t, address, NULL, NULL, 0, 1, 64, LLVMGetAlignment(inst));
+   if (!loaded)
+      return false;
+   if (field->kind == STELA_AIR_FIELD_TEXTURE || field->kind == STELA_AIR_FIELD_SAMPLER) {
+      struct value *value = rzalloc(t->values, struct value);
+      if (!value || !_mesa_hash_table_insert(t->values, inst, value))
+         return fail(t, STELA_AIR_ALLOCATION, "AIR resource value allocation failed");
+      if (field->kind == STELA_AIR_FIELD_TEXTURE)
+         value->texture = &field->texture;
+      else
+         value->sampler = &field->sampler;
+      value->id = loaded;
+      return true;
+   }
+   if (!put_value(t, inst, loaded, field->buffer.access))
+      return false;
+   struct value *value = find_value(t, inst);
+   value->pointer_root = inst;
+   value->fields = field->arguments;
+   value->offset_known = true;
+   return true;
+}
+
 static bool
 instruction(struct translator *t, LLVMValueRef inst)
 {
@@ -2341,6 +2477,8 @@ instruction(struct translator *t, LLVMValueRef inst)
       return atomic_instruction(t, inst, op);
    if (op == LLVMAlloca)
       return private_allocation(t, inst) != NULL;
+   if (op == LLVMLoad && LLVMGetTypeKind(LLVMTypeOf(inst)) == LLVMPointerTypeKind)
+      return argument_load(t, inst);
    if (t->stage_options && (op == LLVMInsertValue || op == LLVMExtractValue || op == LLVMShuffleVector ||
                             op == LLVMExtractElement || op == LLVMInsertElement))
       return stage_value_instruction(t, inst, op);
@@ -2349,10 +2487,12 @@ instruction(struct translator *t, LLVMValueRef inst)
       return fail(t, STELA_AIR_TYPE, "unsupported AIR instruction result type (opcode %u)", op);
    if (op == LLVMGetElementPtr) {
       const struct value *origin;
-      nir_def *def = gep(t, inst, &origin);
+      uint64_t constant, steps;
+      nir_def *def = gep(t, inst, &origin, &constant, &steps);
       if (!def || !put_value(t, inst, def, origin->access))
          return false;
       pointer_authority(find_value(t, inst), origin, false);
+      pointer_offset(find_value(t, inst), origin, constant, steps);
       return true;
    }
    if (op == LLVMBitCast) {
@@ -2363,6 +2503,7 @@ instruction(struct translator *t, LLVMValueRef inst)
          if (!origin || !origin->access || !put_value(t, inst, origin->def, origin->access))
             return fail(t, STELA_AIR_MEMORY, "pointer identity cast lacks buffer provenance");
          pointer_authority(find_value(t, inst), origin, origin->view_root);
+         pointer_offset(find_value(t, inst), origin, 0, 0);
          return true;
       }
       if (!value_shape(source, &src_components, &src_bits) ||
@@ -2806,6 +2947,7 @@ same_pointer_resource(const struct value *a, const struct value *b)
 {
    return a && b && a->pointer_root && a->pointer_root == b->pointer_root &&
       a->access == b->access && a->ssbo == b->ssbo && a->ssbo_slot == b->ssbo_slot &&
+      a->fields.first == b->fields.first && a->fields.count == b->fields.count &&
       a->storage == b->storage && a->constant_data == b->constant_data &&
       a->storage_size == b->storage_size && a->constant_base == b->constant_base &&
       a->constant_view == b->constant_view;
@@ -2824,9 +2966,15 @@ pointer_node(struct translator *t, LLVMValueRef llvm)
    return entry ? entry->data : NULL;
 }
 
-static struct value *
-pointer_anchor(struct translator *t, LLVMValueRef llvm)
+/* Validates a provenance root and reports whether it is a reflected AS2
+ * view. An address loaded from an argument buffer is a root its load
+ * validates when translated; no reflection describes it. */
+static bool
+pointer_anchor(struct translator *t, LLVMValueRef llvm, bool *view_root)
 {
+   *view_root = false;
+   if (LLVMIsALoadInst(llvm))
+      return true;
    struct value *value = find_value(t, llvm);
    if (!value && LLVMIsAAllocaInst(llvm))
       value = private_allocation(t, llvm);
@@ -2834,11 +2982,10 @@ pointer_anchor(struct translator *t, LLVMValueRef llvm)
       value = pointer_value(t, llvm);
    if (!value || !value->access || value->pointer_root != llvm ||
        !pointer_space(LLVMTypeOf(llvm)) || !value->def ||
-       value->def->num_components != 1 || value->def->bit_size != 64) {
-      fail(t, STELA_AIR_MEMORY, "pointer PHI dependency lacks validated resource origin");
-      return NULL;
-   }
-   return value;
+       value->def->num_components != 1 || value->def->bit_size != 64)
+      return fail(t, STELA_AIR_MEMORY, "pointer PHI dependency lacks validated resource origin");
+   *view_root = value->view_root;
+   return true;
 }
 
 static unsigned
@@ -2895,11 +3042,9 @@ pointer_component(struct translator *t, struct pointer_node **stack,
             candidate = dep->root;
             candidate_state = dep->view_root;
          } else {
-            struct value *value = pointer_anchor(t, dependency);
-            if (!value)
+            if (!pointer_anchor(t, dependency, &candidate_state))
                return false;
             candidate = dependency;
-            candidate_state = value->view_root;
          }
          if (anchored && (reflection ? state != candidate_state : root != candidate))
             return fail(t, STELA_AIR_MEMORY, reflection ?
@@ -2999,8 +3144,8 @@ pointer_provenance(struct translator *t)
          if (LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMPointerTypeKind)
             continue;
          LLVMOpcode op = LLVMGetInstructionOpcode(inst);
-         if (op == LLVMAlloca)
-            continue; /* A root, like arguments and globals. */
+         if (op == LLVMAlloca || op == LLVMLoad)
+            continue; /* Roots, like arguments and globals. */
          if (op != LLVMPHI && op != LLVMGetElementPtr && op != LLVMBitCast)
             return fail(t, STELA_AIR_TYPE, "unsupported pointer provenance producer");
          if (!pointer_space(LLVMTypeOf(inst)) ||
@@ -3085,6 +3230,8 @@ cfg_declare_phi(struct translator *t, LLVMValueRef inst)
    }
    if (pointer_space(type)) {
       struct pointer_node *node = pointer_node(t, inst);
+      if (node && LLVMIsALoadInst(node->root))
+         return fail(t, STELA_AIR_MEMORY, "pointer PHI of an address loaded from an argument buffer");
       struct value *root = node ? find_value(t, node->root) : NULL;
       if (!root)
          return fail(t, STELA_AIR_MEMORY, "pointer PHI lacks completed provenance proof");

@@ -302,12 +302,42 @@ bool stela_air_metadata_global(struct stela_air_metadata *m, LLVMValueRef global
 /* Validates every global; `threadgroup` reports any threadgroup memory. */
 bool stela_air_metadata_globals(struct stela_air_metadata *m, bool *threadgroup);
 
+/* An argument buffer's fields: kernel->fields[first, first + count), in
+ * increasing offsets. */
+struct stela_air_fields {
+   unsigned first, count;
+};
+enum stela_air_field_kind {
+   STELA_AIR_FIELD_DATA, /* Inline constant data. */
+   STELA_AIR_FIELD_BUFFER, /* A device or constant buffer's address. */
+   STELA_AIR_FIELD_ARGUMENTS, /* A nested argument buffer's address. */
+   STELA_AIR_FIELD_TEXTURE, /* A texture's 64-bit MTLResourceID. */
+   STELA_AIR_FIELD_SAMPLER, /* A sampler's 64-bit MTLResourceID. */
+};
+/* One argument of an argument buffer: count elements filling size bytes at
+ * offset. Addresses and resource IDs are aligned 8-byte elements. The
+ * descriptors' argument is the argument buffer's top-level argument and
+ * their index the field's [[id]]. */
+struct stela_air_field {
+   enum stela_air_field_kind kind;
+   unsigned offset, size, count;
+   struct stela_air_buffer buffer; /* Buffers and argument buffers. */
+   struct stela_air_fields arguments; /* An argument buffer's fields. */
+   struct stela_air_texture texture;
+   struct stela_air_sampler sampler;
+};
+#define AIR_MAX_FIELDS 128u
+#define AIR_MAX_ARGUMENT_BUFFER_DEPTH 8u
+
 struct stela_air_argument {
    LLVMValueRef value; /* Borrowed, decoder/compiler internal only. */
    struct stela_air_buffer buffer;
    struct stela_air_texture texture;
    struct stela_air_sampler sampler;
    bool is_buffer, is_texture, is_sampler;
+   /* A buffer argument that is an argument buffer: these are its fields. */
+   bool is_argument_buffer;
+   struct stela_air_fields fields;
    enum stela_air_builtin builtin; /* Otherwise a builtin input. */
    unsigned components; /* The builtin's lanes. */
    bool plain_buffer_type; /* Reflected MSL builtin scalar/vector, not a struct. */
@@ -318,8 +348,9 @@ struct stela_air_argument {
    bool used;
 };
 struct stela_air_kernel {
-   unsigned count;
+   unsigned count, field_count;
    struct stela_air_argument arguments[AIR_MAX_ARGUMENTS];
+   struct stela_air_field fields[AIR_MAX_FIELDS];
 };
 bool stela_air_metadata_kernel(struct stela_air_metadata *m, LLVMValueRef fn,
                                struct stela_air_kernel *kernel);
