@@ -3569,7 +3569,7 @@
   {
     "package": "stela-soc-data",
     "test": "original_j473_uses_its_actual_2048_slot_update_alias",
-    "source": "crates/stela-soc-data/src/board/memory_topology.rs",
+    "source": "crates/stela-soc-data/src/board/memory_topology/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_MCC_J473_DT"
@@ -3589,7 +3589,7 @@
   {
     "package": "stela-soc-data",
     "test": "original_j314s_pmgr_publishes_self_indices_without_activating_a_self_clock",
-    "source": "crates/stela-soc-data/src/board/power_resources/clock_role.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/clock_role/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_T6000_MCC_DEVICE_TREE"
@@ -3599,7 +3599,7 @@
   {
     "package": "stela-soc-data",
     "test": "original_m1_m2_pro_max_provider_start_uses_the_io_service_superclass",
-    "source": "crates/stela-soc-data/src/board/power_resources/clock_role.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/clock_role/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_KERNELCACHE",
@@ -3610,7 +3610,7 @@
   {
     "package": "stela-soc-data",
     "test": "original_provider_start_and_clock_receiver_source_is_pinned",
-    "source": "crates/stela-soc-data/src/board/power_resources/clock_role.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/clock_role/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_KERNELCACHE"
@@ -3620,7 +3620,7 @@
   {
     "package": "stela-soc-data",
     "test": "original_j473_views_resolve_all_ten_source_constructed_owners",
-    "source": "crates/stela-soc-data/src/board/power_resources/cpu.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/cpu/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_CPU_PMGR_ADT",
@@ -3631,7 +3631,7 @@
   {
     "package": "stela-soc-data",
     "test": "original_j473_supplies_match_all_three_physical_owners",
-    "source": "crates/stela-soc-data/src/board/power_resources/implicit.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/implicit/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_ADT"
@@ -3671,7 +3671,7 @@
   {
     "package": "stela-soc-data",
     "test": "original_v2_board_graphs_preserve_all_parents_and_physical_locations",
-    "source": "crates/stela-soc-data/src/board/power_resources.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_ADTS"
@@ -3681,7 +3681,7 @@
   {
     "package": "stela-soc-data",
     "test": "prepared_j473_admission_keeps_complete_graph_and_names_all_remaining_sinks",
-    "source": "crates/stela-soc-data/src/board/power_resources.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_BUNDLE"
@@ -3691,7 +3691,7 @@
   {
     "package": "stela-soc-data",
     "test": "original_j473_resource_graph_keeps_shared_hardware_and_clock_only_usb_darts",
-    "source": "crates/stela-soc-data/src/board/power_resources.rs",
+    "source": "crates/stela-soc-data/src/board/power_resources/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_ADT"
@@ -3753,7 +3753,7 @@
   {
     "package": "stela-soc-data",
     "test": "original_j314s_ap_gpio_qualifies_without_auxiliary_or_lifecycle_claims",
-    "source": "crates/stela-soc-data/src/board.rs",
+    "source": "crates/stela-soc-data/src/board/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_GPIO_DT"
@@ -3773,7 +3773,7 @@
   {
     "package": "stela-soc-data",
     "test": "original_j314s_sep_preserves_sole_trad_with_sixteen_sid_capacity",
-    "source": "crates/stela-soc-data/src/board.rs",
+    "source": "crates/stela-soc-data/src/board/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_DART_DT"
@@ -3793,7 +3793,7 @@
   {
     "package": "stela-soc-data",
     "test": "original_j314s_ans_geometry_and_handoff_qualify_independently_of_whole_board",
-    "source": "crates/stela-soc-data/src/board.rs",
+    "source": "crates/stela-soc-data/src/board/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_ANS_DT"
