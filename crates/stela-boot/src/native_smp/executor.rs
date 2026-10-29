@@ -449,6 +449,7 @@ pub(crate) unsafe fn start(
             pool_physical: handoff.pool.physical + part.pool_offset,
             pool_bytes: part.pool_bytes,
             window_root: handoff.root,
+            loader_tables: &handoff.native_loader_tables,
             code_virtual: layout::code() + part.code_offset,
             code_physical: handoff.code.physical + part.code_offset,
             code_bytes: part.code_bytes,

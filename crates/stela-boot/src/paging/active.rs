@@ -21,6 +21,8 @@ pub(crate) enum RootError {
     ControlsChanged,
     NotActivated,
     Closed,
+    CatalogSize,
+    CatalogAllocation(uefi::Status),
     Traversal(mappings::Error),
     AliasMissing { physical: u64 },
     AliasMismatch { physical: u64 },
@@ -39,6 +41,10 @@ impl fmt::Display for RootError {
             Self::ControlsChanged => f.write_str("native root controls or PAT changed"),
             Self::NotActivated => f.write_str("new table root was not actually activated"),
             Self::Closed => f.write_str("native root ownership was closed after a context change"),
+            Self::CatalogSize => f.write_str("loader catalog size overflows or is empty"),
+            Self::CatalogAllocation(status) => {
+                write!(f, "loader catalog allocation failed: {status:?}")
+            }
             Self::Traversal(error) => write!(f, "owned page-table traversal refused: {error:?}"),
             Self::AliasMissing { physical } => {
                 write!(f, "native tables omit their frame mapping at {physical:#x}")

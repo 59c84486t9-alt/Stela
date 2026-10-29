@@ -199,6 +199,8 @@ pub struct Handoff {
     /// Firmware-created task allocation owners; the preceding wire fields keep
     /// their offsets. The engine can claim each owner once, after mapping checks.
     pub(crate) native_task_allocations: crate::native_smp::resources::TaskAllocations,
+    /// Original loader table allocations; root is only their copied descriptor.
+    pub(crate) native_loader_tables: crate::paging::loader::LoaderTables,
 }
 
 #[cfg(test)]

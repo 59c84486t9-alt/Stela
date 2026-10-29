@@ -1722,6 +1722,7 @@ fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) 
         pool_physical: handoff.pool.physical,
         pool_bytes: partition.pool_bytes,
         window_root: handoff.root,
+        loader_tables: &handoff.native_loader_tables,
         code_virtual: layout::code(),
         code_physical: handoff.code.physical,
         code_bytes: partition.code_bytes,

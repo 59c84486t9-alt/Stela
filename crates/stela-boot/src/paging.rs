@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 mod active;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod config;
+pub(crate) mod loader;
 pub(crate) use active::{ActivatedTables, RootError};
 use core::{
     arch::{asm, naked_asm},
@@ -58,12 +59,12 @@ struct AllocatedTablePage {
 }
 
 fn new_table() -> Result<AllocatedTablePage, &'static str> {
-    let page = uefi::boot::allocate_pages(
-        uefi::boot::AllocateType::AnyPages,
-        uefi::boot::MemoryType::LOADER_DATA,
-        1,
-    )
-    .map_err(|_| "no memory for a page table")?;
+    allocate_table(uefi::boot::AllocateType::AnyPages)
+}
+
+fn allocate_table(policy: uefi::boot::AllocateType) -> Result<AllocatedTablePage, &'static str> {
+    let page = uefi::boot::allocate_pages(policy, uefi::boot::MemoryType::LOADER_DATA, 1)
+        .map_err(|_| "no memory for a page table")?;
     let table = page.as_ptr().cast::<Table>();
     // SAFETY: a fresh page owned by Stela for the rest of the boot.
     unsafe { table.write_bytes(0, 1) };

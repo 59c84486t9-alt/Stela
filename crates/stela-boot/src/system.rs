@@ -102,21 +102,6 @@ pub fn take_snapshot() {
     }
 }
 
-/// Firmware pages reached by identity.
-struct FirmwareFrames;
-
-impl Frames for FirmwareFrames {
-    fn frame(&mut self) -> Option<u64> {
-        let page = firmware::pages(1).ok()? as u64;
-        // SAFETY: a fresh page owned by Stela.
-        unsafe { (page as *mut u8).write_bytes(0, PAGE as usize) };
-        Some(page)
-    }
-    fn table(&self, physical: u64) -> *mut u64 {
-        physical as *mut u64
-    }
-}
-
 fn low_page(kind: MemoryType) -> Result<u64, &'static str> {
     let page = boot::allocate_pages(AllocateType::MaxAddress(BELOW_4G), kind, 1)
         .map_err(|_| "no page below 4 GiB for the page-table root")?;
@@ -708,7 +693,11 @@ fn load(
         handoff_page,
         trampoline,
         root,
+        loader_tables,
     } = memory;
+    let loader_tables = loader_tables
+        .retain()
+        .map_err(|_| "loader table ownership validation failed")?;
     let bounce = native_resources.bounce[0];
     let handoff_phase::RetainedFiles {
         options: options_region,
@@ -811,6 +800,7 @@ fn load(
                 bytes: wifi_key.len() as u64,
             },
             native_task_allocations,
+            native_loader_tables: loader_tables,
         });
     }
     // SAFETY: boot services ended; the completed root maps this code and

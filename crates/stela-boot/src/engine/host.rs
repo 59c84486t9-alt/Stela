@@ -262,6 +262,7 @@ pub struct State {
     host_root: u64,
     /// Original actual loader root retained from install, never caller metadata.
     window_root: u64,
+    _loader_tables: &'static crate::paging::loader::LoaderTables,
     roots: [u64; ROOTS],
     /// The roots of other SPRR_PERM_EL0 and SPRR_PERM_EL1 pairs.
     banks: [Bank; BANKS],
@@ -368,6 +369,7 @@ pub struct Config {
     pub pool_bytes: u64,
     /// The loader's root, whose window entries every root shares.
     pub window_root: u64,
+    pub(crate) loader_tables: &'static crate::paging::loader::LoaderTables,
     /// Processor-private executable alias; arena writes use the physmap.
     pub code_virtual: u64,
     pub code_physical: u64,
@@ -408,16 +410,21 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
         pool.reset_half(half);
     }
     let (first, last) = layout::window_entries();
-    let window = layout::physical(config.window_root) as *const u64;
+    if config.loader_tables.root() != config.window_root {
+        return Err("loader root descriptor differs from its original owner");
+    }
     let mut root = || -> Result<u64, &'static str> {
         let frame = pool.permanent().ok_or("page-table pool too small")?;
         for entry in first..=last {
-            // SAFETY: a fresh permanent frame and the loader's root, both
-            // through the physmap.
+            let value = config
+                .loader_tables
+                .boot_entry(entry)
+                .map_err(|_| "original loader table context changed before host installation")?;
+            // SAFETY: this actual processor's fresh permanent pool allocation.
             unsafe {
                 (layout::physical(frame) as *mut u64)
                     .add(entry)
-                    .write(window.add(entry).read())
+                    .write(value)
             };
         }
         Ok(frame)
@@ -448,6 +455,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             pool,
             host_root,
             window_root: config.window_root,
+            _loader_tables: config.loader_tables,
             roots,
             banks,
             bank_switches: 0,

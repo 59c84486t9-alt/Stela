@@ -24,6 +24,7 @@ pub(super) struct EngineMemory {
     pub handoff_page: Region,
     pub trampoline: u64,
     pub root: u64,
+    pub loader_tables: crate::paging::loader::Builder,
 }
 
 /// Copy and relocate the pristine image into the selected host window.
@@ -163,7 +164,8 @@ pub(super) fn reserve(
     crate::native_smp::resources::partition(cores, cores - 1, code.bytes, pool.bytes, false)?;
     let handoff_page = allocate(size_of::<Handoff>() as u64)?;
     let trampoline = low_page(MemoryType::LOADER_CODE)?;
-    let root = low_page(MemoryType::LOADER_DATA)?;
+    let loader_tables = crate::paging::loader::Builder::new()?;
+    let root = loader_tables.root();
     Ok(EngineMemory {
         heap,
         native_resources,
@@ -174,6 +176,7 @@ pub(super) fn reserve(
         handoff_page,
         trampoline,
         root,
+        loader_tables,
     })
 }
 
@@ -200,11 +203,12 @@ pub(super) fn map(
         code,
         trampoline,
         root,
+        loader_tables,
         ..
     } = memory;
     let (root, trampoline, apic) = (*root, *trampoline, *apic);
     let cores = native_resources.cores as usize;
-    let mut frames = FirmwareFrames;
+    let frames = loader_tables;
     let mut image_rights: Vec<(u64, u64, u64)> = image
         .sections
         .iter()
@@ -215,14 +219,14 @@ pub(super) fn map(
     if native_resources.sipi != 0 {
         image_rights.push((native_resources.sipi, native_resources.sipi + PAGE, PRESENT));
     }
-    identity(&mut frames, root, ram, &image_rights)?;
+    identity(frames, root, ram, &image_rights)?;
     if let Some(storage) = storage {
-        map_devices(&mut frames, root, ram, &storage.mapped)?;
+        map_devices(frames, root, ram, &storage.mapped)?;
     }
     let mapped = storage
         .as_ref()
         .map_or(&[][..], |storage| &storage.mapped[..]);
-    runtime.map(&mut frames, root, ram, mapped)?;
+    runtime.map(frames, root, ram, mapped)?;
     let mut storage = match storage {
         Some(storage) => Storage::new(storage)?,
         None => Storage::absent(),
@@ -234,7 +238,7 @@ pub(super) fn map(
         let start = screen.base as u64 & !(PAGE - 1);
         let end = (screen.base + screen.bytes) as u64;
         tables::map_range(
-            &mut frames,
+            frames,
             root,
             start,
             start,
@@ -246,7 +250,7 @@ pub(super) fn map(
     for page in (0..snapshot.bytes as u64).step_by(PAGE as usize) {
         let rights = image.rights(image.start + page as usize);
         tables::map_page(
-            &mut frames,
+            frames,
             root,
             layout::image() + page,
             engine.physical + page,
@@ -256,7 +260,7 @@ pub(super) fn map(
     let data = PRESENT | WRITABLE | NX;
     for slot in 0..cores {
         tables::map_range(
-            &mut frames,
+            frames,
             root,
             layout::stack() + slot as u64 * STACK_STRIDE + PAGE,
             native_resources.stacks.physical + slot as u64 * STACK_BYTES,
@@ -285,7 +289,7 @@ pub(super) fn map(
                 .slot(base, index)
                 .map_err(|_| "guarded stack virtual range overflow")?;
             tables::map_range(
-                &mut frames,
+                frames,
                 root,
                 slot.usable.start,
                 region.physical
@@ -317,7 +321,7 @@ pub(super) fn map(
                 .backing(raw.physical..end, index)
                 .map_err(|_| "mixed32 backing alignment overflow")?;
             tables::map_range(
-                &mut frames,
+                frames,
                 root,
                 slot.usable.start,
                 backing.start,
@@ -327,7 +331,7 @@ pub(super) fn map(
         }
     }
     tables::map_range(
-        &mut frames,
+        frames,
         root,
         layout::code(),
         code.physical,
@@ -338,7 +342,7 @@ pub(super) fn map(
     for &(start, end) in ram {
         let (start, end) = (start as u64, end as u64);
         tables::map_range(
-            &mut frames,
+            frames,
             root,
             layout::physical(start),
             start,
@@ -351,7 +355,7 @@ pub(super) fn map(
         let end = ((screen.base + screen.bytes) as u64).next_multiple_of(PAGE);
         if !ram.iter().any(|r| r.0 as u64 <= start && end <= r.1 as u64) {
             tables::map_range(
-                &mut frames,
+                frames,
                 root,
                 layout::physical(start),
                 start,
@@ -363,13 +367,7 @@ pub(super) fn map(
     // The xAPIC page must be strong uncacheable (Intel SDM Vol. 3A 11.4.1);
     // the entry says so rather than relying on the firmware's MTRRs.
     if !ram.iter().any(|r| r.0 as u64 <= apic && apic < r.1 as u64) {
-        tables::map_page(
-            &mut frames,
-            root,
-            layout::physical(apic),
-            apic,
-            data | UNCACHED,
-        )?;
+        tables::map_page(frames, root, layout::physical(apic), apic, data | UNCACHED)?;
     }
     // The bounce slot's leaf entries, which the translation helper points
     // at guest frames; until then they map a scratch page.
@@ -377,14 +375,14 @@ pub(super) fn map(
         for index in 0..2 {
             let scratch = allocate(PAGE)?.physical;
             let address = layout::bounce() + (slot * 2 + index) as u64 * PAGE;
-            tables::map_page(&mut frames, root, address, scratch, data)?;
-            let entry = tables::entry(&mut frames, root, address, 0, false)?;
+            tables::map_page(frames, root, address, scratch, data)?;
+            let entry = tables::entry(frames, root, address, 0, false)?;
             native_resources.bounce[slot][index] = entry.ok_or("bounce slot unmapped")? as u64;
         }
     }
 
     if let Some(prepared) = native_mmio {
-        prepared.aperture(&mut frames, root, cores)?;
+        prepared.aperture(frames, root, cores)?;
     }
 
     Ok(storage)
