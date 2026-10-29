@@ -53,7 +53,7 @@ pub(super) mod local;
 mod profile;
 use stela_boot_core::ram;
 mod translated;
-pub(crate) use local::context::{RootContext, RootExecution, RootProcessScope};
+pub(crate) use local::context::{RootContext, RootExecution, RootIdentity, RootProcessScope};
 use local::state;
 pub(crate) use local::{MmioRoots, Owner as HostOwner};
 pub use ram::RamRange;

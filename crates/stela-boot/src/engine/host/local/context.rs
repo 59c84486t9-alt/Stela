@@ -162,6 +162,10 @@ pub(crate) struct RootContext {
     executing: AtomicBool,
 }
 impl RootContext {
+    /// Immutable identity only; this reference carries no generation authority.
+    pub(crate) fn identity(&self) -> &Arc<RootIdentity> {
+        &self.identity
+    }
     fn generation(&self) -> Result<(), WorkError> {
         if self.ram_generation != self.identity.ram_generation.load(Ordering::Acquire) {
             return Err(WorkError::Closed);

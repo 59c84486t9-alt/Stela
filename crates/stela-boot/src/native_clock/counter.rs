@@ -1,11 +1,14 @@
 //! Typed actual Source-owned HPET counter consumer candidate.
 use super::hpet::Descriptor;
-use crate::native_mmio::{ExclusiveHpet, HpetMapping};
+use crate::{
+    engine::host::RootIdentity,
+    native_mmio::{ExclusiveHpet, HpetMapping, NativeExclusiveHpet, NativeHpetMapping},
+};
 use alloc::sync::Arc;
 use core::ptr::{read_volatile, write_volatile};
 use stela_boot_core::hpet::{Geometry, coherent_counter};
 use stela_drivers::{
-    bus::mmio::owned::{CacheAttribute, Protection},
+    bus::mmio::owned::{CacheAttribute, Mapping, Protection},
     platform::work::WorkError,
 };
 
@@ -13,11 +16,60 @@ const ENABLED: u32 = 1;
 const LEGACY: u32 = 2;
 const TIMER_INTERRUPTS: u32 = 4 | 0x4000;
 
+/// These are actual distinct resource owners, never a caller-provided
+/// pointer/lifetime facade. The scoped diagnostic path deliberately retains its
+/// finite RAM epoch; the production path retains immutable RootIdentity only.
+enum Owner {
+    Scoped(HpetMapping),
+    Native(NativeHpetMapping),
+}
+impl Owner {
+    fn descriptor(&self) -> Descriptor {
+        match self {
+            Self::Scoped(owner) => owner.descriptor(),
+            Self::Native(owner) => owner.descriptor(),
+        }
+    }
+    fn identity(&self) -> &Arc<RootIdentity> {
+        match self {
+            Self::Scoped(owner) => owner.context().identity(),
+            Self::Native(owner) => owner.identity(),
+        }
+    }
+    fn check_process(&self) -> Result<(), WorkError> {
+        match self {
+            Self::Scoped(owner) => owner.check_process(),
+            Self::Native(owner) => owner.check_process(),
+        }
+    }
+    fn check_irq_cpu(&self) -> Result<(), WorkError> {
+        match self {
+            Self::Scoped(owner) => owner.check_irq_cpu(),
+            Self::Native(owner) => owner.check_irq_cpu(),
+        }
+    }
+    fn mapping(&self) -> Result<&Mapping, WorkError> {
+        match self {
+            Self::Scoped(owner) => Ok(owner.mapping()),
+            Self::Native(owner) => owner.mapping(),
+        }
+    }
+    unsafe fn retire_mapping(&mut self) -> Result<(), WorkError> {
+        match self {
+            // SAFETY: forwarded complete actual reader/IRQ/controller drain;
+            // each variant retains its own original resource/root authority.
+            Self::Scoped(owner) => unsafe { owner.retire_mapping() },
+            // SAFETY: same drain, using the production registry's actual owner.
+            Self::Native(owner) => unsafe { owner.retire_mapping() },
+        }
+    }
+}
+
 /// Owns genuine Source mapping/root pin. No caller-provided pointer or generic
 /// lifetime token can instantiate this counter. There is no automatic stop in
 /// Drop: uncertain state remains quarantined by the owned Mapping registry.
 pub(crate) struct Counter {
-    owned: HpetMapping,
+    owned: Owner,
     base: usize,
     geometry: Geometry,
     started: bool,
@@ -33,20 +85,23 @@ impl Counter {
     /// alter this resource. Descriptor/mapping authenticity alone is no such
     /// continuity guarantee. Consumers check actual same CPU before raw reads.
     pub(crate) unsafe fn attach_running(owned: HpetMapping) -> Result<Self, WorkError> {
-        Self::attach(owned, false)
+        Self::attach(Owner::Scoped(owned), false)
     }
 
     /// The separately minted exclusive whole-controller handoff authorizes a
     /// main-counter enable only. Any legacy, comparator/FSB interrupt or pending
     /// status refuses; no unknown route/configuration is disabled or stolen.
     pub(crate) fn attach_exclusive(owned: ExclusiveHpet) -> Result<Self, WorkError> {
-        Self::attach(owned.into_mapping(), true)
+        Self::attach(Owner::Scoped(owned.into_mapping()), true)
     }
 
-    fn attach(owned: HpetMapping, may_enable: bool) -> Result<Self, WorkError> {
+    pub(crate) fn attach_native_exclusive(owned: NativeExclusiveHpet) -> Result<Self, WorkError> {
+        Self::attach(Owner::Native(owned.into_mapping()), true)
+    }
+    fn attach(owned: Owner, may_enable: bool) -> Result<Self, WorkError> {
         owned.check_process()?;
         let descriptor = owned.descriptor();
-        let mapping = owned.mapping();
+        let mapping = owned.mapping()?;
         if mapping.physical_span().map_err(unavailable)? != descriptor.registers()
             || mapping.attribute().map_err(unavailable)? != CacheAttribute::Uncached
         {
@@ -118,7 +173,10 @@ impl Counter {
     }
     pub(crate) fn owner(&self) -> Result<&HpetMapping, WorkError> {
         self.check_process()?;
-        Ok(&self.owned)
+        match &self.owned {
+            Owner::Scoped(owner) => Ok(owner),
+            Owner::Native(_) => Err(WorkError::Unavailable),
+        }
     }
     pub(crate) fn period_fs(&self) -> u32 {
         self.geometry.period_fs
@@ -126,8 +184,8 @@ impl Counter {
     pub(crate) fn descriptor(&self) -> Descriptor {
         self.owned.descriptor()
     }
-    pub(crate) fn context(&self) -> &Arc<crate::engine::host::RootContext> {
-        self.owned.context()
+    pub(crate) fn identity(&self) -> &Arc<RootIdentity> {
+        self.owned.identity()
     }
     pub(crate) fn ns(&self, ticks: u64) -> Result<u64, WorkError> {
         self.geometry.ns(ticks).map_err(|_| WorkError::Exhausted)
@@ -160,8 +218,8 @@ impl Counter {
     }
     /// # Safety
     /// Every Clock/Runtime/cached pointer/IRQ-entry user has finally stopped and
-    /// drained before this process call. RootProcessScope remains live until
-    /// actual mapping/TLB retirement acknowledgement. Wholeblock ownership is
+    /// drained before this process call. The actual immutable identity (and a
+    /// diagnostic source's finite scope) remains live until acknowledged unmap. Wholeblock ownership is
     /// retained and no future source reader may start.
     pub(crate) unsafe fn retire(&mut self) -> Result<(), WorkError> {
         if self.retired {
@@ -190,7 +248,7 @@ impl Counter {
             }
             self.started = false;
         }
-        // SAFETY: real source consumer drain plus retained root process scope.
+        // SAFETY: real source consumer drain plus its retained actual root owner.
         unsafe { self.owned.retire_mapping() }?;
         self.retired = true;
         Ok(())

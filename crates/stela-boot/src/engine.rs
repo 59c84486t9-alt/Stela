@@ -1749,24 +1749,15 @@ fn install_host(handoff: &Handoff, options: &Options, ram: &[RamRange]) -> Insta
     crate::status::done("");
     #[cfg(feature = "diagnostics")]
     if options.native_clock_check {
-        // SAFETY: original loader capture remains pinned in this actual
-        // HostOwner's physmap. Parsing never supplies hardware ownership.
-        let prepared = unsafe { crate::native_mmio::captured(handoff) }
-            .map_err(|_| stela_drivers::platform::work::WorkError::Unavailable)
-            .and_then(|wire| crate::native_clock::Prepared::from_fadt(wire.fadt()))
-            .unwrap_or_else(|error| {
-                output::arguments(format_args!("CHECK native-clock FAIL {error:?}\n"));
-                output::fatal("native clock source capture failed")
-            });
-        // SAFETY: explicit bounded UP test mode on its original HostOwner,
-        // with no other diagnostic/device owner active. The trusted fixture
-        // excludes source reset/SMM/VMM gaps over one second; this grants no
-        // arbitrary original driver execution or general PM clock profile.
-        unsafe { crate::native_clock::diagnostic::check(&mut host_owner, prepared) }
-            .unwrap_or_else(|error| {
-                output::arguments(format_args!("CHECK native-clock FAIL {error:?}\n"));
+        // SAFETY: explicit original UP/controller ownership; HPET uses the
+        // actual production Source, or absent HPET preserves the bounded PM
+        // fixture's complete <=1second gap contract. No driver is published.
+        unsafe { crate::native_mmio::diagnostic::clock(handoff, &mut host_owner) }.unwrap_or_else(
+            |error| {
+                output::arguments(format_args!("CHECK native-clock FAIL {error}\n"));
                 output::fatal("native clock fixture failed")
-            });
+            },
+        );
         stop_here("bounded native clock fixture complete", 0x10);
     }
     #[cfg(feature = "diagnostics")]

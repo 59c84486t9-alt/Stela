@@ -64,6 +64,11 @@ impl Prepared {
     ) -> Result<Self, WorkError> {
         Counter::attach_exclusive(owner).map(|counter| Self::Hpet(Arc::new(counter)))
     }
+    pub(crate) fn exclusive_native_hpet(
+        owner: crate::native_mmio::NativeExclusiveHpet,
+    ) -> Result<Self, WorkError> {
+        Counter::attach_native_exclusive(owner).map(|counter| Self::Hpet(Arc::new(counter)))
+    }
     pub(crate) fn hpet_counter(&self) -> Option<&Arc<super::HpetCounter>> {
         match self {
             Self::Hpet(counter) => Some(counter),
@@ -86,13 +91,13 @@ impl Prepared {
     }
     pub(super) fn admit(
         &self,
-        context: &Arc<crate::engine::host::RootContext>,
+        identity: &Arc<crate::engine::host::RootIdentity>,
     ) -> Result<(), WorkError> {
         match self {
             Self::Pm(pm) => pm.admit(),
             Self::Hpet(counter) => {
                 counter.check_process()?;
-                if !Arc::ptr_eq(counter.context(), context) {
+                if !Arc::ptr_eq(counter.identity(), identity) {
                     return Err(WorkError::WrongCpu);
                 }
                 Ok(())

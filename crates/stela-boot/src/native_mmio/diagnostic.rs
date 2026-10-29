@@ -18,6 +18,129 @@ fn stage<T>(name: &str, result: Result<T, Error>) -> Result<T, Error> {
     result
 }
 
+#[derive(Debug)]
+pub(crate) enum ClockError {
+    Mapping(Error),
+    Work(stela_drivers::platform::work::WorkError),
+}
+impl core::fmt::Display for ClockError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Mapping(error) => write!(formatter, "native HPET resource: {error:?}"),
+            Self::Work(error) => write!(formatter, "native clock execution: {error:?}"),
+        }
+    }
+}
+impl From<Error> for ClockError {
+    fn from(error: Error) -> Self {
+        Self::Mapping(error)
+    }
+}
+impl From<stela_drivers::platform::work::WorkError> for ClockError {
+    fn from(error: stela_drivers::platform::work::WorkError) -> Self {
+        Self::Work(error)
+    }
+}
+/// # Safety
+/// Explicit owned UP diagnostic on the original native host. An HPET capture
+/// selects the actual whole-controller path; otherwise the existing bounded PM
+/// fixture retains its explicit source-gap limits. Neither admits a Linux owner.
+pub(crate) unsafe fn clock(handoff: &Handoff, owner: &mut HostOwner) -> Result<(), ClockError> {
+    if handoff.native_resources.cores != 1 || handoff.storage.present {
+        return Err(Error::Unavailable.into());
+    }
+    // SAFETY: original loader capture and physical tables remain retained.
+    let wire = unsafe { captured(handoff) }?;
+    if wire.hpet().is_empty() {
+        let prepared = Prepared::from_fadt(wire.fadt())?;
+        // SAFETY: the explicit PM diagnostic's original complete <=1second
+        // sample-gap contract remains required and unchanged.
+        unsafe { crate::native_clock::diagnostic::check(owner, prepared) }?;
+        Ok(())
+    } else {
+        // SAFETY: actual whole-controller exclusive diagnostic handoff, with
+        // no second authority or asynchronous production owner in this boot.
+        unsafe { check_native_hpet(handoff, owner) }
+    }
+}
+
+/// Exercise the actual production HPET owner, retire it, then reacquire through
+/// the same authority for a bounded IRQ/HLT/clock retirement proof. No Runtime
+/// or finite RAM-absence capability is published.
+/// # Safety
+/// The caller supplies the same complete whole-controller diagnostic handoff as
+/// check. The original BSP/root and actual table/backing stay pinned through
+/// acknowledged configuration restoration, UC unmap and resource retirement.
+unsafe fn check_native_hpet(handoff: &Handoff, owner: &mut HostOwner) -> Result<(), ClockError> {
+    // SAFETY: the original immutable loader capture is retained by this boot.
+    let wire = unsafe { captured(handoff) }?;
+    // SAFETY: actual original BSP before other processors or device owners.
+    let source = unsafe { Source::activate(wire, owner, handoff.tsc_hz) }?;
+    let identity = owner.root_identity()?;
+    // SAFETY: this explicit fixture has actual exclusive HPET control, no SMM,
+    // firmware/native comparator routes or other counter readers/writers.
+    let owned = unsafe { source.take_hpet(identity.clone()) }?;
+    let mut counter = crate::native_clock::HpetCounter::attach_native_exclusive(owned)?;
+    if !alloc::sync::Arc::ptr_eq(counter.identity(), &identity) || counter.owner().is_ok() {
+        return Err(Error::InvalidPlatformReply.into());
+    }
+    let before = counter.read_irq()?;
+    let mut after = before;
+    for _ in 0..128 {
+        after = counter.read_irq()?;
+        if after > before {
+            break;
+        }
+    }
+    if after <= before {
+        return Err(Error::InvalidPlatformReply.into());
+    }
+    let base = counter.descriptor().registers().start();
+    // SAFETY: this stack frame is the only counter reader, no IRQ/publication
+    // exists, and every actual Source/RootIdentity/controller owner remains live.
+    unsafe { counter.retire() }?;
+    if counter.read_irq().is_ok() {
+        return Err(Error::InvalidPlatformReply.into());
+    }
+    let status = source.authority().status()?;
+    if status.live != 0
+        || status.installing != 0
+        || status.uncertain != 0
+        || status.quarantined != 0
+    {
+        return Err(Error::UnmapFailed.into());
+    }
+    drop(counter);
+    crate::output::arguments(format_args!(
+        "CHECK native-hpet-owner PASS source=production identity=actual base={base:#x} counter=progressed retire=config-restored+UC-unmapped+resource-released; no IRQ, Runtime or RAM-adoption grant\n"
+    ));
+    // Reuse this same permanent authority after acknowledged first retirement;
+    // never activate a competing registry for the subsequent timed proof.
+    // SAFETY: exact same whole-controller owner, no external user was admitted.
+    let owned = unsafe { source.take_hpet(identity.clone()) }?;
+    let prepared = Prepared::exclusive_native_hpet(owned)?;
+    let counter = prepared.hpet_counter().ok_or(Error::Unavailable)?.clone();
+    // SAFETY: actual original Source/RootIdentity, controller, IDT and ARAT
+    // delivery stay pinned. This diagnostic creates no production producer.
+    unsafe { crate::native_clock::diagnostic::check_native(identity, prepared) }?;
+    let mut counter = alloc::sync::Arc::try_unwrap(counter).map_err(|_| Error::ResourceConflict)?;
+    // SAFETY: acknowledged clock retirement removed ISR/publication views;
+    // unique Arc proves no retained counter reader remains in that graph.
+    unsafe { counter.retire() }?;
+    let status = source.authority().status()?;
+    if status.live != 0
+        || status.installing != 0
+        || status.uncertain != 0
+        || status.quarantined != 0
+    {
+        return Err(Error::UnmapFailed.into());
+    }
+    crate::output::arguments(format_args!(
+        "CHECK native-hpet-clock PASS source=production identity=immutable IRQ=elapsed idle=HLT guest_mux=elapsed retire=quiet+source-released; no RAM-adoption or production-service grant\n"
+    ));
+    Ok(())
+}
+
 /// # Safety
 /// Explicit native diagnostic owns this actual post-EBS BSP, all controller
 /// resources and the complete original HPET/LAPIC source. No firmware, SMM,

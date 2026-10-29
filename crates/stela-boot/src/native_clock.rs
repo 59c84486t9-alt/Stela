@@ -98,8 +98,7 @@ fn root() -> u64 {
 /// Immutable CPU view. The actual !Send HostOwner remains on its processor;
 /// its root lease refuses owner destruction while any view still exists.
 pub(crate) struct RootCpu {
-    context: Arc<host::RootContext>,
-    root_scope: Arc<host::RootProcessScope>,
+    identity: Arc<host::RootIdentity>,
     base: u64,
     registers: u64,
     id: u32,
@@ -122,9 +121,9 @@ impl RootCpu {
         if self.closed.load(Ordering::Acquire) {
             return Err(WorkError::Closed);
         }
-        // Canonical actual Owner context/epoch checks current architectural
-        // CPU and one of its immutable original roots before device access.
-        self.root_scope.check_irq_cpu()
+        // The retained immutable Owner identity checks the actual CPU/GS/
+        // descriptors and original root catalog before device access.
+        self.identity.check_irq_cpu()
     }
     /// Caller holds local IRQ exclusion; all fields are separate from State.
     fn sample(&self) -> Result<u64, WorkError> {
@@ -272,8 +271,8 @@ impl State {
     }
 }
 struct NativeClock(Arc<State>);
-// SAFETY: source is actual PM time with retained root/CPU, not Cpu::ticks or an
-// IRQ count. Source reads are bounded and IRQ-serialized, including during HLT.
+// SAFETY: time comes from the actual retained hardware counter. Its coherent
+// reads and elapsed accumulator are serialized by this physical CPU's IRQ save.
 unsafe impl Clock for NativeClock {
     fn cpu(&self) -> &Arc<dyn Cpu> {
         &self.0.cpu_view
@@ -416,13 +415,6 @@ impl IrqAdapter {
     }
 }
 impl DriverExecution<'_> {
-    pub(crate) fn context(&self) -> &Arc<host::RootContext> {
-        self.installed.context()
-    }
-    pub(crate) fn root_scope(&self) -> Result<Arc<host::RootProcessScope>, WorkError> {
-        self.check()?;
-        self.installed.root_scope()
-    }
     pub(crate) fn check(&self) -> Result<(), WorkError> {
         self.installed.state.process()?;
         if !self.installed.state.executing.load(Ordering::Acquire)
@@ -482,7 +474,7 @@ impl Drop for DriverExecution<'_> {
 impl Installed {
     /// # Safety
     /// Post-EBS actual owning CPU and canonical time-free RootExecution.
-    /// HPET source owns its actual UC mapping/controller and the SAME context.
+    /// HPET source owns its UC mapping/controller and the same immutable identity.
     /// No stop/reset/counter-write/rate/decode/suspend discontinuity is allowed.
     /// PM is admitted only under its separate explicit complete sample-gap bound.
     /// No suspend/reset/migration/root replacement occurs before final release.
@@ -498,8 +490,32 @@ impl Installed {
         source: Prepared,
     ) -> Result<Self, WorkError> {
         owner.check_root(root_execution)?;
-        let context = root_execution.context().clone();
-        source.admit(&context)?;
+        let identity = root_execution.context().identity().clone();
+        // SAFETY: actual owner/root execution and complete controller/deadline
+        // handoff are supplied by this constructor's existing contract.
+        unsafe { Self::attach_identity(identity, source) }
+    }
+    /// # Safety
+    /// Same actual timer/IDT/controller/rate/ARAT handoff as attach, using the
+    /// production resource owner and immutable HostOwner identity. Every old
+    /// absence/publication capability must independently close before RAM
+    /// adoption; this clock never retains or recreates one of those grants.
+    pub(crate) unsafe fn attach_native(
+        identity: Arc<host::RootIdentity>,
+        source: Prepared,
+    ) -> Result<Self, WorkError> {
+        identity.check_dispatch()?;
+        // SAFETY: caller retains the genuine physical controller/root/deadline
+        // owner; source admission below checks the exact same identity.
+        unsafe { Self::attach_identity(identity, source) }
+    }
+    /// Actual source and local timer handoff required by the two constructors.
+    unsafe fn attach_identity(
+        identity: Arc<host::RootIdentity>,
+        source: Prepared,
+    ) -> Result<Self, WorkError> {
+        identity.check_dispatch()?;
+        source.admit(&identity)?;
         let max_cpuid = core::arch::x86_64::__cpuid(0).eax;
         if max_cpuid < 6 {
             return Err(WorkError::Unavailable);
@@ -519,8 +535,7 @@ impl Installed {
             if !ACTIVE.load(Ordering::Acquire).is_null() {
                 return Err(WorkError::Busy);
             }
-            owner.check_root(root_execution)?;
-            let root_scope = root_execution.process_scope()?;
+            identity.check_dispatch()?;
             let base = apic::base_msr();
             let registers = crate::layout::physical(base & apic::BASE_ADDRESS);
             let apic = Apic::new(base, registers);
@@ -546,8 +561,7 @@ impl Installed {
             // HPET validates the original CPU/root before coherent MMIO reads.
             let previous = unsafe { source.read()? };
             let cpu = Arc::new(RootCpu {
-                context,
-                root_scope,
+                identity,
                 base,
                 registers,
                 id: apic.id(),
@@ -601,13 +615,6 @@ impl Installed {
         }
         drop(deferred_source);
         result
-    }
-    pub(crate) fn context(&self) -> &Arc<host::RootContext> {
-        &self.state.cpu.context
-    }
-    pub(crate) fn root_scope(&self) -> Result<Arc<host::RootProcessScope>, WorkError> {
-        self.state.process()?;
-        Ok(self.state.cpu.root_scope.clone())
     }
     pub(crate) fn cpu(&self) -> Arc<dyn Cpu> {
         self.state.cpu_view.clone()

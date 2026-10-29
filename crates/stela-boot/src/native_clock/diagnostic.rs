@@ -21,6 +21,27 @@ pub(crate) unsafe fn check(
     // SAFETY: real owner and unchanged retained tables/roots satisfy attach.
     let root_execution = owner.enter_root()?;
     let installed = unsafe { Installed::attach(owner, &root_execution, source)? };
+    run(installed)
+}
+
+/// # Safety
+/// Actual production Source counter/root identity and complete original
+/// controller/IRQ/idle handoff remain owned through this bounded native proof.
+/// No finite RAM-absence scope is retained or recreated by this constructor.
+pub(crate) unsafe fn check_native(
+    identity: Arc<host::RootIdentity>,
+    prepared: Prepared,
+) -> Result<(), WorkError> {
+    if prepared.hpet_counter().is_none() {
+        return Err(WorkError::Unavailable);
+    }
+    // SAFETY: this actual owner supplies complete HPET/LAPIC/IDT delivery and
+    // lifecycle; constructor checks exact retained Source identity and ARAT.
+    let installed = unsafe { Installed::attach_native(identity, prepared)? };
+    run(installed)
+}
+
+fn run(installed: Installed) -> Result<(), WorkError> {
     let observation = installed.observation()?;
     let clock = Arc::clone(&installed.clock);
     let idle = Arc::clone(&installed.idle);

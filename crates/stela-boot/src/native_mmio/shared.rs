@@ -17,7 +17,11 @@ use super::{
     capture::LEAVES,
     platform::{aliases, owned_table},
 };
-use crate::{engine::host::HostOwner, native_smp::memory_types::Image};
+use crate::{
+    engine::host::{HostOwner, RootIdentity},
+    native_smp::memory_types::Image,
+};
+mod hpet;
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     arch::asm,
@@ -25,6 +29,7 @@ use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, Ordering},
 };
+pub(crate) use hpet::{ExclusiveHpet as NativeExclusiveHpet, HpetMapping as NativeHpetMapping};
 use stela_boot_core::aperture::{self, Controls, Flush, Processors};
 use stela_drivers::bus::{
     mmio::owned::{
@@ -37,15 +42,17 @@ use stela_drivers::bus::{
 /// Which host processors may hold aperture translations, for the boot.
 pub(crate) static PROCESSORS: Processors = Processors::new();
 
-/// A span this source reserved: a captured ECAM bus or a BAR inside a root
-/// bridge window, outside RAM.
+/// A span this source reserved outside RAM: a captured ECAM bus, a BAR inside
+/// a root bridge window, or the separately admitted whole HPET controller page.
 struct Backing {
     owner: Arc<Captured>,
     span: PhysicalSpan,
     kind: ResourceKind,
 }
-// SAFETY: `Source` mints a backing only for spans the captured MCFG or root
-// bridge windows describe and the final memory map leaves outside RAM.
+// SAFETY: Source validates every immutable span against the captured MCFG,
+// root bridge windows or HPET descriptor and final non-RAM memory inventory.
+// The HPET constructor additionally requires its real whole-controller handoff;
+// this backing only retains that original capture and checked physical extent.
 unsafe impl ResourceBacking for Backing {
     fn physical_span(&self) -> PhysicalSpan {
         self.span
@@ -357,6 +364,10 @@ struct Bus {
 
 /// The owned MMIO authority over the captured firmware description.
 pub(crate) struct Source {
+    /// The actual original BSP owner, independent of finite RAM absence scopes.
+    /// Keep this affine pin on Source; shared MappingPlatform instances do not
+    /// gain a foreign-CPU root ownership or destruction permission.
+    identity: Arc<RootIdentity>,
     platform: Arc<Platform>,
     authority: Authority,
     /// Each claimed ECAM bus, by its window and bus.
@@ -379,12 +390,13 @@ impl Source {
         if !wire.valid() || !PROCESSORS.alone() {
             return Err(Error::Unavailable);
         }
-        let (catalog, snapshot) = {
+        let (catalog, snapshot, identity) = {
             let execution = owner.enter_root().map_err(failed)?;
             let context = execution.context();
             (
                 context.roots().clone(),
                 context.memory_snapshot().map_err(failed)?,
+                context.identity().clone(),
             )
         };
         let flush = aperture::qualify(&Controls {
@@ -476,6 +488,7 @@ impl Source {
         // aliases; the leaf table is owned and shared by every root.
         let authority = unsafe { Authority::activate(platform.clone(), space, aliases) }?;
         Ok(Self {
+            identity,
             platform,
             authority,
             buses: core::cell::RefCell::new(Vec::new()),
