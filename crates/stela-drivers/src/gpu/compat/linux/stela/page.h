@@ -54,6 +54,16 @@ struct stela_linux_page_ops {
 int stela_linux_page_catalog_register(const struct stela_linux_page_reservation *reservation,
 				     const struct stela_linux_page_ops *ops, void *context);
 int stela_linux_page_catalog_unregister(u64 generation);
+/* Immutable multi-extent admission into the SAME canonical descriptor owner.
+ * Every entry has the same generation and satisfies the actual retained WB
+ * reservation contract above. Entries are sorted by physical_base, with no
+ * physical or CPU overlap; sparse guard pages are not entries. Descriptors
+ * remain stable until full retirement. Adding/growing extents while registered
+ * is refused, including adjacent PFNs: no escaped descriptor is reallocated.
+ * This explicit immutable contract is not dynamic sparse-memory admission. */
+int stela_linux_page_catalog_register_extents(
+    const struct stela_linux_page_reservation *extents, size_t extent_count,
+    const struct stela_linux_page_ops *ops, void *context);
 void stela_linux_pages_finish(void);
 /* Explicit bounded service diagnostic, not GPU or native-IRQ qualification.
  * Requires quiescent entry; owns and retires only its temporary allocations. */

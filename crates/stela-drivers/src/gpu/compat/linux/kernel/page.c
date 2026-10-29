@@ -41,8 +41,20 @@ struct allocation_record {
 	size_t next;
 };
 
+/* Inventory entries cover only actual writable mappings, never raw allocation
+ * padding or guard holes. PFN-sorted descriptors are immutable for one owner. */
+struct registered_extent {
+    u64 physical_base;
+    u8 *cpu_base;
+    size_t page_count;
+    size_t first;
+};
+
 static struct {
-	struct stela_linux_page_reservation reservation;
+    u64 generation;
+    size_t page_count;
+    struct registered_extent *extents;
+    size_t extent_count;
 	struct stela_linux_page_ops ops;
 	void *context;
 	struct page *pages;
@@ -139,55 +151,102 @@ static void initialize_page(struct page *page)
 	set_page_count(page, 0);
 }
 
-int stela_linux_page_catalog_register(const struct stela_linux_page_reservation *reservation,
-				     const struct stela_linux_page_ops *ops, void *context)
+int stela_linux_page_catalog_register_extents(
+    const struct stela_linux_page_reservation *extents, size_t extent_count,
+    const struct stela_linux_page_ops *ops, void *context)
 {
-	require_quiescence();
-	if (catalog.pages)
-		return -EBUSY;
-	if (!reservation || !ops || !ops->validate || !ops->allocate || !ops->release ||
-	    !reservation->generation || reservation->generation <= last_generation ||
-	    !reservation->cpu_base || !reservation->page_count ||
-	    ((unsigned long)reservation->cpu_base & ~PAGE_MASK) ||
-	    (reservation->physical_base & (PAGE_SIZE - 1)) ||
-	    reservation->page_count > (size_t)SSIZE_MAX / PAGE_SIZE ||
-	    reservation->page_count > (ULONG_MAX - (unsigned long)reservation->cpu_base) / PAGE_SIZE ||
-	    reservation->page_count > (U64_MAX - reservation->physical_base) / PAGE_SIZE ||
-	    reservation->page_count > (size_t)SSIZE_MAX / sizeof(struct page) ||
-	    reservation->page_count > (size_t)SSIZE_MAX / sizeof(struct page_state) ||
-	    reservation->page_count > (size_t)SSIZE_MAX / sizeof(struct allocation_record))
-		return -EINVAL;
-	size_t count = reservation->page_count;
-	struct page *pages = allocate_metadata(count * sizeof(*pages), __alignof__(*pages));
-	if (!pages)
-		return -ENOMEM;
-	struct page_state *state = allocate_metadata(count * sizeof(*state), __alignof__(*state));
-	if (!state) {
-		free_metadata(pages, count * sizeof(*pages), __alignof__(*pages));
-		return -ENOMEM;
-	}
-	struct allocation_record *allocations = allocate_metadata(count * sizeof(*allocations),
-								__alignof__(*allocations));
-	if (!allocations) {
-		free_metadata(state, count * sizeof(*state), __alignof__(*state));
-		free_metadata(pages, count * sizeof(*pages), __alignof__(*pages));
-		return -ENOMEM;
-	}
-	for (size_t i = 0; i < count; i++) {
-		initialize_page(pages + i);
-		state[i].allocation = NO_INDEX;
-		allocations[i].next = i + 1 < count ? i + 1 : NO_INDEX;
-	}
-	catalog.reservation = *reservation;
-	catalog.ops = *ops;
-	catalog.context = context;
-	catalog.pages = pages;
-	catalog.state = state;
-	catalog.allocations = allocations;
-	catalog.free_records = 0;
-	catalog.retired = NO_INDEX;
-	last_generation = reservation->generation;
-	return 0;
+    require_quiescence();
+    if (catalog.pages)
+        return -EBUSY;
+    if (!extents || !extent_count || !ops || !ops->validate || !ops->allocate || !ops->release ||
+        extent_count > (size_t)SSIZE_MAX / sizeof(struct registered_extent))
+        return -EINVAL;
+    u64 generation = extents[0].generation;
+    if (!generation || generation <= last_generation)
+        return -EINVAL;
+    size_t count = 0;
+    for (size_t i = 0; i < extent_count; i++) {
+        const struct stela_linux_page_reservation *item = extents + i;
+        if (item->generation != generation || !item->cpu_base || !item->page_count ||
+            ((unsigned long)item->cpu_base & ~PAGE_MASK) ||
+            (item->physical_base & (PAGE_SIZE - 1)) ||
+            item->page_count > (size_t)SSIZE_MAX / PAGE_SIZE ||
+            item->page_count > (ULONG_MAX - (unsigned long)item->cpu_base) / PAGE_SIZE ||
+            item->page_count > (U64_MAX - item->physical_base) / PAGE_SIZE ||
+            item->page_count > SIZE_MAX - count)
+            return -EINVAL;
+        if (i && item->physical_base < extents[i - 1].physical_base +
+                (u64)extents[i - 1].page_count * PAGE_SIZE)
+            return -EINVAL;
+        for (size_t j = 0; j < i; j++) {
+            unsigned long cpu = (unsigned long)item->cpu_base;
+            unsigned long other = (unsigned long)extents[j].cpu_base;
+            size_t bytes = item->page_count * PAGE_SIZE;
+            size_t other_bytes = extents[j].page_count * PAGE_SIZE;
+            if (cpu <= other ? other - cpu < bytes : cpu - other < other_bytes)
+                return -EINVAL;
+        }
+        count += item->page_count;
+    }
+    if (count > (size_t)SSIZE_MAX / sizeof(struct page) ||
+        count > (size_t)SSIZE_MAX / sizeof(struct page_state) ||
+        count > (size_t)SSIZE_MAX / sizeof(struct allocation_record))
+        return -EINVAL;
+    struct page *pages = allocate_metadata(count * sizeof(*pages), __alignof__(*pages));
+    if (!pages)
+        return -ENOMEM;
+    struct page_state *state = allocate_metadata(count * sizeof(*state), __alignof__(*state));
+    if (!state) {
+        free_metadata(pages, count * sizeof(*pages), __alignof__(*pages));
+        return -ENOMEM;
+    }
+    struct allocation_record *allocations = allocate_metadata(count * sizeof(*allocations),
+                                                              __alignof__(*allocations));
+    if (!allocations) {
+        free_metadata(state, count * sizeof(*state), __alignof__(*state));
+        free_metadata(pages, count * sizeof(*pages), __alignof__(*pages));
+        return -ENOMEM;
+    }
+    struct registered_extent *inventory = allocate_metadata(extent_count * sizeof(*inventory),
+                                                             __alignof__(*inventory));
+    if (!inventory) {
+        free_metadata(allocations, count * sizeof(*allocations), __alignof__(*allocations));
+        free_metadata(state, count * sizeof(*state), __alignof__(*state));
+        free_metadata(pages, count * sizeof(*pages), __alignof__(*pages));
+        return -ENOMEM;
+    }
+    size_t first = 0;
+    for (size_t i = 0; i < extent_count; i++) {
+        inventory[i] = (struct registered_extent){
+            .physical_base = extents[i].physical_base, .cpu_base = extents[i].cpu_base,
+            .page_count = extents[i].page_count, .first = first,
+        };
+        first += extents[i].page_count;
+    }
+    for (size_t i = 0; i < count; i++) {
+        initialize_page(pages + i);
+        state[i].allocation = NO_INDEX;
+        allocations[i].next = i + 1 < count ? i + 1 : NO_INDEX;
+    }
+    catalog.generation = generation;
+    catalog.page_count = count;
+    catalog.extents = inventory;
+    catalog.extent_count = extent_count;
+    catalog.ops = *ops;
+    catalog.context = context;
+    catalog.pages = pages;
+    catalog.state = state;
+    catalog.allocations = allocations;
+    catalog.free_records = 0;
+    catalog.retired = NO_INDEX;
+    last_generation = generation;
+    return 0;
+}
+
+int stela_linux_page_catalog_register(const struct stela_linux_page_reservation *reservation,
+                                     const struct stela_linux_page_ops *ops, void *context)
+{
+    return stela_linux_page_catalog_register_extents(reservation, 1, ops, context);
 }
 
 static size_t page_index(const struct page *page)
@@ -195,7 +254,7 @@ static size_t page_index(const struct page *page)
 	require_catalog();
 	unsigned long address = (unsigned long)page;
 	unsigned long base = (unsigned long)catalog.pages;
-	size_t bytes = catalog.reservation.page_count * sizeof(*catalog.pages);
+	size_t bytes = catalog.page_count * sizeof(*catalog.pages);
 	if (address < base || address - base >= bytes ||
 	    (address - base) % sizeof(*catalog.pages))
 		__builtin_trap();
@@ -205,50 +264,83 @@ static size_t page_index(const struct page *page)
 	return index;
 }
 
+/* Unlike FLATMEM, a descriptor index is not a PFN delta across a sparse gap.
+ * Like Linux sparse sections, PFN lookup must first find actual coverage.
+ * We do not admit dynamic section growth or move any escaped descriptor. */
+static const struct registered_extent *index_extent(size_t index)
+{
+    for (size_t i = 0; i < catalog.extent_count; i++) {
+        const struct registered_extent *extent = catalog.extents + i;
+        if (index >= extent->first && index - extent->first < extent->page_count)
+            return extent;
+    }
+    __builtin_trap();
+}
+
+static size_t physical_slot(phys_addr_t address)
+{
+    size_t low = 0, high = catalog.extent_count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        const struct registered_extent *extent = catalog.extents + middle;
+        if (address < extent->physical_base) {
+            high = middle;
+        } else {
+            u64 offset = address - extent->physical_base;
+            if (offset < (u64)extent->page_count * PAGE_SIZE)
+                return extent->first + (size_t)(offset >> PAGE_SHIFT);
+            low = middle + 1;
+        }
+    }
+    return NO_INDEX;
+}
+
 static size_t physical_index(phys_addr_t address)
 {
-	require_catalog();
-	u64 base = catalog.reservation.physical_base;
-	u64 bytes = (u64)catalog.reservation.page_count * PAGE_SIZE;
-	if (address < base || address - base >= bytes)
-		__builtin_trap();
-	size_t index = (size_t)((address - base) >> PAGE_SHIFT);
-	if (!catalog.state[index].live)
-		__builtin_trap();
-	return index;
+    require_catalog();
+    size_t index = physical_slot(address);
+    if (index == NO_INDEX || !catalog.state[index].live)
+        __builtin_trap();
+    return index;
 }
 
 struct page *pfn_to_page(unsigned long pfn)
 {
-	if (pfn > (U64_MAX >> PAGE_SHIFT))
-		__builtin_trap();
-	return catalog.pages + physical_index((phys_addr_t)pfn << PAGE_SHIFT);
+    if (pfn > (U64_MAX >> PAGE_SHIFT))
+        __builtin_trap();
+    return catalog.pages + physical_index((phys_addr_t)pfn << PAGE_SHIFT);
 }
 
 unsigned long page_to_pfn(const struct page *page)
 {
-	size_t index = page_index(page);
-	return (unsigned long)(catalog.reservation.physical_base >> PAGE_SHIFT) + index;
+    size_t index = page_index(page);
+    const struct registered_extent *extent = index_extent(index);
+    return (unsigned long)(extent->physical_base >> PAGE_SHIFT) + index - extent->first;
 }
 
 unsigned long __phys_addr(unsigned long address)
 {
-	require_catalog();
-	unsigned long base = (unsigned long)catalog.reservation.cpu_base;
-	size_t bytes = catalog.reservation.page_count * PAGE_SIZE;
-	if (address < base || address - base >= bytes)
-		__builtin_trap();
-	size_t offset = address - base;
-	if (!catalog.state[offset >> PAGE_SHIFT].live)
-		__builtin_trap();
-	return (unsigned long)catalog.reservation.physical_base + offset;
+    require_catalog();
+    for (size_t i = 0; i < catalog.extent_count; i++) {
+        const struct registered_extent *extent = catalog.extents + i;
+        unsigned long base = (unsigned long)extent->cpu_base;
+        if (address >= base && address - base < extent->page_count * PAGE_SIZE) {
+            size_t offset = address - base;
+            if (!catalog.state[extent->first + (offset >> PAGE_SHIFT)].live)
+                __builtin_trap();
+            return (unsigned long)extent->physical_base + offset;
+        }
+    }
+    __builtin_trap();
 }
 
 void *__phys_to_virt(phys_addr_t address)
 {
-	size_t index = physical_index(address);
-	size_t offset = (index << PAGE_SHIFT) + (size_t)(address & (PAGE_SIZE - 1));
-	return (u8 *)catalog.reservation.cpu_base + offset;
+    size_t index = physical_index(address);
+    const struct registered_extent *extent = index_extent(index);
+    size_t offset = ((index - extent->first) << PAGE_SHIFT) +
+                    (size_t)(address & (PAGE_SIZE - 1));
+    return extent->cpu_base + offset;
 }
 
 /* The callback may call ordinary native services, but cannot change Linux's
@@ -305,12 +397,14 @@ void stela_linux_pages_finish(void)
 int stela_linux_page_catalog_unregister(u64 generation)
 {
 	require_quiescence();
-	if (!catalog.pages || catalog.reservation.generation != generation)
+	if (!catalog.pages || catalog.generation != generation)
 		return -EINVAL;
 	stela_linux_pages_finish();
 	if (catalog.live_pages)
 		return -EBUSY;
-	size_t count = catalog.reservation.page_count;
+	size_t count = catalog.page_count;
+    free_metadata(catalog.extents, catalog.extent_count * sizeof(*catalog.extents),
+                  __alignof__(*catalog.extents));
 	free_metadata(catalog.allocations, count * sizeof(*catalog.allocations),
 		      __alignof__(*catalog.allocations));
 	free_metadata(catalog.state, count * sizeof(*catalog.state), __alignof__(*catalog.state));
@@ -326,37 +420,39 @@ static bool overlaps(unsigned long start, size_t bytes, const void *object, size
 }
 
 static bool validate_allocation(const struct stela_linux_page_allocation *allocation,
-				unsigned int order, size_t *first)
+                                unsigned int order, size_t *first)
 {
-	size_t count = (size_t)1 << order;
-	size_t bytes = count << PAGE_SHIFT;
-	u64 base = catalog.reservation.physical_base;
-	unsigned long cpu = (unsigned long)allocation->cpu_base;
-	if (!allocation->pin || !allocation->cpu_base || !allocation->physical_pages ||
-	    allocation->page_count != count || (cpu & (bytes - 1)))
-		return false;
-	u64 physical = allocation->physical_pages[0];
-	if (physical < base || (physical & (bytes - 1)))
-		return false;
-	u64 offset = physical - base;
-	if (offset >= (u64)catalog.reservation.page_count * PAGE_SIZE)
-		return false;
-	size_t index = (size_t)(offset >> PAGE_SHIFT);
-	if (count > catalog.reservation.page_count - index ||
-	    cpu != (unsigned long)catalog.reservation.cpu_base + (unsigned long)offset)
-		return false;
-	size_t total = catalog.reservation.page_count;
-	if (overlaps(cpu, bytes, catalog.pages, total * sizeof(*catalog.pages)) ||
-	    overlaps(cpu, bytes, catalog.state, total * sizeof(*catalog.state)) ||
-	    overlaps(cpu, bytes, catalog.allocations, total * sizeof(*catalog.allocations)))
-		return false;
-	for (size_t i = 0; i < count; i++) {
-		if (allocation->physical_pages[i] != physical + (u64)i * PAGE_SIZE ||
-		    catalog.state[index + i].allocation != NO_INDEX)
-			return false;
-	}
-	*first = index;
-	return true;
+    size_t count = (size_t)1 << order;
+    size_t bytes = count << PAGE_SHIFT;
+    unsigned long cpu = (unsigned long)allocation->cpu_base;
+    if (!allocation->pin || !allocation->cpu_base || !allocation->physical_pages ||
+        allocation->page_count != count || (cpu & (bytes - 1)))
+        return false;
+    u64 physical = allocation->physical_pages[0];
+    if (physical & (bytes - 1))
+        return false;
+    size_t index = physical_slot(physical);
+    if (index == NO_INDEX || count > catalog.page_count - index)
+        return false;
+    size_t total = catalog.page_count;
+    if (overlaps(cpu, bytes, catalog.pages, total * sizeof(*catalog.pages)) ||
+        overlaps(cpu, bytes, catalog.state, total * sizeof(*catalog.state)) ||
+        overlaps(cpu, bytes, catalog.allocations, total * sizeof(*catalog.allocations)) ||
+        overlaps(cpu, bytes, catalog.extents, catalog.extent_count * sizeof(*catalog.extents)))
+        return false;
+    for (size_t i = 0; i < count; i++) {
+        const struct registered_extent *extent = index_extent(index + i);
+        size_t offset = (index + i - extent->first) << PAGE_SHIFT;
+        if (physical > U64_MAX - (u64)i * PAGE_SIZE ||
+            cpu > ULONG_MAX - i * PAGE_SIZE ||
+            allocation->physical_pages[i] != physical + (u64)i * PAGE_SIZE ||
+            extent->physical_base + offset != allocation->physical_pages[i] ||
+            (unsigned long)extent->cpu_base + offset != cpu + i * PAGE_SIZE ||
+            catalog.state[index + i].allocation != NO_INDEX)
+            return false;
+    }
+    *first = index;
+    return true;
 }
 
 struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
@@ -471,7 +567,7 @@ static size_t run_index(struct page *page, unsigned int order)
 	    (state->compound && compound_order(page) != order))
 		__builtin_trap();
 	size_t count = (size_t)1 << order;
-	if (count > catalog.reservation.page_count - first)
+	if (count > catalog.page_count - first)
 		__builtin_trap();
 	for (size_t i = 0; i < count; i++) {
 		struct page *part = page + i;
@@ -647,7 +743,7 @@ static bool verify_extent(struct page *page, unsigned int order)
 int stela_linux_page_catalog_verify(u64 generation)
 {
 	require_quiescence();
-	if (!catalog.pages || catalog.reservation.generation != generation)
+	if (!catalog.pages || catalog.generation != generation)
 		return -EINVAL;
 	struct page *page = alloc_page(GFP_KERNEL | __GFP_ZERO);
 	if (!page)
@@ -741,6 +837,7 @@ struct test_provider {
 	bool refuse_atomic;
 	bool exhausted;
 	u64 overlap_physical;
+    u64 physical_override[TEST_PAGES];
 };
 
 static struct test_provider fixture;
@@ -791,7 +888,9 @@ static int test_allocate(void *context, u32 gfp, unsigned int order, bool atomic
 	*pin = (struct test_pin){.active = true, .first = first, .count = count};
 	for (size_t i = 0; i < count; i++) {
 		provider->used[first + i] = true;
-		pin->physical[i] = TEST_PHYSICAL + (u64)(first + i) * PAGE_SIZE;
+		pin->physical[i] = provider->physical_override[first + i] ?
+            provider->physical_override[first + i] :
+            TEST_PHYSICAL + (u64)(first + i) * PAGE_SIZE;
 	}
 	/* The provider need not zero plain pages. ZERO must be enforced by the
 	 * service before it publishes the payload. */
@@ -904,7 +1003,11 @@ static void finish_atomic(void)
 static void register_atomic(void)
 {
 	local_bh_disable();
-	(void)stela_linux_page_catalog_register(&catalog.reservation, &test_ops, &fixture);
+	const struct stela_linux_page_reservation reservation = {
+        .generation = catalog.generation, .physical_base = TEST_PHYSICAL,
+        .cpu_base = fixture.cpu, .page_count = TEST_PAGES,
+    };
+    (void)stela_linux_page_catalog_register(&reservation, &test_ops, &fixture);
 }
 
 static void mapped_free(void)
@@ -1425,6 +1528,109 @@ static void reclaimable_policy(void)
 	}
 }
 
+
+static u64 inventory_gap_physical;
+static unsigned long inventory_gap_virtual;
+static void absent_inventory_pfn(void)
+{
+    (void)pfn_to_page(inventory_gap_physical >> PAGE_SHIFT);
+}
+static void absent_inventory_virtual(void)
+{
+    (void)__pa(inventory_gap_virtual);
+}
+
+/* All extents below refer to this fixture's actual retained CPU allocation;
+ * symbolic PA labels are CPU-test-only, not native physical qualification. */
+static void immutable_multi_extent_inventory(void)
+{
+    static_assert(sizeof(struct stela_linux_page_reservation) == 32);
+    static_assert(offsetof(struct stela_linux_page_reservation, generation) == 0);
+    static_assert(offsetof(struct stela_linux_page_reservation, physical_base) == 8);
+    static_assert(offsetof(struct stela_linux_page_reservation, cpu_base) == 16);
+    static_assert(offsetof(struct stela_linux_page_reservation, page_count) == 24);
+    static_assert(sizeof(struct stela_linux_page_ops) == 3 * sizeof(void *));
+    struct stela_linux_page_reservation extents[] = {
+        {.generation = 3, .physical_base = TEST_PHYSICAL,
+         .cpu_base = fixture.cpu, .page_count = TEST_PAGES / 2},
+        {.generation = 3, .physical_base = TEST_PHYSICAL + TEST_PAGES / 2 * PAGE_SIZE,
+         .cpu_base = fixture.cpu + TEST_PAGES / 2 * PAGE_SIZE, .page_count = TEST_PAGES / 2},
+    };
+    assert(stela_linux_page_catalog_register_extents(NULL, 1, &test_ops, &fixture) == -EINVAL);
+    assert(stela_linux_page_catalog_register_extents(extents, 0, &test_ops, &fixture) == -EINVAL);
+    struct stela_linux_page_reservation invalid[2];
+    for (unsigned int fault = 0; fault < 6; fault++) {
+        memcpy(invalid, extents, sizeof(invalid));
+        switch (fault) {
+        case 0: invalid[1].generation++; break;
+        case 1: invalid[1].physical_base = invalid[0].physical_base; break;
+        case 2: invalid[1].cpu_base = invalid[0].cpu_base; break;
+        case 3: invalid[1].physical_base = U64_MAX & PAGE_MASK; break;
+        case 4: invalid[1].cpu_base = (void *)(ULONG_MAX & PAGE_MASK); break;
+        case 5: invalid[1].page_count = SIZE_MAX; break;
+        }
+        assert(stela_linux_page_catalog_register_extents(invalid, 2, &test_ops, &fixture) == -EINVAL);
+        assert(!metadata_live && !catalog.pages);
+    }
+    for (size_t fail = 0; fail < 4; fail++) {
+        metadata_fail_after = fail;
+        assert(stela_linux_page_catalog_register_extents(extents, 2, &test_ops, &fixture) == -ENOMEM);
+        assert(!metadata_live && !catalog.pages);
+    }
+    metadata_fail_after = NO_INDEX;
+    assert(!stela_linux_page_catalog_register_extents(extents, 2, &test_ops, &fixture));
+    struct page *all = alloc_pages(GFP_KERNEL | __GFP_COMP | __GFP_ZERO, 4);
+    assert(all && verify_extent(all, 4));
+    struct page *stable = all + TEST_PAGES / 2;
+    assert(page_to_pfn(stable) == (TEST_PHYSICAL >> PAGE_SHIFT) + TEST_PAGES / 2);
+    assert(stela_linux_page_catalog_register_extents(extents, 2, &test_ops, &fixture) == -EBUSY);
+    assert(pfn_to_page(page_to_pfn(stable)) == stable);
+    __free_pages(all, 4);
+    assert(!stela_linux_page_catalog_unregister(3));
+    assert(!metadata_live);
+
+    /* Sparse PA coverage and an excluded CPU interval are independent. */
+    for (unsigned int scenario = 0; scenario < 2; scenario++) {
+        extents[0].generation = extents[1].generation = 4 + scenario;
+        extents[0].page_count = extents[1].page_count = 4;
+        extents[1].cpu_base = fixture.cpu + 8 * PAGE_SIZE;
+        extents[1].physical_base = TEST_PHYSICAL + (scenario ? 4 : 64) * PAGE_SIZE;
+        for (size_t i = 0; i < TEST_PAGES; i++)
+            fixture.used[i] = (i >= 4 && i < 8) || i >= 12;
+        for (size_t i = 0; i < 4; i++)
+            fixture.physical_override[8 + i] = extents[1].physical_base + i * PAGE_SIZE;
+        assert(!stela_linux_page_catalog_register_extents(extents, 2, &test_ops, &fixture));
+        struct page *first = alloc_pages(GFP_KERNEL | __GFP_ZERO, 2);
+        struct page *second = alloc_pages(GFP_KERNEL | __GFP_ZERO, 2);
+        assert(first && second && second == first + 4);
+        assert(page_to_pfn(first) == TEST_PHYSICAL >> PAGE_SHIFT);
+        assert(page_to_pfn(second) == extents[1].physical_base >> PAGE_SHIFT);
+        assert(page_address(first) == fixture.cpu && page_address(second) == fixture.cpu + 8 * PAGE_SIZE);
+        assert(__va(page_to_phys(second) + 37) == fixture.cpu + 8 * PAGE_SIZE + 37);
+        assert(__pa(fixture.cpu + 8 * PAGE_SIZE + 37) == page_to_phys(second) + 37);
+        inventory_gap_virtual = (unsigned long)(fixture.cpu + 4 * PAGE_SIZE);
+        assert(stela_test_traps(absent_inventory_virtual));
+        if (!scenario) {
+            inventory_gap_physical = TEST_PHYSICAL + 4 * PAGE_SIZE;
+            assert(stela_test_traps(absent_inventory_pfn));
+        }
+        for (size_t i = 0; i < 4; i++) {
+            assert(page_to_pfn(second + i) == (extents[1].physical_base >> PAGE_SHIFT) + i);
+            assert(pfn_to_page(page_to_pfn(second + i)) == second + i);
+        }
+        assert(stela_linux_page_catalog_unregister(4 + scenario) == -EBUSY);
+        __free_pages(first, 2);
+        __free_pages(second, 2);
+        assert(!stela_linux_page_catalog_unregister(4 + scenario));
+        assert(!metadata_live);
+        for (size_t i = 0; i < TEST_PAGES; i++) {
+            fixture.used[i] = false;
+            fixture.physical_override[i] = 0;
+        }
+    }
+}
+
+
 int main(void)
 {
 	reclaimable_policy();
@@ -1452,7 +1658,7 @@ int main(void)
 	invalid = reservation;
 	invalid.generation = 0;
 	assert(stela_linux_page_catalog_register(&invalid, &test_ops, &fixture) == -EINVAL);
-	for (size_t i = 0; i < 3; i++) {
+	for (size_t i = 0; i < 4; i++) {
 		metadata_fail_after = i;
 		assert(stela_linux_page_catalog_register(&reservation, &test_ops, &fixture) == -ENOMEM);
 		assert(!metadata_live && !catalog.pages);
@@ -1480,6 +1686,7 @@ int main(void)
 	assert(stela_linux_page_catalog_unregister(1) == -EINVAL);
 	assert(!stela_linux_page_catalog_unregister(2));
 	assert(!metadata_live);
+    immutable_multi_extent_inventory();
 	stela_linux_exit();
 	assert(fixture.allocations == fixture.releases + 1); /* One deliberate ENOMEM. */
 	for (size_t i = 0; i < TEST_PAGES; i++)

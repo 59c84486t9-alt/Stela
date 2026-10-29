@@ -2,7 +2,7 @@
 //! The catalog supplies no DMA mapping or GPU attachment. Its provider and
 //! reservation survive until explicit retirement, or observable quarantine.
 use crate::bus::dma::memory::{CacheAttribute, MemoryError, PinnedPages};
-use alloc::{boxed::Box, rc::Rc};
+use alloc::{boxed::Box, rc::Rc, vec::Vec};
 use core::{
     alloc::Layout,
     ffi::{c_int, c_void},
@@ -166,8 +166,9 @@ unsafe extern "C" {
     static stela_linux_bare: u8;
     fn stela_linux_try_enter(owner: *const c_void) -> bool;
     fn stela_linux_exit();
-    fn stela_linux_page_catalog_register(
-        reservation: *const NativeReservation,
+    fn stela_linux_page_catalog_register_extents(
+        reservations: *const NativeReservation,
+        reservation_count: usize,
         operations: *const Operations,
         context: *mut c_void,
     ) -> c_int;
@@ -200,7 +201,7 @@ impl Drop for Entered {
 
 struct Context<P> {
     provider: P,
-    reservation: Reservation,
+    reservations: Vec<Reservation>,
 }
 
 struct Pin {
@@ -273,20 +274,22 @@ unsafe extern "C" fn allocate<P: Provider>(
         Ok(cpu) => cpu,
         Err(error) => return allocation_error(error),
     };
-    // Check the provider's registered CPU/PA relation before publishing even
-    // an opaque token. C independently checks its complete physical page list.
-    let Some(offset) = (cpu.as_ptr() as usize)
-        .checked_sub(context.reservation.cpu_base.as_ptr() as usize)
-        .filter(|offset| {
-            offset
-                .checked_add(bytes)
-                .is_some_and(|end| end <= context.reservation.page_count * PAGE_BYTES)
-        })
-    else {
-        return -EINVAL;
-    };
-    if pages.physical_pages()[0] != context.reservation.physical_base + offset as u64 {
-        return -EINVAL;
+    // Validate every actual retained page against the immutable inventory.
+    // Adjacent physical extents may have different CPU mappings: only the
+    // real mapping for each page establishes its relation, never a direct-map
+    // assumption or an inferred address in an unmapped guard gap.
+    for (index, physical) in pages.physical_pages().iter().enumerate() {
+        let Some(address) = (cpu.as_ptr() as usize).checked_add(index * PAGE_BYTES) else {
+            return -EINVAL;
+        };
+        if !context.reservations.iter().any(|reservation| {
+            address
+                .checked_sub(reservation.cpu_base.as_ptr() as usize)
+                .filter(|offset| *offset < reservation.page_count * PAGE_BYTES)
+                .is_some_and(|offset| *physical == reservation.physical_base + offset as u64)
+        }) {
+            return -EINVAL;
+        }
     }
     let pin = storage.write(Pin { pages });
     let allocation = NativeAllocation {
@@ -338,33 +341,71 @@ impl<P: Provider> Catalog<P> {
     /// their retained authority contracts. Retirement and final Drop must obey
     /// the same context rules; a busy drop quarantines, never frees live pages.
     pub unsafe fn register(provider: P, reservation: Reservation) -> Result<Self, Error> {
+        let mut reservations = Vec::new();
+        reservations
+            .try_reserve_exact(1)
+            .map_err(|_| Error::OutOfMemory)?;
+        reservations.push(reservation);
+        // SAFETY: the same retained provider/reservation and caller context
+        // contract is forwarded; a one-extent inventory adds no authority.
+        unsafe { Self::register_extents(provider, reservations) }
+    }
+
+    /// Register the complete immutable actual reservation inventory.
+    ///
+    /// Every extent is copied into the one canonical C descriptor owner.
+    /// Physical gaps and guard mappings are absent. Descriptor addresses stay
+    /// stable until full retirement; admission cannot grow a live catalog.
+    /// This does not qualify dynamic sparse-memory or native stack ownership.
+    ///
+    /// # Safety
+    /// Each reservation satisfies its actual retained mapping/physical contract
+    /// under this provider. No physical or writable CPU extent aliases another;
+    /// the provider may allocate only exact pinned pages in this inventory.
+    /// The process/IRQ/root/retirement requirements of `register` also apply.
+    pub unsafe fn register_extents(
+        provider: P,
+        mut reservations: Vec<Reservation>,
+    ) -> Result<Self, Error> {
+        if reservations.is_empty() {
+            return Err(Error::InvalidReservation);
+        }
+        reservations.sort_unstable_by_key(|reservation| reservation.physical_base);
         let generation = NEXT_GENERATION
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(1)
             })
             .map_err(|_| Error::GenerationExhausted)?;
+        let mut native = Vec::new();
+        native
+            .try_reserve_exact(reservations.len())
+            .map_err(|_| Error::OutOfMemory)?;
+        for reservation in &reservations {
+            native.push(NativeReservation {
+                generation,
+                physical_base: reservation.physical_base,
+                cpu_base: reservation.cpu_base.as_ptr().cast(),
+                page_count: reservation.page_count,
+            });
+        }
         let mut context = try_box(Context {
             provider,
-            reservation,
+            reservations,
         })?;
         let operations = Operations {
             validate: validate::<P>,
             allocate: allocate::<P>,
             release,
         };
-        let native = NativeReservation {
-            generation,
-            physical_base: reservation.physical_base,
-            cpu_base: reservation.cpu_base.as_ptr().cast(),
-            page_count: reservation.page_count,
-        };
         let result = {
             let _entered = Entered::try_new()?;
-            // SAFETY: C copies the two temporary records and retains only the
-            // stable Context pointer. It publishes nothing on a failed result.
+            // SAFETY: native contains exactly its declared number of original
+            // ABI records, each derived from a retained actual reservation.
+            // C copies them before return and borrows only stable Context.
             unsafe {
-                stela_linux_page_catalog_register(
-                    &native,
+                stela_linux_page_catalog_register_extents(
+                    native.as_ptr(),
+                    native.len(),
                     &operations,
                     (&mut *context as *mut Context<P>).cast(),
                 )
@@ -506,18 +547,25 @@ mod tests {
     }
 
     fn model(refused: bool) -> (Model, Reservation, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        model_at(refused, PHYSICAL)
+    }
+
+    fn model_at(
+        refused: bool,
+        physical: u64,
+    ) -> (Model, Reservation, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let drops = Arc::new(AtomicUsize::new(0));
         let allocations = Arc::new(AtomicUsize::new(0));
         let backing = Box::new(Backing {
             buffer: Box::new(Buffer([0; PAGE_BYTES])),
-            physical: [PHYSICAL],
+            physical: [physical],
             drops: drops.clone(),
         });
         let cpu = backing.cpu_base();
         let pin = PinnedPages::new(backing, PAGE_BYTES, PAGE_BYTES).unwrap();
         // SAFETY: explicit CPU-only model with the exact retained CPU extent;
         // no conversion or callback grants hardware access to its PA labels.
-        let reservation = unsafe { Reservation::new(PHYSICAL, cpu, 1) }.unwrap();
+        let reservation = unsafe { Reservation::new(physical, cpu, 1) }.unwrap();
         (
             Model {
                 pin: Mutex::new(Some(pin)),
@@ -528,6 +576,120 @@ mod tests {
             drops,
             allocations,
         )
+    }
+
+    struct PairModel([Model; 2]);
+    // SAFETY: each component retains its actual separate model CPU pin; the
+    // symbolic physical inventories do not grant any native hardware access.
+    // Validation and transfer obey the same serialized nonreentrant contract
+    // as Model; only ordinary exhaustion falls through to the second owner.
+    unsafe impl Provider for PairModel {
+        fn validate(&self, request: Request) -> Result<(), MemoryError> {
+            self.0[0].validate(request)?;
+            self.0[1].validate(request)
+        }
+        fn allocate(&self, request: Request) -> Result<PinnedPages, MemoryError> {
+            match self.0[0].allocate(request) {
+                Err(MemoryError::OutOfMemory) => self.0[1].allocate(request),
+                result => result,
+            }
+        }
+    }
+
+    #[test]
+    fn multiple_actual_mapping_pins_keep_their_distinct_cpu_and_physical_relations() {
+        if std::env::var_os("STELA_LINUX_EXTENTS_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "gpu::linux::pages::tests::multiple_actual_mapping_pins_keep_their_distinct_cpu_and_physical_relations",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env("STELA_LINUX_EXTENTS_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                std::string::String::from_utf8_lossy(&output.stdout),
+                std::string::String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        unsafe extern "C" {
+            fn __alloc_pages_noprof(
+                gfp: u32,
+                order: u32,
+                nid: i32,
+                nodes: *mut c_void,
+            ) -> *mut c_void;
+            fn __free_pages(page: *mut c_void, order: u32);
+            fn page_to_pfn(page: *const c_void) -> usize;
+            fn __phys_to_virt(physical: u64) -> *mut c_void;
+        }
+        let (left, left_extent, left_drops, _) = model_at(false, PHYSICAL);
+        let right_physical = PHYSICAL + 17 * PAGE_BYTES as u64;
+        let (right, right_extent, right_drops, _) = model_at(false, right_physical);
+        let expected_cpu = [left_extent.cpu_base, right_extent.cpu_base];
+        assert_ne!(expected_cpu[0], expected_cpu[1]);
+        // SAFETY: both actual separate CPU grants are retained by PairModel;
+        // only isolated symbolic physical labels are used and IRQ/root writers
+        // are absent. Reversed input proves ordering is not caller authority.
+        let mut catalog = unsafe {
+            Catalog::register_extents(
+                PairModel([left, right]),
+                alloc::vec![right_extent, left_extent],
+            )
+        }
+        .unwrap();
+        let entered = Entered::try_new().unwrap();
+        // SAFETY: the actual isolated C owner is entered at quiescence; the
+        // registered provider transfers its two real CPU pins through the
+        // normal Linux page API. Null nodemask and node -1 permit node0.
+        let pages = unsafe {
+            [
+                __alloc_pages_noprof(0, 0, -1, ptr::null_mut()),
+                __alloc_pages_noprof(0, 0, -1, ptr::null_mut()),
+            ]
+        };
+        assert!(!pages[0].is_null() && !pages[1].is_null());
+        for (index, physical) in [PHYSICAL, right_physical].into_iter().enumerate() {
+            // SAFETY: each page is live in this exact generation, and these
+            // queries operate on its retained metadata and actual CPU mapping.
+            unsafe {
+                assert_eq!(page_to_pfn(pages[index]) as u64, physical >> PAGE_SHIFT);
+                assert_eq!(
+                    __phys_to_virt(physical).cast::<u8>(),
+                    expected_cpu[index].as_ptr()
+                );
+            }
+        }
+        drop(entered);
+        assert_eq!(catalog.try_retire(), Err(Error::Native(-16)));
+        assert_eq!(left_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(right_drops.load(Ordering::Relaxed), 0);
+        let entered = Entered::try_new().unwrap();
+        // SAFETY: both exact original order0 live references are uniquely held
+        // by this test; no device, IRQ, RCU or concurrent consumer exists.
+        unsafe {
+            __free_pages(pages[0], 0);
+            __free_pages(pages[1], 0);
+        }
+        drop(entered);
+        assert_eq!(left_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(right_drops.load(Ordering::Relaxed), 1);
+        catalog.try_retire().unwrap();
+    }
+
+    #[test]
+    fn original_reservation_and_operations_abi_has_no_unread_tail() {
+        assert_eq!(size_of::<NativeReservation>(), 32);
+        assert_eq!(core::mem::offset_of!(NativeReservation, generation), 0);
+        assert_eq!(core::mem::offset_of!(NativeReservation, physical_base), 8);
+        assert_eq!(core::mem::offset_of!(NativeReservation, cpu_base), 16);
+        assert_eq!(core::mem::offset_of!(NativeReservation, page_count), 24);
+        assert_eq!(size_of::<Operations>(), 3 * size_of::<usize>());
     }
 
     #[test]
@@ -558,7 +720,7 @@ mod tests {
             }
             let mut context = Context {
                 provider,
-                reservation,
+                reservations: alloc::vec![reservation],
             };
             let mut output = NativeAllocation {
                 pin: ptr::null_mut(),
