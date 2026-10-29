@@ -206,6 +206,11 @@ conversions_follow_their_names(void)
               "call half @air.convert.f.f16.f.f32(float 1.5)", 0x3e00);
    CHECK_FOLD("declare float @air.convert.f.f32.u.i16(i16)\n", "float",
               "call float @air.convert.f.f32.u.i16(i16 -1)", f32(65535.0f));
+   /* A bool converts as zero or one; anything nonzero is true. */
+   CHECK_FOLD("declare float @air.convert.f.f32.u.i1(i1)\n", "float",
+              "call float @air.convert.f.f32.u.i1(i1 true)", f32(1.0f));
+   CHECK_FOLD("declare i32 @air.convert.s.i32.u.i1(i1)\n", "i32",
+              "call i32 @air.convert.s.i32.u.i1(i1 true)", 1);
    CHECK_FOLD("declare i32 @air.convert.s.i32.s.i16(i16)\n", "i32",
               "call i32 @air.convert.s.i32.s.i16(i16 -2)", 0xfffffffeu);
    CHECK_FOLD("declare i32 @air.convert.u.i32.u.i16(i16)\n", "i32",

@@ -354,8 +354,18 @@ lower(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef ca
    return STELA_AIR_CALL_LOWERED;
 }
 
+/* Whether a type is a bool or a vector of bools. */
+static bool
+boolean(LLVMTypeRef type)
+{
+   unsigned lanes;
+   LLVMTypeRef element = stela_air_call_element(type, &lanes);
+   return lanes <= 4 && LLVMGetTypeKind(element) == LLVMIntegerTypeKind &&
+          LLVMGetIntTypeWidth(element) == 1;
+}
+
 /* "air.convert.<to>.<from>": each type is "f." with a float type, or "s."
- * or "u." with an integer type. */
+ * or "u." with an integer type; a bool is "u.i1", true converting to one. */
 static enum stela_air_call_status
 convert(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef callee,
         const char *name, size_t bytes, nir_def **result)
@@ -367,8 +377,9 @@ convert(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef 
    stela_air_call_element(to, &to_lanes);
    stela_air_call_element(from, &from_lanes);
    bool to_float = stela_air_call_floating(to), from_float = stela_air_call_floating(from);
-   if ((!to_float && !stela_air_call_integer(to)) || (!from_float && !stela_air_call_integer(from)) ||
-       to_lanes != from_lanes)
+   bool to_bool = boolean(to), from_bool = boolean(from);
+   if ((!to_float && !to_bool && !stela_air_call_integer(to)) ||
+       (!from_float && !from_bool && !stela_air_call_integer(from)) || to_lanes != from_lanes)
       return stela_air_call_fail(c, STELA_AIR_TYPE, "unsupported conversion types"), STELA_AIR_CALL_FAILED;
    char to_name[16], from_name[16];
    stela_air_call_overload(to, to_name, sizeof(to_name));
@@ -398,7 +409,11 @@ convert(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef 
    unsigned to_bits = to_float ? (LLVMGetTypeKind(stela_air_call_element(to, &to_lanes)) == LLVMHalfTypeKind ? 16 : 32) :
                       LLVMGetIntTypeWidth(stela_air_call_element(to, &to_lanes));
    nir_builder *b = c->b;
-   if (to_float && from_float)
+   if (from_bool)
+      *result = to_bool ? x : to_float ? nir_b2fN(b, x, to_bits) : nir_b2iN(b, x, to_bits);
+   else if (to_bool)
+      *result = from_float ? nir_fneu_imm(b, x, 0.0) : nir_ine_imm(b, x, 0);
+   else if (to_float && from_float)
       *result = to_bits == 16 ? nir_f2f16_rtne(b, x) : nir_f2fN(b, x, to_bits);
    else if (to_float)
       *result = from_sign == 0 ? nir_i2fN(b, x, to_bits) : nir_u2fN(b, x, to_bits);
