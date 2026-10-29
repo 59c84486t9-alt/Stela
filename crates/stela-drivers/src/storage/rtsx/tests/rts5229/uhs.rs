@@ -3,6 +3,7 @@ use super::*;
 
 #[test]
 fn rts5229_cmd11_all_sdr_modes_and_tx27_tuning_drive_actual_changed_pio_payloads() {
+    let _virtual = crate::test_clock::virtualize();
     for (function, hz, timing) in [
         (0, 25_000_000, Timing::Sdr12),
         (1, 50_000_000, Timing::Sdr25),
@@ -61,6 +62,7 @@ fn rts5229_cmd11_all_sdr_modes_and_tx27_tuning_drive_actual_changed_pio_payloads
 
 #[test]
 fn rts5229_voltage_or_tuning_failure_withholds_publication_and_requires_fresh_power_cycle() {
+    let _virtual = crate::test_clock::virtualize();
     for fault in 0..4 {
         let chip = chip(false, true, 2);
         {
@@ -118,6 +120,7 @@ fn rts5229_voltage_or_tuning_failure_withholds_publication_and_requires_fresh_po
 
 #[test]
 fn rts5229_real_removal_delink_or_shared_ms_during_tuning_is_not_a_phase_sample() {
+    let _virtual = crate::test_clock::virtualize();
     for fault in [Fault::Remove, Fault::Delink, Fault::MemoryStick] {
         let chip = chip(false, true, 0);
         {
