@@ -1,6 +1,33 @@
-//! Shared input handling for the Metal driver frontend.
+//! Stela's Metal device over a Vulkan backend.
 //!
-//! Parsing a library exposes its original AIR and metadata; it does not compile
-//! shaders, initialize hardware, or establish any Metal capability. AGX machine
-//! code archives are a different input and are not accepted as AIR libraries.
+//! The guest's unchanged Metal framework reaches this device through the
+//! frontend; every Metal object and command lowers here to the internal
+//! [`vulkan`] boundary, which the vendor's Mesa driver executes (NVK for the
+//! [`nvidia`] route). Capabilities derive from the Vulkan device, the AIR
+//! compiler and this implementation together ([`capabilities`]).
+//!
+//! [`library`] parses Metal libraries and exposes their original AIR and
+//! metadata. AGX machine code archives are a different input and are not
+//! accepted as AIR libraries.
+#[macro_use]
+mod macros;
+
+pub mod abi;
+pub mod binding;
+pub mod capabilities;
+pub mod command_buffer;
+pub mod device;
+pub mod error;
+pub mod hazard;
+pub mod heap;
 pub mod library;
+pub mod nvidia;
+pub mod pass;
+pub mod pipeline;
+pub mod pixel_format;
+pub mod resource;
+pub mod sampler;
+pub mod shader;
+pub mod upload;
+pub mod vertex;
+pub mod vulkan;
