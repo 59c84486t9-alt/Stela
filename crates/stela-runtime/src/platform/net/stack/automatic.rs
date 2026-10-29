@@ -137,7 +137,9 @@ impl<L: Link, C: Clock> Stack<L, C> {
             self.phy.probes.push(dad::Probe {
                 address,
                 nonce,
-                until: now.saturating_add(1_000_000),
+                // Link admission/queue contention may have consumed time before
+                // publication. Keep the full DAD interval after transmit returns.
+                until: self.now().saturating_add(1_000_000),
                 duplicate: false,
             });
         }
@@ -313,6 +315,57 @@ pub(super) mod tests {
         let sum = rdnss::checksum(source, destination, icmp);
         icmp[2..4].copy_from_slice(&sum.to_be_bytes());
         frame
+    }
+    #[test]
+    fn dad_wait_starts_after_the_solicitation_is_transmitted() {
+        use alloc::rc::Rc;
+        use core::cell::Cell;
+        struct LogicalClock(Rc<Cell<u64>>);
+        impl Clock for LogicalClock {
+            fn now_us(&self) -> u64 {
+                self.0.get()
+            }
+        }
+        struct DelayedLink {
+            now: Rc<Cell<u64>>,
+            transmissions: usize,
+        }
+        impl Link for DelayedLink {
+            fn mac(&self) -> stela_drivers::net::Mac {
+                stela_drivers::net::Mac([2, 0, 0, 0, 0, 2])
+            }
+            fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
+                assert_eq!(frame[54], 135);
+                self.transmissions += 1;
+                // A real link may wait for its root/queue owner before the
+                // solicitation is published, consuming the earlier deadline.
+                self.now.set(self.now.get() + 2_000_000);
+                Ok(())
+            }
+            fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
+                Ok(None)
+            }
+        }
+        let now = Rc::new(Cell::new(0));
+        let mut stack = Stack::new(
+            DelayedLink {
+                now: now.clone(),
+                transmissions: 0,
+            },
+            LogicalClock(now.clone()),
+            7,
+        );
+        stack.probe_ipv6().unwrap();
+        assert_eq!(now.get(), 2_000_000);
+        stack.probe_ipv6().unwrap();
+        assert!(stack.phy.approved_ipv6.is_empty());
+        now.set(2_999_999);
+        stack.probe_ipv6().unwrap();
+        assert!(stack.phy.approved_ipv6.is_empty());
+        now.set(3_000_000);
+        stack.probe_ipv6().unwrap();
+        assert_eq!(stack.phy.approved_ipv6, [stack.phy.local_ipv6]);
+        assert_eq!(stack.phy.link.transmissions, 1);
     }
     #[test]
     fn ipv6_only_link_uses_real_router_advertisement_and_dad() {
