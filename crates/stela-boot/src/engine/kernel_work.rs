@@ -24,18 +24,19 @@ use stela_drivers::{
     platform::work::{self, Cpu, Executor, Queue, Stack, StackBacking, WorkError},
 };
 const SLOTS: usize = 64;
-const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
+mod firmware;
 #[cfg(feature = "diagnostics")]
 mod pages;
 mod pin;
 mod plan;
+pub(crate) use firmware::FirmwareContext;
 use plan::Plan;
 #[cfg(feature = "diagnostics")]
 mod prototype;
 #[cfg(feature = "diagnostics")]
 pub(super) use prototype::check as check_mixed;
 #[derive(Debug)]
-pub(super) enum Error {
+pub(crate) enum Error {
     Inventory,
     WrongCpu,
     Clock,
@@ -171,7 +172,7 @@ unsafe impl Cpu for NativeCpu {
 pub(super) struct KernelWork {
     executor: Executor<SLOTS>,
     _cpu: Arc<NativeCpu>,
-    foreground: Range<usize>,
+    foreground: Arc<firmware::Foreground>,
     root: u64,
     busy: Cell<bool>,
     #[cfg(feature = "diagnostics")]
@@ -344,7 +345,16 @@ impl KernelWork {
         });
         #[cfg(feature = "diagnostics")]
         let stack_pages = pages::TaskPageInventory::from_spans(reservation.clone(), &spans)?;
-        let foreground = spans[0].0.clone();
+        let (foreground_slot, foreground_physical) = plan.slot(0)?;
+        let foreground = Arc::new(firmware::Foreground {
+            reservation: reservation.clone(),
+            bounds: spans[0].0.clone(),
+            lower: foreground_slot.lower_guard.start as usize
+                ..foreground_slot.lower_guard.end as usize,
+            upper: foreground_slot.upper_guard.start as usize
+                ..foreground_slot.upper_guard.end as usize,
+            physical: foreground_physical,
+        });
         let mut stacks = Vec::new();
         stacks
             .try_reserve_exact(spans.len())
@@ -413,6 +423,12 @@ impl KernelWork {
             .identity
             .check_dispatch()
             .map_err(Error::Work)?;
+        let runtime = self.executor.runtime();
+        match runtime.current_id() {
+            Ok(_) => return Err(Error::Work(WorkError::WouldDeadlock)),
+            Err(WorkError::Unavailable) => {}
+            Err(error) => return Err(Error::Work(error)),
+        }
         // SAFETY: genuine retained loader root on this physical BSP, no native
         // or IRQ frame; every continuation was qualified in this same domain.
         let _root = unsafe { RestoreRoot::enter(self.root) };
@@ -423,12 +439,6 @@ impl KernelWork {
             .identity
             .check_clock_root()
             .map_err(Error::Work)?;
-        let runtime = self.executor.runtime();
-        match runtime.current_id() {
-            Ok(_) => return Err(Error::Work(WorkError::WouldDeadlock)),
-            Err(WorkError::Unavailable) => {}
-            Err(error) => return Err(Error::Work(error)),
-        }
         let deadline = self
             ._cpu
             .ticks()
@@ -482,24 +492,25 @@ impl KernelWork {
             .check_firmware_join(work::FirmwareQueue::Notify)
             .map_err(Error::Work)
     }
+    /// Run only on the real owned foreground stack, under the dispatcher's
+    /// existing serialized original-root guard. No borrowed caller stack or
+    /// process authority is captured or retained in a queued job.
+    pub(super) fn call_firmware_owned<F, T>(&self, timeout_us: u64, function: F) -> Result<T, Error>
+    where
+        F: FnOnce(&super::FirmwareContext<'_>) -> T + 'static,
+        T: 'static,
+    {
+        let stack = self.foreground.clone();
+        let queue = self.executor.runtime().queue().clone();
+        self.call_owned(timeout_us, move || {
+            let context = FirmwareContext::enter(&stack, &queue)?;
+            let output = function(&context);
+            context.check()?;
+            Ok(output)
+        })?
+    }
     fn qualify_foreground(&self) -> Result<(), Error> {
-        let pointer = self.executor.runtime().get_ref() as *const _ as usize;
-        let bounds = self.foreground.clone();
-        let expected_root = self.root;
-        let valid = self.call_owned(1_000_000, move || {
-            let (rsp, root): (usize, u64);
-            // SAFETY: pure observations from this genuine foreground callback.
-            unsafe {
-                asm!("mov {}, rsp",out(reg)rsp,options(nomem,nostack,preserves_flags));
-                asm!("mov {}, cr3",out(reg)root,options(nomem,nostack,preserves_flags));
-            }
-            // SAFETY: pointer is this actual pinned Runtime. An uncertain call
-            // retains its owned closure and complete runtime through quarantine.
-            let runtime = unsafe { &*(pointer as *const work::Runtime<SLOTS>) };
-            runtime.current_id().is_ok_and(|id| id.get() != 0)
-                && bounds.contains(&rsp)
-                && root & ADDRESS == expected_root
-        })?;
+        let valid = self.call_firmware_owned(1_000_000, |context| context.id() != 0)?;
         if !valid {
             return Err(Error::Qualification);
         }

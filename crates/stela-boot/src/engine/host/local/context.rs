@@ -82,6 +82,21 @@ pub(crate) struct ProcessRootScope<'a> {
     _local: PhantomData<*mut ()>,
 }
 impl ProcessRootScope<'_> {
+    /// Require the manager's actual entered original owner, not merely a Host
+    /// root with equivalent shared mappings. This remains no stack/service grant.
+    pub(crate) fn entered_original(
+        &self,
+        owner: &crate::paging::loader::LoaderTables,
+    ) -> Result<(), WorkError> {
+        self.identity.validate_process_root()?;
+        if root() != self.root
+            || !core::ptr::eq(self.identity.loader_tables, owner)
+            || !crate::engine::storage::entered_loader_root(owner)
+        {
+            return Err(WorkError::CorruptContext);
+        }
+        Ok(())
+    }
     pub(crate) fn observe_original(
         &self,
         address: u64,
