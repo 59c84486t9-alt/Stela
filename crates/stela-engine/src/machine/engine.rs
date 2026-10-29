@@ -145,11 +145,6 @@ const JUMP_CACHE: usize = 4096;
 /// anyway). Each run that reaches it costs an exit to the engine, which
 /// at 256 caused frequent exits in measured workloads.
 const CHAIN_LIMIT: u64 = 4096;
-/// Blocks installed between reclaims for low memory: the heap may be low
-/// with another PE's machine's data, which reclaiming code here again at
-/// every install would not free.
-const LOW_MEMORY_INSTALLS: u64 = 4096;
-
 /// The distinct refusals of one device register and direction reported.
 const DEVICE_REFUSALS_REPORTED: usize = 16;
 /// ISS CV=1 and COND=0b1110, as reported for trapped AArch64 instructions.
@@ -1826,9 +1821,6 @@ pub struct Machine<H: Host, D: Devices> {
     index: BTreeMap<(u64, u64, Variant), usize>,
     /// The `index` keys of the blocks compiled from each physical page.
     code_pages: BTreeMap<u64, Vec<(u64, u64, Variant)>>,
-    /// Blocks compiled and shared by the next reclaim for low memory
-    /// ([`LOW_MEMORY_INSTALLS`]).
-    low_memory_reclaim: u64,
     /// The last block [`Machine::stale_code`] checked, where its sweep goes
     /// on; `None` to start over.
     stale_cursor: Option<(u64, u64, Variant)>,
@@ -2076,7 +2068,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
             native_failure: None,
             index: BTreeMap::new(),
             code_pages: BTreeMap::new(),
-            low_memory_reclaim: 0,
             stale_cursor: None,
             pages: BTreeMap::new(),
             kept_pages: stored::KEPT_PAGES,
@@ -2926,6 +2917,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
         match self.host.reclaim_code() {
             Some(range) => self.evict_code(range),
             None => self.discard_code(),
+        }
+    }
+
+    /// Release local code owners under pressure before allocating compilation
+    /// input and recovery metadata. A ring may return an unused part: advancing
+    /// it alone does not release any retained template or source witness.
+    fn reclaim_for_memory(&mut self) {
+        while !self.blocks.is_empty() && self.host.memory_low() {
+            let retained = self.fault_recovery.len();
+            self.reclaim_code();
+            if !self.blocks.is_empty() && self.fault_recovery.len() == retained {
+                self.discard_code();
+            }
         }
     }
 
@@ -4299,6 +4303,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Some(&index) => index,
             None => {
                 let generation = self.code_generation;
+                self.reclaim_for_memory();
                 let compiled = self.compile(pc, physical, variant)?;
                 // Compiling may have reclaimed code, whose lookup entries
                 // the old context still names: the thunks look up in a new
@@ -4629,12 +4634,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let last = compiled.template.source_bytes - INSTRUCTION as usize;
         let terminal = u32::from_le_bytes(source[last..last + 4].try_into().expect("a word"));
-        let installed = self.statistics.compiled + self.statistics.shared;
-        if !self.blocks.is_empty() && installed >= self.low_memory_reclaim && self.host.memory_low()
-        {
-            self.reclaim_code();
-            self.low_memory_reclaim = installed + LOW_MEMORY_INSTALLS;
-        }
         // A heap without room for the block table's next chunk reuses the
         // oldest code's slots instead, or, when none of this machine's
         // blocks lay there, every slot.
@@ -7464,6 +7463,8 @@ mod tests {
         translation_helper: Option<u64>,
         /// What [`Host::memory_low`] answers.
         pub(super) memory_low: bool,
+        /// Check the allocation boundary before a new compilation reads input.
+        require_empty_code_on_read: bool,
         /// Installs per part of a code arena of two parts reclaimed in
         /// turn, and its parts' code addresses, oldest first; `None` for an
         /// arena of one part.
@@ -7473,6 +7474,12 @@ mod tests {
 
     impl Host for FakeHost {
         fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
+            if self.require_empty_code_on_read {
+                assert!(
+                    self.installed.is_empty(),
+                    "resident code survived until new input allocation"
+                );
+            }
             let Some(offset) = physical.checked_sub(self.base) else {
                 return false;
             };
@@ -7557,6 +7564,7 @@ mod tests {
         fn discard_code(&mut self) {
             self.live_patch_start = self.patches.len();
             self.installed.clear();
+            self.parts.clear();
             self.executables.clear();
         }
         fn memory_low(&self) -> bool {
@@ -7771,6 +7779,7 @@ mod tests {
             placement: mmu::placement::Placement::FiveLevel,
             translation_helper: None,
             memory_low: false,
+            require_empty_code_on_read: false,
             ring: None,
             parts: Vec::new(),
         };
@@ -9291,6 +9300,42 @@ mod tests {
     }
 
     #[test]
+    fn pressure_reclaims_before_reading_new_compile_input() {
+        const RET: u32 = 0xd65f_03c0;
+        let mut machine = machine(&vec![RET; FETCH_PAGE as usize / 4 + 1]);
+        let base = machine.cpu.pc;
+        assert!(machine.fetch_block(base, false).is_ok());
+        machine.host.memory_low = true;
+        machine.host.require_empty_code_on_read = true;
+        assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
+        assert_eq!(machine.fault_recovery.len(), 1);
+        assert_eq!(machine.statistics.code_discards, 1);
+    }
+
+    #[test]
+    fn pressure_reclaims_metadata_when_the_next_arena_part_is_empty() {
+        const RET: u32 = 0xd65f_03c0;
+        let mut machine = machine(&vec![RET; 2 * FETCH_PAGE as usize / 4 + 1]);
+        machine.host.ring = Some(16);
+        let base = machine.cpu.pc;
+        assert!(machine.fetch_block(base, false).is_ok());
+        let old_generation = machine.code_generation;
+        machine.host.memory_low = true;
+        assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
+        assert_eq!(machine.fault_recovery.len(), 1);
+        assert!(!machine.index.keys().any(|&(pc, ..)| pc == base));
+        assert_ne!(machine.code_generation, old_generation);
+        // A cached hit adds no compilation scratch and retains its owner.
+        let discarded = machine.statistics.code_discards;
+        assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
+        assert_eq!(machine.statistics.code_discards, discarded);
+        // Continued foreign pressure must not permit unbounded local growth.
+        assert!(machine.fetch_block(base + 2 * FETCH_PAGE, false).is_ok());
+        assert_eq!(machine.fault_recovery.len(), 1);
+        assert_eq!(machine.index.len(), 1);
+    }
+
+    #[test]
     fn a_block_installed_while_memory_runs_low_discards_the_others_first() {
         const RET: u32 = 0xd65f_03c0;
         let mut machine = machine(&vec![RET; FETCH_PAGE as usize / 4 + 1]);
@@ -9304,18 +9349,18 @@ mod tests {
     }
 
     #[test]
-    fn memory_low_reclaims_code_once_per_run_of_installs() {
+    fn memory_pressure_reclaims_before_each_new_compilation() {
         const RET: u32 = 0xd65f_03c0;
         let mut machine = machine(&vec![RET; 2 * FETCH_PAGE as usize / 4 + 1]);
         let base = machine.cpu.pc;
         assert!(machine.fetch_block(base, false).is_ok());
         machine.host.memory_low = true;
         assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
-        // Still low, as another machine's data may keep it: the next install
-        // keeps the blocks this one had.
+        // Still low, as another machine's data may keep it: a new compile
+        // releases this machine's old owners before allocating more.
         assert!(machine.fetch_block(base + 2 * FETCH_PAGE, false).is_ok());
-        assert_eq!(machine.index.len(), 2);
-        assert_eq!(machine.statistics.code_discards, 1);
+        assert_eq!(machine.index.len(), 1);
+        assert_eq!(machine.statistics.code_discards, 2);
     }
 
     #[test]
