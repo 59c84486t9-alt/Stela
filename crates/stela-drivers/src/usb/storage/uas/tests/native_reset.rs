@@ -12,6 +12,10 @@ fn native_root_reset_rebind_preserves_old_alias_quarantine_and_reprobes_geometry
         let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
         let binding = Binding::new(&device, &interface).unwrap();
         let mut failures = Vec::new();
+        // SAFETY: This fixture pairs the current controller/device/binding
+        // with unused class endpoints. memory is alive and exclusive through
+        // old/new alias and reset accesses; the passive model performs DMA
+        // only synchronously inside these calls.
         let mut disks = unsafe {
             crate::usb::storage::discover_uas(
                 controller.clone(),
@@ -147,6 +151,10 @@ fn native_reset_identity_or_reconstruction_failure_quarantines_both_epochs() {
         );
         let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
         let mut failures = Vec::new();
+        // SAFETY: The controller, device and binding name this fixture's
+        // current attachment, with no competing UAS endpoint owner. memory
+        // remains alive/exclusive through synchronous discovery and resets;
+        // fault injection starts only after this initial call returns.
         let mut disks = unsafe {
             crate::usb::storage::discover_uas(
                 controller.clone(),

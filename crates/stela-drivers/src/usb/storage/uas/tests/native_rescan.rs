@@ -13,6 +13,10 @@ fn native_empty_owner_rescans_change_and_reset_without_retargeting_old_disks() {
         hardware.borrow_mut().empty_media = true;
         let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
         let mut failures = Vec::new();
+        // SAFETY: This reset fixture supplies the current controller, device
+        // and binding with unused UAS endpoint contexts. memory stays alive
+        // and exclusive through synchronous discovery, probing and resets;
+        // no competing class or firmware actor drives this model.
         let (storage, disks) = unsafe {
             crate::usb::storage::discover_uas_retained(
                 controller,
