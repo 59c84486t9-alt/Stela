@@ -8,7 +8,7 @@
 //! commands because the hazard tracker orders the queue.
 use super::{BufferRef, CommandBuffer, Encoder, Resolver};
 use crate::gpu::metal::{
-    abi::{BlitOption, TextureType},
+    abi::BlitOption,
     error::{Error, Result, ensure},
     hazard::Use,
     pixel_format::{Description, Kind},
@@ -57,31 +57,6 @@ impl BlitTexture<'_> {
         self.descriptor.pixel_format.describe()
     }
 
-    fn level_size(&self, level: u64) -> [u64; 3] {
-        let texture = self.descriptor;
-        let height = match texture.texture_type {
-            TextureType::D1 | TextureType::D1Array | TextureType::TextureBuffer => 1,
-            TextureType::Cube | TextureType::CubeArray => texture.width,
-            _ => texture.height,
-        };
-        let depth = if texture.texture_type == TextureType::D3 {
-            texture.depth
-        } else {
-            1
-        };
-        [texture.width, height, depth].map(|size| (size >> level).max(1))
-    }
-
-    fn slices(&self) -> u64 {
-        let texture = self.descriptor;
-        match texture.texture_type {
-            TextureType::Cube => 6,
-            TextureType::CubeArray => texture.array_length * 6,
-            TextureType::D3 => 1,
-            _ => texture.array_length,
-        }
-    }
-
     /// Validates `region` and returns its subresource, offset and extent.
     fn region(
         &self,
@@ -92,8 +67,11 @@ impl BlitTexture<'_> {
             region.level < self.descriptor.mipmap_level_count,
             "level beyond the texture's mipmaps",
         )?;
-        ensure(region.slice < self.slices(), "slice beyond the texture")?;
-        let size = self.level_size(region.level);
+        ensure(
+            region.slice < self.descriptor.slice_count(),
+            "slice beyond the texture",
+        )?;
+        let size = self.descriptor.level_extent(region.level);
         let block = self.description().block;
         let block_size = [u64::from(block.width), u64::from(block.height), 1];
         for axis in 0..3 {
@@ -305,9 +283,9 @@ impl CommandBuffer {
         let aspects = src.description().image_aspects();
         let mut regions = Vec::new();
         for level in 0..level_count {
-            let size = src.level_size(src_level + level);
+            let size = src.descriptor.level_extent(src_level + level);
             ensure(
-                dst.level_size(dst_level + level) == size,
+                dst.descriptor.level_extent(dst_level + level) == size,
                 "copied levels have equal sizes",
             )?;
             for slice in 0..slice_count {
@@ -407,7 +385,7 @@ impl CommandBuffer {
             filterable,
             "mipmap generation needs a filterable, renderable format",
         )?;
-        let layers = texture.slices() as u32;
+        let layers = texture.descriptor.slice_count() as u32;
         for level in 1..texture.descriptor.mipmap_level_count {
             let bounds = |size: [u64; 3]| [[0; 3], size.map(|size| size as i32)];
             let subresource = |level: u64| Subresource {
@@ -422,9 +400,9 @@ impl CommandBuffer {
                 dst: texture.image,
                 regions: alloc::vec![ImageBlit {
                     src: subresource(level - 1),
-                    src_bounds: bounds(texture.level_size(level - 1)),
+                    src_bounds: bounds(texture.descriptor.level_extent(level - 1)),
                     dst: subresource(level),
-                    dst_bounds: bounds(texture.level_size(level)),
+                    dst_bounds: bounds(texture.descriptor.level_extent(level)),
                 }],
                 filter: Filter::Linear,
             });

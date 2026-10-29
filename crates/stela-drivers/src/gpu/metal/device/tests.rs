@@ -25,9 +25,9 @@ use crate::gpu::metal::{
         Specialization, Stage, Tessellation, TessellationStages, tests::interface,
     },
     vulkan::{
-        PrimitiveTopology, ShaderStages,
+        ImageAspects, PrimitiveTopology, ShaderStages,
         backend::{BufferAllocation, Descriptor, Requirements},
-        command::{BufferImageCopy, Command},
+        command::{BufferImageCopy, Command, Subresource},
         object::{
             Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo,
             GraphicsPipelineInfo, Image, ImageInfo, ImageView, ImageViewInfo, MemoryRequest,
@@ -47,7 +47,7 @@ struct MockBackend {
     graphics: Vec<GraphicsPipelineInfo>,
     compute: Vec<ComputePipelineInfo>,
     submissions: Vec<Vec<Segment>>,
-    writes: Vec<(Memory, Vec<u8>)>,
+    writes: Vec<(Memory, u64, Vec<u8>)>,
     semaphores: BTreeMap<u64, u64>,
     queries_ready: bool,
 }
@@ -154,11 +154,20 @@ impl Backend for MockBackend {
     fn write_descriptor(&mut self, index: u32, descriptor: Descriptor) {
         self.descriptors.push((index, descriptor));
     }
-    fn write_memory(&mut self, memory: Memory, _: u64, bytes: &[u8]) -> Result<()> {
-        self.writes.push((memory, bytes.to_vec()));
+    fn write_memory(&mut self, memory: Memory, offset: u64, bytes: &[u8]) -> Result<()> {
+        self.writes.push((memory, offset, bytes.to_vec()));
         Ok(())
     }
-    fn read_memory(&mut self, _: Memory, _: u64, _: &mut [u8]) -> Result<()> {
+    /// Reads back the latest write to each byte.
+    fn read_memory(&mut self, memory: Memory, offset: u64, bytes: &mut [u8]) -> Result<()> {
+        for (written, at, data) in &self.writes {
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                let address = offset + index as u64;
+                if *written == memory && (*at..*at + data.len() as u64).contains(&address) {
+                    *byte = data[(address - at) as usize];
+                }
+            }
+        }
         Ok(())
     }
     fn flush_memory(&mut self, _: Memory, _: u64, _: u64) -> Result<()> {
@@ -623,6 +632,81 @@ fn render_pipelines_compile_their_functions_once() {
         device.compiler.released.len(),
         4,
         "failed pipelines release their NIR"
+    );
+}
+
+#[test]
+fn managed_textures_keep_a_cpu_copy_without_host_image_copy() {
+    let mut backend = MockBackend::new();
+    backend.physical.as_mut().unwrap().features.host_image_copy = false;
+    let chip: &Chip = &CHIPS[0];
+    let platform = chip.platform(crate::gpu::metal::nvidia::Attachment {
+        link: PcieLink {
+            speed: 4,
+            width: 16,
+        },
+        external: false,
+        location_number: 0,
+    });
+    let mut device = Device::new(backend, MockCompiler::default(), &platform).unwrap();
+    let descriptor = TextureDescriptor {
+        width: 8,
+        height: 4,
+        mipmap_level_count: 2,
+        options: options(StorageMode::Managed),
+        ..texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ)
+    };
+    let texture = device.new_texture(&descriptor).unwrap();
+    let region = BufferImageCopy {
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        subresource: Subresource {
+            aspects: ImageAspects::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        },
+        offset: [2, 1, 0],
+        extent: [2, 2, 1],
+    };
+    let written: Vec<u8> = (0..16).collect();
+    device.replace_region(texture, &region, &written).unwrap();
+    let mut read = [0; 16];
+    device.get_bytes(texture, &region, &mut read).unwrap();
+    assert_eq!(read[..], written[..], "reads come from the CPU copy");
+    assert!(
+        device
+            .replace_region(texture, &region, &written[..12])
+            .is_err()
+    );
+
+    let level1 = device.texture_cpu_copy(texture, 1, 0).unwrap().unwrap();
+    assert_eq!((level1.offset, level1.bytes_per_row), (8 * 4 * 4, 4 * 4));
+
+    submit(&mut device);
+    let segment = &device.backend().submissions.last().unwrap()[0];
+    let Command::CopyBufferToImage { src, regions, .. } = &segment.commands[1] else {
+        panic!("{:?}", segment.commands[1]);
+    };
+    assert_eq!(*src, level1.buffer.buffer);
+    assert_eq!(
+        (
+            regions[0].buffer_offset,
+            regions[0].buffer_row_length,
+            regions[0].offset
+        ),
+        ((8 * 4) + 2 * 4, 8, [2, 1, 0])
+    );
+    assert!(matches!(segment.commands[2], Command::Barrier(_)));
+    submit(&mut device);
+    let segment = &device.backend().submissions.last().unwrap()[0];
+    assert!(
+        !segment
+            .commands
+            .iter()
+            .any(|command| matches!(command, Command::CopyBufferToImage { .. })),
+        "each write uploads once"
     );
 }
 

@@ -3,19 +3,25 @@ use super::{BufferId, Device, HeapId, SamplerId, Slab, TextureId};
 use crate::gpu::metal::{
     abi::{HeapType, ResourceOptions, StorageMode, TextureType},
     binding::{HeapArray, ResourceId},
-    command_buffer::BufferRef,
+    command_buffer::{BufferRef, blit::BufferLayout},
     error::{Error, Result, ensure},
+    hazard::FULL,
     heap::{self, HeapAllocator, HeapDescriptor, SizeAndAlign},
     pass::AttachmentView,
     resource::{
-        self, CpuAccess, ShaderViews, TextureDescriptor, TexturePlan, TextureViewDescriptor,
+        self, CpuAccess, ShaderViews, SubresourceLayout, TextureDescriptor, TexturePlan,
+        TextureViewDescriptor,
     },
     sampler::{self, SamplerDescriptor},
     shader::Compiler,
     vulkan::{
-        backend::{Backend, Descriptor, Object},
-        command::BufferImageCopy,
-        object::{Buffer, BufferView, Image, ImageView, ImageViewInfo, Memory, Sampler},
+        BufferCreate, BufferUsage, MemoryProperties,
+        backend::{Backend, BufferAllocation, Descriptor, Object},
+        command::{BufferImageCopy, Command},
+        object::{
+            Buffer, BufferInfo, BufferView, Image, ImageView, ImageViewInfo, Memory, MemoryRequest,
+            Sampler,
+        },
     },
 };
 use alloc::vec::Vec;
@@ -71,6 +77,8 @@ struct TextureObject {
     /// The texture this one views; views keep their parent alive.
     parent: Option<TextureId>,
     dependents: u32,
+    /// A managed texture's CPU copy, when the CPU cannot reach the image.
+    cpu_copy: Option<BufferAllocation>,
 }
 
 #[derive(Debug)]
@@ -97,6 +105,8 @@ pub(super) struct Resources {
     textures: Slab<TextureObject>,
     samplers: Slab<SamplerObject>,
     heaps: Slab<HeapObject>,
+    /// CPU-copy regions of managed textures that the next commit uploads.
+    cpu_copy_uploads: Vec<(TextureId, BufferImageCopy)>,
 }
 
 impl<B: Backend, C: Compiler> Device<B, C> {
@@ -194,7 +204,20 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         backing: Backing,
         memory: Option<Memory>,
     ) -> Result<TextureId> {
-        let (id, views) = match self.shader_views(image, &plan.views) {
+        let cpu_copy = match plan.cpu_access {
+            CpuAccess::Staged => self.new_cpu_copy(descriptor).map(Some),
+            _ => Ok(None),
+        };
+        let created = cpu_copy.and_then(|cpu_copy| match self.shader_views(image, &plan.views) {
+            Ok((id, views)) => Ok((id, views, cpu_copy)),
+            Err(error) => {
+                if let Some(copy) = cpu_copy {
+                    self.destroy_cpu_copy(copy);
+                }
+                Err(error)
+            }
+        });
+        let (id, views, cpu_copy) = match created {
             Ok(created) => created,
             Err(error) => {
                 self.backend.destroy(Object::Image(image));
@@ -214,8 +237,31 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             memory,
             parent: None,
             dependents: 0,
+            cpu_copy,
         };
         Ok(TextureId(self.resources.textures.insert(texture)))
+    }
+
+    /// The host-visible buffer behind a managed texture's CPU copy.
+    fn new_cpu_copy(&mut self, descriptor: &TextureDescriptor) -> Result<BufferAllocation> {
+        let info = BufferInfo {
+            size: descriptor.cpu_copy_bytes(),
+            usage: BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
+            flags: BufferCreate::EMPTY,
+        };
+        let request = MemoryRequest {
+            required: MemoryProperties::HOST_VISIBLE | MemoryProperties::HOST_COHERENT,
+            preferred: MemoryProperties::HOST_CACHED,
+            mapped: true,
+        };
+        let allocation = self.backend.create_buffer(&info, request)?;
+        self.allocated += allocation.allocated;
+        Ok(allocation)
+    }
+
+    fn destroy_cpu_copy(&mut self, copy: BufferAllocation) {
+        self.defer(Object::Buffer(copy.buffer));
+        self.release_memory(copy.memory, copy.allocated);
     }
 
     /// Creates the sampled and storage views and their descriptors.
@@ -287,6 +333,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             memory: None,
             parent: Some(root),
             dependents: 0,
+            cpu_copy: None,
         };
         Ok(TextureId(self.resources.textures.insert(view)))
     }
@@ -342,6 +389,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 memory: None,
                 parent: None,
                 dependents: 0,
+                cpu_copy: None,
             }
         } else {
             let plan = resource::linear_texture(
@@ -373,6 +421,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 memory: None,
                 parent: None,
                 dependents: 0,
+                cpu_copy: None,
             }
         };
         self.resources.buffers.get_mut(buffer_id.0)?.dependents += 1;
@@ -431,7 +480,23 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let image = texture.image.ok_or(Error::Invalid(
             "texture buffers are written through their buffer",
         ))?;
-        self.backend.copy_to_image(image, region, bytes)
+        let Some(copy) = &texture.cpu_copy else {
+            return self.backend.copy_to_image(image, region, bytes);
+        };
+        let (memory, rows) = (
+            copy.memory,
+            cpu_copy_rows(&texture.descriptor, region, bytes.len())?,
+        );
+        for (offset, packed) in rows.clone() {
+            self.backend.write_memory(memory, offset, &bytes[packed])?;
+        }
+        let upload = BufferImageCopy {
+            buffer_offset: rows.first,
+            ..*region
+        };
+        let upload = cpu_copy_region(&texture.descriptor, upload);
+        self.resources.cpu_copy_uploads.push((id, upload));
+        Ok(())
     }
 
     /// `getBytes:bytesPerRow:bytesPerImage:fromRegion:mipmapLevel:slice:`.
@@ -446,7 +511,72 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let image = texture.image.ok_or(Error::Invalid(
             "texture buffers are read through their buffer",
         ))?;
-        self.backend.copy_from_image(image, region, bytes)
+        let Some(copy) = &texture.cpu_copy else {
+            return self.backend.copy_from_image(image, region, bytes);
+        };
+        let (memory, rows) = (
+            copy.memory,
+            cpu_copy_rows(&texture.descriptor, region, bytes.len())?,
+        );
+        for (offset, packed) in rows {
+            self.backend
+                .read_memory(memory, offset, &mut bytes[packed])?;
+        }
+        Ok(())
+    }
+
+    /// The CPU copy of a managed texture's `level` and `slice`, for
+    /// `synchronizeTexture`; `None` when the CPU reaches the image directly.
+    pub fn texture_cpu_copy(
+        &self,
+        id: TextureId,
+        level: u64,
+        slice: u64,
+    ) -> Result<Option<BufferLayout>> {
+        let texture = self.resources.textures.get(id.0)?;
+        let Some(copy) = &texture.cpu_copy else {
+            return Ok(None);
+        };
+        let descriptor = &texture.descriptor;
+        ensure(
+            level < descriptor.mipmap_level_count && slice < descriptor.slice_count(),
+            "subresource outside the texture",
+        )?;
+        let layout = descriptor.subresource_layout(level, slice);
+        Ok(Some(BufferLayout {
+            buffer: BufferRef {
+                buffer: copy.buffer,
+                offset: 0,
+                address: copy.address,
+                length: descriptor.cpu_copy_bytes(),
+            },
+            offset: layout.offset,
+            bytes_per_row: layout.bytes_per_row,
+            bytes_per_image: layout.bytes_per_image,
+        }))
+    }
+
+    /// Commands that bring images up to date with CPU-copy writes since the
+    /// last commit, ending in a barrier; empty when there are none.
+    pub(super) fn take_cpu_copy_uploads(&mut self) -> Vec<Command> {
+        let uploads = core::mem::take(&mut self.resources.cpu_copy_uploads);
+        let textures = &self.resources.textures;
+        let mut commands: Vec<Command> = uploads
+            .into_iter()
+            .filter_map(|(id, region)| {
+                // A texture destroyed since its write needs no upload.
+                let texture = textures.get(id.0).ok()?;
+                Some(Command::CopyBufferToImage {
+                    src: texture.cpu_copy.as_ref()?.buffer,
+                    dst: texture.image?,
+                    regions: alloc::vec![region],
+                })
+            })
+            .collect();
+        if !commands.is_empty() {
+            commands.push(Command::Barrier(FULL));
+        }
+        commands
     }
 
     fn cpu_access(&self, texture: &TextureObject) -> Result<()> {
@@ -455,8 +585,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             "private textures have no CPU access",
         )?;
         match texture.cpu_access {
-            CpuAccess::HostImageCopy | CpuAccess::Linear => Ok(()),
-            CpuAccess::Staged => Err(Error::Unsupported("CPU access without host image copies")),
+            CpuAccess::HostImageCopy | CpuAccess::Linear | CpuAccess::Staged => Ok(()),
             CpuAccess::None => Err(Error::Invalid("the texture has no CPU access")),
         }
     }
@@ -488,6 +617,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             None => {
                 if let Some(image) = texture.image {
                     self.defer(Object::Image(image));
+                }
+                if let Some(copy) = texture.cpu_copy {
+                    self.destroy_cpu_copy(copy);
                 }
                 self.release_backing(texture.backing, texture.memory)?;
             }
@@ -831,5 +963,105 @@ fn make_aliasable(backing: &mut Backing) -> Result<(HeapId, u64, u64)> {
             Ok((*heap, *offset, *size))
         }
         _ => Err(Error::Invalid("only heap resources become aliasable")),
+    }
+}
+
+/// The rows `region` covers in a texture's CPU copy, as (copy offset,
+/// range in tightly packed bytes of `length`); `first` is the region's
+/// first byte in the copy.
+#[derive(Clone, Debug)]
+struct CopyRows {
+    first: u64,
+    bytes_per_row: u64,
+    bytes_per_image: u64,
+    row_bytes: usize,
+    rows: u32,
+    images: u32,
+    next: u32,
+}
+
+impl Iterator for CopyRows {
+    type Item = (u64, core::ops::Range<usize>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next == self.rows * self.images {
+            return None;
+        }
+        let (image, row) = (self.next / self.rows, self.next % self.rows);
+        let offset = self.first
+            + u64::from(image) * self.bytes_per_image
+            + u64::from(row) * self.bytes_per_row;
+        let start = self.next as usize * self.row_bytes;
+        self.next += 1;
+        Some((offset, start..start + self.row_bytes))
+    }
+}
+
+/// Validates a tightly packed region of `length` bytes against the texture
+/// and locates its rows in the CPU copy.
+fn cpu_copy_rows(
+    descriptor: &TextureDescriptor,
+    region: &BufferImageCopy,
+    length: usize,
+) -> Result<CopyRows> {
+    let subresource = &region.subresource;
+    let (level, slice) = (
+        u64::from(subresource.mip_level),
+        u64::from(subresource.base_array_layer),
+    );
+    ensure(
+        subresource.layer_count == 1
+            && level < descriptor.mipmap_level_count
+            && slice < descriptor.slice_count(),
+        "one subresource of the texture",
+    )?;
+    let SubresourceLayout {
+        offset,
+        bytes_per_row,
+        bytes_per_image,
+        extent,
+    } = descriptor.subresource_layout(level, slice);
+    let block = descriptor.pixel_format.describe().block;
+    let block_size = [u64::from(block.width), u64::from(block.height), 1];
+    let origin = region.offset.map(|offset| offset as u64);
+    let size = region.extent.map(u64::from);
+    for axis in 0..3 {
+        let end = origin[axis] + size[axis];
+        ensure(end <= extent[axis], "region outside the texture level")?;
+        ensure(
+            origin[axis].is_multiple_of(block_size[axis])
+                && (size[axis].is_multiple_of(block_size[axis]) || end == extent[axis]),
+            "compressed regions cover whole blocks",
+        )?;
+    }
+    let row_bytes = size[0].div_ceil(block_size[0]) * u64::from(block.bytes);
+    let rows = size[1].div_ceil(block_size[1]);
+    ensure(
+        row_bytes * rows * size[2] == length as u64,
+        "the bytes are the region, tightly packed",
+    )?;
+    Ok(CopyRows {
+        first: offset
+            + origin[2] * bytes_per_image
+            + origin[1] / block_size[1] * bytes_per_row
+            + origin[0] / block_size[0] * u64::from(block.bytes),
+        bytes_per_row,
+        bytes_per_image,
+        row_bytes: row_bytes as usize,
+        rows: rows as u32,
+        images: size[2] as u32,
+        next: 0,
+    })
+}
+
+/// `region` reading its texels from the CPU copy, whose rows span the whole
+/// level.
+fn cpu_copy_region(descriptor: &TextureDescriptor, region: BufferImageCopy) -> BufferImageCopy {
+    let extent = descriptor.level_extent(region.subresource.mip_level.into());
+    let block = descriptor.pixel_format.describe().block;
+    BufferImageCopy {
+        buffer_row_length: extent[0].next_multiple_of(block.width.into()) as u32,
+        buffer_image_height: extent[1].next_multiple_of(block.height.into()) as u32,
+        ..region
     }
 }

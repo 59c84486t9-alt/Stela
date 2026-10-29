@@ -282,7 +282,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// `commit`: submits the command buffer and returns its serial.
     pub fn commit(&mut self, commands: CommandBuffer) -> Result<u64> {
         let serial = self.submitted + 1;
-        let recording = commands.commit((self.timeline, serial))?;
+        let mut recording = commands.commit((self.timeline, serial))?;
+        // CPU-copy writes reach the images first, after the opening barrier.
+        let uploads = self.take_cpu_copy_uploads();
+        recording.segments[0].commands.splice(1..1, uploads);
         let mut chunks = Vec::with_capacity(recording.uploads.len());
         for (chunk, bytes) in &recording.uploads {
             let memory = self.chunk_memory(chunk.buffer)?;

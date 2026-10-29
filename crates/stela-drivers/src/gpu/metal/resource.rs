@@ -113,13 +113,82 @@ pub struct TextureDescriptor {
     pub swizzle: SwizzleChannels,
 }
 
+/// Where one level and slice of a managed texture lives in its CPU copy.
+/// Levels are packed in order, each level's slices in order, and rows hold
+/// whole blocks without padding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SubresourceLayout {
+    pub offset: u64,
+    pub bytes_per_row: u64,
+    pub bytes_per_image: u64,
+    /// The level's extent in texels.
+    pub extent: [u64; 3],
+}
+
+impl TextureDescriptor {
+    /// Slices: array elements, with six faces per cube.
+    pub fn slice_count(&self) -> u64 {
+        match self.texture_type {
+            TextureType::Cube | TextureType::CubeArray => self.array_length * 6,
+            TextureType::D3 => 1,
+            _ => self.array_length,
+        }
+    }
+
+    /// Texels of `level` along each axis.
+    pub fn level_extent(&self, level: u64) -> [u64; 3] {
+        let height = match self.texture_type {
+            TextureType::D1 | TextureType::D1Array | TextureType::TextureBuffer => 1,
+            TextureType::Cube | TextureType::CubeArray => self.width,
+            _ => self.height,
+        };
+        let depth = if self.texture_type == TextureType::D3 {
+            self.depth
+        } else {
+            1
+        };
+        [self.width, height, depth].map(|size| (size >> level).max(1))
+    }
+
+    /// The CPU copy's layout of `level` and `slice`.
+    pub fn subresource_layout(&self, level: u64, slice: u64) -> SubresourceLayout {
+        let block = self.pixel_format.describe().block;
+        let packed = |level| {
+            let extent = self.level_extent(level);
+            let bytes_per_row = extent[0].div_ceil(block.width.into()) * u64::from(block.bytes);
+            let bytes_per_image = bytes_per_row * extent[1].div_ceil(block.height.into());
+            (extent, bytes_per_row, bytes_per_image)
+        };
+        let earlier: u64 = (0..level)
+            .map(|level| {
+                let (extent, _, bytes_per_image) = packed(level);
+                bytes_per_image * extent[2] * self.slice_count()
+            })
+            .sum();
+        let (extent, bytes_per_row, bytes_per_image) = packed(level);
+        SubresourceLayout {
+            offset: earlier + slice * bytes_per_image * extent[2],
+            bytes_per_row,
+            bytes_per_image,
+            extent,
+        }
+    }
+
+    /// Bytes of the CPU copy of every level and slice.
+    pub fn cpu_copy_bytes(&self) -> u64 {
+        self.subresource_layout(self.mipmap_level_count, 0).offset
+    }
+}
+
 /// How the CPU reaches a texture's contents.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CpuAccess {
     None,
     /// `vkCopyMemoryToImage` and `vkCopyImageToMemory`.
     HostImageCopy,
-    /// A transfer through a host-visible staging buffer.
+    /// Metal's CPU copy of a managed texture, in a host-visible buffer:
+    /// CPU writes reach the image at the next commit, and
+    /// `synchronizeTexture` copies the image back.
     Staged,
     /// The texture aliases a buffer's mapped rows.
     Linear,
@@ -155,6 +224,12 @@ pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> R
     check_shape(capabilities, descriptor, description)?;
     let usage = effective_usage(capabilities, descriptor)?;
 
+    if descriptor.options.storage_mode == StorageMode::Managed {
+        ensure(
+            description.is_color() && descriptor.sample_count == 1,
+            "depth, stencil and multisample textures use private storage",
+        )?;
+    }
     let cpu_access = match descriptor.options.storage_mode {
         StorageMode::Private => CpuAccess::None,
         StorageMode::Managed
@@ -447,11 +522,7 @@ fn image_info(
 }
 
 fn full_range(descriptor: &TextureDescriptor, description: &Description) -> SubresourceRange {
-    let layers = match descriptor.texture_type {
-        TextureType::Cube | TextureType::CubeArray => descriptor.array_length * 6,
-        TextureType::D3 => 1,
-        _ => descriptor.array_length,
-    };
+    let layers = descriptor.slice_count();
     SubresourceRange {
         aspects: shader_aspects(description),
         base_mip_level: 0,
@@ -580,11 +651,7 @@ pub fn texture_view(
         "view type is not compatible with the texture",
     )?;
 
-    let parent_layers = match parent.texture_type {
-        TextureType::Cube | TextureType::CubeArray => parent.array_length * 6,
-        TextureType::D3 => 1,
-        _ => parent.array_length,
-    };
+    let parent_layers = parent.slice_count();
     ensure(
         !view.levels.is_empty() && view.levels.end <= parent.mipmap_level_count,
         "view levels outside the texture",
