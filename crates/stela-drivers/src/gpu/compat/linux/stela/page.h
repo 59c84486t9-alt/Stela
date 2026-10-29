@@ -46,10 +46,24 @@ struct stela_linux_page_ops {
 	void (*release)(void *context, void *pin);
 };
 
+/* Separate versioned table: never append/read a tail on the original ops.
+ * Readiness is a nonblocking observation of this exact retained pin's actual
+ * ownership fences. False retains it and all descriptor allocation markers;
+ * it does not mean release completed. It may not allocate, reenter Linux,
+ * change current/preemption/IRQ state or transfer any pin ownership. */
+#define STELA_LINUX_PAGE_OPS_V2 2U
+struct stela_linux_page_ops_v2 {
+    u32 version;
+    u32 bytes;
+    struct stela_linux_page_ops ordinary;
+    bool (*release_ready)(void *context, void *pin);
+};
+
 /* Call inside a quiescent entered Linux owner. Registration copies the input;
  * callback code/context and the reservation must remain retained until a
  * successful unregister. Register is fallible and publishes nothing on error.
- * Unregister drains retired pins, returns -EBUSY for live payloads, and rejects
+ * Unregister drains ready retired pins, returns -EBUSY for live payloads or
+ * pins still awaiting owner acknowledgment, and rejects
  * a stale generation. A failed unregister relinquishes no lifetime. */
 int stela_linux_page_catalog_register(const struct stela_linux_page_reservation *reservation,
 				     const struct stela_linux_page_ops *ops, void *context);
@@ -64,6 +78,9 @@ int stela_linux_page_catalog_unregister(u64 generation);
 int stela_linux_page_catalog_register_extents(
     const struct stela_linux_page_reservation *extents, size_t extent_count,
     const struct stela_linux_page_ops *ops, void *context);
+int stela_linux_page_catalog_register_extents_v2(
+    const struct stela_linux_page_reservation *extents, size_t extent_count,
+    const struct stela_linux_page_ops_v2 *ops, void *context);
 void stela_linux_pages_finish(void);
 /* Explicit bounded service diagnostic, not GPU or native-IRQ qualification.
  * Requires quiescent entry; owns and retires only its temporary allocations. */

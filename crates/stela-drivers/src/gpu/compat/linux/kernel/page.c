@@ -56,6 +56,7 @@ static struct {
     struct registered_extent *extents;
     size_t extent_count;
 	struct stela_linux_page_ops ops;
+    bool (*release_ready)(void *context, void *pin);
 	void *context;
 	struct page *pages;
 	struct page_state *state;
@@ -249,6 +250,25 @@ int stela_linux_page_catalog_register(const struct stela_linux_page_reservation 
     return stela_linux_page_catalog_register_extents(reservation, 1, ops, context);
 }
 
+int stela_linux_page_catalog_register_extents_v2(
+    const struct stela_linux_page_reservation *extents, size_t extent_count,
+    const struct stela_linux_page_ops_v2 *ops, void *context)
+{
+    require_quiescence();
+    if (catalog.pages)
+        return -EBUSY;
+    /* Read only the fixed header until its exact version/size admits the tail. */
+    if (!ops || ops->version != STELA_LINUX_PAGE_OPS_V2 || ops->bytes != sizeof(*ops))
+        return -EINVAL;
+    if (!ops->release_ready)
+        return -EINVAL;
+    int error = stela_linux_page_catalog_register_extents(extents, extent_count,
+                                                        &ops->ordinary, context);
+    if (!error)
+        catalog.release_ready = ops->release_ready;
+    return error;
+}
+
 static size_t page_index(const struct page *page)
 {
 	require_catalog();
@@ -374,12 +394,25 @@ void stela_linux_pages_finish(void)
 	if (!catalog.pages)
 		return;
 	const struct stela_linux_owner *owner = stela_linux_owner();
-	while (catalog.retired != NO_INDEX) {
-		size_t index = catalog.retired;
-		struct allocation_record *record = catalog.allocations + index;
-		catalog.retired = record->next;
+    /* A bounded pass: an unready native owner cannot spin or prevent other
+     * ready pins from retiring. Links/markers stay owned until actual ack. */
+    size_t *link = &catalog.retired;
+    while (*link != NO_INDEX) {
+        size_t index = *link;
+        struct allocation_record *record = catalog.allocations + index;
 		if (!record->pin || record->live)
 			__builtin_trap();
+        if (catalog.release_ready) {
+            in_callback = true;
+            bool ready = catalog.release_ready(catalog.context, record->pin);
+            in_callback = false;
+            check_callback(owner, 0, ARCH_IRQ_ENABLED);
+            if (!ready) {
+                link = &record->next;
+                continue;
+            }
+        }
+        *link = record->next;
 		in_callback = true;
 		catalog.ops.release(catalog.context, record->pin);
 		in_callback = false;
@@ -400,7 +433,7 @@ int stela_linux_page_catalog_unregister(u64 generation)
 	if (!catalog.pages || catalog.generation != generation)
 		return -EINVAL;
 	stela_linux_pages_finish();
-	if (catalog.live_pages)
+	if (catalog.live_pages || catalog.retired != NO_INDEX)
 		return -EBUSY;
 	size_t count = catalog.page_count;
     free_metadata(catalog.extents, catalog.extent_count * sizeof(*catalog.extents),
@@ -837,6 +870,8 @@ struct test_provider {
 	bool refuse_atomic;
 	bool exhausted;
 	u64 overlap_physical;
+    struct test_pin *held_pin;
+    unsigned int readiness_checks;
     u64 physical_override[TEST_PAGES];
 };
 
@@ -1631,6 +1666,79 @@ static void immutable_multi_extent_inventory(void)
 }
 
 
+
+static bool test_release_ready(void *context, void *pin)
+{
+    struct test_provider *provider = context;
+    assert(stela_linux_quiescent() && !stela_linux_try_enter(&stela_linux_bare));
+    provider->readiness_checks++;
+    return pin != provider->held_pin;
+}
+
+static void deferred_pin_retirement(void)
+{
+    static_assert(sizeof(struct stela_linux_page_ops_v2) == 40);
+    static_assert(offsetof(struct stela_linux_page_ops_v2, ordinary) == 8);
+    static_assert(offsetof(struct stela_linux_page_ops_v2, release_ready) == 32);
+    const struct stela_linux_page_reservation extent = {
+        .generation = 6, .physical_base = TEST_PHYSICAL, .cpu_base = fixture.cpu,
+        .page_count = TEST_PAGES,
+    };
+    struct stela_linux_page_ops_v2 ops = {
+        .version = STELA_LINUX_PAGE_OPS_V2, .bytes = sizeof(ops),
+        .ordinary = test_ops, .release_ready = test_release_ready,
+    };
+    const struct { u32 version, bytes; } header_only = {STELA_LINUX_PAGE_OPS_V2, 8};
+    assert(stela_linux_page_catalog_register_extents_v2(&extent, 1,
+           (const struct stela_linux_page_ops_v2 *)&header_only, &fixture) == -EINVAL);
+    ops.version--;
+    assert(stela_linux_page_catalog_register_extents_v2(&extent, 1, &ops, &fixture) == -EINVAL);
+    ops.version++;
+    ops.release_ready = NULL;
+    assert(stela_linux_page_catalog_register_extents_v2(&extent, 1, &ops, &fixture) == -EINVAL);
+    ops.release_ready = test_release_ready;
+    assert(!metadata_live && !catalog.pages);
+    assert(!stela_linux_page_catalog_register_extents_v2(&extent, 1, &ops, &fixture));
+    unsigned int released = fixture.releases;
+    struct page *first = alloc_page(GFP_KERNEL);
+    struct page *second = alloc_page(GFP_KERNEL);
+    assert(first && second);
+    size_t record = catalog.state[0].allocation;
+    fixture.held_pin = catalog.allocations[record].pin;
+    u8 *payload = page_address(first);
+    *payload = 0x5a;
+    get_page(first);
+    unsigned int checks = fixture.readiness_checks;
+    __free_page(first);
+    stela_linux_pages_finish();
+    assert(fixture.readiness_checks == checks && page_ref_count(first) == 1);
+    __free_page(first);
+    __free_page(second);
+    assert(!catalog.live_pages && catalog.retired != NO_INDEX);
+    stela_linux_pages_finish();
+    assert(fixture.releases == released + 1 && fixture.held_pin->active);
+    assert(*payload == 0x5a && catalog.state[0].allocation == record);
+    assert(stela_linux_page_catalog_unregister(6) == -EBUSY);
+    assert(catalog.pages && metadata_live && fixture.held_pin->active);
+    /* A malformed overlapping output cannot bypass the pending marker. Its
+     * own actual pin is released; the retained first pin remains untouched. */
+    fixture.overlap_physical = TEST_PHYSICAL;
+    fixture.fault = OUTPUT_OVERLAP;
+    assert(!alloc_page(GFP_KERNEL));
+    assert(fixture.held_pin->active && catalog.state[0].allocation == record);
+    fixture.fault = OUTPUT_VALID;
+    fixture.overlap_physical = 0;
+    assert(fixture.releases == released + 2);
+    fixture.held_pin = NULL; /* CPU model acknowledgment, not native fences. */
+    stela_linux_pages_finish();
+    assert(fixture.releases == released + 3 && catalog.retired == NO_INDEX);
+    assert(catalog.state[0].allocation == NO_INDEX);
+    stela_linux_pages_finish();
+    assert(fixture.releases == released + 3);
+    assert(!stela_linux_page_catalog_unregister(6) && !metadata_live);
+}
+
+
 int main(void)
 {
 	reclaimable_policy();
@@ -1687,6 +1795,7 @@ int main(void)
 	assert(!stela_linux_page_catalog_unregister(2));
 	assert(!metadata_live);
     immutable_multi_extent_inventory();
+    deferred_pin_retirement();
 	stela_linux_exit();
 	assert(fixture.allocations == fixture.releases + 1); /* One deliberate ENOMEM. */
 	for (size_t i = 0; i < TEST_PAGES; i++)
