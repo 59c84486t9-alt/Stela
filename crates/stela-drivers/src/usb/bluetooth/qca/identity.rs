@@ -13,11 +13,11 @@ pub struct UsbIdentity {
 }
 impl UsbIdentity {
     pub fn read(device: &Device) -> Self {
-        let d = &device.descriptor;
+        let identity = super::super::identity::read(&device.descriptor);
         Self {
-            vendor: u16::from_le_bytes([d[8], d[9]]),
-            product: u16::from_le_bytes([d[10], d[11]]),
-            revision: u16::from_le_bytes([d[12], d[13]]),
+            vendor: identity.vendor,
+            product: identity.product,
+            revision: identity.revision,
         }
     }
     pub fn kind(self) -> Option<Kind> {

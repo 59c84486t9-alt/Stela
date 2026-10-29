@@ -45,6 +45,7 @@ pub mod broadcom;
 pub(crate) use crate::bluetooth::hci as command;
 mod firmware;
 mod host;
+mod identity;
 mod initialization;
 pub mod intel;
 pub mod mediatek;
