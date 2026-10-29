@@ -117,7 +117,7 @@ pub(super) fn crossing_store(bytes: u8) -> Option<(Vec<u8>, Vec<usize>)> {
 fn fast(code: &mut Code, bytes: u8, displacement: u8, source: Source) {
     let target = Mem::base(Gpr::Rax, i32::from(displacement));
     let mut asm = code.asm();
-    match source {
+    asm.guest_access(|asm| match source {
         Source::Xmm(xmm) => match bytes {
             DWORD_BYTES => asm.movd_from_xmm(target, xmm),
             QWORD_BYTES => asm.movq_store(xmm, target),
@@ -139,7 +139,7 @@ fn fast(code: &mut Code, bytes: u8, displacement: u8, source: Source) {
             };
             asm.mov_store(size, target, register);
         }
-    }
+    });
 }
 
 fn prefix_store(

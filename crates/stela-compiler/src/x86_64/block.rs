@@ -3,6 +3,7 @@ use crate::x86_64::asm::{Asm, Code, Cond, Gpr, Size};
 use alloc::vec;
 use alloc::vec::Vec;
 pub(crate) mod checked_memory;
+mod recovery;
 pub(crate) use super::region::ResidentLoopPlan;
 
 use crate::{
@@ -285,6 +286,10 @@ fn emit_selected(
                     crate::block::FaultRecovery {
                         start: offset + entry.start,
                         end: offset + entry.end,
+                        retirement: entry
+                            .retirement
+                            .rebased(u16::try_from(cursor).expect("bounded block cursor"))
+                            .expect("bounded block retirement"),
                         ..entry
                     }
                 }));
@@ -345,6 +350,14 @@ fn emit_selected(
         checks,
         after.rax,
     );
+    if fault_table {
+        fault_recovery = recovery::bind(
+            &block.x86_64_code,
+            &block.source_map,
+            instructions,
+            fault_recovery,
+        );
+    }
     (block.into_native(), fault_recovery)
 }
 

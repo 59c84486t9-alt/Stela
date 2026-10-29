@@ -244,6 +244,9 @@ pub(crate) fn counter_deadline(tsc: u64) -> stela_engine::machine::engine::Nativ
 #[derive(Clone, Copy)]
 struct Recorded {
     rip: u64,
+    origin: stela_engine::machine::NativeFaultOrigin,
+    trap: u16,
+    error_code: u64,
     address: u64,
     write: bool,
     cause: FaultCause,
@@ -281,6 +284,9 @@ pub struct State {
     /// installed last.
     code_unit: u64,
     code_used: u64,
+    /// Successful initialized installs in each retained arena unit. These
+    /// metadata ranges require this State's actual backing/root/CPU owner.
+    installed_ranges: [Vec<(u64, u64)>; CODE_UNITS as usize],
     /// The furthest the arena's code has reached: what the run needed of it
     /// until it first filled and new code reclaimed the oldest.
     code_peak: u64,
@@ -456,6 +462,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             code_bytes: config.code_bytes,
             code_unit: 0,
             code_used: 0,
+            installed_ranges: core::array::from_fn(|_| Vec::new()),
             code_peak: 0,
             installed_immutable: InstalledCodeCache::default(),
             recorded: None,
@@ -683,6 +690,29 @@ pub(crate) fn profile_word_report() {
 }
 
 impl State {
+    fn owns_installed(&self, code: NativeCode, bytes: usize) -> bool {
+        if bytes == 0 {
+            return false;
+        }
+        let Some(offset) = (code.0 as u64).checked_sub(self.code_virtual) else {
+            return false;
+        };
+        let Some(end) = offset.checked_add(bytes as u64) else {
+            return false;
+        };
+        let unit = code_unit_bytes(self);
+        if unit == 0 || end > self.code_bytes {
+            return false;
+        }
+        let Some(ranges) = self.installed_ranges.get((offset / unit) as usize) else {
+            return false;
+        };
+        let index = ranges.partition_point(|&(_, finish)| finish <= offset);
+        ranges
+            .get(index)
+            .is_some_and(|&(start, finish)| start <= offset && end <= finish)
+    }
+
     fn host_physical(&self, guest: u64) -> Option<u64> {
         self.run(guest).map(|(host, _)| host)
     }
@@ -1044,6 +1074,9 @@ fn in_code(state: &State, rip: u64) -> bool {
 fn abandon(state: &mut State, frame: &mut Frame, address: u64, write: bool, cause: FaultCause) {
     state.recorded = Some(Recorded {
         rip: frame.rip,
+        origin: stela_engine::machine::NativeFaultOrigin::Exception,
+        trap: u16::try_from(frame.vector).unwrap_or(u16::MAX),
+        error_code: frame.error,
         address,
         write,
         cause,
@@ -1340,11 +1373,15 @@ fn native_return(code: NativeCode, exit: BlockExit, entered: u64) -> NativeExit 
         && let Some(recorded) = state.recorded.take()
     {
         return NativeExit::Fault(NativeFault {
+            origin: recorded.origin,
             // A chained block may lie below the entered one.
             offset: recorded.rip.wrapping_sub(code.0 as u64) as usize,
             address: recorded.address,
             write: recorded.write,
             cause: recorded.cause,
+            trap: recorded.trap,
+            error_code: recorded.error_code,
+            spills: stela_compiler::block::HostSpillSnapshot::new(),
             registers: stela_compiler::block::HostGprSnapshot::legacy(recorded.registers),
         });
     }
@@ -1522,6 +1559,12 @@ impl Host for BareHost<'_> {
         if end > (state.code_unit + 1) * code_unit_bytes(state) {
             return Err(InstallError::Full);
         }
+        state.installed_ranges[state.code_unit as usize]
+            .try_reserve(1)
+            .map_err(|_| InstallError::Full)?;
+        if code.is_empty() {
+            return Err(InstallError::Full);
+        }
         // SAFETY: arena bytes through the writable physmap alias.
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -1531,6 +1574,7 @@ impl Host for BareHost<'_> {
             );
         }
         serialize_code();
+        state.installed_ranges[state.code_unit as usize].push((offset, end));
         state.code_used = end;
         state.code_peak = state.code_peak.max(end);
         #[cfg(feature = "native-profile")]
@@ -1551,9 +1595,32 @@ impl Host for BareHost<'_> {
         Ok(installed)
     }
 
+    fn read_native(&mut self, code: NativeCode, bytes: &mut [u8]) -> bool {
+        let state = state();
+        if state.native || !state.owns_installed(code, bytes.len()) {
+            return false;
+        }
+        let offset = code.0 as u64 - state.code_virtual;
+        // SAFETY: successful install metadata proves this exact initialized,
+        // unreclaimed extent. The actual IF0 CPU owner retains the arena's
+        // backing/root and physmap; no native frame/executable borrow is live.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                layout::physical(state.code_physical + offset) as *const u8,
+                bytes.as_mut_ptr(),
+                bytes.len(),
+            );
+        }
+        true
+    }
+
     fn patch(&mut self, code: NativeCode, bytes: &[u8]) {
         let state = state();
         state.installed_immutable.clear();
+        assert!(
+            state.owns_installed(code, bytes.len()),
+            "a patch outside a retained initialized install"
+        );
         let offset = code.0 as u64 - state.code_virtual;
         assert!(
             offset + bytes.len() as u64 <= state.code_bytes,
@@ -1575,6 +1642,9 @@ impl Host for BareHost<'_> {
         state.installed_immutable.clear();
         state.code_unit = 0;
         state.code_used = 0;
+        for ranges in &mut state.installed_ranges {
+            ranges.clear();
+        }
     }
 
     fn reclaim_code(&mut self) -> Option<core::ops::Range<usize>> {
@@ -1582,6 +1652,7 @@ impl Host for BareHost<'_> {
         state.installed_immutable.clear();
         let unit = code_unit_bytes(state);
         state.code_unit = (state.code_unit + 1) % CODE_UNITS;
+        state.installed_ranges[state.code_unit as usize].clear();
         state.code_used = state.code_unit * unit;
         let start = (state.code_virtual + state.code_used) as usize;
         Some(start..start + unit as usize)

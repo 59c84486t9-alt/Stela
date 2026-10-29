@@ -645,6 +645,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// No executing native GuestState or another PE's frame is inspected.
     /// This is optional stale diagnostic data, never a retirement receipt.
     pub fn observe_parallel_source(&mut self, phase: SourcePhase) {
+        // A failed native recipe can leave an unqualified partial frame. Keep
+        // the preceding materialized sample stale instead of publishing it as
+        // a new safe boundary.
+        if self.native_failure.is_some() {
+            return;
+        }
         let Some(hub) = self.parallel.as_ref() else {
             return;
         };

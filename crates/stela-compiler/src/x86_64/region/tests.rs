@@ -1057,7 +1057,7 @@ fn fault_tables_keep_dirty_values_across_accesses() {
     assert_eq!(region.stats.load_boundary_stores, 0);
     assert!(region.code.len() < settled.code.len());
     let guests = |entry: &crate::block::FaultRecovery| {
-        let mut guests: Vec<u8> = entry.registers.iter().map(|&(guest, _)| guest).collect();
+        let mut guests: Vec<u8> = entry.bindings.iter().map(|binding| binding.guest).collect();
         guests.sort_unstable();
         guests
     };
@@ -1074,7 +1074,10 @@ fn fault_tables_keep_dirty_values_across_accesses() {
     }
     for entry in entries {
         assert!(entry.start < entry.end && entry.end <= region.code.len());
-        for &(_, host) in &entry.registers {
+        for binding in &entry.bindings {
+            let crate::block::RecoverySource::HostRegister(host) = binding.source else {
+                panic!("ordinary memory recovery uses host GPRs");
+            };
             assert!(POOL.iter().any(|pool| *pool as u8 == host));
             // The access clobbers RCX, so nothing live stays there.
             assert_ne!(host, HostGpr::Rcx as u8);
@@ -1121,7 +1124,10 @@ fn crossing_stores_keep_the_shared_split() {
         assert_eq!(region.consumed_instructions, instructions.len());
         assert!(contains(&region.code, &recipe));
         for entry in &region.fault_recovery {
-            for &(_, host) in &entry.registers {
+            for binding in &entry.bindings {
+                let crate::block::RecoverySource::HostRegister(host) = binding.source else {
+                    panic!("ordinary memory recovery uses host GPRs");
+                };
                 assert!(![HostGpr::Rcx as u8, HostGpr::R10 as u8].contains(&host));
             }
         }

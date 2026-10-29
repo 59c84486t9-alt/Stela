@@ -91,7 +91,7 @@ pub(super) fn address_offset(
         let mut asm = code.asm();
         asm.test_accumulator_imm(Size::Byte, ATOMIC_GRANULE_MASK.into());
         let aligned = asm.jcc8(Cond::E);
-        asm.ud2();
+        asm.guest_check();
         asm.bind(aligned);
     }
     if displacement != 0 {
@@ -106,12 +106,12 @@ pub(super) fn address_offset(
             asm.alu_imm8(Alu::And, Size::Dword, Gpr::Rcx, ATOMIC_GRANULE_MASK as i8);
             asm.alu_byte_imm(Alu::Cmp, Gpr::Rcx, ATOMIC_GRANULE_BYTES - bytes);
             let within = asm.jcc8(Cond::Be);
-            asm.ud2();
+            asm.guest_check();
             asm.bind(within);
         } else if displacement.rem_euclid(i32::from(ATOMIC_GRANULE_BYTES))
             > i32::from(ATOMIC_GRANULE_BYTES - bytes)
         {
-            asm.ud2();
+            asm.guest_check();
         }
     }
     code.asm().mov(Size::Qword, Gpr::Rdx, Gpr::Rax);
@@ -172,15 +172,16 @@ fn read(code: &mut Code, bytes: u8, destination: Gpr) {
     let mut asm = code.asm();
     match bytes {
         BYTE_BYTES | HALFWORD_BYTES => {
-            asm.movzx(Size::Dword, destination, size(bytes), ADDRESS);
+            asm.guest_access(|asm| asm.movzx(Size::Dword, destination, size(bytes), ADDRESS));
         }
-        _ => asm.mov_load(size(bytes), destination, ADDRESS),
+        _ => asm.guest_access(|asm| asm.mov_load(size(bytes), destination, ADDRESS)),
     }
 }
 
 /// MOV of RCX's low `bytes` to [RDX].
 pub(super) fn store_rcx(code: &mut Code, bytes: u8) {
-    code.asm().mov_store(size(bytes), ADDRESS, Gpr::Rcx);
+    code.asm()
+        .guest_access(|asm| asm.mov_store(size(bytes), ADDRESS, Gpr::Rcx));
 }
 
 /// Input staging and exact-width updates keep the complete old value zero-extended.
@@ -195,6 +196,8 @@ pub(super) fn commit_rax(code: &mut Code, bytes: u8, destination: Register) {
 /// `lock cmpxchg [rdx], source` at `bytes`.
 pub(super) fn locked_compare_exchange(code: &mut Code, bytes: u8, source: Gpr) {
     let mut asm = code.asm();
-    asm.lock();
-    asm.cmpxchg(size(bytes), ADDRESS, source);
+    asm.guest_access(|asm| {
+        asm.lock();
+        asm.cmpxchg(size(bytes), ADDRESS, source)
+    });
 }

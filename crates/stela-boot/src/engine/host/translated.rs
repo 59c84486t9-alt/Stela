@@ -243,6 +243,9 @@ fn abandon(state: &mut State, saved: &Saved, address: u64, write: bool, cause: F
     let rsp = &raw const saved.ret as u64 + 8;
     state.recorded = Some(Recorded {
         rip: saved.ret,
+        origin: stela_engine::machine::NativeFaultOrigin::TranslatedHelper,
+        trap: 0,
+        error_code: 0,
         address,
         write,
         cause,

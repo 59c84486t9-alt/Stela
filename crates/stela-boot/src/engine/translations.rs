@@ -334,7 +334,7 @@ impl Translations for Shared {
         key: &Digest,
         pc: u64,
         context: &Digest,
-    ) -> Option<alloc::sync::Arc<stela_compiler::block::CompiledBlock>> {
+    ) -> Option<alloc::sync::Arc<stela_engine::machine::engine::SharedTranslation>> {
         with_boot(|boot| boot.as_mut()?.store.prepared(key, pc, context))
     }
 

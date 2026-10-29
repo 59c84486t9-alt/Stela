@@ -26,13 +26,15 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChec
         } => {
             let address = Mem::base(Gpr::Rax, 0);
             let mut asm = code.asm();
-            match (width, signed) {
-                // MOV EAX zero-extends RAX.
-                (Width::W32, false) => asm.mov_load(Size::Dword, Gpr::Rax, address),
-                (Width::X64, false) => asm.mov_load(Size::Qword, Gpr::Rax, address),
-                (Width::X64, true) => asm.movsxd(Gpr::Rax, address),
-                (Width::W32, true) => unreachable!("literal signed load writes X register"),
-            }
+            asm.guest_access(|asm| {
+                match (width, signed) {
+                    // MOV EAX zero-extends RAX.
+                    (Width::W32, false) => asm.mov_load(Size::Dword, Gpr::Rax, address),
+                    (Width::X64, false) => asm.mov_load(Size::Qword, Gpr::Rax, address),
+                    (Width::X64, true) => asm.movsxd(Gpr::Rax, address),
+                    (Width::W32, true) => unreachable!("literal signed load writes X register"),
+                }
+            });
             // ZR discards only the result; its access and possible fault remain.
             store(code, destination);
         }

@@ -138,7 +138,7 @@ fn transfer(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
             let size = Size::of(width == Width::X64);
             let address = Mem::base(Gpr::Rax, 0);
             let mut asm = code.asm();
-            match (operand.bytes, signed) {
+            asm.guest_access(|asm| match (operand.bytes, signed) {
                 (1, false) => asm.movzx(size, Gpr::Rcx, Size::Byte, address),
                 (2, false) => asm.movzx(size, Gpr::Rcx, Size::Word, address),
                 (1, true) => asm.movsx(size, Gpr::Rcx, Size::Byte, address),
@@ -149,7 +149,7 @@ fn transfer(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
                 }
                 (4 | 8, false) => asm.mov_load(size, Gpr::Rcx, address),
                 _ => unreachable!("decoder validates signed register-offset size"),
-            }
+            });
             // A load to ZR still accesses memory and can fault.
             if let Some(displacement) = offset(operand.data) {
                 asm.mov_store(

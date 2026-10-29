@@ -228,7 +228,8 @@ fn crossing_release(code: &mut Code, bytes: u8) {
 }
 
 fn release(code: &mut Code, bytes: u8) {
-    code.asm().xchg(size(bytes), ADDRESS, Gpr::Rcx);
+    code.asm()
+        .guest_access(|asm| asm.xchg(size(bytes), ADDRESS, Gpr::Rcx));
 }
 
 fn read_extended(code: &mut Code, bytes: u8, extension: LoadExtension) {
@@ -243,10 +244,15 @@ fn read_extended(code: &mut Code, bytes: u8, extension: LoadExtension) {
 fn sign_extend(code: &mut Code, bytes: u8, width: Width, operand: Rm) {
     let wide = Size::of(width == Width::X64);
     let mut asm = code.asm();
-    match bytes {
+    let emit = |asm: &mut crate::x86_64::asm::Asm<'_>| match bytes {
         BYTE_BYTES | HALFWORD_BYTES => asm.movsx(wide, Gpr::Rax, size(bytes), operand),
         DWORD_BYTES if width == Width::X64 => asm.movsxd(Gpr::Rax, operand),
         _ => unreachable!("decoder validates ordered signed widths"),
+    };
+    if matches!(operand, Rm::Mem(_)) {
+        asm.guest_access(emit)
+    } else {
+        emit(&mut asm)
     }
 }
 
@@ -284,7 +290,7 @@ fn snapshot_value(
         Gpr::Rdx,
         -i8::try_from(ATOMIC_QUANTITY_BYTES).expect("granule fits imm8"),
     );
-    asm.simd(SimdOpcode::MoveAligned, 0, ADDRESS, target);
+    asm.guest_access(|asm| asm.simd(SimdOpcode::MoveAligned, 0, ADDRESS, target));
     asm.movq_from_xmm(Gpr::Rax, 0);
     // The high quadword to the low one. (MOVHLPS is not on Intel's data
     // operand independent timing list.)

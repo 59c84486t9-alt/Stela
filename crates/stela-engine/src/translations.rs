@@ -14,13 +14,16 @@ use sha2::{Digest as _, Sha256};
 use stela_compiler::block::Features;
 use stela_compiler::{
     GuestAddress, NativeBlock,
-    block::{CompiledBlock, ExitKind, FaultRecovery},
+    block::{
+        CompiledBlock, ExitKind, RecoveryBinding, RecoverySiteKind, RecoverySource,
+        RetirementPhase, RetirementPoint, SpillOffset, UnqualifiedFaultRecovery,
+    },
     x86_64::chain::DirectExit,
 };
 
 /// The bytes of the fetch page a record covers: no block leaves it.
 pub const PAGE_BYTES: usize = 4096;
-pub const SCHEMA: u32 = 2;
+pub const SCHEMA: u32 = 3;
 const RECORD_MAGIC: [u8; 8] = *b"STLTPAGE";
 const HEADER_BYTES: usize = 88;
 const TRAILER_BYTES: usize = 32;
@@ -100,12 +103,22 @@ pub struct Entry {
     /// Page offset of each guest instruction and its native offset.
     pub source_map: Vec<(u16, u32)>,
     pub exits: Vec<Exit>,
-    pub recovery: Vec<FaultRecovery>,
+    pub recovery: Vec<UnqualifiedFaultRecovery>,
+}
+
+/// A rebased immutable template. Persisted fault tags remain unqualified until
+/// the exact retained input/profile/template passes compiler plan qualification.
+#[derive(Debug, Clone)]
+pub struct StoredBlock {
+    pub native: NativeBlock,
+    pub source_bytes: usize,
+    pub direct_exits: Vec<DirectExit>,
+    pub fault_recovery: Vec<UnqualifiedFaultRecovery>,
 }
 
 impl Entry {
     /// The block as compiled at the page whose address is `page`.
-    pub fn rebase(&self, page: u64, admitted: &[u8]) -> Option<CompiledBlock> {
+    pub fn rebase(&self, page: u64, admitted: &[u8]) -> Option<StoredBlock> {
         if !self.consistent() || admitted.get(..self.input.len())? != self.input {
             return None;
         }
@@ -131,7 +144,7 @@ impl Entry {
                 })
             })
             .collect::<Option<_>>()?;
-        Some(CompiledBlock {
+        Some(StoredBlock {
             native: NativeBlock {
                 x86_64_code: code,
                 source_map: self
@@ -144,8 +157,50 @@ impl Entry {
             },
             source_bytes: usize::from(self.source_bytes),
             direct_exits,
-            fault_recovery: self.recovery.clone(),
+            fault_recovery: self
+                .recovery
+                .iter()
+                .map(|row| {
+                    let mut row = row.clone();
+                    row.retirement = self.retirement_at(row.retirement, page)?;
+                    Some(row)
+                })
+                .collect::<Option<_>>()?,
         })
+    }
+
+    /// Reconstruct only a source-backed retirement shape. This never mints a
+    /// guest-access site or grants memory-effect authority from a portable tag.
+    fn retirement_at(&self, point: RetirementPoint, page: u64) -> Option<RetirementPoint> {
+        use stela_compiler::Lifter as _;
+        let relative = point
+            .instruction_pc()
+            .0
+            .checked_sub(u64::from(self.offset))?;
+        if !relative.is_multiple_of(4)
+            || relative > u64::from(self.source_bytes)
+            || u64::from(point.retired_before()) != relative / 4
+        {
+            return None;
+        }
+        let pc = GuestAddress(page.checked_add(point.instruction_pc().0)?);
+        match point.phase() {
+            RetirementPhase::Before => RetirementPoint::before(pc, point.retired_before()).ok(),
+            RetirementPhase::AfterFallthrough => {
+                let at = usize::try_from(relative).ok()?;
+                if at.checked_add(4)? > usize::from(self.source_bytes) {
+                    return None;
+                }
+                let word = u32::from_le_bytes(self.input.get(at..at + 4)?.try_into().ok()?);
+                let instruction = stela_compiler::aarch64::Decoder.lift(pc, word).ok()?;
+                RetirementPoint::from_instruction(
+                    &instruction,
+                    point.retired_before(),
+                    point.phase(),
+                )
+                .ok()
+            }
+        }
     }
 
     /// Check what decoding cannot: offsets inside the code and the page,
@@ -185,12 +240,18 @@ impl Entry {
                 in_code(exit.offset, 0) && ExitKind::try_from(u64::from(exit.kind)).is_ok()
             })
             && self.recovery.iter().all(|range| {
-                range.start <= range.end
+                range.start < range.end
                     && range.end <= code
-                    && range
-                        .registers
-                        .iter()
-                        .all(|&(guest, host)| guest <= 31 && host < 16)
+                    && self.retirement_at(range.retirement, 0).is_some()
+                    && (range.site == RecoverySiteKind::NativeInternal
+                        || range.retirement.phase() == RetirementPhase::Before)
+                    && range.bindings.iter().all(|binding| {
+                        binding.guest <= 31
+                            && match binding.source {
+                                RecoverySource::HostRegister(host) => host < 32,
+                                RecoverySource::NativeSpill(_) => true,
+                            }
+                    })
             })
     }
 }
@@ -293,9 +354,22 @@ impl Record {
             for range in &entry.recovery {
                 out.extend((range.start as u32).to_le_bytes());
                 out.extend((range.end as u32).to_le_bytes());
-                out.extend((range.registers.len() as u32).to_le_bytes());
-                for &(guest, host) in &range.registers {
-                    out.extend([guest, host]);
+                out.extend(range.retirement.instruction_pc().0.to_le_bytes());
+                out.extend(range.retirement.retired_before().to_le_bytes());
+                out.push(match range.retirement.phase() {
+                    RetirementPhase::Before => 0,
+                    RetirementPhase::AfterFallthrough => 1,
+                });
+                out.push(range.site as u8);
+                out.extend((range.bindings.len() as u32).to_le_bytes());
+                for binding in &range.bindings {
+                    out.push(binding.guest);
+                    let (kind, value) = match binding.source {
+                        RecoverySource::HostRegister(host) => (0, u16::from(host)),
+                        RecoverySource::NativeSpill(offset) => (1, offset.bytes()),
+                    };
+                    out.push(kind);
+                    out.extend(value.to_le_bytes());
                 }
             }
             out.extend(&entry.code);
@@ -424,17 +498,72 @@ impl<'a> Reader<'a> {
                 })
             })
             .collect::<Result<_, _>>()?;
-        let recovery = (0..self.count(12)?)
+        let recovery = (0..self.count(24)?)
             .map(|_| {
                 let start = self.u32()? as usize;
                 let end = self.u32()? as usize;
-                let registers = (0..self.count(2)?)
-                    .map(|_| Ok((self.u8()?, self.u8()?)))
+                let pc = GuestAddress(self.u64()?);
+                let count = self.u16()?;
+                let phase = match self.u8()? {
+                    0 => RetirementPhase::Before,
+                    1 => RetirementPhase::AfterFallthrough,
+                    _ => return Err(FormatError::Entry),
+                };
+                let site =
+                    RecoverySiteKind::try_from(self.u8()?).map_err(|_| FormatError::Entry)?;
+                let bindings = (0..self.count(4)?)
+                    .map(|_| {
+                        let guest = self.u8()?;
+                        let kind = self.u8()?;
+                        let value = self.u16()?;
+                        let source = match kind {
+                            0 => RecoverySource::HostRegister(
+                                u8::try_from(value).map_err(|_| FormatError::Entry)?,
+                            ),
+                            1 => RecoverySource::NativeSpill(
+                                SpillOffset::new(value).map_err(|_| FormatError::Entry)?,
+                            ),
+                            _ => return Err(FormatError::Entry),
+                        };
+                        Ok(RecoveryBinding { guest, source })
+                    })
                     .collect::<Result<_, _>>()?;
-                Ok(FaultRecovery {
+                // Build a structurally valid source-backed shape using an
+                // entry view below; no raw After constructor is exposed.
+                let before = RetirementPoint::before(pc, count).map_err(|_| FormatError::Entry)?;
+                let retirement = match phase {
+                    RetirementPhase::Before => before,
+                    RetirementPhase::AfterFallthrough => {
+                        use stela_compiler::Lifter as _;
+                        let at = usize::try_from(
+                            pc.0.checked_sub(u64::from(offset))
+                                .ok_or(FormatError::Entry)?,
+                        )
+                        .map_err(|_| FormatError::Entry)?;
+                        if at.checked_add(4).ok_or(FormatError::Entry)? > usize::from(source_bytes)
+                        {
+                            return Err(FormatError::Entry);
+                        }
+                        let word = u32::from_le_bytes(
+                            input
+                                .get(at..at + 4)
+                                .ok_or(FormatError::Entry)?
+                                .try_into()
+                                .map_err(|_| FormatError::Entry)?,
+                        );
+                        let instruction = stela_compiler::aarch64::Decoder
+                            .lift(pc, word)
+                            .map_err(|_| FormatError::Entry)?;
+                        RetirementPoint::from_instruction(&instruction, count, phase)
+                            .map_err(|_| FormatError::Entry)?
+                    }
+                };
+                Ok(UnqualifiedFaultRecovery {
                     start,
                     end,
-                    registers,
+                    bindings,
+                    retirement,
+                    site,
                 })
             })
             .collect::<Result<_, _>>()?;
@@ -484,7 +613,25 @@ pub fn prove(
     let same_shape = |probe: &CompiledBlock, displacement: u64| {
         probe.source_bytes == block.source_bytes
             && probe.native.x86_64_code.len() == code.len()
-            && probe.fault_recovery == block.fault_recovery
+            && probe.fault_recovery.len() == block.fault_recovery.len()
+            && probe
+                .fault_recovery
+                .iter()
+                .zip(&block.fault_recovery)
+                .all(|(moved, original)| {
+                    moved.start == original.start
+                        && moved.end == original.end
+                        && moved.bindings == original.bindings
+                        && moved.site == original.site
+                        && moved.retirement.phase() == original.retirement.phase()
+                        && moved.retirement.retired_before() == original.retirement.retired_before()
+                        && moved
+                            .retirement
+                            .instruction_pc()
+                            .0
+                            .wrapping_sub(original.retirement.instruction_pc().0)
+                            == displacement
+                })
             && probe.native.source_map.len() == block.native.source_map.len()
             && probe
                 .native
@@ -580,7 +727,20 @@ pub fn prove(
                 })
             })
             .collect::<Option<_>>()?,
-        recovery: block.fault_recovery.clone(),
+        recovery: block
+            .fault_recovery
+            .iter()
+            .map(|row| {
+                let mut row = UnqualifiedFaultRecovery::from(row);
+                row.retirement = row
+                    .retirement
+                    .relocated(GuestAddress(
+                        row.retirement.instruction_pc().0.checked_sub(page)?,
+                    ))
+                    .ok()?;
+                Some(row)
+            })
+            .collect::<Option<_>>()?,
     };
     entry.consistent().then_some(entry)
 }
@@ -638,7 +798,14 @@ mod tests {
             );
             assert_eq!(rebased.native.source_map, expected.native.source_map);
             assert_eq!(rebased.direct_exits, expected.direct_exits);
-            assert_eq!(rebased.fault_recovery, expected.fault_recovery);
+            assert_eq!(
+                rebased.fault_recovery,
+                expected
+                    .fault_recovery
+                    .iter()
+                    .map(UnqualifiedFaultRecovery::from)
+                    .collect::<Vec<_>>()
+            );
             assert_eq!(rebased.source_bytes, expected.source_bytes);
         }
     }
@@ -708,6 +875,102 @@ mod tests {
         assert_eq!(
             Record::decode(&bytes, &translator, &key),
             Err(FormatError::Schema)
+        );
+    }
+
+    #[test]
+    fn portable_after_phase_requires_the_actual_retained_fallthrough_instruction() {
+        use stela_compiler::Lifter as _;
+        let source = words(&[0xd503201f, 0xd4000001]);
+        let mut entry = proved(&source, 0x40).unwrap();
+        let instruction = stela_compiler::aarch64::Decoder
+            .lift(GuestAddress(0x40), 0xd503201f)
+            .unwrap();
+        entry.recovery = vec![UnqualifiedFaultRecovery {
+            start: 0,
+            end: 1,
+            bindings: Vec::new(),
+            retirement: RetirementPoint::after_fallthrough(&instruction, 0).unwrap(),
+            site: RecoverySiteKind::NativeInternal,
+        }];
+        let (translator, key) = (translator_id(), Digest::of(b"phase fixture raw page"));
+        let encode = |entry| {
+            let mut record = Record::new(translator, key);
+            record.insert(entry);
+            record.encode()
+        };
+        let decoded = Record::decode(&encode(entry.clone()), &translator, &key).unwrap();
+        let row = &decoded.entries[0]
+            .rebase(PAGE, &source)
+            .unwrap()
+            .fault_recovery[0];
+        assert_eq!(row.retirement.position().unwrap().pc.0, PAGE + 0x44);
+        assert_eq!(
+            row.site,
+            RecoverySiteKind::NativeInternal,
+            "portable decoding never mints a guest site"
+        );
+        let mut branch = entry.clone();
+        branch.input[..4].copy_from_slice(&0xd65f03c0_u32.to_le_bytes());
+        assert_eq!(
+            Record::decode(&encode(branch), &translator, &key),
+            Err(FormatError::Entry),
+            "serialized After does not authorize RET fallthrough"
+        );
+        let mut guest_after = entry;
+        guest_after.recovery[0].site = RecoverySiteKind::GuestAccess;
+        assert_eq!(
+            Record::decode(&encode(guest_after), &translator, &key),
+            Err(FormatError::Entry)
+        );
+    }
+
+    #[test]
+    fn portable_before_endpoint_keeps_exact_prefix_count_and_checked_relocation() {
+        let source = words(&[0xd503201f, 0xd4000001]);
+        let mut entry = proved(&source, 0x40).unwrap();
+        let end = u64::from(entry.offset) + u64::from(entry.source_bytes);
+        let count = entry.source_bytes / 4;
+        entry.recovery = vec![UnqualifiedFaultRecovery {
+            start: 0,
+            end: 1,
+            bindings: Vec::new(),
+            retirement: RetirementPoint::before(GuestAddress(end), count).unwrap(),
+            site: RecoverySiteKind::NativeInternal,
+        }];
+        assert!(entry.consistent());
+        let rebased = entry.rebase(PAGE, &source).unwrap();
+        assert_eq!(
+            rebased.fault_recovery[0]
+                .retirement
+                .position()
+                .unwrap()
+                .pc
+                .0,
+            PAGE + end
+        );
+        assert_eq!(
+            rebased.fault_recovery[0]
+                .retirement
+                .position()
+                .unwrap()
+                .retired_instructions,
+            count
+        );
+        let (translator, key) = (translator_id(), Digest::of(b"endpoint fixture raw page"));
+        let mut record = Record::new(translator, key);
+        record.insert(entry.clone());
+        assert_eq!(
+            Record::decode(&record.encode(), &translator, &key),
+            Ok(record)
+        );
+        entry.recovery[0].retirement =
+            RetirementPoint::before(GuestAddress(end), count - 1).unwrap();
+        let mut bad = Record::new(translator, key);
+        bad.insert(entry);
+        assert_eq!(
+            Record::decode(&bad.encode(), &translator, &key),
+            Err(FormatError::Entry)
         );
     }
 

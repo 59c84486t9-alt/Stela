@@ -16,6 +16,7 @@
 //! bound: the records that gained entries, then the records this boot used,
 //! then the others, as long as they fit.
 use super::{Digest, Record};
+use crate::machine::engine::SharedTranslation;
 use crate::machine::{Offer, Preparation, Translations};
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -23,7 +24,6 @@ use alloc::{
     vec::Vec,
 };
 use sha2::{Digest as _, Sha256};
-use stela_compiler::block::CompiledBlock;
 
 pub const MAGIC: [u8; 8] = *b"STLTPACK";
 pub const SCHEMA: u32 = 1;
@@ -303,7 +303,7 @@ pub struct Store<'a> {
     /// The blocks offered, by page key, PC and context, for the other
     /// machines sharing the store, oldest first, and the bytes of their
     /// native code within `shared_bound` ([`Store::share`]).
-    shared: BTreeMap<SharedKey, Arc<CompiledBlock>>,
+    shared: BTreeMap<SharedKey, Arc<SharedTranslation>>,
     shared_order: VecDeque<SharedKey>,
     shared_bytes: usize,
     shared_bound: usize,
@@ -415,22 +415,8 @@ impl<'a> Store<'a> {
                 input,
                 preparation,
             } = pending;
-            let entry = preparation
-                .compile_input(&input, pc)
-                .ok()
-                .and_then(|block| {
-                    Offer {
-                        key,
-                        page,
-                        pc,
-                        context,
-                        input,
-                        preparation,
-                        successors: Vec::new(),
-                        block,
-                    }
-                    .prove()
-                });
+            let entry = Offer::compile(key, page, pc, context, input, preparation)
+                .and_then(|offer| offer.prove());
             match entry {
                 Some(entry) => {
                     count += 1;
@@ -500,37 +486,34 @@ impl Translations for Store<'_> {
         record.map(Arc::new)
     }
 
-    fn prepared(&mut self, key: &Digest, pc: u64, context: &Digest) -> Option<Arc<CompiledBlock>> {
+    fn prepared(
+        &mut self,
+        key: &Digest,
+        pc: u64,
+        context: &Digest,
+    ) -> Option<Arc<SharedTranslation>> {
         self.shared.get(&(*key, pc, *context)).cloned()
     }
 
     fn offer(&mut self, offer: Offer) {
-        let Offer {
-            key,
-            page,
-            pc,
-            context,
-            input,
-            preparation,
-            block,
-            ..
-        } = offer;
-        let code = block.native.x86_64_code.len();
+        let (key, page, pc, context) = (offer.key(), offer.page(), offer.pc(), offer.context());
+        let input = offer.input().to_vec();
+        let preparation = Arc::clone(offer.preparation());
+        let shared = offer.shared();
+        let code = shared.block().native.x86_64_code.len();
         let at = (key, pc, context);
         if let Some(present) = self.shared.get_mut(&at) {
-            // Offered again, a block keeps its place.
-            self.shared_bytes = self.shared_bytes - present.native.x86_64_code.len() + code;
-            *present = Arc::new(block);
+            self.shared_bytes = self.shared_bytes - present.block().native.x86_64_code.len() + code;
+            *present = shared;
         } else if code <= self.shared_bound {
-            // Full, it forgets the oldest blocks until this one fits.
             while self.shared_bytes + code > self.shared_bound
                 && let Some(oldest) = self.shared_order.pop_front()
             {
                 if let Some(evicted) = self.shared.remove(&oldest) {
-                    self.shared_bytes -= evicted.native.x86_64_code.len();
+                    self.shared_bytes -= evicted.block().native.x86_64_code.len();
                 }
             }
-            self.shared.insert(at, Arc::new(block));
+            self.shared.insert(at, shared);
             self.shared_bytes += code;
             self.shared_order.push_back(at);
         }
@@ -568,16 +551,7 @@ mod tests {
             .flat_map(|word| word.to_le_bytes())
             .collect();
         preparation.admit(&mut input);
-        Offer {
-            key,
-            page,
-            pc,
-            context: preparation.context(page),
-            block: preparation.compile_input(&input, pc).unwrap(),
-            input,
-            preparation,
-            successors: Vec::new(),
-        }
+        Offer::compile(key, page, pc, preparation.context(page), input, preparation).unwrap()
     }
 
     #[test]
@@ -585,11 +559,11 @@ mod tests {
         let translator = Digest::of(b"translator");
         let key = Digest::of(b"page");
         let (first, second) = (offer(0x1000, key), offer(0x1008, key));
-        let code = first.block.native.x86_64_code.len();
+        let code = first.block().native.x86_64_code.len();
         let (mut store, _) = Store::new(translator, None);
         store.offer(first.clone());
         // A store no machine shares keeps no native code.
-        assert!(store.prepared(&key, 0x1000, &first.context).is_none());
+        assert!(store.prepared(&key, 0x1000, &first.context()).is_none());
         store.share(code + code / 2);
         store.offer(first.clone());
         store.offer(first.clone());
@@ -599,15 +573,15 @@ mod tests {
                 .prepared(&key, 0x1000, &Digest::of(b"other"))
                 .is_none()
         );
-        assert!(store.prepared(&key, 0x1008, &second.context).is_some());
-        assert!(store.prepared(&key, 0x1000, &first.context).is_none());
+        assert!(store.prepared(&key, 0x1008, &second.context()).is_some());
+        assert!(store.prepared(&key, 0x1000, &first.context()).is_none());
         store.share(4 * code);
         store.offer(first.clone());
         assert_eq!(
             store
-                .prepared(&key, 0x1000, &first.context)
-                .map(|block| block.native.x86_64_code.clone()),
-            Some(first.block.native.x86_64_code.clone())
+                .prepared(&key, 0x1000, &first.context())
+                .map(|block| block.block().native.x86_64_code.clone()),
+            Some(first.block().native.x86_64_code.clone())
         );
         // Offered again, a block keeps its one place and its bytes.
         store.offer(first.clone());
@@ -618,12 +592,26 @@ mod tests {
         let fourth = offer(0x1018, key);
         store.offer(third.clone());
         store.offer(fourth.clone());
-        let mut fifth = offer(0x1020, key);
-        fifth.block.native.x86_64_code.truncate(code / 2);
+        let preparation = Arc::new(test_preparation());
+        let pc = 0x1020;
+        let page = pc & !(PAGE_BYTES as u64 - 1);
+        let fifth = Offer::compile(
+            key,
+            page,
+            pc,
+            preparation.context(page),
+            0xd65f03c0_u32.to_le_bytes().to_vec(),
+            preparation,
+        )
+        .unwrap();
+        assert!(
+            fifth.block().native.x86_64_code.len() < code,
+            "a genuine shorter emitted block"
+        );
         store.offer(fifth.clone());
-        assert!(store.prepared(&key, 0x1008, &second.context).is_none());
-        assert!(store.prepared(&key, 0x1000, &first.context).is_some());
-        assert!(store.prepared(&key, 0x1020, &fifth.context).is_some());
+        assert!(store.prepared(&key, 0x1008, &second.context()).is_none());
+        assert!(store.prepared(&key, 0x1000, &first.context()).is_some());
+        assert!(store.prepared(&key, 0x1020, &fifth.context()).is_some());
         assert!(store.shared_bytes <= 4 * code);
         // Every offer still waits for proof.
         assert_eq!(store.pending(), 9);
@@ -716,12 +704,12 @@ mod tests {
 
         let mut next = Store::new(translator, Some(&bytes)).0;
         let record = next.record(&first).expect("the first page's record");
-        let context = offer(0x1_0000_4008, first).context;
+        let context = offer(0x1_0000_4008, first).context();
         assert!(
             record
                 .find(8, &context)
                 .unwrap()
-                .rebase(0x1_0000_4000, &offer(0x1_0000_4008, first).input)
+                .rebase(0x1_0000_4000, offer(0x1_0000_4008, first).input())
                 .is_some()
         );
         assert_eq!(next.counters.loaded, 1);

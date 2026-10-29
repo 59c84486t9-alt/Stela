@@ -888,25 +888,35 @@ fn system_mode_compiles_locked_atomics_and_fences_for_concurrent_pes() {
 fn fault_recovery_applies_the_covering_entries() {
     let table = [
         FaultRecovery {
+            site: crate::block::RecoverySite::native_internal(),
             start: 4,
             end: 10,
-            registers: vec![(3, 9), (31, 6)],
+            retirement: RetirementPoint::before(GuestAddress(0x1000), 0).unwrap(),
+            bindings: vec![(3, 9), (31, 6)]
+                .into_iter()
+                .map(|(guest, host)| RecoveryBinding::gpr(guest, host))
+                .collect(),
         },
         FaultRecovery {
+            site: crate::block::RecoverySite::native_internal(),
             start: 10,
             end: 20,
-            registers: vec![(4, 10)],
+            retirement: RetirementPoint::before(GuestAddress(0x1000), 0).unwrap(),
+            bindings: vec![(4, 10)]
+                .into_iter()
+                .map(|(guest, host)| RecoveryBinding::gpr(guest, host))
+                .collect(),
         },
     ];
     let host: [u64; 16] = core::array::from_fn(|register| 0x100 + register as u64);
     let mut state = crate::GuestState::default();
-    FaultRecovery::apply(&table, 9, &HostGprSnapshot::legacy(host), &mut state).unwrap();
+    apply_recovery(&table, 9, &HostGprSnapshot::legacy(host), &mut state).unwrap();
     assert_eq!((state.x[3], state.sp, state.x[4]), (0x109, 0x106, 0));
     let mut state = crate::GuestState::default();
-    FaultRecovery::apply(&table, 10, &HostGprSnapshot::legacy(host), &mut state).unwrap();
+    apply_recovery(&table, 10, &HostGprSnapshot::legacy(host), &mut state).unwrap();
     assert_eq!((state.x[3], state.sp, state.x[4]), (0, 0, 0x10a));
     let mut state = crate::GuestState::default();
-    FaultRecovery::apply(&table, 3, &HostGprSnapshot::legacy(host), &mut state).unwrap();
+    apply_recovery(&table, 3, &HostGprSnapshot::legacy(host), &mut state).unwrap();
     assert_eq!(state, crate::GuestState::default());
 }
 
@@ -2110,4 +2120,21 @@ fn trap_is_a_consumed_boundary_with_its_own_source_map_and_no_leaf_fallback() {
     for word in [0xd4000001, 0xd4200000] {
         assert!(crate::testing::block(&bytes(&[word]), GuestAddress(u64::MAX - 3)).is_err());
     }
+}
+
+fn apply_recovery(
+    table: &[FaultRecovery],
+    offset: usize,
+    gprs: &HostGprSnapshot,
+    state: &mut crate::GuestState,
+) -> Result<Option<RecoverySettlement>, FaultRecoveryError> {
+    FaultRecovery::apply(
+        table,
+        offset,
+        HostFaultSnapshot {
+            gprs,
+            spills: &HostSpillSnapshot::new(),
+        },
+        state,
+    )
 }

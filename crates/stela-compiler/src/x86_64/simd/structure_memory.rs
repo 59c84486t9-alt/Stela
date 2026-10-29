@@ -199,18 +199,18 @@ fn transfer_access(
 /// Exact-width RAM read into zero-extended RCX; no guest state commit yet.
 fn element_load(code: &mut Code, bytes: u8, displacement: u8) {
     let mut asm = code.asm();
-    match bytes {
+    asm.guest_access(|asm| match bytes {
         BYTE_BYTES | HALFWORD_BYTES => {
             asm.movzx(Size::Dword, Gpr::Rcx, size(bytes), element(displacement));
         }
         _ => asm.mov_load(size(bytes), Gpr::Rcx, element(displacement)),
-    }
+    });
 }
 
 /// Exact scalar RCX store, used only after the whole-footprint granule proof.
 fn element_store(code: &mut Code, bytes: u8, displacement: u8) {
     code.asm()
-        .mov_store(size(bytes), element(displacement), Gpr::Rcx);
+        .guest_access(|asm| asm.mov_store(size(bytes), element(displacement), Gpr::Rcx));
 }
 
 /// true writes RCX to the selected state lane; false reads it into RCX.

@@ -32,9 +32,9 @@ pub use cpu::{Cpu, Exception};
 pub(crate) use engine::test_preparation;
 pub use engine::{
     ConsumedPair, Description, DeviceError, Devices, Event, FaultCause, Host, InstallError,
-    Machine, NativeCode, NativeExit, NativeFault, NoDevices, Offer, PeerState, Preparation,
-    Prepared, Refused, Regime, Requirement, RequirementKind, Reset, StaleCode, Statistics, Stop,
-    Transition, Translations, window,
+    Machine, NativeCode, NativeExit, NativeFault, NativeFaultOrigin, NoDevices, Offer, PeerState,
+    Preparation, Prepared, Refused, Regime, Requirement, RequirementKind, Reset, StaleCode,
+    Statistics, Stop, Transition, Translations, window,
 };
 pub use registers::{CpuProfile, Lines};
 use stela_contracts::Chip;

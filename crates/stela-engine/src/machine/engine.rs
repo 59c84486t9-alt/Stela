@@ -33,6 +33,10 @@ pub use device_write::{
     CanonicalDeviceWrite, CanonicalWriteMemory, ConsumedWrite, DeviceWriteRequest, DeviceWriteShape,
 };
 mod processors;
+mod recovery;
+#[cfg(test)]
+#[path = "engine/recovery_tests.rs"]
+mod recovery_tests;
 mod scalable;
 mod shared_memory;
 pub mod step_timing;
@@ -67,6 +71,7 @@ pub use processors::{
     PeerState, PreparedProcessorPower, ProcessorBinding, ProcessorChange, ProcessorPowerError,
     ProcessorTarget, ProcessorWrite, Processors, SettledProcessorWrite,
 };
+pub use recovery::{NativeFailure, NativeFailureReason, SourceRecord, UnsettledChain};
 pub use shared_memory::{
     HeldRamService, MAX_NATIVE_EPOCH_BODIES, NativeCohort, NativeEpochDeadline, NativeEpochEnd,
     NativeEpochStatistics, NativeRun, NativeRunIdentity, NativeRunObservation, NativeTransport,
@@ -102,7 +107,7 @@ use stela_compiler::{
 };
 pub use stela_contracts::bus::Transition;
 pub use stela_contracts::dma::Memory;
-pub use stored::{Offer, Translations};
+pub use stored::{Offer, SharedTranslation, Translations};
 pub use system::FP_TRAPS_WRITABLE;
 use {
     super::cpu::Cpu, super::cpu::Exception, super::cpu::HCR_AMO, super::cpu::HCR_API,
@@ -329,13 +334,29 @@ pub enum FaultCause {
     TagChecked,
 }
 
+/// Distinguish an actual exception image from a deliberate translation-helper
+/// return. The helper token cannot fabricate hardware vector authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeFaultOrigin {
+    Exception,
+    TranslatedHelper,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeFault {
+    pub origin: NativeFaultOrigin,
     /// Byte offset of the faulting instruction in the block's native code.
     pub offset: usize,
     pub address: u64,
     pub write: bool,
     pub cause: FaultCause,
+    /// Actual x86 exception vector, or zero for a deliberate helper return.
+    pub trap: u16,
+    /// Actual x86 exception error code; instruction-fetch or host page-table/
+    /// protection/stack failures cannot authorize a guest data-abort projection.
+    pub error_code: u64,
+    /// Initialized words captured from a qualified invocation stack, unavailable
+    /// until the platform actually supplies that owned lease and exact plan.
+    pub spills: stela_compiler::block::HostSpillSnapshot,
     /// Host GPRs in architectural encoding order at the faulting instruction.
     /// A platform supplies the extended bank only after actually capturing it
     /// or qualifying its architectural initialization state. Recovery refuses
@@ -470,6 +491,13 @@ pub trait Host {
     /// Overwrite installed code at `code` with `bytes`, which the next
     /// native run executes.
     fn patch(&mut self, code: NativeCode, bytes: &[u8]);
+    /// Copy an idle installed native extent from this actual Host's retained
+    /// executable owner. Refuse unknown/reclaimed ranges; numeric addresses
+    /// alone never authorize reading native memory. Used in dispatcher fault
+    /// qualification, never in an interrupt handler.
+    fn read_native(&mut self, _code: NativeCode, _bytes: &mut [u8]) -> bool {
+        false
+    }
     /// Free every installed block.
     fn discard_code(&mut self);
     /// Free the oldest part of the code arena for new code, as a ring
@@ -1127,6 +1155,9 @@ pub enum Stop {
     /// A device carried out the guest's reset or power-off request.
     Reset(Reset),
     Unsupported(Requirement),
+    /// The native implementation failed. Its owned code/capture remain retained;
+    /// the current frame is not a resumable architectural guest state.
+    NativeFailure(Arc<NativeFailure>),
     /// An unexecuted device read retained by the actual canonical scheduler.
     DeviceRead(DeviceReadRequest),
     /// An unexecuted write, retained by the same canonical cohort owner.
@@ -1788,7 +1819,9 @@ pub struct Machine<H: Host, D: Devices> {
     /// index: where their regions keep guest GPRs out of the frame across a
     /// faultable access, which a native fault applies first. Kept apart
     /// from [`Block`], whose fields every exit reads.
-    fault_recovery: BTreeMap<usize, Vec<stela_compiler::block::FaultRecovery>>,
+    fault_recovery: BTreeMap<usize, recovery::CodeRecovery>,
+    native_patches: BTreeMap<usize, recovery::OwnedPatch>,
+    native_failure: Option<recovery::CapturedFailure>,
     /// Blocks by PC, PA, FP enablement and SP alignment checking.
     index: BTreeMap<(u64, u64, Variant), usize>,
     /// The `index` keys of the blocks compiled from each physical page.
@@ -2039,6 +2072,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             blocks: table::Table::new(),
             free_blocks: Vec::new(),
             fault_recovery: BTreeMap::new(),
+            native_patches: BTreeMap::new(),
+            native_failure: None,
             index: BTreeMap::new(),
             code_pages: BTreeMap::new(),
             low_memory_reclaim: 0,
@@ -2901,6 +2936,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// their own code is reclaimed. A block no longer indexed has no live
     /// chain into it, as its page was forgotten whole then.
     fn evict_code(&mut self, range: core::ops::Range<usize>) {
+        self.native_patches.retain(|&at, patch| {
+            at.checked_add(patch.bytes.len())
+                .is_some_and(|end| end <= range.start || at >= range.end)
+        });
         let evicted: Vec<usize> = (0..self.blocks.len())
             .filter(|&slot| range.contains(&self.blocks[slot].code.0))
             .collect();
@@ -2943,6 +2982,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.blocks.clear();
         self.free_blocks.clear();
         self.fault_recovery.clear();
+        self.native_patches.clear();
         self.index.clear();
         self.code_pages.clear();
         self.pages.clear();
@@ -3426,6 +3466,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Run within block and optional host-time limits, yielding between
     /// engine steps. An entered native chain or host callback may overrun.
     pub fn run_with_budget(&mut self, budget: RunBudget) -> Stop {
+        if let Some(failure) = &self.native_failure {
+            return Stop::NativeFailure(failure.summary.clone());
+        }
         if let Some(pending) = self.pending_native_device_access() {
             return pending;
         }
@@ -3447,6 +3490,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     pub(super) fn run_blocks_with_budget(&mut self, budget: RunBudget) -> Stop {
+        if let Some(failure) = &self.native_failure {
+            return Stop::NativeFailure(failure.summary.clone());
+        }
         let deadline = budget
             .host_ticks
             .map(|ticks| budget::Deadline::new(self.host.counter(), ticks));
@@ -3586,6 +3632,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
         }
         let step = self.execute(index, if single { 0 } else { self.chain_budget() });
+        if self.native_failure.is_some() {
+            return step;
+        }
         if !core::mem::take(&mut self.pacm_written) && pacm {
             self.cpu.pstate.pacm = false;
         }
@@ -3712,17 +3761,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let (block, retired, hits, linked) = self.chain.completed();
         let chained = linked + hits;
         let last = (block & u64::from(u32::MAX)) as usize;
-        self.cpu.retired += retired;
+        if let NativeExit::Fault(fault) = exit
+            && (last >= self.blocks.len() || self.blocks[last].code.0 == 0)
+        {
+            return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
+        }
         self.statistics.blocks += 1 + chained;
         self.statistics.chained += chained;
         self.statistics.lookup_hits += hits;
         // A transfer entered the last block, with the BTYPE it names: 0
         // from every thunk but those of BR and BLR forms.
-        if chained > 0 {
-            self.cpu.pstate.btype = (block >> chain::BLOCK_BTYPE_SHIFT) as u8;
-        }
+        let btype = (chained > 0).then_some((block >> chain::BLOCK_BTYPE_SHIFT) as u8);
         match exit {
             NativeExit::Exit { next_pc, kind } => {
+                self.cpu.retired = self.cpu.retired.wrapping_add(retired);
+                if let Some(btype) = btype {
+                    self.cpu.pstate.btype = btype;
+                }
                 if let Some(count) = self.statistics.exit_kinds.get_mut(kind as usize) {
                     *count += 1;
                 }
@@ -3750,7 +3805,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             NativeExit::Fault(mut fault) => {
                 let at = (entry.0 as u64).wrapping_add(fault.offset as u64);
                 fault.offset = at.wrapping_sub(self.blocks[last].code.0 as u64) as usize;
-                let handled = self.native_fault(last, fault);
+                let handled = self.native_fault(last, fault, retired, btype);
                 self.timing_exit(step_timing::FAULT_SLOT, returned);
                 handled
             }
@@ -3849,8 +3904,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         ) else {
             return;
         };
-        self.host.patch(thunk, &code);
-        self.host.patch(NativeCode(site as usize), &jump);
+        self.patch_native(thunk, &code);
+        self.patch_native(NativeCode(site as usize), &jump);
         self.blocks[index].successors.swap_remove(position);
         self.statistics.links += 1;
     }
@@ -3905,7 +3960,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(jump) = chain::jump(site, thunk.0 as u64) else {
             return false;
         };
-        self.host.patch(NativeCode(site as usize), &jump);
+        self.patch_native(NativeCode(site as usize), &jump);
         self.statistics.lookups += 1;
         true
     }
@@ -4351,14 +4406,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let found = record
                 .as_ref()
                 .and_then(|record| record.find(offset as u16, context))
-                .and_then(|entry| entry.rebase(page, &source));
-            if let Some(compiled) = found {
-                if !within(&compiled) {
+                .and_then(|entry| {
+                    entry
+                        .rebase(page, &source)
+                        .map(|block| (block, entry.input.clone()))
+                });
+            if let Some((compiled, input)) = found {
+                if compiled.source_bytes > available {
                     return Ok(None);
                 }
                 self.statistics.stored += 1;
                 return self
-                    .install(pc, physical, variant, &source, compiled)
+                    .install(
+                        pc,
+                        physical,
+                        variant,
+                        &source,
+                        recovery::CodeRecovery::stored(compiled, input, preparation.clone())
+                            .with_record(SourceRecord {
+                                page,
+                                raw_page_sha256: *key,
+                                preparation_context: *context,
+                            }),
+                    )
                     .map(Some);
             }
             if let Some(compiled) = self
@@ -4366,14 +4436,31 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .translations()
                 .and_then(|translations| translations.prepared(key, pc, context))
             {
-                if !within(&compiled) {
+                if !within(&compiled.block) {
                     return Ok(None);
                 }
-                self.statistics.shared += 1;
-                let compiled = Arc::unwrap_or_clone(compiled);
-                return self
-                    .install(pc, physical, variant, &source, compiled)
-                    .map(Some);
+                if compiled.matches(key, pc, context, &source) {
+                    self.statistics.shared += 1;
+                    let shared = Arc::unwrap_or_clone(compiled);
+                    return self
+                        .install(
+                            pc,
+                            physical,
+                            variant,
+                            &source,
+                            recovery::CodeRecovery::compiled(
+                                shared.block,
+                                shared.input,
+                                shared.preparation,
+                            )
+                            .with_record(SourceRecord {
+                                page,
+                                raw_page_sha256: *key,
+                                preparation_context: *context,
+                            }),
+                        )
+                        .map(Some);
+                }
             }
         }
         let started = self.host.counter();
@@ -4425,6 +4512,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.statistics.compile_ticks += self.host.counter().wrapping_sub(started);
         // An offer is kept until the store proves it; with memory low the
         // block is only compiled, as one the store cannot hold.
+        let source_record = stored
+            .as_ref()
+            .zip(context)
+            .map(|((key, _), context)| SourceRecord {
+                page,
+                raw_page_sha256: *key,
+                preparation_context: context,
+            });
         if let (Some((key, _)), Some(context)) = (stored, context)
             && !self.host.memory_low()
             && let Some(translations) = self.host.translations()
@@ -4435,13 +4530,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 pc,
                 context,
                 input: source[..input].to_vec(),
-                preparation,
+                preparation: preparation.clone(),
                 block: compiled.clone(),
                 successors,
             });
             self.statistics.offered += 1;
         }
-        self.install(pc, physical, variant, &source, compiled)
+        let mut recovery =
+            recovery::CodeRecovery::compiled(compiled, source[..input].to_vec(), preparation);
+        if let Some(record) = source_record {
+            recovery = recovery.with_record(record);
+        }
+        self.install(pc, physical, variant, &source, recovery)
             .map(Some)
     }
 
@@ -4506,10 +4606,26 @@ impl<H: Host, D: Devices> Machine<H, D> {
         physical: u64,
         variant: Variant,
         source: &[u8],
-        compiled: stela_compiler::block::CompiledBlock,
+        compiled: recovery::CodeRecovery,
     ) -> Result<Fetched, Stop> {
         let Variant { checks, single, .. } = variant;
-        let last = compiled.source_bytes - INSTRUCTION as usize;
+        if compiled.portable_requires_unavailable_capture() {
+            return Err(self.unsupported(RequirementKind::Native(
+                "native spill/extended-register invocation capture is not qualified",
+            )));
+        }
+        if !compiled.matches_source(source)
+            || compiled.template.source_bytes < INSTRUCTION as usize
+            || compiled.template.source_bytes > source.len()
+            || pc
+                .checked_add(compiled.template.source_bytes as u64)
+                .is_none()
+        {
+            return Err(self.unsupported(RequirementKind::Native(
+                "native template has no matching admitted source extent",
+            )));
+        }
+        let last = compiled.template.source_bytes - INSTRUCTION as usize;
         let terminal = u32::from_le_bytes(source[last..last + 4].try_into().expect("a word"));
         let installed = self.statistics.compiled + self.statistics.shared;
         if !self.blocks.is_empty() && installed >= self.low_memory_reclaim && self.host.memory_low()
@@ -4526,19 +4642,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.discard_code();
             }
         }
-        let code = match self.host.install(&compiled.native.x86_64_code) {
+        let code = match self.host.install(&compiled.template.native.x86_64_code) {
             Ok(code) => code,
             Err(InstallError::Full) => {
                 self.reclaim_code();
                 self.host
-                    .install(&compiled.native.x86_64_code)
+                    .install(&compiled.template.native.x86_64_code)
                     .map_err(|_| {
                         self.unsupported(RequirementKind::Native("block exceeds the code arena"))
                     })?
             }
         };
-        let terminal_pc = pc + compiled.source_bytes as u64 - INSTRUCTION;
+        let terminal_pc = pc + compiled.template.source_bytes as u64 - INSTRUCTION;
         let mut successors: Vec<Successor> = compiled
+            .template
             .direct_exits
             .iter()
             .map(|exit| Successor {
@@ -4549,7 +4666,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .collect();
         // RET, BR and BLR end the code with their exit to the target in
         // RAX; the PAC thunk of a RETA*, BRA* or BLRA* has one too.
-        let code_bytes = &compiled.native.x86_64_code;
+        let code_bytes = &compiled.template.native.x86_64_code;
         let mut dynamic_site = (!single
             && terminal & 0xff9f_fc1f == 0xd61f_0000
             && dynamic_branch(terminal)
@@ -4560,7 +4677,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let (successor, dynamic) = self
                 .complete_pointer_natively(
                     code,
-                    &compiled.native.x86_64_code,
+                    &compiled.template.native.x86_64_code,
                     terminal_pc,
                     terminal,
                 )
@@ -4569,7 +4686,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             dynamic_site = dynamic_site.or(dynamic);
             successors.extend(self.complete_mirrored_read_natively(
                 code,
-                &compiled.native.x86_64_code,
+                &compiled.template.native.x86_64_code,
                 terminal_pc,
                 terminal,
             ));
@@ -4579,6 +4696,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             physical,
             code,
             source_map: compiled
+                .template
                 .native
                 .source_map
                 .iter()
@@ -4591,8 +4709,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             first,
             terminal: (terminal_pc, terminal),
             taken: 0,
-            source_bytes: compiled.source_bytes,
-            source_hash: source_hash(&source[..compiled.source_bytes]),
+            source_bytes: compiled.template.source_bytes,
+            source_hash: source_hash(&source[..compiled.template.source_bytes]),
         };
         let index = match self.free_blocks.pop() {
             Some(slot) => {
@@ -4601,15 +4719,41 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             None => self.blocks.push(block),
         };
-        if !compiled.fault_recovery.is_empty() {
-            self.fault_recovery.insert(index, compiled.fault_recovery);
-        }
+        self.fault_recovery.insert(index, compiled);
         self.index.insert((pc, physical, variant), index);
         self.code_pages
             .entry(physical & !(FETCH_PAGE - 1))
             .or_default()
             .push((pc, physical, variant));
         Ok(Fetched::Block(index))
+    }
+
+    fn patch_native(&mut self, code: NativeCode, bytes: &[u8]) {
+        self.host.patch(code, bytes);
+        self.native_patches.insert(
+            code.0,
+            recovery::OwnedPatch {
+                bytes: bytes.to_vec(),
+                purpose: recovery::PatchPurpose::Chain,
+            },
+        );
+    }
+
+    fn patch_native_adapter(
+        &mut self,
+        code: NativeCode,
+        bytes: &[u8],
+        pc: u64,
+        kind: recovery::NativeAdapter,
+    ) {
+        self.host.patch(code, bytes);
+        self.native_patches.insert(
+            code.0,
+            recovery::OwnedPatch {
+                bytes: bytes.to_vec(),
+                purpose: recovery::PatchPurpose::NativeAdapter { pc, kind },
+            },
+        );
     }
 
     /// Redirect the PAC exit ending a block's `native` code, installed at
@@ -4646,7 +4790,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let installed = self.host.install(&thunk.code).ok()?;
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
-        self.host.patch(NativeCode(site as usize), &jump);
+        self.patch_native_adapter(
+            NativeCode(site as usize),
+            &jump,
+            pc,
+            recovery::NativeAdapter::PointerAuthentication,
+        );
         let successor = thunk.next.map(|next| Successor {
             site: installed.0 as u64 + next as u64,
             target: GuestAddress(pc + INSTRUCTION),
@@ -4686,7 +4835,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let installed = self.host.install(&thunk.code).ok()?;
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
-        self.host.patch(NativeCode(site as usize), &jump);
+        self.patch_native_adapter(
+            NativeCode(site as usize),
+            &jump,
+            pc,
+            recovery::NativeAdapter::MirroredRead,
+        );
         thunk.next.map(|next| Successor {
             site: installed.0 as u64 + next as u64,
             target: GuestAddress(pc + INSTRUCTION),
@@ -5557,31 +5711,164 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    /// Guest PC of the instruction containing native `offset`.
-    fn faulting_pc(&self, index: usize, offset: usize) -> u64 {
-        let map = &self.blocks[index].source_map;
-        let position = map.partition_point(|(_, start)| *start <= offset);
-        map[position.saturating_sub(1)].0
+    /// The original fixed capture retained after a terminal native failure.
+    /// Its frame is diagnostic only; subsequent run calls refuse execution.
+    pub fn native_failure_capture(&self) -> Option<&NativeFault> {
+        self.native_failure.as_ref().map(|failure| &failure.capture)
     }
 
-    fn native_fault(&mut self, index: usize, fault: NativeFault) -> Step {
-        // Guest registers a region kept in host registers across the access.
-        if let Some(table) = self.fault_recovery.get(&index)
-            && let Err(cause) = stela_compiler::block::FaultRecovery::apply(
-                table,
-                fault.offset,
-                &fault.registers,
-                &mut self.cpu.state,
-            )
-        {
-            let mut requirement = self.requirement(RequirementKind::FaultRecovery(cause));
-            requirement.pc = self.faulting_pc(index, fault.offset);
-            return Err(Stop::Unsupported(requirement));
+    fn fail_native(
+        &mut self,
+        index: usize,
+        fault: NativeFault,
+        reason: NativeFailureReason,
+    ) -> Stop {
+        let block = (index < self.blocks.len()).then(|| &self.blocks[index]);
+        let (last_block, reported_retired, lookup_hits, direct_links) = self.chain.completed();
+        let failure = Arc::new(NativeFailure {
+            pc: block.map_or(self.cpu.pc, |block| block.pc),
+            code: block.map(|block| block.code),
+            native_offset: fault.offset,
+            address: fault.address,
+            origin: fault.origin,
+            trap: fault.trap,
+            error_code: fault.error_code,
+            unsettled_chain: Some(UnsettledChain {
+                reported_retired,
+                last_block,
+                lookup_hits,
+                direct_links,
+            }),
+            reason,
+            source_record: self
+                .fault_recovery
+                .get(&index)
+                .and_then(recovery::CodeRecovery::source_record),
+        });
+        self.native_failure = Some(recovery::CapturedFailure {
+            summary: failure.clone(),
+            capture: fault,
+        });
+        Stop::NativeFailure(failure)
+    }
+
+    fn native_fault(
+        &mut self,
+        index: usize,
+        fault: NativeFault,
+        chained_retired: u64,
+        chained_btype: Option<u8>,
+    ) -> Step {
+        use stela_compiler::block::{
+            FaultRecovery, HostFaultSnapshot, RecoverySiteKind, RetirementPhase,
+        };
+        // Source maps locate diagnostics; only an independently qualified exact
+        // operand/check site can authorize architectural fault projection.
+        let Some(block) = (index < self.blocks.len()).then(|| &self.blocks[index]) else {
+            return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
+        };
+        let (code, entry_pc, source_bytes) = (block.code, block.pc, block.source_bytes);
+        let Some(owner) = self.fault_recovery.get_mut(&index) else {
+            return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
+        };
+        if fault.offset >= owner.template.native.x86_64_code.len() {
+            return Err(self.fail_native(index, fault, NativeFailureReason::CodeExtent));
         }
-        let pc = self.faulting_pc(index, fault.offset);
-        self.retire_before(index, pc);
+        if let Err(reason) = owner.validate_live(&mut self.host, code, &self.native_patches) {
+            return Err(self.fail_native(index, fault, reason));
+        }
+        let table = match owner.qualify(entry_pc) {
+            Ok(table) => table,
+            Err(reason) => return Err(self.fail_native(index, fault, reason)),
+        };
+        let recovery_site = match FaultRecovery::site_at(table, fault.offset) {
+            Ok(site) => site,
+            Err(error) => {
+                return Err(self.fail_native(index, fault, NativeFailureReason::Recovery(error)));
+            }
+        };
+        let site = recovery_site.kind();
+        if site == RecoverySiteKind::NativeInternal {
+            return Err(self.fail_native(index, fault, NativeFailureReason::InternalSite));
+        }
+        let compatible = match (fault.origin, site) {
+            (NativeFaultOrigin::Exception, RecoverySiteKind::GuestAccess) => match fault.trap {
+                14 => {
+                    fault.error_code & !0b111 == 0
+                        && !matches!(fault.cause, FaultCause::InvalidOpcode)
+                }
+                13 => fault.error_code == 0 && matches!(fault.cause, FaultCause::NonCanonical),
+                _ => false,
+            },
+            (NativeFaultOrigin::Exception, RecoverySiteKind::GuestCheck) => {
+                fault.trap == 6
+                    && fault.error_code == 0
+                    && matches!(fault.cause, FaultCause::InvalidOpcode)
+            }
+            (NativeFaultOrigin::TranslatedHelper, RecoverySiteKind::TranslatedHelper) => {
+                fault.trap == 0
+                    && fault.error_code == 0
+                    && recovery_site.translated_access().is_some_and(|access| {
+                        access.bytes() != 0
+                            && access.write() == fault.write
+                            && match fault.cause {
+                                FaultCause::InvalidOpcode => access.atomic(),
+                                FaultCause::NonCanonical
+                                | FaultCause::Device { .. }
+                                | FaultCause::Translation(_)
+                                | FaultCause::Watched
+                                | FaultCause::TagChecked => true,
+                                FaultCause::Guest(_) => false,
+                            }
+                    })
+            }
+            _ => false,
+        };
+        if !compatible {
+            return Err(self.fail_native(index, fault, NativeFailureReason::TrapSiteMismatch));
+        }
+        let mut staged = self.cpu.state.clone();
+        let settlement = match FaultRecovery::apply(
+            table,
+            fault.offset,
+            HostFaultSnapshot {
+                gprs: &fault.registers,
+                spills: &fault.spills,
+            },
+            &mut staged,
+        ) {
+            Ok(Some(settlement)) => settlement,
+            Ok(None) => {
+                return Err(self.fail_native(index, fault, NativeFailureReason::InternalSite));
+            }
+            Err(error) => {
+                return Err(self.fail_native(index, fault, NativeFailureReason::Recovery(error)));
+            }
+        };
+        let pc = settlement.position.pc.0;
+        let count = u64::from(settlement.position.retired_instructions);
+        if settlement.phase != RetirementPhase::Before
+            || settlement.site.kind() != site
+            || pc.checked_sub(entry_pc) != count.checked_mul(INSTRUCTION)
+            || pc
+                .checked_sub(entry_pc)
+                .is_none_or(|bytes| bytes >= source_bytes as u64)
+        {
+            return Err(self.fail_native(index, fault, NativeFailureReason::Position));
+        }
+        // Publish the complete authorized boundary once, including chained and
+        // current-block retirement. Internal/After windows never reach replay.
+        self.cpu.state = staged;
+        self.cpu.retired = self
+            .cpu
+            .retired
+            .wrapping_add(chained_retired)
+            .wrapping_add(count);
         self.cpu.pc = pc;
-        if pc != self.blocks[index].pc {
+        if let Some(btype) = chained_btype {
+            self.cpu.pstate.btype = btype;
+        }
+        if pc != entry_pc {
             self.cpu.pstate.btype = 0;
         }
         // A native DC ZVA's first store, or a native DC clean's read of Xt,
@@ -7075,6 +7362,40 @@ mod tests {
         }
     }
 
+    pub(super) const NATIVE_CODE_STRIDE: usize = 1 << 20;
+
+    /// A synthetic boundary must name a real operand/check instruction from
+    /// this emitted block, never its source-map/prologue bookkeeping offset.
+    pub(super) fn native_fault_site<D: Devices>(
+        machine: &mut Machine<FakeHost, D>,
+        pc: u64,
+        kind: stela_compiler::block::RecoverySiteKind,
+    ) -> usize {
+        native_fault_site_in_entry(machine, pc, pc, kind).1
+    }
+    pub(super) fn native_fault_site_in_entry<D: Devices>(
+        machine: &mut Machine<FakeHost, D>,
+        entry: u64,
+        pc: u64,
+        kind: stela_compiler::block::RecoverySiteKind,
+    ) -> (usize, usize) {
+        let Ok(Fetched::Block(index)) = machine.fetch_block(entry, false) else {
+            panic!("actual compiled native block");
+        };
+        let row = machine.fault_recovery[&index]
+            .template
+            .fault_recovery
+            .iter()
+            .find(|row| row.retirement.instruction_pc().0 == pc && row.site == kind)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no {kind:?} site for {pc:#x} in entry {entry:#x}: {:?}",
+                    machine.fault_recovery[&index].template.fault_recovery
+                )
+            });
+        (index, row.start)
+    }
+
     pub(super) struct FakeHost {
         pub(super) ram: Vec<u8>,
         pub(super) events: Vec<Event>,
@@ -7092,8 +7413,9 @@ mod tests {
         /// Executable copies of the context leaves the engine called.
         executables: Vec<crate::execution::platform::Mapping>,
         pub(super) patches: Vec<(usize, Vec<u8>)>,
+        live_patch_start: usize,
         /// The chaining state the next native run leaves, as thunks would.
-        chained: Option<(*mut ChainControl, ChainControl)>,
+        pub(super) chained: Option<(*mut ChainControl, ChainControl)>,
         /// What the next native blocks return, in order: unit tests do not
         /// run native code.
         pub(super) exits: Vec<NativeExit>,
@@ -7163,21 +7485,48 @@ mod tests {
                 part.end += 1;
             }
             self.installed.push(code.to_vec());
-            Ok(NativeCode(self.installed.len()))
+            assert!(code.len() < NATIVE_CODE_STRIDE);
+            Ok(NativeCode(self.installed.len() * NATIVE_CODE_STRIDE))
         }
         fn reclaim_code(&mut self) -> Option<core::ops::Range<usize>> {
             self.ring?;
             let next = self.installed.len() + 1;
             self.parts.push(next..next);
-            Some(match self.parts.len() > 2 {
+            let range = match self.parts.len() > 2 {
                 true => self.parts.remove(0),
                 false => 0..0,
-            })
+            };
+            Some(range.start * NATIVE_CODE_STRIDE..range.end * NATIVE_CODE_STRIDE)
         }
         fn patch(&mut self, code: NativeCode, bytes: &[u8]) {
             self.patches.push((code.0, bytes.to_vec()));
         }
+        fn read_native(&mut self, code: NativeCode, bytes: &mut [u8]) -> bool {
+            let Some(index) = (code.0 / NATIVE_CODE_STRIDE).checked_sub(1) else {
+                return false;
+            };
+            let offset = code.0 % NATIVE_CODE_STRIDE;
+            let Some(body) = self
+                .installed
+                .get(index)
+                .and_then(|code| code.get(offset..offset + bytes.len()))
+            else {
+                return false;
+            };
+            bytes.copy_from_slice(body);
+            for (at, patch) in self.patches.iter().skip(self.live_patch_start) {
+                if *at >= code.0
+                    && at
+                        .checked_add(patch.len())
+                        .is_some_and(|end| end <= code.0 + bytes.len())
+                {
+                    bytes[*at - code.0..*at - code.0 + patch.len()].copy_from_slice(patch);
+                }
+            }
+            true
+        }
         fn discard_code(&mut self) {
+            self.live_patch_start = self.patches.len();
             self.installed.clear();
             self.executables.clear();
         }
@@ -7188,8 +7537,10 @@ mod tests {
         fn context_entry(&mut self, code: NativeCode) -> Option<usize> {
             // Context leaves run: they touch only the state, the context and
             // the memory service.
-            let mapping = crate::execution::platform::Mapping::new(&self.installed[code.0 - 1])
-                .expect("an executable mapping of the leaf");
+            let mapping = crate::execution::platform::Mapping::new(
+                &self.installed[code.0 / NATIVE_CODE_STRIDE - 1],
+            )
+            .expect("an executable mapping of the leaf");
             let entry = mapping.entry();
             self.executables.push(mapping);
             Some(entry)
@@ -7276,6 +7627,15 @@ mod tests {
 
     /// A machine running `words` at BASE on PE 0 at EL1 of the chip the
     /// tests run on ([`crate::machine::test_chip`]).
+    pub(super) fn translated_machine(words: &[u32]) -> Machine<FakeHost, NoDevices> {
+        let mut machine = machine(words);
+        machine.host.placement = mmu::placement::Placement::four_level(2).unwrap();
+        machine.host.translation_helper = Some(0x1000);
+        machine.translated_pages.insert(BASE & !(FETCH_PAGE - 1));
+        machine.derived_changed();
+        machine
+    }
+
     pub(super) fn machine(words: &[u32]) -> Machine<FakeHost, NoDevices> {
         board(words, NoDevices, Vec::new())
     }
@@ -7368,6 +7728,7 @@ mod tests {
             installed: Vec::new(),
             executables: Vec::new(),
             patches: Vec::new(),
+            live_patch_start: 0,
             chained: None,
             exits: Vec::new(),
             store: None,
@@ -8054,8 +8415,10 @@ mod tests {
 
     #[test]
     fn unavailable_extended_fault_state_cannot_partially_recover_or_retire() {
-        use stela_compiler::block::{FaultRecovery, FaultRecoveryError, HostGprSnapshot};
-        let mut machine = machine(&[0x9100_0400, 0xd400_0001]);
+        use stela_compiler::block::{
+            FaultRecoveryError, HostGprSnapshot, RecoveryBinding, RecoverySiteKind,
+        };
+        let mut machine = machine(&[0x9100_0400, 0xf9400043, 0xd400_0001]);
         let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
             panic!("prepared block");
         };
@@ -8064,31 +8427,49 @@ mod tests {
         let before = machine.cpu.state.clone();
         let pc = machine.cpu.pc;
         let retired = machine.cpu.retired;
-        machine.fault_recovery.insert(
-            index,
-            vec![FaultRecovery {
-                start: 0,
-                end: usize::MAX,
-                registers: vec![(0, 0), (1, 16)],
-            }],
-        );
+        // Corrupt a real, minted operand row to exercise atomic capture refusal;
+        // no test-only constructor fabricates a guest site at internal code.
+        let row = machine
+            .fault_recovery
+            .get_mut(&index)
+            .unwrap()
+            .test_rows_mut()
+            .iter_mut()
+            .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+            .unwrap();
+        row.bindings = vec![RecoveryBinding::gpr(0, 0), RecoveryBinding::gpr(1, 16)];
+        let offset = row.start;
         let stopped = machine.native_fault(
             index,
             NativeFault {
-                offset: 0,
+                origin: crate::machine::NativeFaultOrigin::Exception,
+                trap: 14,
+                error_code: 0,
+                spills: stela_compiler::block::HostSpillSnapshot::new(),
+                offset,
                 address: 0x40,
                 write: false,
-                cause: FaultCause::InvalidOpcode,
+                cause: FaultCause::NonCanonical,
                 registers: HostGprSnapshot::legacy([99; 16]),
             },
+            0,
+            None,
         );
-        assert!(matches!(stopped, Err(Stop::Unsupported(Requirement {
-            pc: failed_pc,
-            kind: RequirementKind::FaultRecovery(FaultRecoveryError::ExtendedStateUnavailable { register: 16 }),
-            ..
-        })) if failed_pc == BASE));
+        assert!(matches!(
+            stopped,
+            Err(Stop::NativeFailure(ref failure)) if failure.reason == NativeFailureReason::Recovery(
+                FaultRecoveryError::ExtendedStateUnavailable { register: 16 }
+            )
+        ));
         assert_eq!(machine.cpu.state, before);
         assert_eq!(machine.cpu.pc, pc);
+        assert_eq!(machine.cpu.retired, retired);
+        assert_eq!(
+            machine.run(1),
+            stopped.unwrap_err(),
+            "terminal failure cannot resume the partial frame"
+        );
+        assert_eq!(machine.cpu.state, before);
         assert_eq!(machine.cpu.retired, retired);
     }
 
@@ -8131,7 +8512,8 @@ mod tests {
         // add r8d,ecx; mov [rdx],r8d: the plain update and store.
         const PLAIN_ADD_STORE: [u8; 6] = [0x41, 0x01, 0xc8, 0x44, 0x89, 0x02];
         let has = |machine: &Machine<FakeHost, NoDevices>, index: usize, bytes: &[u8]| {
-            let code = &machine.host.installed[machine.blocks[index].code.0 - 1];
+            let code =
+                &machine.host.installed[machine.blocks[index].code.0 / NATIVE_CODE_STRIDE - 1];
             code.windows(bytes.len()).any(|window| window == bytes)
         };
         let mut machine = machine(&[LDADD_W1_W0_X2, SVC_0]);
@@ -8166,7 +8548,8 @@ mod tests {
         // ldr x0, [sp, #8]; svc #0
         let mut machine = machine(&[0xf940_07e0, 0xd400_0001]);
         let has_check = |machine: &Machine<FakeHost, NoDevices>, index: usize| {
-            let code = &machine.host.installed[machine.blocks[index].code.0 - 1];
+            let code =
+                &machine.host.installed[machine.blocks[index].code.0 / NATIVE_CODE_STRIDE - 1];
             code.windows(SP_CHECK.len()).any(|bytes| bytes == SP_CHECK)
         };
         let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1) | 1 << 3;
@@ -8223,6 +8606,10 @@ mod tests {
             .set(SystemRegister::CPTR_EL2, 0, 0b11 << 20);
         let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1) & !(SCTLR_A | SCTLR_NAA);
         let ud = NativeExit::Fault(NativeFault {
+            origin: crate::machine::NativeFaultOrigin::Exception,
+            trap: 6,
+            error_code: 0,
+            spills: stela_compiler::block::HostSpillSnapshot::new(),
             registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
             offset: 0,
             address: 0,
@@ -8240,7 +8627,16 @@ mod tests {
             machine.derived_changed();
             machine.cpu.pc = BASE + 4 * index;
             machine.cpu.state.x[1] = address;
-            machine.host.exits.push(ud);
+            let offset = native_fault_site(
+                &mut machine,
+                BASE + 4 * index,
+                stela_compiler::block::RecoverySiteKind::GuestCheck,
+            );
+            let NativeExit::Fault(mut fault) = ud else {
+                unreachable!()
+            };
+            fault.offset = offset;
+            machine.host.exits.push(NativeExit::Fault(fault));
             let outcome = machine.step();
             (
                 outcome.map(|()| {
@@ -8315,45 +8711,71 @@ mod tests {
             | 0b10 << 30
             | 5 << 32;
         const ADDRESS: u64 = mmu::placement::UPPER_HALF + 0x100;
-        let mut machine = machine(&[0xf940_0020]); // ldr x0, [x1]
-        normal_memory(&mut machine, false);
-        let table = |machine: &mut Machine<FakeHost, NoDevices>, at: u64, entry: u64| {
-            let at = at as usize;
-            machine.host.ram[at..at + 8].copy_from_slice(&entry.to_le_bytes());
+        let setup = || {
+            let mut machine = machine(&[0xf940_0020]); // ldr x0, [x1]
+            normal_memory(&mut machine, false);
+            let table = |machine: &mut Machine<FakeHost, NoDevices>, at: u64, entry: u64| {
+                let at = at as usize;
+                machine.host.ram[at..at + 8].copy_from_slice(&entry.to_le_bytes());
+            };
+            table(&mut machine, LEVEL0, (BASE + LEVEL1) | 0b11);
+            table(&mut machine, LEVEL1, BASE | 1 << 10 | 3 << 8 | 0b01);
+            machine
+                .cpu
+                .registers
+                .set(SystemRegister::TTBR1_EL1, 0, BASE + LEVEL0);
+            machine.cpu.registers.set(SystemRegister::TCR_EL1, 0, TCR);
+            machine.translations_changed();
+            machine
         };
-        table(&mut machine, LEVEL0, (BASE + LEVEL1) | 0b11);
-        table(&mut machine, LEVEL1, BASE | 1 << 10 | 3 << 8 | 0b01);
-        machine
-            .cpu
-            .registers
-            .set(SystemRegister::TTBR1_EL1, 0, BASE + LEVEL0);
-        machine.cpu.registers.set(SystemRegister::TCR_EL1, 0, TCR);
-        machine.translations_changed();
-        let outside = |cause| {
+        let mut machine = setup();
+        let outside = |cause, offset| {
             NativeExit::Fault(NativeFault {
+                origin: crate::machine::NativeFaultOrigin::Exception,
+                trap: if matches!(cause, FaultCause::InvalidOpcode) {
+                    6
+                } else {
+                    13
+                },
+                error_code: 0,
+                spills: stela_compiler::block::HostSpillSnapshot::new(),
                 registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
-                offset: 0,
+                offset,
                 address: 0,
                 write: false,
                 cause,
             })
         };
-        let run = |machine: &mut Machine<FakeHost, NoDevices>, cause| {
+        let run = |machine: &mut Machine<FakeHost, NoDevices>, cause, kind| {
             machine.cpu.pc = BASE;
             machine.cpu.state.x[1] = ADDRESS;
-            machine.host.exits.push(outside(cause));
+            let offset = native_fault_site(machine, BASE, kind);
+            machine.host.exits.push(outside(cause, offset));
             machine.step()
         };
-        // Native under LA57: a failed check there has no fault to take.
-        assert!(matches!(
-            run(&mut machine, FaultCause::InvalidOpcode),
-            Err(Stop::Unsupported(_))
-        ));
+        // LA57 has no intentional range-check UD2 here. An illegal Host
+        // opcode at the actual operand is terminal, not a graceful guest check.
+        let stop = run(
+            &mut machine,
+            FaultCause::InvalidOpcode,
+            stela_compiler::block::RecoverySiteKind::GuestAccess,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&stop, Stop::NativeFailure(failure) if failure.reason == NativeFailureReason::TrapSiteMismatch)
+        );
+        assert_eq!(machine.run(1), stop);
+        // Continue the unchanged valid four-level cases with a fresh identical
+        // frame; a terminal partial frame can never be reset into execution.
+        let mut machine = setup();
         // Four-level without the helper.
         machine.host.placement = mmu::placement::Placement::four_level(2).unwrap();
         machine.derived_changed();
-        let Err(Stop::Unsupported(requirement)) = run(&mut machine, FaultCause::InvalidOpcode)
-        else {
+        let Err(Stop::Unsupported(requirement)) = run(
+            &mut machine,
+            FaultCause::InvalidOpcode,
+            stela_compiler::block::RecoverySiteKind::GuestCheck,
+        ) else {
             panic!("an explicit stop")
         };
         assert_eq!(requirement.address, Some(ADDRESS));
@@ -8370,7 +8792,12 @@ mod tests {
         machine.host.translation_helper = Some(HELPER);
         for cause in [FaultCause::InvalidOpcode, FaultCause::NonCanonical] {
             machine.translated_pages.clear();
-            run(&mut machine, cause).unwrap();
+            let kind = if matches!(cause, FaultCause::InvalidOpcode) {
+                stela_compiler::block::RecoverySiteKind::GuestCheck
+            } else {
+                stela_compiler::block::RecoverySiteKind::GuestAccess
+            };
+            run(&mut machine, cause, kind).unwrap();
             assert_eq!(machine.cpu.pc, BASE, "{cause:?}");
             assert_eq!(machine.first_translated(), Some((BASE, ADDRESS)));
             let current = machine.current_variant(false, false);
@@ -8388,15 +8815,22 @@ mod tests {
             // Its failed check calls the helper through the slot.
             let mut call = vec![0x48, 0xa1]; // movabs rax, [HELPER]
             call.extend(HELPER.to_le_bytes());
-            let code = &machine.host.installed[block.code.0 - 1];
+            let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
             assert!(code.windows(call.len()).any(|bytes| bytes == call));
         }
         assert_eq!(machine.statistics.translated_pages, 2);
-        // A translated block that still leaves the ranges stops.
-        assert!(matches!(
-            run(&mut machine, FaultCause::InvalidOpcode),
-            Err(Stop::Unsupported(_))
-        ));
+        // The translated body replaces failed range checks with helper calls;
+        // no intentional UD2 exists. An actual Host #UD remains terminal.
+        let stop = run(
+            &mut machine,
+            FaultCause::InvalidOpcode,
+            stela_compiler::block::RecoverySiteKind::GuestAccess,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&stop, Stop::NativeFailure(failure) if failure.reason == NativeFailureReason::TrapSiteMismatch)
+        );
+        assert_eq!(machine.run(1), stop);
     }
 
     /// System-mode blocks check every access against the guest's ranges,
@@ -8412,7 +8846,7 @@ mod tests {
         let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
             panic!("block")
         };
-        let code = &machine.host.installed[machine.blocks[index].code.0 - 1];
+        let code = &machine.host.installed[machine.blocks[index].code.0 / NATIVE_CODE_STRIDE - 1];
         assert!(code.windows(CHECK.len()).any(|bytes| bytes == CHECK));
     }
 
@@ -8924,7 +9358,7 @@ mod tests {
             );
             assert_eq!(Some(thunk.clone()), expected);
             // The block's one direct exit ends its code.
-            let code = &machine.host.installed[from.code.0 - 1];
+            let code = &machine.host.installed[from.code.0 / NATIVE_CODE_STRIDE - 1];
             let site = from.code.0 + code.len() - chain::DIRECT_EXIT_BYTES;
             let jump = chain::jump(site as u64, *at as u64).unwrap().to_vec();
             assert_eq!(patches[1], (site, jump));
@@ -8968,9 +9402,9 @@ mod tests {
         machine.step().unwrap();
         assert_eq!(machine.statistics.chained, chained + budget);
         assert_eq!(machine.statistics.blocks, blocks + 1 + budget);
-        // A run entered with BTYPE 0b01 that chained into a block and
-        // faulted at its first instruction saves BTYPE 0, which the
-        // transfer left, in SPSR_EL1.
+        // This original target starts with ADD, which has no guest memory
+        // operand. A synthetic Host page fault there is terminal and must not
+        // invent an ARM data abort, BTYPE settlement or retired prefix.
         machine.cpu.pc = base;
         machine.cpu.pstate.btype = 0b01;
         let current = machine.chain.snapshot();
@@ -8989,15 +9423,42 @@ mod tests {
             .0
             .wrapping_sub(machine.blocks[0].code.0);
         machine.host.exits = vec![NativeExit::Fault(NativeFault {
+            origin: crate::machine::NativeFaultOrigin::Exception,
+            trap: 14,
+            error_code: 0,
+            spills: stela_compiler::block::HostSpillSnapshot::new(),
             registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
             offset,
             address: 0x40,
             write: false,
             cause: FaultCause::Guest(mmu::Fault::stage1(mmu::FaultKind::Translation, 3)),
         })];
-        machine.step().unwrap();
-        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), base + 12);
-        assert_eq!(machine.cpu.read(SystemRegister::SPSR_EL1) >> 10 & 3, 0);
+        let before = (
+            machine.cpu.pc,
+            machine.cpu.retired,
+            machine.cpu.read(SystemRegister::ELR_EL1),
+            machine.cpu.read(SystemRegister::SPSR_EL1),
+        );
+        let state = machine.cpu.state.clone();
+        let stop = machine.step().unwrap_err();
+        assert!(
+            matches!(&stop, Stop::NativeFailure(failure) if failure.reason == NativeFailureReason::InternalSite)
+        );
+        assert_eq!(
+            (
+                machine.cpu.pc,
+                machine.cpu.retired,
+                machine.cpu.read(SystemRegister::ELR_EL1),
+                machine.cpu.read(SystemRegister::SPSR_EL1)
+            ),
+            before
+        );
+        assert_eq!(machine.cpu.state, state);
+        assert!(
+            matches!(&stop, Stop::NativeFailure(failure) if failure.unsettled_chain.as_ref().is_some_and(|chain| chain.reported_retired == 2))
+        );
+        assert_eq!(machine.run(1), stop);
+        assert_eq!(machine.cpu.state, state);
     }
 
     /// A direct exit out of its page and a RET are redirected through
@@ -9037,7 +9498,7 @@ mod tests {
         let (first, second) = (&machine.blocks[0], &machine.blocks[1]);
         assert!(first.successors.is_empty() && first.dynamic_site.is_none());
         assert!(second.dynamic_site.is_none());
-        let code = |block: &Block| &machine.host.installed[block.code.0 - 1];
+        let code = |block: &Block| &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
         // The branch's direct exit, then the RET's exit to RAX, ends each
         // block's code.
         let sites = [
@@ -9056,6 +9517,7 @@ mod tests {
                 .position(|installed| Some(installed) == thunk.as_ref())
                 .expect("the thunk is installed")
                 + 1;
+            let at = at * NATIVE_CODE_STRIDE;
             let jump = chain::jump(site as u64, at as u64).unwrap().to_vec();
             assert_eq!(machine.host.patches[index], (site, jump));
         }
@@ -9311,7 +9773,9 @@ mod tests {
         machine.fetch[slot].as_mut().unwrap().guarded = true;
         machine.remember_target(far, target);
         assert_eq!(machine.targets[chain::lookup_slot(far)].targets, 0b0111);
-        // A run whose last transfer was the BLR's resumes with its BTYPE.
+        // BTI C itself performs no guest memory access. Preserve this
+        // original landing-pad program, but a fabricated Host fault at its
+        // first instruction cannot be projected as an ARM data abort.
         let current = machine.chain.snapshot();
         machine.host.chained = Some((
             machine.chain.address() as *mut ChainControl,
@@ -9328,6 +9792,10 @@ mod tests {
             .0
             .wrapping_sub(machine.blocks[0].code.0);
         machine.host.exits = vec![NativeExit::Fault(NativeFault {
+            origin: crate::machine::NativeFaultOrigin::Exception,
+            trap: 14,
+            error_code: 0,
+            spills: stela_compiler::block::HostSpillSnapshot::new(),
             registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
             offset,
             address: 0x40,
@@ -9335,9 +9803,32 @@ mod tests {
             cause: FaultCause::Guest(mmu::Fault::stage1(mmu::FaultKind::Translation, 3)),
         })];
         machine.cpu.pc = base;
-        machine.step().unwrap();
-        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), far);
-        assert_eq!(machine.cpu.read(SystemRegister::SPSR_EL1) >> 10 & 3, 0b10);
+        let before = (
+            machine.cpu.pc,
+            machine.cpu.retired,
+            machine.cpu.read(SystemRegister::ELR_EL1),
+            machine.cpu.read(SystemRegister::SPSR_EL1),
+        );
+        let state = machine.cpu.state.clone();
+        let stop = machine.step().unwrap_err();
+        assert!(
+            matches!(&stop, Stop::NativeFailure(failure) if failure.reason == NativeFailureReason::InternalSite)
+        );
+        assert_eq!(
+            (
+                machine.cpu.pc,
+                machine.cpu.retired,
+                machine.cpu.read(SystemRegister::ELR_EL1),
+                machine.cpu.read(SystemRegister::SPSR_EL1)
+            ),
+            before
+        );
+        assert_eq!(machine.cpu.state, state);
+        assert!(
+            matches!(&stop, Stop::NativeFailure(failure) if failure.unsettled_chain.as_ref().is_some_and(|chain| chain.reported_retired == 1))
+        );
+        assert_eq!(machine.run(1), stop);
+        assert_eq!(machine.cpu.state, state);
     }
 
     #[test]
@@ -10059,7 +10550,7 @@ mod tests {
             block.variant.system.cache_clean,
             cache_clean::Operations::ALL
         );
-        let code = &machine.host.installed[block.code.0 - 1];
+        let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
         let tail = chain::direct_exit(next, ExitKind::Fallthrough);
         assert_eq!(code[code.len() - chain::DIRECT_EXIT_BYTES..], tail);
         assert_eq!(block.successors.len(), 1);
@@ -10081,7 +10572,7 @@ mod tests {
                 .cache_clean
                 .contains(cache_clean::Operations::CIVAC)
         );
-        let code = &machine.host.installed[trapped.code.0 - 1];
+        let code = &machine.host.installed[trapped.code.0 / NATIVE_CODE_STRIDE - 1];
         assert_eq!(
             code[code.len() - chain::DIRECT_EXIT_BYTES..],
             chain::direct_exit(GuestAddress(base + 4), ExitKind::System)
@@ -10092,8 +10583,22 @@ mod tests {
         machine.derived_changed();
         machine.cpu.pc = base;
         machine.cpu.state.x[3] = 0x4000_0040;
-        let offset = machine.blocks[0].source_map[1].1;
+        let (entered, offset) = native_fault_site_in_entry(
+            &mut machine,
+            base,
+            base + 4,
+            stela_compiler::block::RecoverySiteKind::GuestAccess,
+        );
+        assert_eq!(
+            &machine.fault_recovery[&entered].template.native.x86_64_code[offset..offset + 3],
+            &[0x0f, 0xb6, 0x08],
+            "actual MOVZX byte probe at the minted DC clean site"
+        );
         machine.host.exits = vec![NativeExit::Fault(NativeFault {
+            origin: crate::machine::NativeFaultOrigin::Exception,
+            trap: 14,
+            error_code: 0,
+            spills: stela_compiler::block::HostSpillSnapshot::new(),
             registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
             offset,
             address: 0x4000_0040,
@@ -11284,7 +11789,7 @@ mod tests {
         }];
         machine.step().unwrap();
         let block = &machine.blocks[0];
-        let code = &machine.host.installed[block.code.0 - 1];
+        let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
         let (memo, tags, service) = machine.pointer.addresses();
         let thunk = x86_64_pointer::thunk(
             x86_64_pointer::Form::of(block::PointerAuthenticationOperation::SignIbSp).unwrap(),
@@ -11293,8 +11798,11 @@ mod tests {
             tags,
             service,
         );
-        let installed = machine.host.installed.len();
-        assert_eq!(machine.host.installed[installed - 1], thunk.code);
+        let installed = machine.host.installed.len() * NATIVE_CODE_STRIDE;
+        assert_eq!(
+            machine.host.installed[installed / NATIVE_CODE_STRIDE - 1],
+            thunk.code
+        );
         let site = block.code.0 + code.len() - chain::DIRECT_EXIT_BYTES;
         let jump = chain::jump(site as u64, installed as u64).unwrap().to_vec();
         assert_eq!(machine.host.patches, [(site, jump)]);
@@ -11356,7 +11864,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(native.host.installed.last(), Some(&thunk.code));
-        let installed = native.host.installed.len();
+        let installed = native.host.installed.len() * NATIVE_CODE_STRIDE;
         assert_eq!(
             native.blocks[0].successors,
             [Successor {
@@ -11434,11 +11942,16 @@ mod tests {
             .position(|code| *code == thunk.code)
             .unwrap()
             + 1;
+        let at = at * NATIVE_CODE_STRIDE;
         let site = (at + thunk.dynamic.unwrap()) as u64;
         let control = machine.chain.address();
         let lookup = chain::lookup_thunk(control, 1, None, ExitKind::Return, 0).unwrap();
         assert_eq!(machine.host.installed.last(), Some(&lookup));
-        let jump = chain::jump(site, machine.host.installed.len() as u64).unwrap();
+        let jump = chain::jump(
+            site,
+            (machine.host.installed.len() * NATIVE_CODE_STRIDE) as u64,
+        )
+        .unwrap();
         assert_eq!(
             machine.host.patches.last(),
             Some(&(site as usize, jump.to_vec()))
@@ -11472,11 +11985,14 @@ mod tests {
         }];
         machine.step().unwrap();
         let block = &machine.blocks[0];
-        let code = &machine.host.installed[block.code.0 - 1];
+        let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
         let cell = &machine.mirrors[thread] as *const register_read::Cell as u64;
         let thunk = register_read::thunk(GuestAddress(base + 4), 8, cell);
-        let installed = machine.host.installed.len();
-        assert_eq!(machine.host.installed[installed - 1], thunk.code);
+        let installed = machine.host.installed.len() * NATIVE_CODE_STRIDE;
+        assert_eq!(
+            machine.host.installed[installed / NATIVE_CODE_STRIDE - 1],
+            thunk.code
+        );
         let site = block.code.0 + code.len() - chain::DIRECT_EXIT_BYTES;
         let jump = chain::jump(site as u64, installed as u64).unwrap().to_vec();
         assert_eq!(machine.host.patches, [(site, jump)]);
@@ -11751,7 +12267,7 @@ mod tests {
         machine.step().unwrap();
         let block = &machine.blocks[0];
         assert_eq!(block.variant.system.zero_block, Some(64));
-        let code = &machine.host.installed[block.code.0 - 1];
+        let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
         let tail = chain::direct_exit(next, ExitKind::Fallthrough);
         assert_eq!(code[code.len() - chain::DIRECT_EXIT_BYTES..], tail);
         assert_eq!(block.successors.len(), 1);
@@ -11771,7 +12287,7 @@ mod tests {
         machine.step().unwrap();
         let trapped = &machine.blocks[1];
         assert_eq!(trapped.variant.system.zero_block, None);
-        let code = &machine.host.installed[trapped.code.0 - 1];
+        let code = &machine.host.installed[trapped.code.0 / NATIVE_CODE_STRIDE - 1];
         assert_eq!(
             code[code.len() - chain::DIRECT_EXIT_BYTES..],
             chain::direct_exit(GuestAddress(base + 4), ExitKind::System)
@@ -11781,8 +12297,28 @@ mod tests {
         machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, hcr);
         machine.derived_changed();
         machine.cpu.pc = base;
-        let offset = machine.blocks[0].source_map[1].1;
+        let (entered, offset) = native_fault_site_in_entry(
+            &mut machine,
+            base,
+            base + 4,
+            stela_compiler::block::RecoverySiteKind::GuestAccess,
+        );
+        let expected: &[u8] = if machine.blocks[entered].variant.system.zero_block.unwrap() == 4 {
+            &[0x89, 0x08]
+        } else {
+            &[0x48, 0x89, 0x48, 0x00]
+        };
+        assert_eq!(
+            &machine.fault_recovery[&entered].template.native.x86_64_code
+                [offset..offset + expected.len()],
+            expected,
+            "actual first zero store at the minted DC ZVA site"
+        );
         machine.host.exits = vec![NativeExit::Fault(NativeFault {
+            origin: crate::machine::NativeFaultOrigin::Exception,
+            trap: 14,
+            error_code: 0,
+            spills: stela_compiler::block::HostSpillSnapshot::new(),
             registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
             offset,
             address: BASE + 0x100,
@@ -12966,10 +13502,14 @@ mod tests {
         let watch = machine.host.regimes.last().unwrap().watch;
         assert!(watch.blocks(BASE) && !watch.blocks(BASE + 0x1000));
         machine.cpu.state.x[0] = BASE + 0x100;
-        let watched = |address, write| {
+        let watched = |address, write, offset| {
             NativeExit::Fault(NativeFault {
+                origin: crate::machine::NativeFaultOrigin::Exception,
+                trap: 14,
+                error_code: 0,
+                spills: stela_compiler::block::HostSpillSnapshot::new(),
                 registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
-                offset: 0,
+                offset,
                 address,
                 write,
                 cause: FaultCause::Watched,
@@ -12977,7 +13517,12 @@ mod tests {
         };
         // The store covers bytes 0..=7: a match at byte 4, EC 0x35 (same
         // EL), WnR, DFSC 0b100010, FAR the first matching byte.
-        machine.host.exits.push(watched(BASE + 0x100, true));
+        let offset = native_fault_site(
+            &mut machine,
+            BASE,
+            stela_compiler::block::RecoverySiteKind::GuestAccess,
+        );
+        machine.host.exits.push(watched(BASE + 0x100, true, offset));
         machine.step().unwrap();
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0xd600_0062);
         assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), BASE + 0x104);
@@ -12990,7 +13535,15 @@ mod tests {
         });
         machine.sync_regime();
         machine.cpu.pc = BASE + 4;
-        machine.host.exits.push(watched(BASE + 0x108, false));
+        let offset = native_fault_site(
+            &mut machine,
+            BASE + 4,
+            stela_compiler::block::RecoverySiteKind::GuestAccess,
+        );
+        machine
+            .host
+            .exits
+            .push(watched(BASE + 0x108, false, offset));
         machine.host.exits.push(NativeExit::Exit {
             next_pc: BASE + 8,
             kind: ExitKind::Fallthrough as u64,

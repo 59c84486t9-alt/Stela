@@ -67,13 +67,13 @@ fn copy(code: &mut Code, destination: u8, source: u8) {
 fn chunk(code: &mut Code, load: bool, bytes: u8, xmm: u8, displacement: u8) {
     let address = Mem::base(Gpr::Rax, displacement.into());
     let baseline = TargetCpu::Baseline;
-    match (load, bytes) {
+    code.guest_access(|code| match (load, bytes) {
         (true, QWORD_BYTES) => Host::MoveQword.emit(code, xmm, address, baseline),
         (true, VECTOR_BYTES) => Host::LoadUnaligned.emit(code, xmm, address, baseline),
         (false, QWORD_BYTES) => code.asm().movq_store(xmm, address),
         (false, VECTOR_BYTES) => Host::StoreUnaligned.emit(code, xmm, address, baseline),
         _ => unreachable!("multiple footprint consists of exact qword/vector chunks"),
-    }
+    });
 }
 
 fn contiguous(code: &mut Code, operand: &Operand, repetitions: u8, bytes: u8) {

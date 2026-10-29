@@ -270,6 +270,23 @@ impl Host for NativeHost {
         );
         Ok(NativeCode(pointer as usize))
     }
+    fn read_native(&mut self, native: NativeCode, bytes: &mut [u8]) -> bool {
+        let Some(end) = native.0.checked_add(bytes.len()) else {
+            return false;
+        };
+        if !self.code.iter().any(|code| {
+            native.0 as u64 >= code.address && end as u64 <= code.address + code.bytes as u64
+        }) {
+            return false;
+        }
+        // SAFETY: this owner retains the idle readable executable mmap through
+        // fault settlement; no address/reference escapes and discard owns munmap.
+        unsafe {
+            core::ptr::copy_nonoverlapping(native.0 as *const u8, bytes.as_mut_ptr(), bytes.len());
+        }
+        true
+    }
+
     fn patch(&mut self, native: NativeCode, bytes: &[u8]) {
         let mapping = self
             .code

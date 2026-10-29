@@ -55,3 +55,48 @@ fn spans_keep_inline_data_and_internal_branches_without_counting_data() {
     copied.append_span(&source, empty);
     assert_eq!(copied.instructions(), 4);
 }
+
+#[test]
+fn guest_site_markers_follow_span_copy_split_and_instruction_elision() {
+    use crate::block::RecoverySiteKind;
+    let mut code = Code::new();
+    code.asm().nop();
+    let start = code.checkpoint();
+    code.asm()
+        .guest_access(|asm| asm.mov_load(Size::Qword, Gpr::Rcx, Mem::base(Gpr::Rax, 0)));
+    let span = code.span_since(start);
+    code.asm().guest_check();
+    assert_eq!(&code[..], [0x90, 0x48, 0x8b, 0x08, 0x0f, 0x0b]);
+    assert_eq!(
+        (
+            code.sites()[0].start,
+            code.sites()[0].end,
+            code.sites()[0].site.kind()
+        ),
+        (1, 4, RecoverySiteKind::GuestAccess)
+    );
+    let mut copied = Code::new();
+    copied.asm().nop();
+    copied.append_span(&code, span);
+    assert_eq!(copied.sites(), &code.sites()[..1]);
+    copied.remove_instruction(0..1);
+    assert_eq!((copied.sites()[0].start, copied.sites()[0].end), (0, 3));
+    let tail = code.split_off(start);
+    assert!(code.sites().is_empty());
+    assert_eq!((tail.sites()[0].start, tail.sites()[1].start), (0, 3));
+    copied.append(tail);
+    assert_eq!(copied.sites().len(), 3);
+    copied.clear();
+    assert!(copied.sites().is_empty());
+}
+
+#[test]
+fn lock_prefix_is_part_of_the_guest_operand_site() {
+    let mut code = Code::new();
+    code.asm().guest_access(|asm| {
+        asm.lock();
+        asm.xadd(Size::Qword, Mem::base(Gpr::Rdx, 0), Gpr::Rax)
+    });
+    assert_eq!(&code[..], [0xf0, 0x48, 0x0f, 0xc1, 0x02]);
+    assert_eq!((code.sites()[0].start, code.sites()[0].end), (0, 5));
+}

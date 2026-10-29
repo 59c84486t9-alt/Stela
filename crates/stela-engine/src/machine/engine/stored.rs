@@ -11,6 +11,45 @@ use crate::translations::{Digest, PAGE_BYTES, Record};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use stela_compiler::block::CompiledBlock;
 
+/// A same-process prepared block together with its complete admitted input.
+/// The page key and context remain independent lookup bindings.
+#[derive(Debug, Clone)]
+pub struct SharedTranslation {
+    pub(super) input: Vec<u8>,
+    pub(super) block: CompiledBlock,
+    pub(super) preparation: Arc<Preparation>,
+    key: Digest,
+    page: u64,
+    pc: u64,
+    context: Digest,
+}
+impl SharedTranslation {
+    pub fn input(&self) -> &[u8] {
+        &self.input
+    }
+    pub fn block(&self) -> &CompiledBlock {
+        &self.block
+    }
+    pub fn preparation(&self) -> &Arc<Preparation> {
+        &self.preparation
+    }
+    pub(super) fn matches(&self, key: &Digest, pc: u64, context: &Digest, source: &[u8]) -> bool {
+        self.key == *key
+            && self.pc == pc
+            && self.context == *context
+            && self.page == pc & !(PAGE_BYTES as u64 - 1)
+            && self.preparation.context(self.page) == *context
+            && source.get(..self.input.len()) == Some(self.input.as_slice())
+            && self.block.source_bytes <= self.input.len()
+            && self
+                .block
+                .native
+                .source_map
+                .first()
+                .is_some_and(|(at, _)| at.0 == pc)
+    }
+}
+
 /// The store a host keeps for the engine.
 pub trait Translations {
     /// The record of the page whose bytes hash to `key`, if the store has
@@ -25,31 +64,108 @@ pub trait Translations {
         _key: &Digest,
         _pc: u64,
         _context: &Digest,
-    ) -> Option<Arc<CompiledBlock>> {
+    ) -> Option<Arc<SharedTranslation>> {
         None
     }
     /// A block the engine compiled from a page the store had no entry for.
     fn offer(&mut self, offer: Offer);
 }
 
-/// A block compiled anew, and how it was compiled.
+/// A block compiled anew, and how it was compiled. Emission fields are private;
+/// only read-only provenance and the sealed same-process handoff are exposed.
+///
+/// ```compile_fail
+/// fn replace_source(offer: &mut stela_engine::machine::Offer) {
+///     offer.input.clear();
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Offer {
-    pub key: Digest,
+    pub(super) key: Digest,
     /// The guest address of its fetch page.
-    pub page: u64,
-    pub pc: u64,
-    pub context: Digest,
+    pub(super) page: u64,
+    pub(super) pc: u64,
+    pub(super) context: Digest,
     /// The admitted words the compiler was given.
-    pub input: Vec<u8>,
-    pub preparation: Arc<Preparation>,
+    pub(super) input: Vec<u8>,
+    pub(super) preparation: Arc<Preparation>,
     /// The entry PCs of its static successors, for translation ahead of
     /// execution.
-    pub successors: Vec<u64>,
-    pub block: CompiledBlock,
+    pub(super) successors: Vec<u64>,
+    pub(super) block: CompiledBlock,
 }
 
 impl Offer {
+    /// Off-path preparation from canonical immutable input. No native template
+    /// or copied site can be supplied; this owner emits the block itself.
+    pub(crate) fn compile(
+        key: Digest,
+        page: u64,
+        pc: u64,
+        context: Digest,
+        input: Vec<u8>,
+        preparation: Arc<Preparation>,
+    ) -> Option<Self> {
+        if page != pc & !(PAGE_BYTES as u64 - 1) || preparation.context(page) != context {
+            return None;
+        }
+        let block = preparation.compile_input(&input, pc).ok()?;
+        Some(Self {
+            key,
+            page,
+            pc,
+            context,
+            input,
+            preparation,
+            successors: Vec::new(),
+            block,
+        })
+    }
+    pub fn key(&self) -> Digest {
+        self.key
+    }
+    pub fn page(&self) -> u64 {
+        self.page
+    }
+    pub fn pc(&self) -> u64 {
+        self.pc
+    }
+    pub fn context(&self) -> Digest {
+        self.context
+    }
+    pub fn input(&self) -> &[u8] {
+        &self.input
+    }
+    pub fn preparation(&self) -> &Arc<Preparation> {
+        &self.preparation
+    }
+    pub fn successors(&self) -> &[u64] {
+        &self.successors
+    }
+    pub fn block(&self) -> &CompiledBlock {
+        &self.block
+    }
+
+    /// Retain this genuine same-process emission and its complete private
+    /// source/profile/template binding. No factory accepts portable site tags.
+    ///
+    /// ```compile_fail
+    /// fn substitute(shared: &mut stela_engine::machine::engine::SharedTranslation) {
+    ///     shared.block.fault_recovery.clear();
+    /// }
+    /// ```
+    pub fn shared(self) -> Arc<SharedTranslation> {
+        Arc::new(SharedTranslation {
+            input: self.input,
+            block: self.block,
+            preparation: self.preparation,
+            key: self.key,
+            page: self.page,
+            pc: self.pc,
+            context: self.context,
+        })
+    }
+
     /// Its block's stored form: the block compiled again at both probe
     /// addresses of its page, proven to move only by them
     /// ([`translations::prove`](crate::translations::prove)).
@@ -208,7 +324,7 @@ pub(super) mod tests {
     pub(crate) struct MemoryStore {
         pub(crate) records: BTreeMap<Digest, Arc<Record>>,
         pub(crate) offers: Vec<Offer>,
-        pub(crate) prepared: BTreeMap<(Digest, u64, Digest), Arc<CompiledBlock>>,
+        pub(crate) prepared: BTreeMap<(Digest, u64, Digest), Arc<SharedTranslation>>,
     }
 
     impl Translations for MemoryStore {
@@ -220,11 +336,108 @@ pub(super) mod tests {
             key: &Digest,
             pc: u64,
             context: &Digest,
-        ) -> Option<Arc<CompiledBlock>> {
+        ) -> Option<Arc<SharedTranslation>> {
             self.prepared.get(&(*key, pc, *context)).cloned()
         }
         fn offer(&mut self, offer: Offer) {
             self.offers.push(offer);
+        }
+    }
+
+    #[test]
+    fn sealed_shared_handoff_rejects_other_source_pc_and_profile_before_install() {
+        let words = [0x91000400, 0xd4000001];
+        let mut sender = machine(&words);
+        sender.host.store = Some(MemoryStore::default());
+        assert!(matches!(
+            sender.fetch_block(BASE, false),
+            Ok(Fetched::Block(_))
+        ));
+        let genuine = sender.host.store.as_mut().unwrap().offers.pop().unwrap();
+        assert!(genuine.clone().shared().matches(
+            &genuine.key,
+            genuine.pc,
+            &genuine.context,
+            &genuine.input
+        ));
+
+        let mut different = machine(&[0x91000800, 0xd4000001]);
+        different.host.store = Some(MemoryStore::default());
+        assert!(matches!(
+            different.fetch_block(BASE, false),
+            Ok(Fetched::Block(_))
+        ));
+        let other_source = different
+            .host
+            .store
+            .as_mut()
+            .unwrap()
+            .offers
+            .pop()
+            .unwrap()
+            .shared();
+        let other_pc = Offer::compile(
+            genuine.key,
+            genuine.page,
+            genuine.pc + 4,
+            genuine.context,
+            genuine.input.clone(),
+            Arc::clone(&genuine.preparation),
+        )
+        .unwrap()
+        .shared();
+        let mut description = genuine.preparation.description();
+        description.fp = !description.fp;
+        let other_preparation = Arc::new(Preparation::from_description(&description).unwrap());
+        let other_context = other_preparation.context(genuine.page);
+        let other_profile = Offer::compile(
+            genuine.key,
+            genuine.page,
+            genuine.pc,
+            other_context,
+            genuine.input.clone(),
+            other_preparation,
+        )
+        .unwrap()
+        .shared();
+        assert_eq!(
+            other_profile.block().native.x86_64_code,
+            genuine.block.native.x86_64_code,
+            "identical scalar bytes do not prove profile identity"
+        );
+        assert!(
+            Offer::compile(
+                genuine.key,
+                genuine.page,
+                genuine.pc,
+                other_context,
+                genuine.input.clone(),
+                Arc::clone(&genuine.preparation)
+            )
+            .is_none()
+        );
+
+        for wrong in [other_source, other_pc, other_profile] {
+            assert!(!wrong.matches(&genuine.key, genuine.pc, &genuine.context, &genuine.input));
+            let mut store = MemoryStore::default();
+            store
+                .prepared
+                .insert((genuine.key, genuine.pc, genuine.context), wrong);
+            let mut receiver = machine(&words);
+            receiver.host.store = Some(store);
+            assert!(matches!(
+                receiver.fetch_block(BASE, false),
+                Ok(Fetched::Block(_))
+            ));
+            assert_eq!(
+                (receiver.statistics.shared, receiver.statistics.compiled),
+                (0, 1)
+            );
+            assert_eq!(
+                receiver.host.installed,
+                core::slice::from_ref(&genuine.block.native.x86_64_code),
+                "wrong handoff never reaches installation"
+            );
         }
     }
 
@@ -282,10 +495,9 @@ pub(super) mod tests {
                 for same_profile in [false, true] {
                     let mut store = MemoryStore::default();
                     if shared {
-                        store.prepared.insert(
-                            (offer.key, offer.pc, offer.context),
-                            Arc::new(offer.block.clone()),
-                        );
+                        store
+                            .prepared
+                            .insert((offer.key, offer.pc, offer.context), offer.clone().shared());
                     } else {
                         store.records.insert(offer.key, Arc::new(record.clone()));
                     }
@@ -316,10 +528,9 @@ pub(super) mod tests {
         assert!(first.fetch_block(BASE + 4, false).is_ok());
         let offer = first.host.store.as_mut().unwrap().offers.pop().unwrap();
         let mut store = MemoryStore::default();
-        store.prepared.insert(
-            (offer.key, offer.pc, offer.context),
-            Arc::new(offer.block.clone()),
-        );
+        store
+            .prepared
+            .insert((offer.key, offer.pc, offer.context), offer.clone().shared());
         let mut second = machine(&words);
         second.host.store = Some(store);
         let Ok(Fetched::Block(index)) = second.fetch_block(BASE + 4, false) else {
@@ -330,7 +541,8 @@ pub(super) mod tests {
             (0, 1)
         );
         assert_eq!(
-            second.host.installed[second.blocks[index].code.0 - 1],
+            second.host.installed
+                [second.blocks[index].code.0 / super::super::tests::NATIVE_CODE_STRIDE - 1],
             offer.block.native.x86_64_code
         );
         // Another PC of the same page is compiled.
@@ -378,7 +590,8 @@ pub(super) mod tests {
                          index: usize| {
             let block = &machine.blocks[index];
             (
-                machine.host.installed[block.code.0 - 1].clone(),
+                machine.host.installed[block.code.0 / super::super::tests::NATIVE_CODE_STRIDE - 1]
+                    .clone(),
                 block.source_map.clone(),
                 block.terminal,
                 block.successors.len(),

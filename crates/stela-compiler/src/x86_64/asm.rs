@@ -21,6 +21,7 @@ pub(crate) use sse::{FloatLanes, FloatOp};
 mod code;
 mod operands;
 mod prefixes;
+use code::EmissionSite;
 pub(crate) use code::{Checkpoint, Code, Span};
 pub(crate) use operands::*;
 
@@ -30,6 +31,7 @@ pub(crate) struct Asm<'a> {
     code: &'a mut Vec<u8>,
     instructions: usize,
     shared: Option<&'a mut usize>,
+    sites: Option<&'a mut Vec<EmissionSite>>,
 }
 
 impl<'a> Asm<'a> {
@@ -38,6 +40,52 @@ impl<'a> Asm<'a> {
             code,
             instructions: 0,
             shared: None,
+            sites: None,
+        }
+    }
+    /// Mark exactly one actual guest memory operand, including its prefixes and
+    /// immediate bytes. Frame/staging/address instructions must remain outside.
+    pub(crate) fn guest_access(&mut self, emit: impl FnOnce(&mut Self)) {
+        self.fault_site(crate::block::RecoverySite::guest_access(), emit);
+    }
+    /// Intentional alignment/range failure, rather than an unsupported opcode.
+    pub(crate) fn guest_check(&mut self) {
+        self.fault_site(crate::block::RecoverySite::guest_check(), |asm| asm.ud2());
+    }
+    /// Emit the unchanged translated descriptor and mark ONLY its first byte as
+    /// a deliberate helper-return token. The CALL opcode and descriptor tail
+    /// remain internal; neither is a hardware guest-access/check instruction.
+    pub(crate) fn translated_helper_return(&mut self, bytes: u8, flags: u8) {
+        let start = self.len();
+        self.data(&[bytes, flags]);
+        if let Some(sites) = self.sites.as_deref_mut() {
+            assert!(
+                sites.last().is_none_or(|previous| previous.end <= start),
+                "helper sites do not overlap"
+            );
+            sites.push(EmissionSite {
+                start,
+                end: start + 1,
+                site: crate::block::RecoverySite::translated_helper(bytes, flags),
+            });
+        }
+    }
+    fn fault_site(&mut self, site: crate::block::RecoverySite, emit: impl FnOnce(&mut Self)) {
+        let start = self.len();
+        let instructions = self.instructions;
+        emit(self);
+        assert_eq!(
+            self.instructions,
+            instructions + 1,
+            "one exact faulting instruction"
+        );
+        let end = self.len();
+        if let Some(sites) = self.sites.as_deref_mut() {
+            assert!(
+                sites.last().is_none_or(|previous| previous.end <= start),
+                "fault sites do not nest"
+            );
+            sites.push(EmissionSite { start, end, site });
         }
     }
     fn count(&mut self) {

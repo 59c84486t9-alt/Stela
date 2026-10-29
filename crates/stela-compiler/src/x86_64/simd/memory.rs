@@ -69,12 +69,12 @@ pub(super) fn wide_transfer(
         return;
     }
     let address = Mem::base(Gpr::Rax, displacement.into());
-    match bytes {
+    code.guest_access(|code| match bytes {
         DWORD_BYTES => code.asm().movd_to_xmm(xmm, address),
         QWORD_BYTES => Host::MoveQword.emit(code, xmm, address, TargetCpu::Baseline),
         VECTOR_BYTES => Host::LoadUnaligned.emit(code, xmm, address, TargetCpu::Baseline),
         _ => unreachable!("decoder validates wide vector memory width"),
-    }
+    });
 }
 
 /// Whether [`transfer`] passes the vector through XMM0, which then holds
@@ -105,7 +105,9 @@ pub(in crate::x86_64) fn transfer(
                     Size::Word
                 };
                 let mut asm = code.asm();
-                asm.movzx(Size::Dword, Gpr::Rcx, from, Mem::base(Gpr::Rax, 0));
+                asm.guest_access(|asm| {
+                    asm.movzx(Size::Dword, Gpr::Rcx, from, Mem::base(Gpr::Rax, 0))
+                });
                 asm.movd_to_xmm(0, Gpr::Rcx);
             }
             DWORD_BYTES | QWORD_BYTES | VECTOR_BYTES => {

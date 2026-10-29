@@ -397,6 +397,8 @@ pub struct Observation {
     pub memory_fault: Option<crate::memory::domain::MemoryFault>,
     pub source_failure: Option<policy::Failure>,
     pub status: Result<(), MemoryStatus>,
+    /// Last qualified materialized boundary. A native Host fault leaves the
+    /// current frame unqualified; this field is then diagnostic history only.
     pub settled_pc: u64,
     /// Retired source prefix in the final executed body (fault indexing).
     pub retired: u64,
@@ -601,6 +603,14 @@ impl NativeRun<'_> {
         }
         let result = entered?;
         let native = result.ok_or(MemoryStatus::Unsupported)?;
+        if matches!(native, NativeExit::Fault(_)) {
+            // The checked body dereferences no direct guest VA. A native fault
+            // can occur during frame/helper/commit bookkeeping, so source-map
+            // indexing proves no resumable register, PC or retirement boundary.
+            observation.memory_fault = None;
+            observation.epoch_end = NativeEpochEnd::Failure;
+            return Err(MemoryStatus::Domain);
+        }
         let (settled_pc, retired) = if status != MemoryStatus::Success {
             observation.memory_fault = Some(crate::memory::domain::MemoryFault {
                 status,
@@ -618,30 +628,7 @@ impl NativeRun<'_> {
             (pc, index as u64)
         } else {
             match native {
-                NativeExit::Fault(fault) => {
-                    // No direct guest VA is dereferenced by a checked body.
-                    // Retain its exact reached source prefix for diagnostics,
-                    // but a host bug/fault is terminal, never an ARM data abort.
-                    if fault.offset >= self.artifact.code.len() {
-                        return Err(MemoryStatus::Domain);
-                    }
-                    let index = self
-                        .artifact
-                        .source_map
-                        .partition_point(|(_, offset)| *offset <= fault.offset)
-                        .checked_sub(1)
-                        .ok_or(MemoryStatus::Domain)?;
-                    let source_pc = self.artifact.source_map[index].0.0;
-                    *self.pc = source_pc;
-                    *self.retired = self.retired.wrapping_add(index as u64);
-                    if index != 0 {
-                        *self.btype = 0;
-                    }
-                    observation.settled_pc = source_pc;
-                    observation.retired = index as u64;
-                    self.epoch_retired = self.epoch_retired.wrapping_add(index as u64);
-                    return Err(MemoryStatus::Domain);
-                }
+                NativeExit::Fault(_) => return Err(MemoryStatus::Domain),
                 NativeExit::Exit { next_pc, kind } => {
                     let kind = ExitKind::try_from(kind).map_err(|_| MemoryStatus::Domain)?;
                     let count = self.artifact.source.len() as u64 / 4;
@@ -728,6 +715,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         &'a mut self,
         binding: publication::WorkerBinding,
     ) -> Result<NativeRun<'a>, MemoryStatus> {
+        if self.native_failure.is_some() {
+            return Err(MemoryStatus::Domain);
+        }
         let memory = self
             .cpu
             .canonical_memory
@@ -1131,6 +1121,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         bindings: &[publication::WorkerBinding],
         runnable_only: bool,
     ) -> Result<Cohort<'a, H>, PreparationFailure> {
+        if self.native_failure.is_some() {
+            return Err(MemoryStatus::Domain.into());
+        }
         if bindings.len() != self.peers.len() || (!runnable_only && self.waiting.is_some()) {
             return Err(MemoryStatus::Unsupported.into());
         }

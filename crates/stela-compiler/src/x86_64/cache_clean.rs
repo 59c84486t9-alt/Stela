@@ -89,7 +89,7 @@ pub(crate) fn emit(code: &mut Code, rt: u8, checks: super::MemoryChecks) {
     );
     super::range_check(code, checks, super::Access::read(1));
     code.asm()
-        .movzx(Size::Dword, Gpr::Rcx, Size::Byte, Mem::base(Gpr::Rax, 0));
+        .guest_access(|asm| asm.movzx(Size::Dword, Gpr::Rcx, Size::Byte, Mem::base(Gpr::Rax, 0)));
 }
 
 #[cfg(test)]

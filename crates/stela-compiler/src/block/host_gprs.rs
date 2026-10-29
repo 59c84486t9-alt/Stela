@@ -44,37 +44,34 @@ impl HostGprSnapshot {
     }
 }
 
-/// A fault recovery table requires a register outside the captured state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FaultRecoveryError {
-    InvalidGuestRegister { register: u8 },
-    InvalidHostRegister { register: u8 },
-    ExtendedStateUnavailable { register: u8 },
-}
-impl core::fmt::Display for FaultRecoveryError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::InvalidGuestRegister { register } => {
-                write!(f, "fault recovery names invalid guest register {register}")
-            }
-            Self::InvalidHostRegister { register } => {
-                write!(f, "fault recovery names invalid host register {register}")
-            }
-            Self::ExtendedStateUnavailable { register } => write!(
-                f,
-                "fault recovery needs host R{register}, but its extended bank was not captured"
-            ),
-        }
-    }
-}
-impl core::error::Error for FaultRecoveryError {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GuestState, block::FaultRecovery};
+    use crate::{
+        GuestAddress, GuestState,
+        block::{
+            FaultRecovery, FaultRecoveryError, HostFaultSnapshot, HostSpillSnapshot,
+            RecoveryBinding, RecoverySettlement, RetirementPoint,
+        },
+    };
     use alloc::vec;
 
+    fn apply_recovery(
+        table: &[FaultRecovery],
+        offset: usize,
+        gprs: &HostGprSnapshot,
+        state: &mut crate::GuestState,
+    ) -> Result<Option<RecoverySettlement>, FaultRecoveryError> {
+        FaultRecovery::apply(
+            table,
+            offset,
+            HostFaultSnapshot {
+                gprs,
+                spills: &HostSpillSnapshot::new(),
+            },
+            state,
+        )
+    }
     #[test]
     fn legacy_capture_does_not_supply_an_extended_bank() {
         let snapshot = HostGprSnapshot::legacy(core::array::from_fn(|i| i as u64 + 10));
@@ -103,18 +100,23 @@ mod tests {
         state.x[1] = 8;
         let before = state.clone();
         let table = [FaultRecovery {
+            site: crate::block::RecoverySite::native_internal(),
             start: 2,
             end: 8,
-            registers: vec![(0, 0), (1, 16)],
+            retirement: RetirementPoint::before(GuestAddress(0x1000), 0).unwrap(),
+            bindings: vec![(0, 0), (1, 16)]
+                .into_iter()
+                .map(|(guest, host)| RecoveryBinding::gpr(guest, host))
+                .collect(),
         }];
         assert_eq!(
-            FaultRecovery::apply(&table, 3, &snapshot, &mut state),
+            apply_recovery(&table, 3, &snapshot, &mut state),
             Err(FaultRecoveryError::ExtendedStateUnavailable { register: 16 })
         );
         assert_eq!(state.x, before.x);
         assert_eq!(state.sp, before.sp);
         assert_eq!(state.nzcv, before.nzcv);
-        assert!(FaultRecovery::apply(&table, 9, &snapshot, &mut state).is_ok());
+        assert!(apply_recovery(&table, 9, &snapshot, &mut state).is_ok());
     }
 
     #[test]
@@ -122,11 +124,16 @@ mod tests {
         let snapshot = HostGprSnapshot::complete(core::array::from_fn(|i| 100 + i as u64));
         let mut state = GuestState::default();
         let table = [FaultRecovery {
+            site: crate::block::RecoverySite::native_internal(),
             start: 2,
             end: 8,
-            registers: vec![(0, 16), (30, 31), (31, 4)],
+            retirement: RetirementPoint::before(GuestAddress(0x1000), 0).unwrap(),
+            bindings: vec![(0, 16), (30, 31), (31, 4)]
+                .into_iter()
+                .map(|(guest, host)| RecoveryBinding::gpr(guest, host))
+                .collect(),
         }];
-        FaultRecovery::apply(&table, 3, &snapshot, &mut state).unwrap();
+        apply_recovery(&table, 3, &snapshot, &mut state).unwrap();
         assert_eq!((state.x[0], state.x[30], state.sp), (116, 131, 104));
     }
 
@@ -144,14 +151,19 @@ mod tests {
             ),
         ] {
             let table = [FaultRecovery {
+                site: crate::block::RecoverySite::native_internal(),
                 start: 0,
                 end: 1,
-                registers: vec![(0, 0), binding],
+                retirement: RetirementPoint::before(GuestAddress(0x1000), 0).unwrap(),
+                bindings: vec![(0, 0), binding]
+                    .into_iter()
+                    .map(|(guest, host)| RecoveryBinding::gpr(guest, host))
+                    .collect(),
             }];
             let mut state = GuestState::default();
             state.x[0] = 7;
             assert_eq!(
-                FaultRecovery::apply(&table, 0, &snapshot, &mut state),
+                apply_recovery(&table, 0, &snapshot, &mut state),
                 Err(expected)
             );
             assert_eq!(state.x[0], 7);

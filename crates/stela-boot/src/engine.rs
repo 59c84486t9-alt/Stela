@@ -3780,6 +3780,13 @@ fn finish<H: Host>(
             output::arguments(format_args!("STOP budget\n"));
             stop_here("the run reached its --budget", 0x14)
         }
+        Stop::NativeFailure(failure) => {
+            output::arguments(format_args!("STOP NATIVE_FAILURE {failure:?}\n"));
+            stop_here(
+                "Stela stopped after an internal native execution failure",
+                0x13,
+            )
+        }
         Stop::Unsupported(requirement) => {
             output::arguments(format_args!("STOP UNSUPPORTED {requirement}\n"));
             stop_here(

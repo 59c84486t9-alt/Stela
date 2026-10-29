@@ -528,7 +528,7 @@ impl RangeCheck {
     pub(crate) fn emit(self, code: &mut Code) {
         let mut asm = code.asm();
         let passed = self.test(&mut asm);
-        asm.ud2();
+        asm.guest_check();
         asm.bind(passed);
         self.mask(&mut asm);
     }
@@ -548,7 +548,7 @@ impl RangeCheck {
         asm.mov(Size::Qword, Rcx, Rax);
         asm.mov_rax_moffs(helper);
         asm.call_rm(Rax);
-        asm.data(&[access.bytes, access.flags]);
+        asm.translated_helper_return(access.bytes, access.flags);
         let translated = asm.jmp8();
         asm.bind(passed);
         self.mask(&mut asm);
@@ -709,7 +709,7 @@ fn alignment_test(asm: &mut asm::Asm, unit: u8) {
 
 fn alignment_tail(asm: &mut asm::Asm) {
     let aligned = asm.jcc8(asm::Cond::E);
-    asm.ud2();
+    asm.guest_check();
     asm.bind(aligned);
 }
 fn stack_alignment_check_register(code: &mut Code, register: asm::Gpr) {

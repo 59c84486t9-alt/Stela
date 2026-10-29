@@ -1162,11 +1162,32 @@ mod tests {
                 kind: ExitKind::Fallthrough as u64,
             }];
             machine.step().unwrap();
-            let offset = machine.blocks[0].source_map[0].1;
+            let access_offset = super::super::tests::native_fault_site(
+                &mut machine,
+                BASE,
+                stela_compiler::block::RecoverySiteKind::GuestAccess,
+            );
+            let check_offset = super::super::tests::native_fault_site(
+                &mut machine,
+                BASE,
+                stela_compiler::block::RecoverySiteKind::GuestCheck,
+            );
             let exit = |cause| {
                 NativeExit::Fault(NativeFault {
+                    origin: crate::machine::NativeFaultOrigin::Exception,
+                    trap: if matches!(cause, FaultCause::InvalidOpcode) {
+                        6
+                    } else {
+                        14
+                    },
+                    error_code: 0,
+                    spills: stela_compiler::block::HostSpillSnapshot::new(),
                     registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
-                    offset,
+                    offset: if matches!(cause, FaultCause::InvalidOpcode) {
+                        check_offset
+                    } else {
+                        access_offset
+                    },
                     address: DATA,
                     write: false,
                     cause,

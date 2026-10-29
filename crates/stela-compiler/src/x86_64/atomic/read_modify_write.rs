@@ -88,7 +88,8 @@ fn plain(code: &mut Code, bytes: u8, operation: Rmw, source: Register, destinati
             code.asm().alu(alu(operation), wide, Gpr::R8, Gpr::Rcx);
         }
     }
-    code.asm().mov_store(size(bytes), ADDRESS, Gpr::R8);
+    code.asm()
+        .guest_access(|asm| asm.mov_store(size(bytes), ADDRESS, Gpr::R8));
     commit_rax(code, bytes, destination);
 }
 
@@ -108,18 +109,24 @@ fn direct(code: &mut Code, bytes: u8, operation: Rmw, discard: bool) {
     let size = size(bytes);
     let mut asm = code.asm();
     match operation {
-        Rmw::Swap => asm.xchg(size, ADDRESS, Gpr::Rax),
+        Rmw::Swap => asm.guest_access(|asm| asm.xchg(size, ADDRESS, Gpr::Rax)),
         Rmw::Add if !discard => {
-            asm.lock();
-            asm.xadd(size, ADDRESS, Gpr::Rax);
+            asm.guest_access(|asm| {
+                asm.lock();
+                asm.xadd(size, ADDRESS, Gpr::Rax)
+            });
         }
         Rmw::Add => {
-            asm.lock();
-            asm.alu(Alu::Add, size, ADDRESS, Gpr::Rax);
+            asm.guest_access(|asm| {
+                asm.lock();
+                asm.alu(Alu::Add, size, ADDRESS, Gpr::Rax)
+            });
         }
         Rmw::Clear | Rmw::Xor | Rmw::Set => {
-            asm.lock();
-            asm.alu(alu(operation), size, ADDRESS, Gpr::Rcx);
+            asm.guest_access(|asm| {
+                asm.lock();
+                asm.alu(alu(operation), size, ADDRESS, Gpr::Rcx)
+            });
         }
         _ => unreachable!("min/max uses the shared compare-exchange retry"),
     }

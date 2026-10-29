@@ -60,23 +60,29 @@ pub(crate) fn emit(code: &mut Code, rt: u8, bytes: u16, checks: super::MemoryChe
     }
     asm.alu(Alu::Xor, Size::Dword, Gpr::Rcx, Gpr::Rcx);
     if bytes < 8 {
-        asm.mov_store(Size::Dword, Mem::base(Gpr::Rax, 0), Gpr::Rcx);
+        asm.guest_access(|asm| {
+            asm.mov_store(Size::Dword, Mem::base(Gpr::Rax, 0), Gpr::Rcx);
+        });
     } else if bytes <= UNROLLED_BYTES {
         for offset in (0..bytes).step_by(8) {
-            asm.mov_store(
-                Size::Qword,
-                Mem::base_disp8(Gpr::Rax, offset as i8),
-                Gpr::Rcx,
-            );
+            asm.guest_access(|asm| {
+                asm.mov_store(
+                    Size::Qword,
+                    Mem::base_disp8(Gpr::Rax, offset as i8),
+                    Gpr::Rcx,
+                );
+            });
         }
     } else {
         asm.mov_imm32(Gpr::Rdx, u32::from(bytes) / 8);
         let store = asm.len();
-        asm.mov_store(
-            Size::Qword,
-            Mem::indexed(Gpr::Rax, Gpr::Rdx, 8, -8),
-            Gpr::Rcx,
-        );
+        asm.guest_access(|asm| {
+            asm.mov_store(
+                Size::Qword,
+                Mem::indexed(Gpr::Rax, Gpr::Rdx, 8, -8),
+                Gpr::Rcx,
+            );
+        });
         asm.dec(Size::Dword, Gpr::Rdx);
         let back = asm.jcc8(Cond::Ne);
         resolve(code, back, store);

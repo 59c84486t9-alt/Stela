@@ -212,7 +212,7 @@ pub(super) fn scalar(
             let start = code.checkpoint();
             {
                 let mut asm = code.asm();
-                match (bytes, signed) {
+                asm.guest_access(|asm| match (bytes, signed) {
                     (1, false) => asm.movzx(size, Gpr::Rcx, Size::Byte, source),
                     (2, false) => asm.movzx(size, Gpr::Rcx, Size::Word, source),
                     (1, true) => asm.movsx(size, Gpr::Rcx, Size::Byte, source),
@@ -223,7 +223,7 @@ pub(super) fn scalar(
                     }
                     (4 | 8, false) => asm.mov_load(size, Gpr::Rcx, source),
                     _ => unreachable!("decoder validates scalar memory size"),
-                }
+                });
             }
             mark(
                 &mut recipe,
@@ -319,12 +319,14 @@ pub(super) fn pair(
                 (1, Gpr::R8, Mem::base_disp8(Gpr::Rax, bytes as i8)),
             ] {
                 let start = code.checkpoint();
-                if signed {
-                    debug_assert!(width == Width::X64);
-                    code.asm().movsxd(host, source);
-                } else {
-                    code.asm().mov_load(size, host, source);
-                }
+                code.asm().guest_access(|asm| {
+                    if signed {
+                        debug_assert!(width == Width::X64);
+                        asm.movsxd(host, source);
+                    } else {
+                        asm.mov_load(size, host, source);
+                    }
+                });
                 mark(
                     &mut recipe,
                     code,

@@ -14,6 +14,7 @@ pub mod pauth_lr;
 pub mod pauth_memory;
 mod pointer_authentication;
 pub mod profile;
+mod recovery;
 pub mod scalable;
 pub mod scalar;
 pub mod system;
@@ -25,7 +26,7 @@ pub use analysis::{
 };
 use analysis::{ParsedBlock, analyze_parsed, parse};
 pub use features::{BlockProfile, Features};
-pub use host_gprs::{FaultRecoveryError, HostGprSnapshot};
+pub use host_gprs::HostGprSnapshot;
 pub use memory::{
     CHECKED_POINTER_PROCESS_MEMORY_PROFILE_ID, CheckedMemoryProfile,
     ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID,
@@ -33,6 +34,12 @@ pub use memory::{
 pub use pointer_authentication::{
     PointerAuthentication, PointerAuthenticationKey, PointerAuthenticationModifier,
     PointerAuthenticationOperation, decode_pointer_authentication,
+};
+pub use recovery::{
+    FaultRecovery, FaultRecoveryError, HostFaultSnapshot, HostSpillSnapshot, InvalidSpillOffset,
+    NATIVE_SPILL_WORDS, RecoveredPosition, RecoveryBinding, RecoveryQualificationError,
+    RecoverySettlement, RecoverySite, RecoverySiteKind, RecoverySource, RecoveryTemplate,
+    RetirementPhase, RetirementPoint, SpillOffset, TranslatedAccess, UnqualifiedFaultRecovery,
 };
 pub use system::{SystemInstruction, decode_system_instruction, decode_system_mode_instruction};
 pub use thread::{ThreadRegisterInstruction, decode_thread_register_instruction};
@@ -229,62 +236,6 @@ impl CompiledBlock {
             direct_exits: alloc::vec::Vec::new(),
             fault_recovery: alloc::vec::Vec::new(),
         }
-    }
-}
-
-/// While native code at offsets `start..end` of its block runs, each
-/// `(guest, host)` pair's guest GPR (31 is SP) holds the value of host
-/// register `host` (its x86 number) rather than its frame slot. A fault
-/// there finds the architectural state of every earlier instruction in the
-/// frame once these values are written to it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FaultRecovery {
-    pub start: usize,
-    pub end: usize,
-    pub registers: alloc::vec::Vec<(u8, u8)>,
-}
-
-impl FaultRecovery {
-    /// Settle the active recovery mappings from a normalized host snapshot.
-    /// All indices and required banks are checked before the first guest write.
-    pub fn apply(
-        table: &[Self],
-        offset: usize,
-        host: &HostGprSnapshot,
-        state: &mut crate::GuestState,
-    ) -> Result<(), FaultRecoveryError> {
-        const SP: u8 = 31;
-        let active = || {
-            table
-                .iter()
-                .filter(move |entry| (entry.start..entry.end).contains(&offset))
-        };
-        for entry in active() {
-            for &(guest, register) in &entry.registers {
-                if guest > SP {
-                    return Err(FaultRecoveryError::InvalidGuestRegister { register: guest });
-                }
-                if register >= 32 {
-                    return Err(FaultRecoveryError::InvalidHostRegister { register });
-                }
-                if host.get(register).is_none() {
-                    return Err(FaultRecoveryError::ExtendedStateUnavailable { register });
-                }
-            }
-        }
-        for entry in active() {
-            for &(guest, register) in &entry.registers {
-                let value = host
-                    .get(register)
-                    .expect("active recovery mappings validated");
-                if guest == SP {
-                    state.sp = value;
-                } else {
-                    state.x[usize::from(guest)] = value;
-                }
-            }
-        }
-        Ok(())
     }
 }
 

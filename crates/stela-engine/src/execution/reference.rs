@@ -18,6 +18,7 @@ pub struct HostFault {
     pub write: bool,
     /// The x86 exception vector captured by Linux ucontext.
     pub trap: u16,
+    pub error_code: u64,
     /// RAX through R15, by x86 register number.
     pub registers: [u64; 16],
 }
@@ -37,10 +38,14 @@ impl HostFault {
     /// The fault as the engine takes it, at `offset` in the entered code.
     pub fn native(&self, offset: usize, cause: FaultCause) -> NativeFault {
         NativeFault {
+            origin: crate::machine::NativeFaultOrigin::Exception,
             offset,
             address: self.address,
             write: self.write,
             cause,
+            trap: self.trap,
+            error_code: self.error_code,
+            spills: stela_compiler::block::HostSpillSnapshot::new(),
             registers: stela_compiler::block::HostGprSnapshot::legacy(self.registers),
         }
     }
@@ -124,7 +129,8 @@ extern "C" fn fault_handler(signal: i32, _info: *mut libc::siginfo_t, context: *
                 rip,
                 address: get(libc::REG_CR2),
                 write: get(libc::REG_ERR) & u64::from(PAGE_FAULT_WRITE) != 0,
-                trap: get(libc::REG_TRAPNO) as u16,
+                trap: u16::try_from(get(libc::REG_TRAPNO)).unwrap_or(u16::MAX),
+                error_code: get(libc::REG_ERR),
                 registers: [
                     get(libc::REG_RAX),
                     get(libc::REG_RCX),

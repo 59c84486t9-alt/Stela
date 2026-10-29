@@ -68,18 +68,20 @@ fn word_pair(
         // read that would fault reports WnR 0.
         pack_word_pairs(code, compare, source);
         let mut asm = code.asm();
-        asm.mov_load(Qword, R9, ADDRESS);
+        asm.guest_access(|asm| asm.mov_load(Qword, R9, ADDRESS));
         asm.alu(Alu::Cmp, Qword, Rax, R9);
         asm.cmov(Cond::Ne, Qword, Rcx, R9);
-        asm.mov_store(Qword, ADDRESS, Rcx);
+        asm.guest_access(|asm| asm.mov_store(Qword, ADDRESS, Rcx));
         asm.mov(Qword, Rax, R9);
     } else if source == compare {
         // Equal compare/new pairs always leave RAM unchanged. XADD of zero still
         // checks write permission and atomically returns the complete old pair.
         let mut asm = code.asm();
         asm.alu(Alu::Xor, Dword, Rax, Rax);
-        asm.lock();
-        asm.xadd(Qword, ADDRESS, Rax);
+        asm.guest_access(|asm| {
+            asm.lock();
+            asm.xadd(Qword, ADDRESS, Rax)
+        });
     } else if target.supports(TargetCpu::Cx8)
         && compare[1] != Register::Zero
         && source[1] != Register::Zero
@@ -120,8 +122,10 @@ fn word_pair_cx8(code: &mut Code, compare: [Register; 2], source: [Register; 2])
     code.asm().mov(Dword, Rbx, Rcx);
     input_rcx(code, DWORD_BYTES, source[1]);
     let mut asm = code.asm();
-    asm.lock();
-    asm.cmpxchg8b(Mem::base(R8, 0));
+    asm.guest_access(|asm| {
+        asm.lock();
+        asm.cmpxchg8b(Mem::base(R8, 0))
+    });
     asm.mov(Qword, Rbx, R9);
     // Every input half is zero-extended. Failed CX8 writes EAX/EDX, while success
     // retains those staged halves, so both paths return complete W results.
@@ -139,8 +143,8 @@ fn word_pair_cx8(code: &mut Code, compare: [Register; 2], source: [Register; 2])
 /// and RBX stays the host's.
 fn plain_doubleword_pair(code: &mut Code, compare: [Register; 2], source: [Register; 2]) {
     let mut asm = code.asm();
-    asm.mov_load(Qword, R8, ADDRESS);
-    asm.mov_load(Qword, R9, HIGH_ADDRESS);
+    asm.guest_access(|asm| asm.mov_load(Qword, R8, ADDRESS));
+    asm.guest_access(|asm| asm.mov_load(Qword, R9, HIGH_ADDRESS));
     input_rax(code, QWORD_BYTES, compare[0]);
     input_rcx(code, QWORD_BYTES, compare[1]);
     let mut asm = code.asm();
@@ -152,8 +156,8 @@ fn plain_doubleword_pair(code: &mut Code, compare: [Register; 2], source: [Regis
     let mut asm = code.asm();
     asm.cmov(Cond::Ne, Qword, Rax, R8);
     asm.cmov(Cond::Ne, Qword, Rcx, R9);
-    asm.mov_store(Qword, ADDRESS, Rax);
-    asm.mov_store(Qword, HIGH_ADDRESS, Rcx);
+    asm.guest_access(|asm| asm.mov_store(Qword, ADDRESS, Rax));
+    asm.guest_access(|asm| asm.mov_store(Qword, HIGH_ADDRESS, Rcx));
     asm.mov(Qword, Rax, R8);
     commit_rax(code, QWORD_BYTES, compare[0]);
     if compare[1] != Register::Zero {
@@ -183,8 +187,10 @@ fn doubleword_pair(code: &mut Code, compare: [Register; 2], source: [Register; 2
         input_rcx(code, QWORD_BYTES, source[1]);
     }
     let mut asm = code.asm();
-    asm.lock();
-    asm.cmpxchg16b(Mem::base(R8, 0));
+    asm.guest_access(|asm| {
+        asm.lock();
+        asm.cmpxchg16b(Mem::base(R8, 0))
+    });
     // Restore the host callee-saved register immediately after the only guest
     // memory access. Target faults occur before either compare-pair commit.
     asm.mov(Qword, Rbx, R9);

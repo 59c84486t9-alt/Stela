@@ -178,6 +178,17 @@ impl Preparation {
         stela_compiler::compile(input, GuestAddress(pc), &self.options())
     }
 
+    pub(super) fn qualify_recovery(
+        &self,
+        input: &[u8],
+        pc: u64,
+        template: block::RecoveryTemplate<'_>,
+    ) -> Result<CompiledBlock, block::RecoveryQualificationError> {
+        CompilationPlan::new(input, GuestAddress(pc), &self.options())
+            .map_err(block::RecoveryQualificationError::Compile)?
+            .qualify_recovery(template)
+    }
+
     /// What the engine compiles this preparation's blocks for.
     fn options(&self) -> stela_compiler::Options {
         stela_compiler::Options::new(PROFILE, self.target)

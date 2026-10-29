@@ -573,7 +573,20 @@ impl Emitter<'_> {
                 .push(crate::block::FaultRecovery {
                     start,
                     end: self.output.code.len(),
-                    registers: live,
+                    site: crate::block::RecoverySite::native_internal(),
+                    bindings: live
+                        .into_iter()
+                        .map(|(guest, host)| crate::block::RecoveryBinding::gpr(guest, host))
+                        .collect(),
+                    retirement: crate::block::RetirementPoint::before(
+                        self.output
+                            .source_map
+                            .last()
+                            .expect("access has its source PC")
+                            .0,
+                        u16::try_from(self.current).expect("bounded region instruction count"),
+                    )
+                    .expect("region input validates the instruction PC"),
                 });
         }
         for index in 0..POOL.len() {

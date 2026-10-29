@@ -214,6 +214,10 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// # Safety
     /// The complete [`Self::run_serialized`] contract applies.
     pub unsafe fn run_serialized_with_budget(&mut self, budget: super::super::RunBudget) -> Stop {
+        if let Some(failure) = &self.native_failure {
+            return Stop::NativeFailure(failure.summary.clone());
+        }
+
         if let Some(pending) = self.pending_native_device_access() {
             return pending;
         }
@@ -710,6 +714,25 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             return Err(self.unsupported(RequirementKind::Native(
                 "native source frame changed before stopped settlement",
             )));
+        }
+        if let Some(super::super::NativeExit::Fault(fault)) = settlement.native {
+            let failure = Arc::new(super::super::NativeFailure {
+                pc: settlement.pc,
+                code: None,
+                native_offset: fault.offset,
+                address: fault.address,
+                origin: fault.origin,
+                trap: fault.trap,
+                error_code: fault.error_code,
+                unsettled_chain: None,
+                reason: super::super::NativeFailureReason::InternalSite,
+                source_record: None,
+            });
+            self.native_failure = Some(super::super::recovery::CapturedFailure {
+                summary: failure.clone(),
+                capture: fault,
+            });
+            return Err(Stop::NativeFailure(failure));
         }
         if settlement.status.is_err() {
             return Err(self.unsupported(RequirementKind::Native(

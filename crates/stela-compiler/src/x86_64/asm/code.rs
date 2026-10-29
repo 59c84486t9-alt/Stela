@@ -7,6 +7,15 @@ use alloc::vec::Vec;
 pub(crate) struct Code {
     pub(super) bytes: Vec<u8>,
     pub(super) instructions: usize,
+    pub(super) sites: Vec<EmissionSite>,
+}
+
+/// Exact faulting instruction interval, separate from source retirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EmissionSite {
+    pub start: usize,
+    pub end: usize,
+    pub site: crate::block::RecoverySite,
 }
 
 /// A byte and instruction position captured at an emission boundary.
@@ -49,6 +58,7 @@ impl Code {
         Self {
             bytes: Vec::new(),
             instructions: 0,
+            sites: Vec::new(),
         }
     }
     /// An encoder that appends here and adds to this count.
@@ -57,7 +67,34 @@ impl Code {
             code: &mut self.bytes,
             instructions: 0,
             shared: Some(&mut self.instructions),
+            sites: Some(&mut self.sites),
         }
+    }
+    /// A typed recipe that emits exactly one guest memory instruction.
+    pub(crate) fn guest_access(&mut self, emit: impl FnOnce(&mut Self)) {
+        let start = self.bytes.len();
+        let count = self.instructions;
+        emit(self);
+        assert_eq!(
+            self.instructions,
+            count + 1,
+            "one exact guest memory instruction"
+        );
+        let end = self.bytes.len();
+        assert!(
+            self.sites
+                .last()
+                .is_none_or(|previous| previous.end <= start),
+            "fault sites do not nest"
+        );
+        self.sites.push(EmissionSite {
+            start,
+            end,
+            site: crate::block::RecoverySite::guest_access(),
+        });
+    }
+    pub(crate) fn sites(&self) -> &[EmissionSite] {
+        &self.sites
     }
     /// The instructions emitted through [`Self::asm`].
     pub(crate) const fn instructions(&self) -> usize {
@@ -68,6 +105,13 @@ impl Code {
     }
     /// Append `other`'s bytes and instructions.
     pub(crate) fn append(&mut self, other: Code) {
+        let base = self.bytes.len();
+        self.sites
+            .extend(other.sites.into_iter().map(|site| EmissionSite {
+                start: base + site.start,
+                end: base + site.end,
+                ..site
+            }));
         self.bytes.extend(other.bytes);
         self.instructions += other.instructions;
     }
@@ -92,6 +136,20 @@ impl Code {
         );
         self.bytes
             .extend_from_slice(&source.bytes[span.start.bytes..span.end.bytes]);
+        for site in &source.sites {
+            if site.start < span.end.bytes && site.end > span.start.bytes {
+                assert!(
+                    site.start >= span.start.bytes && site.end <= span.end.bytes,
+                    "span preserves complete faulting instructions"
+                );
+                let base = self.bytes.len() - (span.end.bytes - span.start.bytes);
+                self.sites.push(EmissionSite {
+                    start: base + site.start - span.start.bytes,
+                    end: base + site.end - span.start.bytes,
+                    ..*site
+                });
+            }
+        }
         self.instructions += span.instructions();
     }
     /// Replace a fixed-size field without changing buffer length or count.
@@ -107,9 +165,25 @@ impl Code {
     /// Move the instructions emitted after `at` into a separate buffer.
     pub(crate) fn split_off(&mut self, at: Checkpoint) -> Self {
         assert!(at.bytes <= self.bytes.len() && at.instructions <= self.instructions);
+        assert!(
+            self.sites
+                .iter()
+                .all(|site| site.end <= at.bytes || site.start >= at.bytes),
+            "split preserves complete faulting instructions"
+        );
+        let sites = self
+            .sites
+            .extract_if(.., |site| site.start >= at.bytes)
+            .map(|site| EmissionSite {
+                start: site.start - at.bytes,
+                end: site.end - at.bytes,
+                ..site
+            })
+            .collect();
         let tail = Self {
             bytes: self.bytes.split_off(at.bytes),
             instructions: self.instructions - at.instructions,
+            sites,
         };
         self.instructions = at.instructions;
         tail
@@ -117,12 +191,35 @@ impl Code {
     /// Discard the instructions emitted after `at`.
     pub(crate) fn truncate(&mut self, at: Checkpoint) {
         assert!(at.bytes <= self.bytes.len() && at.instructions <= self.instructions);
+        assert!(
+            self.sites
+                .iter()
+                .all(|site| site.end <= at.bytes || site.start >= at.bytes),
+            "truncate preserves complete faulting instructions"
+        );
+        self.sites.retain(|site| site.end <= at.bytes);
         self.bytes.truncate(at.bytes);
         self.instructions = at.instructions;
     }
     /// Remove one complete instruction whose bytes the caller identified.
     pub(crate) fn remove_instruction(&mut self, range: core::ops::Range<usize>) {
         assert!(!range.is_empty());
+        let removed = range.len();
+        self.sites.retain_mut(|site| {
+            if site.end <= range.start {
+                true
+            } else if site.start >= range.end {
+                site.start -= removed;
+                site.end -= removed;
+                true
+            } else {
+                assert!(
+                    site.start == range.start && site.end == range.end,
+                    "remove one complete faulting instruction"
+                );
+                false
+            }
+        });
         self.bytes.drain(range);
         self.instructions = self
             .instructions
@@ -134,6 +231,7 @@ impl Code {
     pub(crate) fn clear(&mut self) {
         self.bytes.clear();
         self.instructions = 0;
+        self.sites.clear();
     }
 }
 

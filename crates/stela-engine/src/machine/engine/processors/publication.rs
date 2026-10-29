@@ -1018,6 +1018,10 @@ mod tests {
             state.fpcr = 1 << 25;
             state.fpsr = 1 << 27;
             NativeExit::Fault(NativeFault {
+                origin: crate::machine::NativeFaultOrigin::Exception,
+                trap: 6,
+                error_code: 0,
+                spills: stela_compiler::block::HostSpillSnapshot::new(),
                 offset: 13,
                 address: 0xabcd_0000,
                 write: true,
@@ -1518,6 +1522,10 @@ mod tests {
                 assert_eq!(
                     actual.exit,
                     NativeExit::Fault(NativeFault {
+                        origin: crate::machine::NativeFaultOrigin::Exception,
+                        trap: 6,
+                        error_code: 0,
+                        spills: stela_compiler::block::HostSpillSnapshot::new(),
                         offset: 13,
                         address: 0xabcd_0000,
                         write: true,
