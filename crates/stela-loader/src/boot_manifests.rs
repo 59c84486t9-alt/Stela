@@ -234,26 +234,21 @@ mod tests {
     }
 
     #[test]
-    fn an_existing_sfr_row_refuses_without_a_partial_record() -> Result<()> {
-        let (mut tree, bytes) = input();
-        let object = Object::new(&tree, "krnl", &bytes)?.admits_firmware();
-        tree.ensure_child(CHOSEN, "secure-boot-hashes")?;
-        tree.set_property(HASHES, FIRMWARE_HASH, alloc::vec![0; im4m::SHA384_BYTES])?;
-        let before = tree.clone();
-        assert!(object.reserve(&mut tree).is_err());
-        assert_eq!(tree, before);
-        Ok(())
-    }
-
-    #[test]
-    fn a_conflicting_hash_does_not_leave_a_partial_manifest_record() -> Result<()> {
-        let (mut tree, bytes) = input();
-        let object = Object::new(&tree, "krnl", &bytes)?;
-        tree.ensure_child(CHOSEN, "secure-boot-hashes")?;
-        tree.set_property(HASHES, "krnl", alloc::vec![0; im4m::SHA384_BYTES])?;
-        let before = tree.clone();
-        assert!(object.reserve(&mut tree).is_err());
-        assert_eq!(tree, before);
+    fn a_refused_reservation_leaves_no_partial_record() -> Result<()> {
+        // An SFR row already present for a firmware-admitting object, and a
+        // conflicting hash already recorded under the object's own name.
+        for (firmware, row) in [(true, FIRMWARE_HASH), (false, "krnl")] {
+            let (mut tree, bytes) = input();
+            let mut object = Object::new(&tree, "krnl", &bytes)?;
+            if firmware {
+                object = object.admits_firmware();
+            }
+            tree.ensure_child(CHOSEN, "secure-boot-hashes")?;
+            tree.set_property(HASHES, row, alloc::vec![0; im4m::SHA384_BYTES])?;
+            let before = tree.clone();
+            assert!(object.reserve(&mut tree).is_err(), "{row}");
+            assert_eq!(tree, before, "{row}");
+        }
         Ok(())
     }
 }

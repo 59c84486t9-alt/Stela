@@ -1107,18 +1107,28 @@ fn late_payload_writes_drain_before_unmap_and_failure_keeps_exact_epoch() {
     assert_eq!(pages.drops.load(Ordering::Relaxed), 6);
 }
 #[test]
-fn failed_real_engine_stop_never_drains_or_unmaps() {
-    let (packet, pages, domain, peer) = attach();
-    peer.lock().unwrap().stop_stuck = Some(0x4800);
-    let packet = match packet.retire() {
-        Err((Error::StopTimeout(0x4800), p)) => p,
-        _ => panic!("live engine must refuse"),
-    };
-    assert_eq!(domain.drains.load(Ordering::Relaxed), 0);
-    assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
-    peer.lock().unwrap().stop_stuck = None;
-    assert!(packet.retire().is_ok());
+fn a_refused_retirement_never_drains_or_unmaps() {
+    // A live engine that does not stop, and a Command.BM clear the device
+    // ignores: neither authorizes a drain or an unmap until it is cured.
+    let stuck: fn(&mut Device, bool) = |peer, on| peer.stop_stuck = on.then_some(0x4800);
+    let ignored: fn(&mut Device, bool) = |peer, on| peer.ignore_master_clear = on;
+    for (fault, expected) in [
+        (stuck, Error::StopTimeout(0x4800)),
+        (ignored, Error::ConfigDidNotLatch),
+    ] {
+        let (packet, pages, domain, peer) = attach();
+        fault(&mut peer.lock().unwrap(), true);
+        let packet = match packet.retire() {
+            Err((error, packet)) if error == expected => packet,
+            _ => panic!("retirement must refuse with {expected:?}"),
+        };
+        assert_eq!(domain.drains.load(Ordering::Relaxed), 0);
+        assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
+        fault(&mut peer.lock().unwrap(), false);
+        assert!(packet.retire().is_ok());
+    }
 }
+
 #[test]
 fn reset_phy_nvm_and_coherence_failures_never_advertise_attachment() {
     for fault in 0..4 {
@@ -1210,19 +1220,6 @@ fn link_loss_discards_old_tx_only_after_real_drain_and_rebuilds_rings() {
     assert_eq!(peer.lock().unwrap().sent, vec![vec![0x22; 60]]);
     peer.lock().unwrap().receive(&[0x33; 60], 0, &domain);
     assert_eq!(packet.receive().unwrap(), Some(vec![0x33; 60]));
-    assert!(packet.retire().is_ok());
-}
-#[test]
-fn ignored_bus_master_clear_does_not_authorize_drain_or_unmap() {
-    let (packet, pages, domain, peer) = attach();
-    peer.lock().unwrap().ignore_master_clear = true;
-    let packet = match packet.retire() {
-        Err((Error::ConfigDidNotLatch, packet)) => packet,
-        _ => panic!("ignored Command.BM clear must refuse"),
-    };
-    assert_eq!(domain.drains.load(Ordering::Relaxed), 0);
-    assert_eq!(pages.drops.load(Ordering::Relaxed), 0);
-    peer.lock().unwrap().ignore_master_clear = false;
     assert!(packet.retire().is_ok());
 }
 #[test]

@@ -62,55 +62,29 @@ pub fn bounds(
 mod tests {
     use super::*;
     #[test]
-    fn coarse_rtc_phase_and_counter_brackets_round_outward() {
-        assert_eq!(
-            bounds(
-                Timestamp {
-                    seconds: 100,
-                    nanosecond: 250_000_000
-                },
-                1,
-                200_000_000..=400_000_000
-            ),
-            Ok(99..=102)
-        );
-        assert_eq!(
-            bounds(
-                Timestamp {
-                    seconds: 10,
-                    nanosecond: 500_000_000
-                },
+    fn brackets_round_outward_and_stay_conservative() {
+        for (seconds, nanosecond, resolution, counter, expected) in [
+            // A coarse RTC phase and counter bracket round outward.
+            (100, 250_000_000, 1, 200_000_000..=400_000_000, 99..=102),
+            (
+                10,
+                500_000_000,
                 1000,
-                1_000_000_000..=2_000_000_000
+                1_000_000_000..=2_000_000_000,
+                11..=13,
             ),
-            Ok(11..=13)
-        );
+            // Sub-nanosecond reporting and a second carry stay conservative.
+            (5, 999_999_999, u32::MAX, 0..=0, 5..=6),
+            (5, 0, u32::MAX, 0..=0, 4..=6),
+        ] {
+            let time = Timestamp {
+                seconds,
+                nanosecond,
+            };
+            assert_eq!(bounds(time, resolution, counter), Ok(expected));
+        }
     }
-    #[test]
-    fn sub_nanosecond_reporting_and_second_carry_stay_conservative() {
-        assert_eq!(
-            bounds(
-                Timestamp {
-                    seconds: 5,
-                    nanosecond: 999_999_999
-                },
-                u32::MAX,
-                0..=0
-            ),
-            Ok(5..=6)
-        );
-        assert_eq!(
-            bounds(
-                Timestamp {
-                    seconds: 5,
-                    nanosecond: 0
-                },
-                u32::MAX,
-                0..=0
-            ),
-            Ok(4..=6)
-        );
-    }
+
     #[test]
     fn malformed_inputs_and_epoch_edges_refuse_instead_of_saturating() {
         let t = Timestamp {

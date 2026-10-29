@@ -908,43 +908,29 @@ mod tests {
         assert_eq!(after, before);
     }
     #[test]
-    fn sha_kernel_preserves_xmm_and_mxcsr() {
+    fn sha_kernels_preserve_xmm_and_mxcsr() {
         if !sha_usable() {
             return;
         }
-        let mut state = [0u32; 8];
         let data = [0x57u8; 128];
-        preserved(
-            sha256_kernel as *const () as usize,
-            [
-                state.as_mut_ptr() as usize,
-                data.as_ptr() as usize,
-                2,
+        let mut sha256 = [0u32; 8];
+        let mut sha1 = [0u32; 5];
+        for (kernel, state, constants) in [
+            (
+                sha256_kernel as *const () as usize,
+                sha256.as_mut_ptr() as usize,
                 SHA_CONSTANTS.as_ptr() as usize,
-                0,
-                0,
-            ],
-        );
-    }
-    #[test]
-    fn sha1_kernel_preserves_xmm_and_mxcsr() {
-        if !sha_usable() {
-            return;
-        }
-        let mut state = [0u32; 5];
-        let data = [0x57u8; 128];
-        preserved(
-            sha1_kernel as *const () as usize,
-            [
-                state.as_mut_ptr() as usize,
-                data.as_ptr() as usize,
-                2,
+            ),
+            (
+                sha1_kernel as *const () as usize,
+                sha1.as_mut_ptr() as usize,
                 SHA1_REVERSE.as_ptr() as usize,
-                0,
-                0,
-            ],
-        );
+            ),
+        ] {
+            preserved(kernel, [state, data.as_ptr() as usize, 2, constants, 0, 0]);
+        }
     }
+
     #[test]
     fn aes_kernels_preserve_xmm_and_mxcsr() {
         if !aes_usable() {

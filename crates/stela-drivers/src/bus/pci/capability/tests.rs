@@ -110,33 +110,32 @@ fn a_loop_is_a_cycle() {
 }
 
 #[test]
-fn a_header_inside_a_body_overlaps() {
-    let mut space = Space::new();
-    space.0[0x34] = 0x40;
-    space.standard(0x40, 0x11, 0x48);
-    space.standard(0x48, 0x01, 0);
-    assert_eq!(
-        space.walk(),
-        [
-            Ok((0x40, 0x11, 12)),
-            Err(CapabilityError::Overlap { offset: 0x48 })
-        ]
-    );
-}
-
-#[test]
-fn a_body_over_an_earlier_header_overlaps() {
-    let mut space = Space::new();
-    space.0[0x34] = 0x48;
-    space.standard(0x48, 0x01, 0x40);
-    space.standard(0x40, 0x11, 0);
-    assert_eq!(
-        space.walk(),
-        [
-            Ok((0x48, 1, 8)),
-            Err(CapabilityError::Overlap { offset: 0x40 })
-        ]
-    );
+fn a_header_and_a_body_overlap_in_either_order() {
+    // A header inside an earlier body, and a body over an earlier header.
+    for (first, second, expected) in [
+        (
+            (0x40, 0x11, 0x48),
+            (0x48, 0x01),
+            [
+                Ok((0x40, 0x11, 12)),
+                Err(CapabilityError::Overlap { offset: 0x48 }),
+            ],
+        ),
+        (
+            (0x48, 0x01, 0x40),
+            (0x40, 0x11),
+            [
+                Ok((0x48, 0x01, 8)),
+                Err(CapabilityError::Overlap { offset: 0x40 }),
+            ],
+        ),
+    ] {
+        let mut space = Space::new();
+        space.0[0x34] = first.0 as u8;
+        space.standard(first.0, first.1, first.2);
+        space.standard(second.0, second.1, 0);
+        assert_eq!(space.walk(), expected);
+    }
 }
 
 #[test]

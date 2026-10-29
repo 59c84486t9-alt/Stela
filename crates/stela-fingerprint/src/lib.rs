@@ -101,30 +101,31 @@ mod tests {
     }
 
     #[test]
-    fn crlf_and_lf_checkouts_match() {
-        let lf = tree(
-            "lf",
-            &[("src/a.rs", b"fn a() {}\n"), ("src/b/c.rs", b"x\n")],
-        );
-        let crlf = tree(
-            "crlf",
-            &[("src/a.rs", b"fn a() {}\r\n"), ("src/b/c.rs", b"x\r\n")],
-        );
-        assert_eq!(source_sha256(&lf, &["src"]), source_sha256(&crlf, &["src"]));
-        fs::remove_dir_all(lf).unwrap();
-        fs::remove_dir_all(crlf).unwrap();
-    }
-
-    #[test]
-    fn hidden_entries_are_skipped() {
-        let plain = tree("plain", &[("src/a.rs", b"a")]);
-        let hidden = tree("hidden", &[("src/a.rs", b"a"), ("src/.DS_Store", b"\0")]);
-        assert_eq!(
-            source_sha256(&plain, &["src"]),
-            source_sha256(&hidden, &["src"])
-        );
-        fs::remove_dir_all(plain).unwrap();
-        fs::remove_dir_all(hidden).unwrap();
+    fn line_endings_and_hidden_entries_leave_the_hash_unchanged() {
+        type Files<'a> = &'a [(&'a str, &'a [u8])];
+        let cases: [(&str, Files, Files); 2] = [
+            (
+                "crlf",
+                &[("src/a.rs", b"fn a() {}\n"), ("src/b/c.rs", b"x\n")],
+                &[("src/a.rs", b"fn a() {}\r\n"), ("src/b/c.rs", b"x\r\n")],
+            ),
+            (
+                "hidden",
+                &[("src/a.rs", b"a")],
+                &[("src/a.rs", b"a"), ("src/.DS_Store", b"\0")],
+            ),
+        ];
+        for (case, plain, variant) in cases {
+            let plain = tree(&format!("{case}-plain"), plain);
+            let variant = tree(&format!("{case}-variant"), variant);
+            assert_eq!(
+                source_sha256(&plain, &["src"]),
+                source_sha256(&variant, &["src"]),
+                "{case}"
+            );
+            fs::remove_dir_all(plain).unwrap();
+            fs::remove_dir_all(variant).unwrap();
+        }
     }
 
     #[test]
