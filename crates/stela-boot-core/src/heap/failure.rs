@@ -44,13 +44,11 @@ impl fmt::Display for Report {
     }
 }
 
-#[cfg(target_os = "uefi")]
 pub(super) fn report(heap: &Heap, layout: Layout) {
-    use core::fmt::Write;
     if let Some(report) = capture(heap, layout) {
-        // This concrete formatter emits only fixed strings and integer fields.
-        // Serial is bounded, lock-free port I/O; no output queues/logs run here.
-        let _ = writeln!(crate::serial::Serial, "\n{report}");
+        // This formatter emits only fixed strings and integer fields; the
+        // sink is bounded, lock-free output that runs no queue or log.
+        (heap.failure_sink)(format_args!("\n{report}\n"));
     }
 }
 

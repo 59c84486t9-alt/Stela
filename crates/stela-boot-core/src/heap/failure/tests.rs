@@ -30,9 +30,19 @@ impl fmt::Write for Text {
     }
 }
 
+std::thread_local! {
+    static REPORTED: core::cell::RefCell<Text> = core::cell::RefCell::new(Text::new());
+}
+
+/// Records into fixed storage, as the mount's serial sink writes without
+/// allocating.
+fn record(report: fmt::Arguments<'_>) {
+    REPORTED.with(|text| text.borrow_mut().write_fmt(report).unwrap());
+}
+
 #[test]
-fn first_exhaustion_reports_without_allocating() {
-    let heap = Heap::new();
+fn first_exhaustion_reports_once_without_allocating() {
+    let heap = Heap::new().reporting_failures(record);
     let mut ram = Ram([0; 4096]);
     // SAFETY: fresh exclusive aligned stack storage outlives this heap/model.
     unsafe { heap.initialize(ram.0.as_mut_ptr(), ram.0.len()) };
@@ -40,18 +50,14 @@ fn first_exhaustion_reports_without_allocating() {
     // SAFETY: all allocations remain owned until this synchronous fixture ends;
     // neither their raw pointers nor this model heap escape to another thread.
     while !unsafe { heap.alloc(layout) }.is_null() {}
-    let report = capture(&heap, layout).unwrap();
-    let usage = report.usage.unwrap();
-    assert_eq!(usage.total, 4096);
-    assert_eq!(usage.largest, 0);
-    let mut text = Text::new();
-    write!(&mut text, "{report}").unwrap();
-    assert!(
-        text.as_str()
-            .contains("bytes=16 align=16 snapshot=locked-metadata")
-    );
-    assert!(text.as_str().contains("live_estimate="));
-    assert!(text.as_str().contains("cpu_counters=relaxed"));
+    let reported = REPORTED.with(|text| text.borrow().as_str().to_owned());
+    assert!(reported.contains("bytes=16 align=16 snapshot=locked-metadata"));
+    assert!(reported.contains("live_estimate="));
+    assert!(reported.contains("cpu_counters=relaxed total=4096"));
+    assert!(reported.contains("largest=0\n"));
+    // SAFETY: as above; this second failure must not report again.
+    assert!(unsafe { heap.alloc(layout) }.is_null());
+    REPORTED.with(|text| assert_eq!(text.borrow().as_str(), reported));
     assert!(capture(&heap, layout).is_none());
 }
 

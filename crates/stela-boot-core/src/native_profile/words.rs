@@ -3,24 +3,24 @@
 use stela_engine::machine::engine::NativeInstructionSample;
 
 const CAPACITY: usize = 256;
-pub(crate) const TOP: usize = 16;
+pub const TOP: usize = 16;
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Ranking {
+pub enum Ranking {
     Frequency,
     ObservedBytes,
     MaximumBytes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Event {
+pub enum Event {
     Retired,
     FaultAttempt,
     DeferredService,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Weight {
+pub struct Weight {
     pub word: u32,
     pub event: Event,
     pub upper: u64,
@@ -32,7 +32,7 @@ pub(crate) struct Weight {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct Summary {
+pub struct Summary {
     pub bodies: u64,
     pub retired_words: u64,
     pub fault_attempts: u64,
@@ -46,7 +46,7 @@ pub(crate) struct Summary {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct RegisterSummary {
+pub struct RegisterSummary {
     pub covered_retired_words: u64,
     pub uncovered_retired_words: u64,
     /// Included in uncovered_retired_words, not an additional population.
@@ -114,7 +114,7 @@ const MAX_WORDS: usize = stela_compiler::block::MAX_BLOCK_INSTRUCTIONS;
 
 /// A small immutable copy made while the actual source owner is borrowed.
 /// Histogram searches wait until after the phase End timestamp.
-pub(crate) struct Captured {
+pub struct Captured {
     words: [u32; MAX_WORDS],
     bytes: [u32; MAX_WORDS],
     end: usize,
@@ -178,7 +178,7 @@ impl Captured {
     }
 }
 
-pub(crate) struct Histogram {
+pub struct Histogram {
     entries: [Option<Weight>; CAPACITY],
     pub summary: Summary,
 }

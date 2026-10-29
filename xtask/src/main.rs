@@ -2,59 +2,6 @@
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
-// The UEFI binary cannot run libtest. Exercise its platform-independent
-// UART text and panic capture in the shared host test gate instead.
-#[cfg(test)]
-extern crate alloc;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/engine/bundle/source.rs"]
-mod boot_bundle_source;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/engine/bundle/live_tree.rs"]
-mod boot_live_tree;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/cpu/msr.rs"]
-#[allow(
-    dead_code,
-    reason = "host tests exercise CPUID gates; RDMSR and WRMSR require CPL0"
-)]
-mod boot_msr;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/apic.rs"]
-#[allow(
-    dead_code,
-    reason = "host tests exercise admission; APIC delivery requires CPL0"
-)]
-mod boot_native_apic;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/native_memory.rs"]
-mod boot_native_memory;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/engine/host/profile.rs"]
-mod boot_native_profile;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/engine/topology.rs"]
-#[allow(dead_code, reason = "the GS worker constructor runs only in UEFI")]
-mod boot_topology;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/engine/xstate.rs"]
-#[allow(
-    dead_code,
-    reason = "descriptor and interrupt-stack capture runs only in UEFI"
-)]
-mod boot_xstate;
-
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/native_irq/ioapic.rs"]
-#[allow(
-    dead_code,
-    reason = "host tests exercise route planning; IOAPIC programming requires CPL0"
-)]
-mod boot_ioapic;
-#[cfg(all(test, feature = "fetched-sources"))]
-#[path = "../../crates/stela-boot/src/native_irq/crs.rs"]
-mod boot_irq_crs;
-
 mod amx;
 mod boot;
 mod check;

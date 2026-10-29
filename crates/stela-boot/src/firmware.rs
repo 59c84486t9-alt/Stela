@@ -285,7 +285,7 @@ pub fn take_over(
     }
     // SAFETY: standalone mount retains identity mappings and this allocator.
     let wifi_platform = host_firmware.wifi_observations();
-    let host_firmware = unsafe { host_firmware.identity_catalog() }?;
+    let host_firmware = unsafe { crate::host_firmware::identity_catalog(&host_firmware) }?;
     let storage = crate::storage::prepare(&options, host_firmware, wifi_platform)?.ok_or(
         "stela.cfg starts with neither --system nor --host-check and names no install or \
          storage check",

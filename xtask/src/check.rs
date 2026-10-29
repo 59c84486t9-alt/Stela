@@ -55,6 +55,7 @@ pub fn run(fix: bool) -> Result<()> {
         uefi(["-p", "stela-engine", "--no-default-features"]),
         uefi(["-p", "stela-runtime", "--no-default-features"]),
         uefi(["-p", "stela-tls", "--no-default-features"]),
+        uefi(["-p", "stela-boot-core", "--features", "native-acpi"]),
         uefi(BOOT),
         uefi([BOOT[0], BOOT[1], "--features", "diagnostics"]),
         // Native GPU hooks are optional while their larger vendor ports are

@@ -1,21 +1,27 @@
-//! BSP device-dispatch metadata; the existing IDT and CPU frame remain owned
-//! by main. Only actual checked native dispatch enters this state.
+//! Nesting depth and interrupted stack pointer of the BSP's native device
+//! dispatch. The IDT and CPU frame belong to the mount.
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use stela_drivers::bus::irq::IrqError;
-pub(super) struct Context {
+pub struct Context {
     depth: AtomicU32,
     interrupted: AtomicUsize,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Snapshot {
+pub struct Snapshot {
     pub depth: u32,
     pub interrupted_rsp: Option<usize>,
 }
-pub(super) struct Guard<'a> {
+pub struct Guard<'a> {
     owner: &'a Context,
     depth: u32,
     interrupted: usize,
 }
+impl Default for Context {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Context {
     pub const fn new() -> Self {
         Self {

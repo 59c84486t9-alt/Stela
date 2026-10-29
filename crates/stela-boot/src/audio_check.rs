@@ -14,8 +14,8 @@ use stela_drivers::{
 };
 
 mod registers;
-mod samples;
 use samples::{PERIOD_BYTES, PERIODS, Progress, RING_BYTES, pcm};
+use stela_boot_core::audio_check_samples as samples;
 
 /// PCI base class 03h.
 const DISPLAY_CLASS: u8 = 0x03;

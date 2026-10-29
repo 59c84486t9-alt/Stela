@@ -15,12 +15,12 @@
 extern crate alloc;
 use alloc::format;
 use core::{arch::asm, panic::PanicInfo};
+use stela_boot_core::apic;
 use uefi::{
     Status,
     boot::{AllocateType, MemoryType},
     mem::memory_map::MemoryMap,
 };
-mod apic;
 #[cfg(feature = "diagnostics")]
 mod audio_check;
 mod choice;
@@ -30,7 +30,7 @@ mod engine;
 mod entropy;
 mod firmware;
 mod handoff;
-mod heap;
+use stela_boot_core::heap;
 #[cfg(feature = "diagnostics")]
 mod host_check;
 mod host_firmware;
@@ -66,7 +66,11 @@ mod system;
 mod tables;
 mod ui;
 #[global_allocator]
-pub(crate) static ALLOCATOR: heap::Heap = heap::Heap::new();
+pub(crate) static ALLOCATOR: heap::Heap = heap::Heap::new().reporting_failures(|report| {
+    use core::fmt::Write;
+    // Serial is bounded, lock-free port I/O: no allocation or queue.
+    let _ = serial::Serial.write_fmt(report);
+});
 /// The live firmware keeps its boot-service pages. Budget the first heap from
 /// the conventional pages still available after the pristine image copy.
 fn initial_heap_bytes() -> Result<usize, &'static str> {

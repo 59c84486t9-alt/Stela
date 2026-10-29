@@ -6,23 +6,39 @@ license = "MIT AND GPL-2.0-only"
 publish = false
 description = "The UEFI mount's firmware-independent logic: stela.cfg options, ACPI, topology, paging and console decoders, and the passthrough DMA domain"
 
+[features]
+# `_CRS` interrupt routes, decoded by the drivers' ACPI resource types.
+native-acpi = ["stela-drivers/native-acpi"]
+
 [dependencies]
 stela-crypto = { path = "../stela-crypto" }
 stela-drivers = { path = "../stela-drivers" }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.10", default-features = false }
+uefi-raw = "0.17"
 
 # The freestanding crates for stela.efi; on the host, as `stela setup` and
 # the tests build them.
 [target.'cfg(target_os = "uefi")'.dependencies]
 stela-compiler = { path = "../stela-compiler", default-features = false }
+stela-contracts = { path = "../stela-contracts", default-features = false }
+stela-formats = { path = "../stela-formats", default-features = false }
 stela-loader = { path = "../stela-loader", default-features = false }
 stela-engine = { path = "../stela-engine", default-features = false }
 stela-runtime = { path = "../stela-runtime", default-features = false }
+stela-soc-data = { path = "../stela-soc-data", default-features = false }
 
 [target.'cfg(not(target_os = "uefi"))'.dependencies]
 stela-compiler = { path = "../stela-compiler" }
+stela-contracts = { path = "../stela-contracts" }
+stela-formats = { path = "../stela-formats" }
 stela-loader = { path = "../stela-loader" }
 stela-engine = { path = "../stela-engine" }
 stela-runtime = { path = "../stela-runtime" }
+stela-soc-data = { path = "../stela-soc-data" }
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

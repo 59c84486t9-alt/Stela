@@ -1,16 +1,22 @@
-//! First source failure is permanent for one installed counter epoch.
-use super::WorkError;
+//! A clock source's first failure, kept for the rest of its epoch.
 use core::sync::atomic::{AtomicU32, Ordering};
-pub(in crate::native_clock) struct Health(AtomicU32);
+use stela_drivers::platform::work::WorkError;
+pub struct Health(AtomicU32);
+impl Default for Health {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Health {
-    pub(in crate::native_clock) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self(AtomicU32::new(0))
     }
-    pub(in crate::native_clock) fn check(&self) -> Result<(), WorkError> {
+    pub fn check(&self) -> Result<(), WorkError> {
         let code = self.0.load(Ordering::Acquire);
         if code == 0 { Ok(()) } else { Err(decode(code)) }
     }
-    pub(in crate::native_clock) fn fail(&self, error: WorkError) -> WorkError {
+    pub fn fail(&self, error: WorkError) -> WorkError {
         match self
             .0
             .compare_exchange(0, encode(error), Ordering::AcqRel, Ordering::Acquire)

@@ -12,13 +12,11 @@ use core::{
 use stela_drivers::bus::irq::{IrqController, IrqError, Platform, Registry, Target};
 use stela_drivers::platform::work::Cpu;
 
-mod context;
-#[allow(dead_code)]
-mod crs;
+use stela_boot_core::crs;
+use stela_boot_core::irq_context as context;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod diagnostic;
-#[allow(dead_code)]
-pub mod ioapic;
+pub use stela_boot_core::ioapic;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod level_diagnostic;
 #[allow(dead_code)]

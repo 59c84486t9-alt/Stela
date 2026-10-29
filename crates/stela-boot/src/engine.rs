@@ -22,7 +22,7 @@ mod network;
 pub(crate) mod nor;
 mod parallel;
 pub(crate) mod power;
-mod progress;
+use stela_boot_core::boot_progress as progress;
 mod remapping;
 mod remote;
 mod restore;
@@ -687,8 +687,8 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     };
     // SAFETY: loader-reserved immutable pages, retained in every shared-window
     // physmap; metadata and Arc are created in this active engine allocator.
-    let host_firmware =
-        unsafe { handoff.host_firmware.after_ebs() }.unwrap_or_else(|error| output::fatal(error));
+    let host_firmware = unsafe { crate::host_firmware::after_ebs(&handoff.host_firmware) }
+        .unwrap_or_else(|error| output::fatal(error));
     crate::status::set_clock(handoff.tsc_hz);
     stela_drivers::on_wait(crate::status::tick);
     stela_drivers::on_work(crate::status::progress);
@@ -1171,11 +1171,8 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         _ => output::fatal("selected bundle source, live tree and board must be retained together"),
     };
     if let Some(source) = &topology_source {
-        source
-            .select_on(
-                &mut roster,
-                native_processors.expect("validated native roster"),
-            )
+        roster
+            .select_for(source, native_processors.expect("validated native roster"))
             .unwrap_or_else(|error| output::fatal(&error));
     } else {
         roster

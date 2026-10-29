@@ -17,7 +17,7 @@
 //! Stela started from is left out. Filesystems are never resized: another
 //! system's space is freed only by deleting its partition.
 use crate::{
-    choice::{self, Press, Wait, window},
+    choice::{self, Press, Wait},
     console::{Framebuffer, font},
     output,
     payload::{Aligned, device_path, disk_model, disk_serial},
@@ -25,6 +25,7 @@ use crate::{
 };
 use alloc::{format, string::String, vec, vec::Vec};
 use sha2::Digest;
+use stela_boot_core::screen::{disk_size as size, window};
 use stela_crypto::Sha256;
 use uefi::{
     Handle,
@@ -598,23 +599,6 @@ fn disks() -> Vec<Disk> {
     disks
 }
 
-/// `bytes` as people read disk sizes: decimal units, three figures.
-fn size(bytes: u64) -> String {
-    let tenths = |unit: u64| (bytes * 10 + unit / 2) / unit;
-    match bytes {
-        b if b >= 1000 * GB => {
-            let t = tenths(1000 * GB);
-            format!("{}.{} TB", t / 10, t % 10)
-        }
-        b if b >= 10 * GB => format!("{} GB", (b + GB / 2) / GB),
-        b if b >= GB => {
-            let t = tenths(GB);
-            format!("{}.{} GB", t / 10, t % 10)
-        }
-        b => format!("{} MB", (b + 500_000) / 1_000_000),
-    }
-}
-
 /// A partition type's name and colour.
 fn kind(partition: &gpt::Partition) -> (&'static str, u32) {
     if let Some(role) = partition.role() {
@@ -1157,17 +1141,4 @@ struct Bar {
     y: usize,
     width: usize,
     height: usize,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sizes_read_as_three_figures_in_decimal_units() {
-        assert_eq!(size(1_000_204_886_016), "1.0 TB");
-        assert_eq!(size(512 * GB), "512 GB");
-        assert_eq!(size(8_600_000_000), "8.6 GB");
-        assert_eq!(size(260 * 1_000_000), "260 MB");
-    }
 }

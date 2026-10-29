@@ -8,9 +8,9 @@
     "reason": "native CPU comparison of emitted legacy, LOCK, flag and epoch chain gates; run on request; manual: native chain interruption gate CPU comparison"
   },
   {
-    "package": "xtask",
+    "package": "stela-boot-core",
     "test": "original_t8112_adapter_joins_dense_driver_ids_to_physical_first_p_resources",
-    "source": "crates/stela-boot/src/engine/topology.rs",
+    "source": "crates/stela-boot-core/src/assigned_topology.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_CPU_DT_DIR"
@@ -18,9 +18,9 @@
     "reason": "requires pinned original J473 ADT in STELA_TEST_CPU_DT_DIR"
   },
   {
-    "package": "xtask",
+    "package": "stela-boot-core",
     "test": "original_mode1_factory_projects_actual_live_tree_without_public_pmgr_admission",
-    "source": "crates/stela-boot/src/engine/topology.rs",
+    "source": "crates/stela-boot-core/src/assigned_topology.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_ASSIGNED_DT",
@@ -29,9 +29,9 @@
     "reason": "requires retained original26A434J314s and prepared bundle DT"
   },
   {
-    "package": "xtask",
+    "package": "stela-boot-core",
     "test": "original_mode1_keeps_discovery_order_with_nonzero_logical_boot_pe",
-    "source": "crates/stela-boot/src/engine/topology.rs",
+    "source": "crates/stela-boot-core/src/assigned_topology.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_ASSIGNED_DT",

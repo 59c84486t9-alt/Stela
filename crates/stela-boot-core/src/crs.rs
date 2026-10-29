@@ -12,7 +12,7 @@ use stela_drivers::{
     },
 };
 
-pub(super) fn line(
+pub fn line(
     descriptors: &[Descriptor],
     ordinal: usize,
     pin_index: usize,

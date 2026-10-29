@@ -1,9 +1,7 @@
 //! Verified selected-bundle provenance, distinct from its post-load live ADT.
 //! No hash chooses a source family, creates hardware ownership or authenticates
 //! an Apple container/signature. The actual resource factory checks geometry.
-#[path = "source/clpc.rs"]
 mod clpc;
-#[path = "source/cpus.rs"]
 mod cpus;
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 use sha2::Digest;
@@ -19,7 +17,7 @@ use {
 /// Retains the verified original and exact selected metadata. Original bytes
 /// are never exposed mutably or installed as a guest memory region. Live ADT
 /// bytes stay in Entry.live_tree, after all runtime fixed-offset patches.
-pub(crate) struct Intake {
+pub struct Intake {
     original: Vec<u8>,
     original_sha256: [u8; 32],
     manifest_sha256: [u8; 32],
@@ -72,7 +70,7 @@ impl Intake {
     /// Called only with the SAME json parsed into `verified.manifest` by the
     /// enclosing load_named path. Every file/region has already been verified;
     /// source metadata validation precedes Verified::load and its RAM effects.
-    pub(super) fn from_verified<'a>(
+    pub fn from_verified<'a>(
         json: &[u8],
         verified: &Verified<'_>,
         named: &impl Fn(&str) -> Option<&'a [u8]>,
@@ -220,42 +218,42 @@ impl Intake {
         Ok(intake)
     }
 
-    pub(crate) fn original(&self) -> &[u8] {
+    pub fn original(&self) -> &[u8] {
         &self.original
     }
     /// Logical PE in the verified prepared CPU order, independently derived
     /// from the selected original identity rather than its source index.
-    pub(crate) fn boot_processor(&self) -> usize {
+    pub fn boot_processor(&self) -> usize {
         self.cpus.processor()
     }
-    pub(crate) fn hidden_clpc(&self) -> &[String] {
+    pub fn hidden_clpc(&self) -> &[String] {
         &self.hidden_clpc
     }
-    pub(crate) fn selected(&self) -> &Target {
+    pub fn selected(&self) -> &Target {
         self.manifest
             .target
             .as_ref()
             .expect("validated selected target")
     }
-    pub(crate) fn sources(&self) -> &[Source] {
+    pub fn sources(&self) -> &[Source] {
         &self.manifest.sources
     }
-    pub(crate) fn tree_source(&self) -> &Source {
+    pub fn tree_source(&self) -> &Source {
         &self.manifest.sources[self.tree_source]
     }
     /// Exact parsed resource declarations used by file verification/load.
-    pub(crate) fn manifest(&self) -> &Manifest {
+    pub fn manifest(&self) -> &Manifest {
         &self.manifest
     }
     /// Exact raw selected bundle.json digest, not a digest fabricated from a
     /// filename/model or a reserialization that loses ignored source fields.
-    pub(crate) fn manifest_sha256(&self) -> [u8; 32] {
+    pub fn manifest_sha256(&self) -> [u8; 32] {
         self.manifest_sha256
     }
     /// Caller supplies its actual runtime profile chip. The source-family
     /// factory must cross-check it against these selected IDs and source/live
     /// geometry. This operation grants no lifecycle or native executor state.
-    pub(crate) fn topology_identity(&self, chip: Chip) -> Result<SourceIdentity, String> {
+    pub fn topology_identity(&self, chip: Chip) -> Result<SourceIdentity, String> {
         if stela_soc_data::board::chip(self.soc) != Some(chip) {
             return Err("selected restore chip differs from the actual runtime profile".into());
         }
@@ -274,7 +272,7 @@ impl Intake {
     }
     /// Recheck selected identity and the entire verified prepared CPU sequence
     /// after runtime patches. PMGR/resource qualification remains independent.
-    pub(super) fn validate_live(&self, bytes: &[u8]) -> Result<(), String> {
+    pub fn validate_live(&self, bytes: &[u8]) -> Result<(), String> {
         let tree = DeviceTree::parse(bytes).map_err(|e| format!("live selected ADT: {e}"))?;
         if word(&tree, "chip-id")? != self.soc || word(&tree, "board-id")? != self.board {
             return Err("live DeviceTree differs from selected restore chip/board identity".into());

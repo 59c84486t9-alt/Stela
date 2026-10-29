@@ -1,36 +1,35 @@
 //! Deterministic PCM and bounded position/descriptor observations.
-extern crate alloc;
 use alloc::vec::Vec;
 
-pub(crate) const PERIOD_BYTES: usize = 4096;
-pub(crate) const PERIODS: usize = 4;
-pub(crate) const RING_BYTES: usize = PERIOD_BYTES * PERIODS;
+pub const PERIOD_BYTES: usize = 4096;
+pub const PERIODS: usize = 4;
+pub const RING_BYTES: usize = PERIOD_BYTES * PERIODS;
 const REQUIRED_WRAPS: u32 = 5;
 /// Position observations are evidence of progression, not an exact byte or
 /// period count: complete rings can pass between polls. Polling is bounded to
 /// less than one ring's duration; excessive gaps fail rather than infer wraps.
 #[derive(Default)]
-pub(crate) struct Progress {
+pub struct Progress {
     previous: u32,
-    pub(crate) changes: u32,
-    pub(crate) wraps: u32,
-    pub(crate) completions: u32,
+    pub changes: u32,
+    pub wraps: u32,
+    pub completions: u32,
 }
 
 impl Progress {
-    pub(crate) fn observe(&mut self, position: u32, completed: bool) {
+    pub fn observe(&mut self, position: u32, completed: bool) {
         self.changes += u32::from(position != self.previous);
         self.wraps += u32::from(position < self.previous);
         self.completions += u32::from(completed);
         self.previous = position;
     }
 
-    pub(crate) fn passed(&self) -> bool {
+    pub fn passed(&self) -> bool {
         self.wraps >= REQUIRED_WRAPS && self.completions >= REQUIRED_WRAPS * PERIODS as u32
     }
 }
 
-pub(crate) fn pcm() -> Vec<u8> {
+pub fn pcm() -> Vec<u8> {
     (0..RING_BYTES / 4)
         .flat_map(|frame| {
             let left = ((frame * 73 + 123) % 20_001) as i16 - 10_000;

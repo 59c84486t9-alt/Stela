@@ -23,11 +23,7 @@ pub const RED: u32 = 0xe4574d;
 pub const HEADER: usize = 88;
 const LOGO: usize = 32;
 const NAME: &str = "Stela";
-
-/// Screen pixels per page unit: pages are laid out for about 720 rows.
-pub fn scale(rows: usize) -> usize {
-    (rows / 720).clamp(1, 4)
-}
+pub use stela_boot_core::screen::scale;
 
 /// A page drawn in memory and shown at once.
 pub struct Canvas {
@@ -161,7 +157,8 @@ impl Canvas {
                     for sx in 0..SAMPLES {
                         let u = (px * SAMPLES + sx) as f32 / (side * SAMPLES) as f32;
                         let v = (py * SAMPLES + sy) as f32 / (side * SAMPLES) as f32;
-                        let colour = logo_pixel(u, v).unwrap_or(BACKGROUND);
+                        let colour =
+                            stela_boot_core::screen::logo_pixel(u, v).unwrap_or(BACKGROUND);
                         for (channel, total) in sum.iter_mut().enumerate() {
                             *total += (colour >> (16 - 8 * channel)) & 0xff;
                         }
@@ -222,74 +219,5 @@ impl Canvas {
             }
             self.screen.show_row(y, &row);
         }
-    }
-}
-
-/// The logo at (`u`, `v`) of its unit square: a rounded square split by an
-/// S curve into a blue half and an orange half, each lighter at the top.
-/// `None` outside it and in the gap between the halves.
-fn logo_pixel(u: f32, v: f32) -> Option<u32> {
-    const RADIUS: f32 = 0.2;
-    // Outside a rounded corner.
-    let cx = u.clamp(RADIUS, 1.0 - RADIUS);
-    let cy = v.clamp(RADIUS, 1.0 - RADIUS);
-    let (dx, dy) = (u - cx, v - cy);
-    if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) || dx * dx + dy * dy > RADIUS * RADIUS {
-        return None;
-    }
-    // One period of a sine, from two parabolas.
-    let t = 2.0 * v;
-    let wave = if t < 1.0 {
-        4.0 * t * (1.0 - t)
-    } else {
-        -4.0 * (t - 1.0) * (2.0 - t)
-    };
-    let side = u - (0.5 - 0.12 * wave);
-    if side.abs() < 0.022 {
-        return None;
-    }
-    let (top, bottom) = if side < 0.0 {
-        (0x5fe3c8, 0x2f6fe0)
-    } else {
-        (0xffc46b, 0xe2522a)
-    };
-    Some(mix(top, bottom, v))
-}
-
-/// `from` blended toward `to` by `amount`, channel by channel.
-fn mix(from: u32, to: u32, amount: f32) -> u32 {
-    (0..3).fold(0, |pixel, channel| {
-        let shift = 16 - 8 * channel;
-        let (a, b) = (
-            ((from >> shift) & 0xff) as f32,
-            ((to >> shift) & 0xff) as f32,
-        );
-        (pixel << 8) | (a + (b - a) * amount + 0.5) as u32
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_logo_is_blue_left_orange_right_split_by_a_gap() {
-        assert_eq!(logo_pixel(0.0, 0.0), None);
-        assert_eq!(logo_pixel(0.5, 0.0), None);
-        let blue = logo_pixel(0.15, 0.5).unwrap();
-        let orange = logo_pixel(0.85, 0.5).unwrap();
-        assert!(blue & 0xff > blue >> 16);
-        assert!(orange >> 16 > orange & 0xff);
-        // The curve bulges left in the upper half and right in the lower.
-        assert!(logo_pixel(0.45, 0.25).unwrap() >> 16 > 0xc0);
-        assert!(logo_pixel(0.55, 0.75).unwrap() >> 16 < 0x80);
-    }
-
-    #[test]
-    fn pages_are_laid_out_for_about_720_rows() {
-        assert_eq!(scale(800), 1);
-        assert_eq!(scale(1080), 1);
-        assert_eq!(scale(1440), 2);
-        assert_eq!(scale(2160), 3);
     }
 }

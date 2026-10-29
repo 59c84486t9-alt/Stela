@@ -2,10 +2,7 @@
 //! address it is mapped at, or the x2APIC MSRs when the firmware left the
 //! APIC in x2APIC mode (Intel SDM Vol. 3A chapter 11; AMD APM Vol. 2
 //! chapter 16). Its timer is measured against the TSC.
-#[cfg(test)]
-use crate::boot_msr as msr;
-#[cfg(not(test))]
-use crate::cpu::msr;
+use crate::msr;
 use core::arch::asm;
 
 /// IA32_APIC_BASE: x2APIC mode enabled.
@@ -81,7 +78,7 @@ fn init_destination(destination: u32, bsp: u32, x2: bool, tsc_hz: u64) -> Result
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StartupError {
+pub enum StartupError {
     ClockUnavailable,
     DestinationTooWide,
     BootstrapDestination,
@@ -90,7 +87,6 @@ pub(crate) enum StartupError {
     DeliveryTimeout,
 }
 pub const LVT_MASKED: u32 = 1 << 16;
-#[cfg_attr(target_os = "uefi", cfg(feature = "diagnostics"))]
 pub const TIMER_PERIODIC: u32 = 1 << 17;
 const SOFTWARE_ENABLE: u32 = 1 << 8;
 const DIVIDE_BY_ONE: u32 = 0b1011;
@@ -157,7 +153,7 @@ impl Apic {
         self.write(EOI, 0);
     }
 
-    pub(crate) fn id(&self) -> u32 {
+    pub fn id(&self) -> u32 {
         let value = self.read(ID);
         if self.x2 { value } else { value >> 24 }
     }
@@ -201,7 +197,7 @@ impl Apic {
         self.wait_delivery(tsc_hz)
     }
 
-    pub(crate) fn validate_init(&self, destination: u32, tsc_hz: u64) -> Result<(), StartupError> {
+    pub fn validate_init(&self, destination: u32, tsc_hz: u64) -> Result<(), StartupError> {
         init_destination(destination, self.id(), self.x2, tsc_hz)
     }
 
@@ -226,11 +222,7 @@ impl Apic {
     /// Post-EBS BSP, exclusive local ICR with IF clear; the caller owns this
     /// validated enabled logical AP. Firmware code must not resume afterward;
     /// any later SIPI belongs to a separate complete owned startup sequence.
-    pub(crate) unsafe fn init_only(
-        &self,
-        destination: u32,
-        tsc_hz: u64,
-    ) -> Result<(), StartupError> {
+    pub unsafe fn init_only(&self, destination: u32, tsc_hz: u64) -> Result<(), StartupError> {
         self.validate_init(destination, tsc_hz)?;
         self.send(destination, ICR_INIT | ICR_LEVEL_ASSERT, tsc_hz)?;
         if !settles_at_once() {
@@ -250,7 +242,7 @@ impl Apic {
     /// The caller owns the destination processor after firmware shutdown. Its
     /// complete trampoline, tables, stack and argument stay pinned and visible;
     /// interrupts are disabled and no other ICR sender runs on this processor.
-    pub(crate) unsafe fn startup(
+    pub unsafe fn startup(
         &self,
         destination: u32,
         vector: u8,
@@ -278,7 +270,7 @@ impl Apic {
     /// # Safety
     /// The destination owns this reserved vector and a live private IDT/IST.
     /// The caller exclusively owns the local ICR with interrupts disabled.
-    pub(crate) unsafe fn notify(
+    pub unsafe fn notify(
         &self,
         destination: u32,
         vector: u8,

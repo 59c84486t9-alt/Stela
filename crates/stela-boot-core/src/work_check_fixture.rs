@@ -1,6 +1,6 @@
 //! Only an admission check for the separately source-bound QEMU -smp 1 fixture.
 //! This inventory is not a general processor election or SMP quiescence proof.
-pub(super) fn one_processor(table: &[u8], executing: u32) -> Result<(), &'static str> {
+pub fn one_processor(table: &[u8], executing: u32) -> Result<(), &'static str> {
     if table.len() < 44 || &table[..4] != b"APIC" {
         return Err("work fixture has no valid MADT");
     }

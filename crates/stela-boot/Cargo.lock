@@ -888,12 +888,18 @@ dependencies = [
 name = "stela-boot-core"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
+ "sha2",
  "stela-compiler",
+ "stela-contracts",
  "stela-crypto",
  "stela-drivers",
  "stela-engine",
+ "stela-formats",
  "stela-loader",
  "stela-runtime",
+ "stela-soc-data",
+ "uefi-raw",
 ]
 
 [[package]]

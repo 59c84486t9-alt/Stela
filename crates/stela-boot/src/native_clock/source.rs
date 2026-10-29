@@ -1,9 +1,8 @@
 //! Actual retained source selection. No nominal TSC/frequency or bootstrap Cpu.
 use super::{WorkError, counter::Counter, pm};
 use alloc::sync::Arc;
-mod health;
-pub(super) use health::Health;
 pub(crate) use stela_boot_core::hpet::ElapsedBounds;
+pub(super) use stela_boot_core::source_health::Health;
 
 #[derive(Clone)]
 pub(crate) enum Prepared {

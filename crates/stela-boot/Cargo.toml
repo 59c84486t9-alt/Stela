@@ -8,7 +8,7 @@ publish = false
 [[bin]]
 name = "stela"
 path = "src/main.rs"
-# Inline tests run through xtask's hosted modules; this freestanding entry
+# Its host-testable logic lives in `stela-boot-core`; this freestanding entry
 # supplies its own allocator and panic handler, not a libtest executable.
 test = false
 
@@ -37,7 +37,7 @@ stela-crypto = { path = "../stela-crypto" }
 stela-tls = { path = "../stela-tls" }
 stela-formats = { path = "../stela-formats", default-features = false }
 uefi = { version = "0.41", default-features = false, features = ["alloc"] }
-stela-boot-core = { path = "../stela-boot-core" }
+stela-boot-core = { path = "../stela-boot-core", features = ["native-acpi"] }
 stela-drivers = { path = "../stela-drivers", features = ["linux-kernel", "native-acpi"] }
 stela-runtime = { path = "../stela-runtime", default-features = false }
 stela-loader = { path = "../stela-loader", default-features = false }

@@ -87,13 +87,13 @@ fn identity(cpu: &Cpu, selected: &BootCpu) -> bool {
 
 /// Immutable prepared sequence: live patches may change memory facts, but may
 /// neither replace a CPU nor change its position or selected running state.
-pub(super) struct Prepared {
+pub struct Prepared {
     cpus: Vec<Cpu>,
     processor: usize,
 }
 
 impl Prepared {
-    pub(super) fn verify(
+    pub fn verify(
         original: &DeviceTree,
         prepared: &DeviceTree,
         selected: &BootCpu,
@@ -145,11 +145,11 @@ impl Prepared {
         Ok(Self { cpus, processor })
     }
 
-    pub(super) fn processor(&self) -> usize {
+    pub fn processor(&self) -> usize {
         self.processor
     }
 
-    pub(super) fn validate_live(&self, tree: &DeviceTree) -> Result<(), String> {
+    pub fn validate_live(&self, tree: &DeviceTree) -> Result<(), String> {
         if cpus(tree)? != self.cpus {
             return Err(
                 "live CPU identities/order/running state differ from verified preparation".into(),

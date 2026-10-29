@@ -14,8 +14,6 @@
 //! --disk` writes, in the heap. [`upgrade_from_disk`] and
 //! [`recovery_from_disk`] build a staged update's and a recoveryOS's the
 //! same way (`stela_loader::upgrade`, `stela_loader::recovery`).
-pub(crate) mod live_tree;
-pub(crate) mod source;
 use crate::{
     firmware,
     handoff::{File, Region},
@@ -24,6 +22,7 @@ use crate::{
 };
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::arch::asm;
+pub(crate) use stela_boot_core::bundle::{live_tree, source};
 use stela_drivers::block::{BlockDevice, BlockError};
 use stela_engine::machine::Host;
 use stela_formats::boot_bundle::Framebuffer;

@@ -50,7 +50,7 @@ use stela_engine::machine::mmu::translated::Tlb;
 pub(crate) mod fp_diagnostic;
 pub(super) mod local;
 #[cfg(feature = "native-profile")]
-mod profile;
+use stela_boot_core::native_profile as profile;
 use stela_boot_core::ram;
 mod translated;
 pub(crate) use local::context::{RootContext, RootExecution, RootIdentity, RootProcessScope};

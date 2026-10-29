@@ -289,6 +289,23 @@ fn offset(symbol: *const u8) -> usize {
     unsafe { symbol.offset_from(&raw const stela_ap_start) as usize }
 }
 
+/// The exception stubs, IDTs and fault record lie inside the copied image,
+/// and the record is aligned for its sealed 8-byte fields.
+fn image_holds_its_tables(bytes: usize) -> bool {
+    use early::{EXCEPTIONS, Record, STUB_BYTES};
+    let record = offset(&raw const stela_ap_fault_record);
+    record.is_multiple_of(8)
+        && [
+            (offset(&raw const stela_ap_stubs32), EXCEPTIONS * STUB_BYTES),
+            (offset(&raw const stela_ap_stubs64), EXCEPTIONS * STUB_BYTES),
+            (offset(&raw const stela_ap_idt32), EXCEPTIONS * 8),
+            (offset(&raw const stela_ap_idt64), EXCEPTIONS * 16),
+            (record, core::mem::size_of::<Record>()),
+        ]
+        .into_iter()
+        .all(|(table, size)| table + size <= bytes)
+}
+
 pub(crate) struct Entry<'a> {
     /// Identity-mapped paging root, below 4 GiB, containing the low page and
     /// the permanently pinned high-window entry/stack/argument mappings.
@@ -319,6 +336,9 @@ pub(crate) unsafe fn prepare(
     entry: Entry<'_>,
 ) -> Result<u8, &'static str> {
     let bytes = offset(&raw const stela_ap_end);
+    if !image_holds_its_tables(bytes) {
+        return Err("AP bootstrap tables lie outside its image");
+    }
     if !(PAGE..1 << 20).contains(&physical)
         || !physical.is_multiple_of(PAGE)
         || bytes > PAGE as usize - early::STACK_BYTES
@@ -452,28 +472,4 @@ pub(crate) unsafe fn failure(mapped: *const u8) -> Result<Option<EarlyFault>, ea
     // SAFETY: the caller retains this AP's owned SIPI page, whose assembly
     // publishes the aligned record once and leaves its sealed payload immutable.
     unsafe { early::read(mapped.add(offset(&raw const stela_ap_fault_record)).cast()) }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn actual_owned_image_and_record_leave_an_independent_low_stack() {
-        use super::*;
-        use early::{EXCEPTIONS, Record, STACK_BYTES, STUB_BYTES};
-        let image = offset(&raw const stela_ap_end);
-        assert!(image + STACK_BYTES <= PAGE as usize);
-        for (table, bytes) in [
-            (offset(&raw const stela_ap_stubs32), EXCEPTIONS * STUB_BYTES),
-            (offset(&raw const stela_ap_stubs64), EXCEPTIONS * STUB_BYTES),
-            (offset(&raw const stela_ap_idt32), EXCEPTIONS * 8),
-            (offset(&raw const stela_ap_idt64), EXCEPTIONS * 16),
-            (
-                offset(&raw const stela_ap_fault_record),
-                core::mem::size_of::<Record>(),
-            ),
-        ] {
-            assert!(table + bytes <= image);
-        }
-        assert!(offset(&raw const stela_ap_fault_record).is_multiple_of(8));
-    }
 }

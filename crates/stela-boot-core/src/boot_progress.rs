@@ -1,10 +1,9 @@
 //! Read-only boot observations, never an estimate of total boot completion.
-extern crate alloc;
 
 use alloc::{format, string::String, vec::Vec};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Component {
+pub enum Component {
     SecureMonitor,
     TrustedMonitor,
     Kernel,
@@ -26,7 +25,7 @@ impl Component {
         }
     }
 
-    pub(super) fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::SecureMonitor => "Secure monitor (SPTM)",
             Self::TrustedMonitor => "Trusted execution monitor (TXM)",
@@ -42,20 +41,20 @@ struct CodeRange {
 }
 
 #[derive(Default)]
-pub(super) struct BootProgress {
+pub struct BootProgress {
     ranges: Vec<CodeRange>,
     sampled: Option<(u64, u64)>,
     reported: u8,
     installer: Option<String>,
 }
 
-pub(super) struct Update {
+pub struct Update {
     pub detail: String,
     pub first_component: Option<Component>,
 }
 
 impl BootProgress {
-    pub(super) fn new<'a>(regions: impl Iterator<Item = (&'a str, u64, u64)>) -> Self {
+    pub fn new<'a>(regions: impl Iterator<Item = (&'a str, u64, u64)>) -> Self {
         let ranges = regions
             .filter_map(|(name, start, bytes)| {
                 Some(CodeRange {
@@ -71,15 +70,15 @@ impl BootProgress {
         }
     }
 
-    pub(super) fn start(&mut self, ticks: u64, blocks: u64) {
+    pub fn start(&mut self, ticks: u64, blocks: u64) {
         self.sampled = Some((ticks, blocks));
     }
 
-    pub(super) fn installer(&mut self, step: String) {
+    pub fn installer(&mut self, step: String) {
         self.installer = Some(step);
     }
 
-    pub(super) fn due(&self, ticks: u64, hz: u64) -> bool {
+    pub fn due(&self, ticks: u64, hz: u64) -> bool {
         self.sampled
             .is_some_and(|(last, _)| ticks.wrapping_sub(last) >= hz.max(1))
     }
@@ -87,7 +86,7 @@ impl BootProgress {
     /// Called at a stopped host-service boundary, at most once per second.
     /// The physical instruction address comes from a read-only current-regime
     /// walk. Failure or an unclassified address never invents a component.
-    pub(super) fn sample(
+    pub fn sample(
         &mut self,
         physical: Option<u64>,
         ticks: u64,

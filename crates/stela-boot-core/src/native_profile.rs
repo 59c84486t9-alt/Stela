@@ -4,8 +4,7 @@ use alloc::vec::Vec;
 use stela_engine::machine::engine::MAX_NATIVE_EPOCH_BODIES;
 use stela_engine::machine::engine::NativeTimingPhase as Phase;
 use stela_engine::machine::engine::NativeTimingWork as Work;
-#[path = "profile/words.rs"]
-pub(crate) mod words;
+pub mod words;
 
 const INITIAL_JITTER: u64 = 0x19d5_65c8_d843_ba71;
 const MIN_INTERVAL: u64 = 2048;
@@ -14,7 +13,7 @@ const INTERVAL_MASK: u64 = 4095;
 /// Inclusive intervals; NativeCall is nested in CheckedBody, and every
 /// interval lies inside one of the outer disjoint phases. Never sum these.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct WorkSnapshot {
+pub struct WorkSnapshot {
     pub calls: u64,
     pub sampled_calls: u64,
     pub sampled_ticks: u64,
@@ -25,7 +24,7 @@ pub(crate) struct WorkSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct Snapshot {
+pub struct Snapshot {
     pub rounds: u64,
     pub samples: u64,
     pub complete: u64,
@@ -49,7 +48,7 @@ pub(crate) struct Snapshot {
     pub work: [WorkSnapshot; Work::COUNT],
 }
 
-pub(crate) struct Profile {
+pub struct Profile {
     snapshot: Snapshot,
     jitter: u64,
     remaining: u64,
@@ -82,7 +81,7 @@ impl Default for Profile {
 }
 
 impl Profile {
-    pub(crate) fn work_start(&mut self, work: Work, clock: impl FnOnce() -> u64) -> Option<u64> {
+    pub fn work_start(&mut self, work: Work, clock: impl FnOnce() -> u64) -> Option<u64> {
         let count = &mut self.snapshot.work[work as usize];
         count.calls = count.calls.saturating_add(1);
         if self.active {
@@ -94,7 +93,7 @@ impl Profile {
         self.active.then(clock)
     }
 
-    pub(crate) fn work_end(&mut self, work: Work, started: u64, now: u64) {
+    pub fn work_end(&mut self, work: Work, started: u64, now: u64) {
         let count = &mut self.snapshot.work[work as usize];
         let elapsed = now.wrapping_sub(started);
         count.sampled_ticks = count.sampled_ticks.saturating_add(elapsed);
@@ -105,7 +104,7 @@ impl Profile {
         }
     }
 
-    pub(crate) fn board_start(&mut self, clock: impl FnOnce() -> u64) -> Option<u64> {
+    pub fn board_start(&mut self, clock: impl FnOnce() -> u64) -> Option<u64> {
         self.snapshot.board_refreshes = self.snapshot.board_refreshes.saturating_add(1);
         if self.active {
             self.snapshot.sampled_board_refreshes =
@@ -116,25 +115,25 @@ impl Profile {
         }
     }
 
-    pub(crate) fn board_end(&mut self, started: u64, now: u64) {
+    pub fn board_end(&mut self, started: u64, now: u64) {
         self.snapshot.sampled_board_ticks = self
             .snapshot
             .sampled_board_ticks
             .saturating_add(now.wrapping_sub(started));
     }
 
-    pub(crate) fn needs_calibration(&self) -> bool {
+    pub fn needs_calibration(&self) -> bool {
         self.snapshot.timestamp_pair_min == 0
     }
 
-    pub(crate) fn snapshot(&self) -> Snapshot {
+    pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             words: self.words.summary,
             ..self.snapshot
         }
     }
 
-    pub(crate) fn instructions(
+    pub fn instructions(
         &mut self,
         sample: stela_engine::machine::engine::NativeInstructionSample<'_>,
     ) {
@@ -155,11 +154,11 @@ impl Profile {
         }
     }
 
-    pub(crate) fn top_words(&self, ranking: words::Ranking) -> [Option<words::Weight>; words::TOP] {
+    pub fn top_words(&self, ranking: words::Ranking) -> [Option<words::Weight>; words::TOP] {
         self.words.top_by(ranking)
     }
 
-    pub(crate) fn calibrate(&mut self, mut clock: impl FnMut() -> u64) {
+    pub fn calibrate(&mut self, mut clock: impl FnMut() -> u64) {
         let mut minimum = u64::MAX;
         for _ in 0..32 {
             let start = clock();
@@ -170,7 +169,7 @@ impl Profile {
 
     /// Unsampled checkpoints never read the clock. Partial/error paths retain
     /// whole-round time separately and cannot pollute complete phase totals.
-    pub(crate) fn event(&mut self, phase: Phase, clock: impl FnOnce() -> u64) {
+    pub fn event(&mut self, phase: Phase, clock: impl FnOnce() -> u64) {
         if phase == Phase::Begin {
             self.words.summary.dropped_bodies = self
                 .words
@@ -235,7 +234,7 @@ impl Profile {
         }
     }
 
-    pub(crate) fn installed(&mut self, hit: bool) {
+    pub fn installed(&mut self, hit: bool) {
         let count = if hit {
             &mut self.snapshot.installed_hits
         } else {
@@ -244,11 +243,11 @@ impl Profile {
         *count = count.saturating_add(1);
     }
 
-    pub(crate) fn copied(&mut self, bytes: usize) {
+    pub fn copied(&mut self, bytes: usize) {
         self.snapshot.installed_bytes = self.snapshot.installed_bytes.saturating_add(bytes as u64);
     }
 
-    pub(crate) fn exit(&mut self, kind: u64) {
+    pub fn exit(&mut self, kind: u64) {
         if let Some(count) = self.snapshot.exit_kinds.get_mut(kind as usize) {
             *count = count.saturating_add(1);
         }

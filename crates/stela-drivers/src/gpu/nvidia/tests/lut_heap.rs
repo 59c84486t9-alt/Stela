@@ -4,7 +4,7 @@
 #![allow(dead_code)]
 extern crate alloc;
 
-#[path = "../../../../../stela-boot/src/heap.rs"]
+#[path = "../../../../../stela-boot-core/src/heap.rs"]
 mod common_heap;
 #[path = "../memory.rs"]
 mod nvidia_memory;

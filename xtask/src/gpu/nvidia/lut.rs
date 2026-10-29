@@ -227,7 +227,7 @@ pub(super) fn cpu_model(options: CpuModelOptions<'_>) -> Result<serde_json::Valu
     capture(&mut Command::new(&binary))?;
     Ok(
         json!({"binary":tools::binding(&binary)?,"heap":tools::binding(&heap)?,
-        "shared_heap_source":tools::binding(&tools::root().join("crates/stela-boot/src/heap.rs"))?,
+        "shared_heap_source":tools::binding(&tools::root().join("crates/stela-boot-core/src/heap.rs"))?,
         "metadata_adapter":tools::binding(&source.port.join("memory.rs"))?,
         "fixture_sources":sources.iter().map(|(file,_)| tools::binding(&source.join(file))).collect::<Result<Vec<_>>>()?,
         "excluded_only_for_host_CPU_fixture":excluded,"commands":commands,"executed":true}),

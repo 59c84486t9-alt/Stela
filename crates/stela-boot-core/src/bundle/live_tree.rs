@@ -10,15 +10,14 @@
         reason = "positive native RAM ownership proof runs under UEFI; hosted mounts exercise its pure refusal paths"
     )
 )]
-#[path = "live_tree/registered.rs"]
-pub(crate) mod registered;
+pub mod registered;
 
 use alloc::{format, string::String, vec::Vec};
 use stela_engine::machine::Host;
 use stela_formats::boot_bundle::LoadedRegion;
 use stela_loader::{apple_device_tree::DeviceTree, boot_args};
 
-pub(crate) trait Ram {
+pub trait Ram {
     fn read(&mut self, physical: u64, bytes: &mut [u8]) -> bool;
     fn write(&mut self, physical: u64, bytes: &[u8]) -> bool;
     fn fence(&mut self);
@@ -36,7 +35,7 @@ impl<H: Host> Ram for H {
 }
 
 // The live bytes include fresh entropy slots; never expose them through Debug.
-pub(crate) struct LiveTree {
+pub struct LiveTree {
     physical: u64,
     reservation_bytes: u64,
     args_physical: u64,
@@ -84,11 +83,7 @@ fn reservation(tree: &DeviceTree, physical: u64, bytes: u64) -> Result<(), Strin
 impl LiveTree {
     /// The caller excludes guest entry, guest DMA and changes to the loaded RAM
     /// mapping throughout capture, projection and consuming publication.
-    pub(crate) fn capture(
-        ram: &mut impl Ram,
-        regions: &[LoadedRegion],
-        x0: u64,
-    ) -> Result<Self, String> {
+    pub fn capture(ram: &mut impl Ram, regions: &[LoadedRegion], x0: u64) -> Result<Self, String> {
         let tree = region(regions, "DeviceTree")?;
         let args_region = region(regions, "BootArgs")?;
         if x0 != args_region.guest_pa
@@ -132,14 +127,14 @@ impl LiveTree {
             bytes,
         })
     }
-    pub(crate) fn bytes(&self) -> &[u8] {
+    pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
     /// Check the actual post-patch boot_args snapshot, not the manifest's
     /// command line. The source factory separately checks all DT providers.
     /// Even an explicit zero requires a separately qualified override path.
-    pub(crate) fn require_no_harvesting_override(&self) -> Result<(), String> {
+    pub fn require_no_harvesting_override(&self) -> Result<(), String> {
         let args = boot_args::decode(&self.args).map_err(|e| format!("live boot_args: {e}"))?;
         if args.command_line.split_ascii_whitespace().any(|word| {
             word.split('=').next().unwrap_or("").trim_start_matches('-') == "acc-harvesting"
@@ -156,18 +151,14 @@ impl LiveTree {
         dead_code,
         reason = "retained live-tree operations serve later source-qualified topology publication"
     )] // Adoption also needs the actual Plan/RAM/device owners.
-    pub(crate) fn publish(
-        self,
-        ram: &mut impl Ram,
-        projected: &DeviceTree,
-    ) -> Result<Self, String> {
+    pub fn publish(self, ram: &mut impl Ram, projected: &DeviceTree) -> Result<Self, String> {
         self.publish_inner(ram, projected, false)
     }
 
     /// Publish the actual original driver's cacheless argument together with
     /// the assigned topology, only after the parent constructed its matching
     /// empty cache and canonical RAM owners. This changes no bundle schema.
-    pub(crate) fn publish_cacheless(
+    pub fn publish_cacheless(
         self,
         ram: &mut impl Ram,
         projected: &DeviceTree,

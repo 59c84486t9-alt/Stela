@@ -4,14 +4,14 @@ use stela_engine::memory::RegisteredSystemRam;
 
 /// Borrowed only before the first guest instruction and native publication.
 /// A physical pointer or legacy BareHost is not another permitted writer.
-pub(crate) struct ColdRam<'a>(&'a RegisteredSystemRam);
+pub struct ColdRam<'a>(&'a RegisteredSystemRam);
 impl<'a> ColdRam<'a> {
     /// # Safety
     /// Registration's all-writer contract holds. All raw input copies are
     /// finished; guest execution, DMA, native frame loans and other publishers
     /// are excluded for this borrow. The supplied RAM is the actual retained
     /// owner which will be installed in the Machine, not a shadow allocation.
-    pub(crate) unsafe fn new(ram: &'a RegisteredSystemRam) -> Self {
+    pub unsafe fn new(ram: &'a RegisteredSystemRam) -> Self {
         Self(ram)
     }
 }

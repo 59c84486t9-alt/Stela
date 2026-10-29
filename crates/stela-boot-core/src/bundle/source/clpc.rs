@@ -42,7 +42,7 @@ fn hidden_node(nodes: &[(String, &Node)], path: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn verify(
+pub fn verify(
     original: &DeviceTree,
     prepared: &DeviceTree,
     ledger: &[String],
@@ -70,7 +70,7 @@ pub(super) fn verify(
     Ok(hidden)
 }
 
-pub(super) fn validate_live(tree: &DeviceTree, hidden: &[String]) -> Result<(), String> {
+pub fn validate_live(tree: &DeviceTree, hidden: &[String]) -> Result<(), String> {
     let mut current = Vec::new();
     nodes(&tree.root, "", &mut current)?;
     for path in hidden {

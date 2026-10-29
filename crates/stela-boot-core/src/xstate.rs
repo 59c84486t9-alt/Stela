@@ -1,6 +1,8 @@
 //! Extended-state geometry and control validation for the boot entry ABI.
 mod image;
 pub use image::{ImageError, ImageFormat};
+mod owner;
+pub use owner::XstateOwner;
 pub const LEGACY_BYTES: usize = 512;
 pub const STANDARD_HEADER_OFFSET: usize = LEGACY_BYTES;
 pub const STANDARD_HEADER_BYTES: usize = 64;

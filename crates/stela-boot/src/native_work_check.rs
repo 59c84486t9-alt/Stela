@@ -15,6 +15,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use sha2::Digest;
+use stela_boot_core::work_check_fixture as fixture;
 use stela_crypto::Sha256;
 use stela_drivers::{
     Clock,
@@ -24,7 +25,6 @@ use stela_drivers::{
 };
 use stela_engine::freestanding::BootArena;
 use stela_runtime::pc::acpi;
-mod fixture;
 // Reuse the actual read-only native PAT/MTRR/translation qualifier unchanged.
 use crate::native_memory::cache;
 const CHUNK: usize = 2 * 1024 * 1024;

@@ -19,6 +19,7 @@ use core::{
     ptr,
     sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize, Ordering},
 };
+// Explicit, so the NVIDIA LUT fixture can compile this file by path.
 #[path = "heap/failure.rs"]
 mod failure;
 
@@ -95,6 +96,8 @@ pub struct Usage {
 pub struct Heap {
     held: AtomicBool,
     failure_reported: AtomicBool,
+    /// Where the first failed allocation is reported; it must not allocate.
+    failure_sink: fn(core::fmt::Arguments<'_>),
     state: UnsafeCell<State>,
     caches: [UnsafeCell<Cache>; CPUS],
     /// Each core's bytes allocated from its cache less those freed to it,
@@ -117,11 +120,27 @@ pub struct Heap {
 // UEFI callers mask local interrupts before acquiring the lock. Critical
 // sections cannot migrate/block; NMI and fault handlers never reenter the heap.
 unsafe impl Sync for Heap {}
+impl Default for Heap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Heap {
+    /// Report the first failed allocation to `sink`, which must neither
+    /// allocate nor wait (the mount's serial port).
+    pub const fn reporting_failures(self, sink: fn(core::fmt::Arguments<'_>)) -> Self {
+        Self {
+            failure_sink: sink,
+            ..self
+        }
+    }
+
     pub const fn new() -> Self {
         Self {
             held: AtomicBool::new(false),
             failure_reported: AtomicBool::new(false),
+            failure_sink: |_| {},
             caches: [const { UnsafeCell::new(Cache::EMPTY) }; CPUS],
             cached: [const { AtomicIsize::new(0) }; CPUS],
             own: [const { AtomicIsize::new(0) }; CPUS],
@@ -365,7 +384,7 @@ impl Heap {
             return;
         }
         // SAFETY: as the caller guarantees.
-        unsafe { crate::cpu::msr::TSC_AUX.write(u64::from(TAG | cpu as u32)) };
+        unsafe { crate::msr::TSC_AUX.write(u64::from(TAG | cpu as u32)) };
         self.any_tagged.store(true, Ordering::Release);
     }
 
@@ -619,7 +638,6 @@ unsafe impl GlobalAlloc for Heap {
             if !block.is_null() {
                 self.count_own((SMALLEST << class) as isize);
             }
-            #[cfg(target_os = "uefi")]
             if block.is_null() {
                 failure::report(self, layout);
             }
@@ -636,7 +654,6 @@ unsafe impl GlobalAlloc for Heap {
         if !block.is_null() {
             self.count_own(class(layout).map_or(layout.size(), |class| SMALLEST << class) as isize);
         }
-        #[cfg(target_os = "uefi")]
         if block.is_null() {
             failure::report(self, layout);
         }
