@@ -5,8 +5,8 @@
 mod source;
 pub use source::{BspSource, SourceIdentity};
 
-pub use crate::platform::apple::pmgr::coverage::DomainId;
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
+use stela_soc_data::pmgr::coverage::DomainId;
 use {
     stela_contracts::Chip, stela_contracts::caches::Cache, stela_contracts::caches::Caches,
     stela_contracts::identity::Identity,

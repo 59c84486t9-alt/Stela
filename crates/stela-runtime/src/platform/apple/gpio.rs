@@ -71,16 +71,7 @@ const FIELDS: u32 =
     DATA | MODE | PERIPH | PULL | INPUT_ENABLE | 3 << 10 | 1 << 15 | 7 << 16 | LOCK | 3 << 22;
 const IRQ_BASE: u64 = 0x800;
 const IRQ_STRIDE: u64 = 0x40;
-/// The interrupt groups the 3-bit group field selects.
-pub const GROUPS: usize = 8;
-
-/// Source-qualified register behavior; board nets and lifecycle remain
-/// separately owned. The S5L driver does not implement T8101 lockGPIO.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Profile {
-    T8101,
-    S5l8960x,
-}
+use stela_soc_data::gpio::{GROUPS, Profile};
 
 /// A board net pulled high: open-drain outputs attached to it pull it low.
 /// Clones share the net; at most 64 outputs attach to one net.
@@ -711,9 +702,9 @@ mod tests {
     #[test]
     fn mounted_gpio_refusal_keeps_real_aic_delivery_owned() {
         use {
-            crate::platform::apple::aic::AIC2_IRQ_CFG,
-            crate::platform::apple::aic::AIC2_TIMESTAMPS, crate::platform::apple::aic::Aic2,
-            crate::platform::apple::aic::Aic2Config, stela_contracts::bus::Bus,
+            crate::platform::apple::aic::Aic2, stela_contracts::bus::Bus,
+            stela_soc_data::aic::AIC2_IRQ_CFG, stela_soc_data::aic::AIC2_TIMESTAMPS,
+            stela_soc_data::aic::Aic2Config,
         };
         let net = Net::new();
         let input = net.open_drain().unwrap();

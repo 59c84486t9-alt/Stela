@@ -6,9 +6,9 @@
 use super::policy::{GROUPS, HardwareUpdate, Inputs, Policy};
 use alloc::rc::Rc;
 use {
-    crate::platform::apple::ptd::Range, crate::platform::apple::ptd::UPDATE_OFFSET,
     crate::platform::apple::ptd::transport::notifications::LocalNotifications,
     stela_contracts::bus::Access, stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,
+    stela_soc_data::ptd::Range, stela_soc_data::ptd::UPDATE_OFFSET,
 };
 
 type Error = &'static str;

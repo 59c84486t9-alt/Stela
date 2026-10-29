@@ -3,9 +3,9 @@
 //! through RTKit-local IRQ 1+r, encoded in namespace 0x10000. These are not AP
 //! AIC numbers or ASC messages. See docs/research/apple-mcc.md.
 use super::{NotificationOwner, Ptd, ROUTES, Range};
-use crate::platform::apple::ptd::Geometry;
 use alloc::rc::Rc;
 use stela_contracts::bus::LifecycleState;
+use stela_soc_data::ptd::Geometry;
 
 /// Original native descriptor geometry, independently cross-checked by the
 /// source DeviceTree's 0xc00-byte update alias.
@@ -152,10 +152,10 @@ impl Ptd {
 mod tests {
     use super::*;
     use {
-        crate::platform::apple::ptd::UPDATE_OFFSET, crate::platform::apple::ptd::transport::Entry,
-        stela_contracts::bus::Access, stela_contracts::bus::Lifecycle,
-        stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError,
-        stela_contracts::bus::Width, stela_contracts::interrupt::InterruptLatch,
+        crate::platform::apple::ptd::transport::Entry, stela_contracts::bus::Access,
+        stela_contracts::bus::Lifecycle, stela_contracts::bus::MmioDevice,
+        stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+        stela_contracts::interrupt::InterruptLatch, stela_soc_data::ptd::UPDATE_OFFSET,
     };
 
     fn lifecycle() -> LifecycleState {

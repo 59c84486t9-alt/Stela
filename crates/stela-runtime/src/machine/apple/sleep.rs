@@ -367,15 +367,15 @@ mod tests {
     #[test]
     fn a_masked_smc_wake_keeps_the_soc_asleep_and_the_rtc_alarm_wakes_it() {
         let mut devices = board();
-        let rtc = pmu::Rtc {
+        let rtc = stela_soc_data::pmu::Rtc {
             upcount: 0xf802,
-            clock_offset: pmu::ClockOffset::Register(0xf900),
+            clock_offset: stela_soc_data::pmu::ClockOffset::Register(0xf900),
             alarm_control: 0xf800,
             alarm_enable: 0x40,
             alarm_offset: 0xf808,
             alarm_event: 0xf80c,
             irq_mask: 0xf80e,
-            event_mask: pmu::DEFAULT_EVENT_MASK,
+            event_mask: stela_soc_data::pmu::DEFAULT_EVENT_MASK,
             interrupt_mask: 1,
         };
         let mut pmu = pmu::Pmu::new(Vec::new(), Some(rtc), None);

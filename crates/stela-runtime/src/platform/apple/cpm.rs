@@ -11,16 +11,15 @@
 //! command readback are not proved. Other values and reads of it refuse.
 use super::regfile::Held;
 use alloc::vec::Vec;
+use stela_soc_data::cpm::RESTORE;
+#[cfg(test)]
+use stela_soc_data::cpm::{P_THROTTLER, THROTTLERS};
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
     stela_contracts::bus::refuse,
 };
 const NAME: &str = "cpm-power";
-const RESTORE: u64 = 0x40f8;
-const THROTTLERS: [u64; 4] = [0x250, 0x270, 0x8400, 0x8408];
-const P_THROTTLER: u64 = 0x8b30;
-pub const T8112_OFFSET: u64 = 0x40000;
 #[derive(Debug, Clone)]
 pub struct Cpm {
     performance: bool,
@@ -36,12 +35,7 @@ impl Cpm {
         }
     }
     pub fn offsets(&self) -> Vec<u64> {
-        let mut offsets = THROTTLERS.to_vec();
-        offsets.push(RESTORE);
-        if self.performance {
-            offsets.push(P_THROTTLER);
-        }
-        offsets
+        stela_soc_data::cpm::offsets(self.performance)
     }
     #[cfg(test)]
     pub fn restored(&self) -> bool {

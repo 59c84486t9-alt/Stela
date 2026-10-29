@@ -18,7 +18,7 @@
 use crate::apple_device_tree::DeviceTree;
 use alloc::vec::Vec;
 use anyhow::{Result, ensure};
-use stela_runtime::machine::apple::nor::{self, Image, nvram};
+use stela_soc_data::nor::{Image, nvram};
 
 const CHOSEN: &str = "/chosen";
 const PROXY: &str = "nvram-proxy-data";
@@ -53,7 +53,7 @@ pub fn publish(tree: &mut DeviceTree) -> Result<bool> {
         "NVRAM proxy slot is empty, not a template reservation"
     );
     if let Some(spinor) = tree.node(SPINOR) {
-        let assigned_ranges: Vec<u8> = [0u32, 0, nor::CAPACITY as u32]
+        let assigned_ranges: Vec<u8> = [0u32, 0, stela_soc_data::nor::CAPACITY as u32]
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
@@ -68,9 +68,21 @@ pub fn publish(tree: &mut DeviceTree) -> Result<bool> {
             "unsupported SPI NOR address ranges"
         );
         for (name, template, assigned) in [
-            ("firmware", reg(TEMPLATE_FIRMWARE), reg(&nor::FIRMWARE)),
-            ("anvram", reg(TEMPLATE_ANVRAM), reg(&[nor::ANVRAM])),
-            ("syscfg", reg(TEMPLATE_SYSCFG), reg(&nor::SYSCFG)),
+            (
+                "firmware",
+                reg(TEMPLATE_FIRMWARE),
+                reg(&stela_soc_data::nor::FIRMWARE),
+            ),
+            (
+                "anvram",
+                reg(TEMPLATE_ANVRAM),
+                reg(&[stela_soc_data::nor::ANVRAM]),
+            ),
+            (
+                "syscfg",
+                reg(TEMPLATE_SYSCFG),
+                reg(&stela_soc_data::nor::SYSCFG),
+            ),
         ] {
             let path = alloc::format!("{SPINOR}/{name}");
             let node = tree
@@ -85,9 +97,9 @@ pub fn publish(tree: &mut DeviceTree) -> Result<bool> {
         }
         tree.set_property(SPINOR, "ranges", assigned_ranges)?;
         for (name, value) in [
-            ("firmware", reg(&nor::FIRMWARE)),
-            ("anvram", reg(&[nor::ANVRAM])),
-            ("syscfg", reg(&nor::SYSCFG)),
+            ("firmware", reg(&stela_soc_data::nor::FIRMWARE)),
+            ("anvram", reg(&[stela_soc_data::nor::ANVRAM])),
+            ("syscfg", reg(&stela_soc_data::nor::SYSCFG)),
         ] {
             tree.set_property(&alloc::format!("{SPINOR}/{name}"), "reg", value)?;
         }
@@ -155,7 +167,7 @@ mod tests {
         assert!(publish(&mut tree).unwrap());
         assert_eq!(
             tree.property(SPINOR, "ranges").unwrap().value,
-            [0u32, 0, nor::CAPACITY as u32]
+            [0u32, 0, stela_soc_data::nor::CAPACITY as u32]
                 .into_iter()
                 .flat_map(u32::to_le_bytes)
                 .collect::<Vec<_>>()
@@ -164,19 +176,19 @@ mod tests {
             tree.property(&alloc::format!("{SPINOR}/anvram"), "reg")
                 .unwrap()
                 .value,
-            reg(&[nor::ANVRAM])
+            reg(&[stela_soc_data::nor::ANVRAM])
         );
         assert_eq!(
             tree.property(&alloc::format!("{SPINOR}/firmware"), "reg")
                 .unwrap()
                 .value,
-            reg(&nor::FIRMWARE)
+            reg(&stela_soc_data::nor::FIRMWARE)
         );
         assert_eq!(
             tree.property(&alloc::format!("{SPINOR}/syscfg"), "reg")
                 .unwrap()
                 .value,
-            reg(&nor::SYSCFG)
+            reg(&stela_soc_data::nor::SYSCFG)
         );
         tree.set_property(&alloc::format!("{SPINOR}/syscfg"), "reg", vec![0; 8])
             .unwrap();

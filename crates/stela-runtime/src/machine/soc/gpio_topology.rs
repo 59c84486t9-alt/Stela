@@ -1,15 +1,21 @@
 //! DeviceTree placement and validation for gpio topology.
+use super::GPIO;
+use super::GPIO_FUNCTION;
+use super::GPIO_S5L;
+use super::GPIO_T6000;
+use super::Node;
+use super::String;
+use super::Vec;
+use super::format;
+use super::single_range;
 use super::spmi_topology::cells_of;
-use super::{
-    GPIO, GPIO_FUNCTION, GPIO_S5L, GPIO_T6000, Node, String, Vec, format, gpio, single_range,
-};
 
 /// Compatible identifies register semantics, while role bounds the qualified
 /// board owner. Only the AP S5L bank is admitted: auxiliary restoration,
 /// wake groups and nets remain explicit unqualified board dependencies.
 pub(super) fn gpio_profile<'a>(
     property: impl Fn(&str) -> Option<&'a [u8]>,
-) -> Option<gpio::Profile> {
+) -> Option<stela_soc_data::gpio::Profile> {
     let compatibles = property("compatible")?;
     let has = |name: &str| {
         compatibles
@@ -17,9 +23,9 @@ pub(super) fn gpio_profile<'a>(
             .any(|c| c == name.as_bytes())
     };
     match (has(GPIO), has(GPIO_T6000), has(GPIO_S5L)) {
-        (true, false, false) => Some(gpio::Profile::T8101),
+        (true, false, false) => Some(stela_soc_data::gpio::Profile::T8101),
         (false, true, true) if property("role") == Some(b"AP\0".as_slice()) => {
-            Some(gpio::Profile::S5l8960x)
+            Some(stela_soc_data::gpio::Profile::S5l8960x)
         }
         _ => None,
     }
@@ -30,7 +36,7 @@ pub(super) fn gpio_profile<'a>(
 /// pulled-up I2C lines in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpioBank {
-    pub profile: gpio::Profile,
+    pub profile: stela_soc_data::gpio::Profile,
     /// Original software restoration exclusions. The device model does not
     /// restore pads or implement global 0xc48/wake from this metadata.
     pub no_restore_pins: Vec<u32>,
@@ -139,7 +145,7 @@ const GPIO_IRQ_BASE: u64 = 0x800;
 const GPIO_IRQ_STRIDE: u64 = 0x40;
 
 /// A `gpio,t8101` node's registers, pins, groups and AIC lines: up to
-/// [`gpio::GROUPS`] interrupt groups, the first of which have the node's
+/// [`stela_soc_data::gpio::GROUPS`] interrupt groups, the first of which have the node's
 /// `interrupts` as their lines.
 fn gpio_geometry(
     node: &Node<'_>,
@@ -161,7 +167,7 @@ fn gpio_geometry(
         .collect::<Result<Vec<_>, _>>()?;
     if pins == 0
         || pins > GPIO_PINS
-        || !(1..=gpio::GROUPS as u32).contains(&groups)
+        || !(1..=stela_soc_data::gpio::GROUPS as u32).contains(&groups)
         || lines.is_empty()
         || lines.len() > groups as usize
         || node.first_u32("interrupt-parent") != Some(aic)
@@ -188,7 +194,7 @@ fn gpio_geometry(
         }
         Some(_) => return Err("GPIO restoration exclusions have incomplete cells".into()),
     };
-    if profile == gpio::Profile::S5l8960x
+    if profile == stela_soc_data::gpio::Profile::S5l8960x
         && [
             "no-resume-restore",
             "supported-int-groups",
@@ -320,7 +326,7 @@ mod tests {
             130,
         )
         .unwrap();
-        assert_eq!(bank.profile, gpio::Profile::S5l8960x);
+        assert_eq!(bank.profile, stela_soc_data::gpio::Profile::S5l8960x);
         assert_eq!(bank.physical, 0x39b028000);
         assert_eq!(bank.no_restore_pins, [114, 115, 119]);
         for values in [vec![114u32, 114], vec![255], vec![u32::MAX]] {

@@ -141,7 +141,7 @@ fn is_dart(node: &Node) -> bool {
 }
 
 fn modeled_dart(node: &Node) -> bool {
-    use stela_runtime::machine::apple::DartProfile as Profile;
+    use stela_soc_data::dart::Profile;
     let Some(profile) = node
         .property(COMPATIBLE)
         .and_then(|property| Profile::from_compatible(&property.value))

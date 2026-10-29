@@ -3,8 +3,6 @@
 use crate::machine::soc::DirectMemoryCache;
 use crate::machine::soc::MemoryController;
 use crate::platform::apple::amcc::Amcc;
-use crate::platform::apple::amcc::Layout;
-use crate::platform::apple::amcc::Register;
 use crate::platform::apple::mcc::Configuration;
 use crate::platform::apple::mcc::Controller;
 use crate::platform::apple::ptd::Ptd;
@@ -18,12 +16,14 @@ use stela_contracts::bus::MmioError;
 use stela_contracts::bus::Width;
 use stela_contracts::bus::refuse;
 use stela_contracts::interrupt::Wire;
+use stela_soc_data::amcc::Layout;
+use stela_soc_data::amcc::Register;
 
 // The mount configures these actual resources; it must be able to name their
 // typed configuration, lifecycle and original register/publication geometry.
 pub use crate::platform::apple::amcc;
 pub use crate::platform::apple::mcc;
-pub use crate::platform::apple::ptd;
+
 pub use stela_contracts::bus::LifecycleState;
 
 mod canonical;
@@ -51,7 +51,7 @@ impl Prepared {
     pub fn new(
         descriptor: DirectMemoryCache,
         locks: &MemoryController,
-        programmed: amcc::Programmed,
+        programmed: stela_soc_data::amcc::Programmed,
         configuration: Configuration,
         lifecycle: LifecycleState,
         ptd_bindings: [Option<Wire>; 16],
@@ -78,7 +78,7 @@ impl Prepared {
     pub fn new_local(
         descriptor: DirectMemoryCache,
         locks: &MemoryController,
-        programmed: amcc::Programmed,
+        programmed: stela_soc_data::amcc::Programmed,
         configuration: Configuration,
         lifecycle: LifecycleState,
     ) -> Result<(Self, LocalNotifications), &'static str> {
@@ -104,7 +104,7 @@ impl Prepared {
     fn prepare_router(
         descriptor: &DirectMemoryCache,
         locks: &MemoryController,
-        programmed: amcc::Programmed,
+        programmed: stela_soc_data::amcc::Programmed,
         configuration: Configuration,
         lifecycle: LifecycleState,
     ) -> Result<Router, &'static str> {
@@ -142,7 +142,7 @@ impl Prepared {
     pub fn descriptor(&self) -> &DirectMemoryCache {
         &self.descriptor
     }
-    pub fn locked_regions(&self) -> amcc::Locked {
+    pub fn locked_regions(&self) -> stela_soc_data::amcc::Locked {
         self.router.locks.locked_regions()
     }
     /// Complete aperture bindings, not a permission to publish them yet. One
@@ -288,7 +288,7 @@ struct Router {
 impl Router {
     fn new(
         mut layout: Layout,
-        programmed: amcc::Programmed,
+        programmed: stela_soc_data::amcc::Programmed,
         controller: Controller,
         apertures: usize,
     ) -> Result<Self, &'static str> {
@@ -447,12 +447,12 @@ impl MmioDevice for Router {
 mod tests {
     use super::*;
     use crate::machine::soc::PtdBank;
-    use crate::platform::apple::amcc::LockGroup;
     use crate::platform::apple::mcc::RequestKind;
-    use crate::platform::apple::ptd;
+
     use alloc::{boxed::Box, vec};
     use stela_contracts::bus::Bus;
     use stela_contracts::interrupt::InterruptLatch;
+    use stela_soc_data::amcc::LockGroup;
 
     pub(super) fn prepared() -> Prepared {
         let reg = |offset, mask, value| Register {
@@ -489,7 +489,7 @@ mod tests {
             alternate_dram_configuration: 0xffff0000,
             ptd: PtdBank {
                 physical: 0x28e3c0000,
-                ranges: vec![ptd::Range {
+                ranges: vec![stela_soc_data::ptd::Range {
                     id: 1,
                     start: 0,
                     count: 2,
@@ -503,7 +503,7 @@ mod tests {
         Prepared::new(
             descriptor,
             &locks,
-            amcc::ctrr_a(Some((0x800004000, 0x4000))),
+            stela_soc_data::amcc::ctrr_a(Some((0x800004000, 0x4000))),
             Configuration {
                 dram: vec![[7; 4]; 2],
                 weights: [1; 32],
@@ -618,7 +618,7 @@ mod tests {
             &[0x400000000],
             layout,
             [None; 4],
-            Some(crate::platform::apple::amcc::Cache {
+            Some(stela_soc_data::amcc::Cache {
                 shared: (0x100000, 0x80000),
                 broadcast: 0xf00000,
                 bytes: 8 << 20,
@@ -717,7 +717,7 @@ mod tests {
             (offset, 4),
             (offset + 8, 8),
             (offset + 384 * 16, 8),
-            (offset + ptd::UPDATE_OFFSET, 8),
+            (offset + stela_soc_data::ptd::UPDATE_OFFSET, 8),
             (0, 8),
         ] {
             assert_eq!(owner.paired_entry(offset, bytes), None);
@@ -791,7 +791,7 @@ mod tests {
             .unwrap();
         owner
             .write(
-                base + ptd::UPDATE_OFFSET,
+                base + stela_soc_data::ptd::UPDATE_OFFSET,
                 Width::Double,
                 0x1234,
                 &mut access,

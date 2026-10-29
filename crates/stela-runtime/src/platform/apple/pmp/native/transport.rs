@@ -2,9 +2,9 @@
 use super::{Error, Operation, Packets, Value};
 use alloc::vec::Vec;
 use {
-    crate::platform::apple::ptd::Range, crate::platform::apple::ptd::UPDATE_OFFSET,
     crate::platform::apple::ptd::transport::notifications::LocalNotifications,
     stela_contracts::bus::Access, stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,
+    stela_soc_data::ptd::Range, stela_soc_data::ptd::UPDATE_OFFSET,
 };
 
 pub(super) fn publish(

@@ -147,10 +147,10 @@ mod tests {
     use super::*;
     use alloc::{vec, vec::Vec};
     use {
-        crate::platform::apple::dart::Profile, stela_contracts::bus::MmioDevice,
-        stela_contracts::bus::Width, stela_contracts::dma::Port,
+        stela_contracts::bus::MmioDevice, stela_contracts::bus::Width, stela_contracts::dma::Port,
         stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::AicInput,
         stela_contracts::interrupt::InterruptLatch, stela_contracts::interrupt::Wire,
+        stela_soc_data::dart::Profile,
     };
 
     const ROOT: u64 = 0x8_0000_0000;

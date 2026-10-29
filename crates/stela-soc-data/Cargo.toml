@@ -1,0 +1,17 @@
+[package]
+name = "stela-soc-data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["std"]
+std = ["stela-contracts/std", "stela-formats/std"]
+test-support = []
+
+[dependencies]
+stela-contracts = { path = "../stela-contracts", default-features = false }
+stela-formats = { path = "../stela-formats", default-features = false }

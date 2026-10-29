@@ -1,9 +1,20 @@
 //! DeviceTree placement and validation for power registers.
+use super::CpuCluster;
+use super::Identity;
+use super::Node;
+use super::PMGR2_ARCH;
+use super::SOCS;
+use super::String;
+use super::Vec;
+use super::WakeLayout;
+use super::apertures;
+use super::bridge;
+use super::cluster;
+use super::energy;
+use super::format;
+use super::fuse;
 use super::power_resources::PMGR_DEVICE;
-use super::{
-    CpuCluster, Identity, Node, PMGR2_ARCH, SOCS, String, Vec, WakeLayout, apertures, bridge,
-    cluster, cpm, cpustart, dpe, energy, format, fuse, power, wake,
-};
+use super::wake;
 use crate::platform::apple::pmgr::dvfs;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +37,7 @@ pub struct SocDpe {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PowerBank {
     pub physical: u64,
-    pub kind: power::Kind,
+    pub kind: stela_soc_data::power::Kind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,9 +310,9 @@ fn validate_clusters(reg: &[Option<(u64, u64)>], clusters: &[CpuCluster]) -> Res
     for cluster in clusters {
         let cpm_base = cluster
             .base
-            .checked_add(cpm::T8112_OFFSET)
+            .checked_add(stela_soc_data::cpm::T8112_OFFSET)
             .ok_or("CPM base overflows")?;
-        for offset in cpm::Cpm::new(cluster.counter_map).offsets() {
+        for offset in stela_soc_data::cpm::offsets(cluster.counter_map) {
             if !covered(cpm_base + offset, 8) {
                 return Err("PMGR reg does not cover a CPM power register".into());
             }
@@ -364,12 +375,12 @@ pub(super) fn cpu_start(
         .map(|pe| ((pe.mpidr >> 8) & 0xff) as u8 + 1)
         .max()
         .unwrap_or(0);
-    if offset + cpustart::bytes(clusters) > bytes {
+    if offset + stela_soc_data::cpustart::bytes(clusters) > bytes {
         return Err(format!(
             "/arm-io/{name} reg[0] does not hold the CPU start registers"
         ));
     }
-    let physical = translate(base + offset, cpustart::bytes(clusters))
+    let physical = translate(base + offset, stela_soc_data::cpustart::bytes(clusters))
         .ok_or_else(|| format!("/arm-io/{name} reg[0] is outside /arm-io ranges"))?;
     Ok(Some((physical, clusters)))
 }
@@ -487,9 +498,9 @@ fn place_soc_dpe(
         let offset = address
             .checked_sub(physical)
             .ok_or("SOC DPE sample below its reg bank")?;
-        samples.push((offset, dpe::RESTORE.contains(&offset)));
+        samples.push((offset, stela_soc_data::dpe::RESTORE.contains(&offset)));
     }
-    let model = dpe::Dpe::new(&samples).map_err(String::from)?;
+    let model = stela_soc_data::dpe::Layout::new(&samples).map_err(String::from)?;
     for (o, n) in model.spans() {
         if o.checked_add(n).is_none_or(|end| end > bytes) || physical.checked_add(o + n).is_none() {
             return Err("SOC DPE register outside its DT bank".into());
@@ -502,7 +513,7 @@ fn place_soc_dpe(
 /// word against the selected range rather than claiming a broad PMGR bank.
 fn place_power_banks(
     reg: &[Option<(u64, u64)>],
-    layouts: &[(usize, power::Kind)],
+    layouts: &[(usize, stela_soc_data::power::Kind)],
 ) -> Result<Vec<PowerBank>, String> {
     layouts
         .iter()
@@ -992,11 +1003,11 @@ mod tests {
     #[test]
     fn soc_power_roles_use_dt_ranges_and_refuse_short_or_overflowed_ranges() {
         let kinds = [
-            power::Kind::Volman,
-            power::Kind::Marker,
-            power::Kind::Gpce,
-            power::Kind::Gating,
-            power::Kind::Tvm,
+            stela_soc_data::power::Kind::Volman,
+            stela_soc_data::power::Kind::Marker,
+            stela_soc_data::power::Kind::Gpce,
+            stela_soc_data::power::Kind::Gating,
+            stela_soc_data::power::Kind::Tvm,
         ];
         for kind in kinds {
             let reg = [None, Some((0x5_0000_0000, 0x20000))];

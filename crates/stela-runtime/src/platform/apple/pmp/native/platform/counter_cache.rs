@@ -11,9 +11,8 @@ use super::{ingestion, owner::Completion};
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::{Cell, RefCell};
 use {
-    crate::platform::apple::ptd::Range,
     crate::platform::apple::ptd::transport::notifications::LocalNotifications,
-    stela_contracts::bus::Access,
+    stela_contracts::bus::Access, stela_soc_data::ptd::Range,
 };
 
 type Error = &'static str;

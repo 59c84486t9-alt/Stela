@@ -3,9 +3,8 @@ use super::{Error, transport};
 use alloc::rc::Rc;
 use core::cell::Cell;
 use {
-    crate::platform::apple::ptd::Range,
     crate::platform::apple::ptd::transport::notifications::LocalNotifications,
-    stela_contracts::bus::Access,
+    stela_contracts::bus::Access, stela_soc_data::ptd::Range,
 };
 
 /// Bounded native publisher capability. A later startup creates a new epoch;

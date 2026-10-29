@@ -5,19 +5,23 @@
 //! clock/power arrays. PMP ASC gates0x49/0x4a belong to its separate owner.
 //! Parent provider recipes, absent arrays and caller booleans are never
 //! controller/PMP/cache completion. Full source PowerStates remain retained.
-use super::{Configuration, MemoryController, Prepared, T6020Memory, amcc, validate_ram};
+use super::Configuration;
+use super::MemoryController;
+use super::Prepared;
+use super::T6020Memory;
+use super::validate_ram;
 use crate::machine::apple::AppleDevices;
 use crate::machine::soc::PowerOwner;
 use crate::machine::soc::PowerStates;
 use crate::platform::apple::pmgr;
 use crate::platform::apple::pmgr::Pmgr;
-use crate::platform::apple::pmgr::coverage;
-use crate::platform::apple::pmgr::coverage::Consumer;
-use crate::platform::apple::pmgr::coverage::LifecycleSinks;
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 use stela_contracts::bus::LifecycleState;
 use stela_contracts::bus::Width;
 use stela_engine::memory::RegisteredSystemRam;
+use stela_soc_data::pmgr::coverage;
+use stela_soc_data::pmgr::coverage::Consumer;
+use stela_soc_data::pmgr::coverage::LifecycleSinks;
 
 /// Private inputs retain actual source identities. Construction supplies no
 /// lifecycle status, native topology, firmware PTD service or cache grant.
@@ -29,7 +33,7 @@ pub struct Plan {
     domains: Vec<u64>,
     ram: Arc<RegisteredSystemRam>,
     generation: u64,
-    programmed: amcc::Programmed,
+    programmed: stela_soc_data::amcc::Programmed,
     configuration: Configuration,
 }
 
@@ -42,7 +46,7 @@ impl Plan {
         descriptor: &T6020Memory,
         power: &PowerStates,
         ram: &Arc<RegisteredSystemRam>,
-        programmed: amcc::Programmed,
+        programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
     ) -> Result<Self, String> {
         descriptor.validate(controller).map_err(String::from)?;
@@ -332,7 +336,7 @@ fn contains(descriptor: &T6020Memory, address: u64) -> bool {
         .iter()
         .any(|&start| address >= start && address - start < super::t6020::APERTURE_BYTES)
         || address >= descriptor.ptd.physical
-            && address - descriptor.ptd.physical < super::ptd::PTD_BYTES
+            && address - descriptor.ptd.physical < stela_soc_data::ptd::PTD_BYTES
         || address >= descriptor.auxiliary.0
             && address - descriptor.auxiliary.0 < descriptor.auxiliary.1
 }
@@ -343,11 +347,9 @@ mod tests {
     use alloc::boxed::Box;
     use {
         crate::machine::soc::ClockRole, crate::machine::soc::PowerResource,
-        crate::platform::apple::pmgr::PowerState,
-        crate::platform::apple::pmgr::coverage::Admission,
-        crate::platform::apple::pmgr::coverage::Domain,
-        crate::platform::apple::pmgr::coverage::DomainId, stela_contracts::bus::Access,
-        stela_contracts::interrupt::InterruptLatch,
+        crate::platform::apple::pmgr::PowerState, stela_contracts::bus::Access,
+        stela_contracts::interrupt::InterruptLatch, stela_soc_data::pmgr::coverage::Admission,
+        stela_soc_data::pmgr::coverage::Domain, stela_soc_data::pmgr::coverage::DomainId,
     };
     const SUPPLY: u64 = 0x1000;
     fn id(device: u16) -> DomainId {

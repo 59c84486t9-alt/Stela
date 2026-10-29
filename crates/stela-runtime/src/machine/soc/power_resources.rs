@@ -7,11 +7,13 @@
 //! Source PMGR provider gate-index metadata remains inventoried separately from
 //! the consumer dependencies its IOService start actually activates.
 use super::{IOMMU_MAPPER, Node, PMGR2_ARCH, PMGR2_IMPLEMENTATION, SOCS, name_of};
-use crate::platform::apple::{
-    dart::Profile,
-    pmgr::coverage::{self, Admission, Consumer, Domain, DomainId, LifecycleSinks},
-};
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
+use {
+    stela_soc_data::dart::Profile, stela_soc_data::pmgr::coverage,
+    stela_soc_data::pmgr::coverage::Admission, stela_soc_data::pmgr::coverage::Consumer,
+    stela_soc_data::pmgr::coverage::Domain, stela_soc_data::pmgr::coverage::DomainId,
+    stela_soc_data::pmgr::coverage::LifecycleSinks,
+};
 
 pub(super) mod bridges;
 mod clock_role;

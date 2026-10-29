@@ -38,7 +38,9 @@ impl Aic2DieLayout {
         })
     }
 
-    pub(super) fn banks(self) -> [u64; 6] {
+    /// Register-array bases in IRQ/configuration, software-set/clear,
+    /// mask-set/clear and hardware-state order.
+    pub fn banks(self) -> [u64; 6] {
         [
             self.irq_config,
             self.software_set,
@@ -84,7 +86,7 @@ impl Aic2Layout {
         })
     }
 
-    pub(super) fn validate(&self, config: &Aic2Config) -> Result<u64, &'static str> {
+    pub fn validate(&self, config: &Aic2Config) -> Result<u64, &'static str> {
         if self.dies.is_empty()
             || self.dies.len() > usize::from(self.max_dies)
             || self.max_dies > 15

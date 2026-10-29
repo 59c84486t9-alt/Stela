@@ -31,8 +31,8 @@ use stela_loader::{boot_selection, mount_interface, recovery};
 use {
     stela_formats::apfs, stela_formats::apfs::Container,
     stela_formats::apfs::volume::APFS_VOL_ROLE_UPDATE, stela_formats::payload::ReadAt,
-    stela_formats::preboot, stela_runtime::machine::apple::nor::CAPACITY,
-    stela_runtime::machine::apple::sep_state,
+    stela_formats::preboot, stela_runtime::machine::apple::sep_state,
+    stela_soc_data::nor::CAPACITY,
 };
 
 /// A host partition as an APFS source.

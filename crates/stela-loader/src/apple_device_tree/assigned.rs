@@ -25,8 +25,9 @@ use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
 use stela_runtime::machine::soc::assigned::{
-    CacheId, DomainId, GuestSlotId, InterruptId, Plan, PlanIdentity, StartId,
+    CacheId, GuestSlotId, InterruptId, Plan, PlanIdentity, StartId,
 };
+use stela_soc_data::pmgr::coverage::DomainId;
 mod cpu_ids;
 pub use cpu_ids::{CpuIdMapping, CpuIdRecipe, WatchdogProjection};
 

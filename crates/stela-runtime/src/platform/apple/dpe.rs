@@ -19,15 +19,18 @@
 //! native-bank hook does not establish its implicit PMGR domain association.
 use super::regfile::Held;
 use alloc::{collections::BTreeMap, vec::Vec};
+#[cfg(test)]
+use stela_soc_data::dpe::CONTROLS;
+#[cfg(test)]
+use stela_soc_data::dpe::ENGINES;
+#[cfg(test)]
+use stela_soc_data::dpe::RESTORE;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
     stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
 };
 const NAME: &str = "soc-dpe";
-pub const ENGINES: [u64; 6] = [0x2400, 0x2800, 0x2c00, 0x3000, 0x3400, 0x3800];
-pub const CONTROLS: [u64; 3] = [0, 0x200, 0x300];
-pub const RESTORE: [u64; 3] = [0x2708, 0x2b08, 0x3308];
 #[derive(Debug, Clone)]
 pub struct Dpe {
     lifecycle: LifecycleState,
@@ -37,29 +40,12 @@ pub struct Dpe {
 }
 impl Dpe {
     pub fn new(samples: &[(u64, bool)]) -> Result<Self, &'static str> {
-        let controls: Vec<u64> = ENGINES
-            .iter()
-            .flat_map(|e| CONTROLS.map(|c| e + c))
+        let layout = stela_soc_data::dpe::Layout::new(samples)?;
+        let controls = stela_soc_data::dpe::Layout::controls().collect();
+        let counts = layout
+            .samples()
+            .map(|(offset, restore)| (offset, (0, restore)))
             .collect();
-        let mut counts = BTreeMap::new();
-        for &(offset, restore) in samples {
-            if !offset.is_multiple_of(8)
-                || offset.checked_add(8).is_none()
-                || controls.iter().any(|&c| (offset..offset + 8).contains(&c))
-                || counts.insert(offset, (0, restore)).is_some()
-            {
-                return Err("invalid or duplicate SOC DPE sample offset");
-            }
-        }
-        // Reporting records and RegGroup save slots are distinct address
-        // sources. The DT's AVE/MSR/DCS/DRAM samples are +2f08/+3308/
-        // +3708/+3b08; restore also owns +2708 and +2b08 independently.
-        for offset in RESTORE {
-            counts
-                .entry(offset)
-                .and_modify(|sample| sample.1 = true)
-                .or_insert((0, true));
-        }
         Ok(Self {
             lifecycle: LifecycleState {
                 powered: true,

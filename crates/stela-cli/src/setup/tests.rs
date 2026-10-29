@@ -3,7 +3,7 @@ use super::*;
 use host::{Cpu, Disk, Partition, PartitionInfo, Volume};
 use std::collections::BTreeMap;
 use stela_loader::mount_interface::Choices;
-use stela_runtime::machine::apple::nor::nvram::Variables;
+use stela_soc_data::nor::nvram::Variables;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -900,8 +900,8 @@ fn partition_bytes(f: &Fixture, identifier: &str) -> Vec<u8> {
 }
 
 fn nvram_of(f: &Fixture, nor: &str) -> Variables {
-    let bytes = partition_bytes(f, nor)[..stela_runtime::machine::apple::nor::CAPACITY].to_vec();
-    let image = stela_runtime::machine::apple::nor::Image::from_bytes(bytes).unwrap();
+    let bytes = partition_bytes(f, nor)[..stela_soc_data::nor::CAPACITY].to_vec();
+    let image = stela_soc_data::nor::Image::from_bytes(bytes).unwrap();
     Variables::parse(image.bank(image.current_bank().unwrap()).unwrap()).unwrap()
 }
 
@@ -1328,7 +1328,7 @@ fn installed_disk_preserves_boot_choices_and_partitions() {
     // stela.efi routes a disk without an installed system to the disk's
     // System Recovery, and refuses one that holds none.
     let mut selection = stela_loader::boot_selection::select(
-        &Variables::parse(&stela_runtime::machine::apple::nor::nvram::empty_bank()).unwrap(),
+        &Variables::parse(&stela_soc_data::nor::nvram::empty_bank()).unwrap(),
     )
     .unwrap();
     selection.missing_boot_media();
@@ -1534,7 +1534,7 @@ fn installed_disks_that_would_lose_data_or_cannot_boot_are_refused() {
     // flag blanks it and keeps the NOR image.
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
-    let capacity = stela_runtime::machine::apple::nor::CAPACITY;
+    let capacity = stela_soc_data::nor::CAPACITY;
     let path = f.host.partitions[NOR].1.clone();
     let mut image = fs::read(&path).unwrap();
     image[capacity..capacity + 8].copy_from_slice(b"not SEP!");
@@ -1584,7 +1584,7 @@ fn installed_disks_that_would_lose_data_or_cannot_boot_are_refused() {
 
 /// A SEP roots record, as the SEP model provisions one.
 fn provision_sep(f: &Fixture, nor: &str) {
-    let capacity = stela_runtime::machine::apple::nor::CAPACITY;
+    let capacity = stela_soc_data::nor::CAPACITY;
     let path = f.host.partitions[nor].1.clone();
     let mut image = fs::read(&path).unwrap();
     let mut record = vec![0u8; 8 + 2 * 32];
@@ -2577,7 +2577,7 @@ fn machine_state_roundtrip_requires_identity() {
     setup(&environment(&f.host), installed_command(&f)).unwrap();
     provision_sep(&f, NOR);
     rerun(&f, |c| c.action = Action::NextBoot(NextBoot::Recovery)).unwrap();
-    let capacity = stela_runtime::machine::apple::nor::CAPACITY;
+    let capacity = stela_soc_data::nor::CAPACITY;
     let sep = |f: &Fixture| partition_bytes(f, NOR)[capacity..].to_vec();
     let sep_before = sep(&f);
 
@@ -2790,17 +2790,15 @@ fn split_command(f: &Fixture) -> Request {
 
 /// The region's machine state: its NOR image and SEP area.
 fn state_of(f: &Fixture, identifier: &str) -> Vec<u8> {
-    let bytes = stela_runtime::machine::apple::nor::CAPACITY
-        + stela_runtime::machine::apple::sep_state::BYTES as usize;
+    let bytes =
+        stela_soc_data::nor::CAPACITY + stela_runtime::machine::apple::sep_state::BYTES as usize;
     f.host.read(identifier, tail(), bytes).unwrap()
 }
 
 fn tail_nvram(f: &Fixture) -> Variables {
-    let capacity = stela_runtime::machine::apple::nor::CAPACITY;
-    let image = stela_runtime::machine::apple::nor::Image::from_bytes(
-        state_of(f, REGION)[..capacity].to_vec(),
-    )
-    .unwrap();
+    let capacity = stela_soc_data::nor::CAPACITY;
+    let image =
+        stela_soc_data::nor::Image::from_bytes(state_of(f, REGION)[..capacity].to_vec()).unwrap();
     Variables::parse(image.bank(image.current_bank().unwrap()).unwrap()).unwrap()
 }
 
@@ -2822,7 +2820,7 @@ fn guest_gpt(backup: u64) -> Vec<u8> {
 
 #[test]
 fn machine_state_tail_stays_outside_guest_region() {
-    use stela_runtime::machine::apple::nor::CAPACITY;
+    use stela_soc_data::nor::CAPACITY;
     let mut f = fixture(64 * GIB, false);
     add_split_disk(&mut f, false, &[]);
     let mut dry = split_command(&f);

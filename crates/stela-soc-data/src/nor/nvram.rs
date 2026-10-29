@@ -78,8 +78,8 @@ pub fn generation(bank: &[u8]) -> u32 {
 }
 
 /// An empty bank of generation `generation`, for tests.
-#[cfg(test)]
-pub(crate) fn empty_bank_of(generation: u32) -> Vec<u8> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn empty_bank_of(generation: u32) -> Vec<u8> {
     let mut bank = empty_bank();
     bank[20..24].copy_from_slice(&generation.to_le_bytes());
     let sum = adler(&bank[20..]);

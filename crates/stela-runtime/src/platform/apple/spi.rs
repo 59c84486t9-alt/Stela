@@ -22,11 +22,11 @@
 //! the internal CS output is then disconnected from the attached device.
 use alloc::{collections::VecDeque, vec::Vec};
 use {
-    super::nor::Image, super::nor::Nor, stela_contracts::bus::Access,
-    stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
-    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
-    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
-    stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire,
+    super::nor::Nor, stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse, stela_contracts::interrupt::AicInput,
+    stela_contracts::interrupt::Wire, stela_soc_data::nor::Image,
 };
 
 pub const BYTES: u64 = 0x4000;
@@ -627,7 +627,7 @@ mod tests {
     }
     #[test]
     fn long_read_stalls_at_fifo_capacity_and_interrupt_clears_after_drain() {
-        use super::super::nor::CAPACITY;
+        use stela_soc_data::nor::CAPACITY;
         let image = Image::from_bytes((0..CAPACITY).map(|i| i as u8).collect()).unwrap();
         let irq = AicInput::new(0, 749);
         let mut spi = Spi::new(image, irq, false);

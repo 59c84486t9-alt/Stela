@@ -68,16 +68,16 @@ use stela_engine::machine::registers::encodings::DCZID_EL0;
 use stela_engine::machine::system::Register;
 use stela_loader::{apple_device_tree::DeviceTree, boot_bundle, installed};
 use stela_runtime::machine::apple::AicInput;
-use stela_runtime::machine::apple::AicLayout;
 use stela_runtime::machine::apple::AppleDevices;
 use stela_runtime::machine::apple::ConsoleBusy;
 use stela_runtime::machine::apple::ConsoleSink;
 use stela_runtime::machine::apple::Range;
-use stela_runtime::machine::apple::WallClock;
 use stela_runtime::machine::mount;
 use stela_runtime::machine::soc;
 use stela_runtime::pc::{gpt::Guid, storage::Target};
 use stela_runtime::restore::store::Verify;
+use stela_soc_data::aic::AicLayout;
+use stela_soc_data::pmu::WallClock;
 
 /// The most of the engine heap (at least 512 MiB) `--storage-ram` may
 /// take for written blocks; a restore or recovery boot writes far less.

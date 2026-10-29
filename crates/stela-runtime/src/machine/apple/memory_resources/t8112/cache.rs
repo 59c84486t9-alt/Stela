@@ -22,7 +22,6 @@ use super::amcc::{BROADCAST, LOCK_REGISTERS, LockResource, MMIO_BYTES, Placement
 use crate::platform::apple::pmp::native::cache::publisher;
 mod native;
 use crate::machine::soc::MemoryController;
-use crate::platform::apple::amcc::Locked;
 use alloc::{collections::BTreeMap, sync::Arc};
 pub use native::QuotaView;
 use stela_contracts::bus::Access;
@@ -36,6 +35,7 @@ use stela_contracts::bus::refuse;
 use stela_engine::machine::engine::CanonicalDeviceMemory;
 use stela_engine::memory::CanonicalRamService;
 use stela_engine::memory::RegisteredSystemRam;
+use stela_soc_data::amcc::Locked;
 
 const PLANES: usize = 4;
 const STATUS: u64 = 0x424;

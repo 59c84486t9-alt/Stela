@@ -31,6 +31,8 @@ fn main() {
             "../stela-formats/src",
             "../stela-crypto/Cargo.toml",
             "../stela-crypto/src",
+            "../stela-soc-data/Cargo.toml",
+            "../stela-soc-data/src",
             "../stela-runtime/Cargo.toml",
             "../stela-runtime/src",
         ],

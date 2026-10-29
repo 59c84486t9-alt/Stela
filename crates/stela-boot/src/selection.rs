@@ -41,11 +41,10 @@ use {
     stela_formats::payload::PayloadError, stela_formats::payload::ReadAt,
     stela_formats::payload::gpt, stela_formats::payload::gpt::Disk,
     stela_formats::payload::gpt::Role, stela_formats::preboot,
-    stela_formats::preboot::PrebootError, stela_runtime::machine::apple::nor::CAPACITY,
-    stela_runtime::machine::apple::nor::Image, stela_runtime::machine::apple::nor::SECTOR_SIZE,
-    stela_runtime::machine::apple::nor::nvram::Variables,
-    stela_runtime::machine::apple::nor::nvram::empty_bank, stela_runtime::pc::machine_state,
-    stela_runtime::pc::storage::Target,
+    stela_formats::preboot::PrebootError, stela_runtime::pc::machine_state,
+    stela_runtime::pc::storage::Target, stela_soc_data::nor::CAPACITY, stela_soc_data::nor::Image,
+    stela_soc_data::nor::SECTOR_SIZE, stela_soc_data::nor::nvram::Variables,
+    stela_soc_data::nor::nvram::empty_bank,
 };
 
 /// One GPT partition, through its whole disk's block I/O.

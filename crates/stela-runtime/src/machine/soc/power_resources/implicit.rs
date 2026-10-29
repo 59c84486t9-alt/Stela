@@ -173,10 +173,13 @@ mod tests {
 
     use super::*;
     use crate::machine::soc::tests::flat_fixture_extent;
-    use crate::platform::apple::pmgr::coverage::{self, Admission, Consumer, LifecycleSinks};
     use alloc::vec;
     use {
         crate::machine::soc::power_resources::inventory_with_nodes, stela_contracts::adt::encode,
+    };
+    use {
+        stela_soc_data::pmgr::coverage, stela_soc_data::pmgr::coverage::Admission,
+        stela_soc_data::pmgr::coverage::Consumer, stela_soc_data::pmgr::coverage::LifecycleSinks,
     };
 
     fn bank(binding: Binding) -> Vec<u8> {
@@ -514,7 +517,7 @@ mod tests {
             .unwrap();
         for (index, binding) in T8112[1..].iter().enumerate() {
             let bank = GpioBank {
-                profile: crate::platform::apple::gpio::Profile::T8101,
+                profile: stela_soc_data::gpio::Profile::T8101,
                 no_restore_pins: alloc::vec::Vec::new(),
                 physical: binding.physical,
                 bytes: binding.bytes,

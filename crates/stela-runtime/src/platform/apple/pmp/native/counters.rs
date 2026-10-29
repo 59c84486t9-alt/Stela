@@ -12,9 +12,9 @@ use super::power::DeviceTable;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
 use {
-    crate::platform::apple::ptd::Range, crate::platform::apple::ptd::transport::Entry,
+    crate::platform::apple::ptd::transport::Entry,
     crate::platform::apple::ptd::transport::notifications::LocalNotifications,
-    stela_contracts::bus::Access,
+    stela_contracts::bus::Access, stela_soc_data::ptd::Range,
 };
 
 type Error = &'static str;
@@ -670,12 +670,12 @@ mod tests {
     use super::*;
     use alloc::vec;
     use {
-        crate::platform::apple::ptd::Geometry, crate::platform::apple::ptd::Ptd,
-        crate::platform::apple::ptd::UPDATE_OFFSET,
+        crate::platform::apple::ptd::Ptd,
         crate::platform::apple::ptd::transport::notifications::NativeProfile,
         stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState,
         stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,
-        stela_contracts::interrupt::InterruptLatch,
+        stela_contracts::interrupt::InterruptLatch, stela_soc_data::ptd::Geometry,
+        stela_soc_data::ptd::UPDATE_OFFSET,
     };
     const LIVE: LifecycleState = LifecycleState {
         powered: true,

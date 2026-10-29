@@ -194,10 +194,10 @@ const VERSION_2_2: u16 = 0x0202;
 const CAPTURE_COUNT: u64 = 0x18;
 const PENDING: u64 = 0x4000;
 const ERROR_MASK_2_2: u64 = 0x4060;
-const RECORDS: u64 = 0x8000;
-const RECORD: u64 = 0x40;
+use stela_soc_data::dart::T8110_RECORD as RECORD;
+use stela_soc_data::dart::T8110_RECORDS as RECORDS;
 /// The revision 2.2 register file, ending with the last stream's record.
-pub(super) const REGISTER_BYTES_2_2: u64 = RECORDS + 256 * RECORD;
+use stela_soc_data::dart::T8110_REGISTER_BYTES_2_2 as REGISTER_BYTES_2_2;
 /// Each walk fault's record class: an invalid entry at its table level, or a
 /// permission code, whose level field the decoder ignores.
 const CLASSES: [(Fault, Code, Level); 7] = [

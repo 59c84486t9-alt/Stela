@@ -6,8 +6,9 @@
 //! at two. MCC reg0 is the PTD bank, reg1 a separate auxiliary bank. These
 //! are not T6000 direct-aperture ordinals or its PMGR selector8 placement.
 use super::{MemoryController, PtdBank, publication_ranges, range_at, reg_pairs, scalar};
+use crate::platform::apple::mcc::t6020;
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
-use {crate::platform::apple::mcc::t6020, crate::platform::apple::ptd, stela_contracts::adt::Node};
+use stela_contracts::adt::Node;
 
 pub const COMPATIBLE: &str = "mcc,t6020";
 const PREFIX_REGISTERS: usize = 2;
@@ -51,7 +52,10 @@ impl T6020Memory {
     }
     fn validate_source(&self) -> Result<(), &'static str> {
         self.layout()?;
-        let geometry = ptd::Geometry::new((self.ptd.physical, ptd::PTD_BYTES), self.updates)?;
+        let geometry = stela_soc_data::ptd::Geometry::new(
+            (self.ptd.physical, stela_soc_data::ptd::PTD_BYTES),
+            self.updates,
+        )?;
         if geometry.entries() != self.entries
             || self.updates.1 != UPDATE_BYTES
             || self.auxiliary.1 != AUXILIARY_BYTES
@@ -62,7 +66,10 @@ impl T6020Memory {
         if self.ptd.ranges.len() != self.ptd.interrupts.len() || self.ptd.ranges.is_empty() {
             return Err("T602x PTD must retain every original range and IRQ-resource word");
         }
-        let mut physical = alloc::vec![(self.ptd.physical, ptd::PTD_BYTES), self.auxiliary];
+        let mut physical = alloc::vec![
+            (self.ptd.physical, stela_soc_data::ptd::PTD_BYTES),
+            self.auxiliary
+        ];
         physical.extend(self.apertures.iter().map(|&pa| (pa, t6020::APERTURE_BYTES)));
         for (index, &(start, bytes)) in physical.iter().enumerate() {
             let end = start
@@ -173,13 +180,14 @@ pub fn from_io(
         .ok_or("T602x MCC has no controller apertures after its two prefix banks")?;
     t6020::Layout::new(apertures).map_err(String::from)?;
     if scalar(&node, "pmp_ptd_reg_idx")? != 0
-        || scalar(&node, "pmp_ptd_update_space_offset")? != ptd::UPDATE_OFFSET as u32
+        || scalar(&node, "pmp_ptd_update_space_offset")?
+            != stela_soc_data::ptd::UPDATE_OFFSET as u32
     {
         return Err("T602x MCC PTD index/update alias is not its source profile".into());
     }
     let bank = range_at(&node, translate, 0)?;
     let auxiliary = range_at(&node, translate, 1)?;
-    if bank.1 != ptd::PTD_BYTES || auxiliary.1 != AUXILIARY_BYTES {
+    if bank.1 != stela_soc_data::ptd::PTD_BYTES || auxiliary.1 != AUXILIARY_BYTES {
         return Err("T602x MCC prefix banks have unqualified source extents".into());
     }
     let apertures = (PREFIX_REGISTERS..count)
@@ -199,7 +207,7 @@ pub fn from_io(
     let update_index = usize::try_from(scalar(&pmp, "ptd-update-reg-index")?)
         .map_err(|_| "T602x update register index overflows")?;
     let updates = range_at(&pmp, translate, update_index)?;
-    let geometry = ptd::Geometry::new(bank, updates).map_err(String::from)?;
+    let geometry = stela_soc_data::ptd::Geometry::new(bank, updates).map_err(String::from)?;
     if updates.1 != UPDATE_BYTES {
         return Err("T602x update alias has an unqualified physical capacity".into());
     }
@@ -252,8 +260,10 @@ mod tests {
             .collect()
     }
     fn fixture(apertures: usize, update_bytes: u64) -> Vec<u8> {
-        let mut registers =
-            alloc::vec![(0x8e3c0000, ptd::PTD_BYTES), (0x8e4d0000, AUXILIARY_BYTES)];
+        let mut registers = alloc::vec![
+            (0x8e3c0000, stela_soc_data::ptd::PTD_BYTES),
+            (0x8e4d0000, AUXILIARY_BYTES)
+        ];
         registers.extend(
             (0..apertures).map(|i| (i as u64 * t6020::APERTURE_BYTES, t6020::APERTURE_BYTES)),
         );

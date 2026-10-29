@@ -597,15 +597,17 @@ mod tests {
 
     #[test]
     fn real_gen1_fifo_retires_each_sram_chunk_and_does_not_consume_failed_tail() {
+        use crate::platform::apple::spmi::Spmi;
         use alloc::{boxed::Box, rc::Rc};
         use core::cell::RefCell;
-        use {
-            crate::platform::apple::spmi, crate::platform::apple::spmi::Spmi,
-            stela_contracts::bus::Access, stela_contracts::bus::Lifecycle,
-            stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
-            stela_contracts::bus::MmioError, stela_contracts::bus::Width,
-            stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch,
-        };
+        use stela_contracts::bus::Access;
+        use stela_contracts::bus::Lifecycle;
+        use stela_contracts::bus::LifecycleState;
+        use stela_contracts::bus::MmioDevice;
+        use stela_contracts::bus::MmioError;
+        use stela_contracts::bus::Width;
+        use stela_contracts::interrupt::AicInput;
+        use stela_contracts::interrupt::InterruptLatch;
         struct Observed(Rc<RefCell<Pmu>>);
         impl SpmiSlave for Observed {
             fn read(&mut self, address: u16, data: &mut [u8], now: u64) -> Result<(), SlaveError> {
@@ -619,7 +621,12 @@ mod tests {
         seek(&mut owner.borrow_mut(), 0, 0);
         let mut controller = Spmi::with_configuration(
             AicInput::new(0, 228),
-            spmi::Configuration::new(spmi::Profile::Gen1, 192, [256, 256]).unwrap(),
+            stela_soc_data::spmi::Configuration::new(
+                stela_soc_data::spmi::Profile::Gen1,
+                192,
+                [256, 256],
+            )
+            .unwrap(),
         );
         controller
             .attach(15, Box::new(Observed(owner.clone())))

@@ -29,7 +29,7 @@ mod bfh;
 mod commands;
 mod debug;
 mod die;
-mod geometry;
+
 mod host;
 mod namespace;
 mod prp;
@@ -44,11 +44,11 @@ use alloc::{
 pub use bfh::BootImage;
 #[cfg(test)]
 use bfh::Identity;
-pub use geometry::QueueGeometry;
-pub use namespace::Description;
 use namespace::Medium;
 use prp::dma_error;
 use stela_drivers::block::BlockDevice;
+use stela_soc_data::ans::Description;
+use stela_soc_data::ans::{NVMMU_CONTROL, QueueGeometry};
 use {crate::platform::apple::sart::Sart, stela_contracts::dma::Port};
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
@@ -322,7 +322,7 @@ impl Ans {
             aqa: 0,
             queues: [Queue::default(); 2],
             tcb_bases: [0; 2],
-            nvmmu_control: geometry::NVMMU_CONTROL,
+            nvmmu_control: NVMMU_CONTROL,
             valid: vec![false; geometry.tag_slots() as usize],
             pending: VecDeque::new(),
             inflight: BTreeMap::new(),
@@ -1016,9 +1016,7 @@ impl MmioDevice for Ans {
                 self.modesel = value
             }
             AUTO_QUEUE if value <= 1 => self.auto_queue = value != 0,
-            NVMMU_CONTROL_REG
-                if value == u32::from(geometry::NVMMU_CONTROL) && self.config & ENABLE == 0 =>
-            {
+            NVMMU_CONTROL_REG if value == u32::from(NVMMU_CONTROL) && self.config & ENABLE == 0 => {
                 self.nvmmu_control = value as u16
             }
             ADMIN_SUBMIT | IO_SUBMIT => self

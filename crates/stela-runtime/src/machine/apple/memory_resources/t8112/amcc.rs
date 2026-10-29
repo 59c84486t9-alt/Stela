@@ -9,9 +9,6 @@
 use super::Prepared;
 use crate::machine::soc::MemoryController;
 use crate::platform::apple::amcc::Amcc;
-use crate::platform::apple::amcc::Locked;
-use crate::platform::apple::amcc::Programmed;
-use crate::platform::apple::amcc::Register;
 use alloc::sync::Arc;
 use stela_contracts::bus::Access;
 use stela_contracts::bus::Direction;
@@ -23,6 +20,9 @@ use stela_contracts::bus::Width;
 use stela_contracts::bus::refuse;
 use stela_engine::memory::CanonicalRamService;
 use stela_engine::memory::RegisteredSystemRam;
+use stela_soc_data::amcc::Locked;
+use stela_soc_data::amcc::Programmed;
+use stela_soc_data::amcc::Register;
 
 const PLANES: u32 = 4;
 pub(super) const STRIDE: u64 = 0x40000;
@@ -120,7 +120,7 @@ impl LockResource {
             return Err("T8112 AMCC planes and DCS do not share their source physical placement");
         }
         let ptd = owner.descriptor.ptd.physical;
-        if physical < ptd + crate::platform::apple::ptd::PTD_BYTES && ptd < end {
+        if physical < ptd + stela_soc_data::ptd::PTD_BYTES && ptd < end {
             return Err("T8112 AMCC ownership overlaps the actual PTD bank");
         }
         for (start, _, bytes) in owner.ram.placements() {
@@ -283,13 +283,13 @@ impl MmioDevice for LockResource {
 pub(in crate::machine::apple) mod tests {
     use super::super::tests::{configuration, descriptor, ram_at};
     use super::*;
-    use crate::platform::apple::amcc::Layout;
-    use crate::platform::apple::amcc::LockGroup;
     use alloc::{boxed::Box, vec};
     use core::{cell::UnsafeCell, ptr::NonNull};
     use stela_contracts::interrupt::InterruptLatch;
     use stela_engine::memory::ReservedSystemRamRange;
     use stela_engine::memory::system_ram::fixture;
+    use stela_soc_data::amcc::Layout;
+    use stela_soc_data::amcc::LockGroup;
     const BASE: u64 = 0x200000000;
     const RAM: u64 = 0x800000000;
     const LIVE: LifecycleState = LifecycleState {

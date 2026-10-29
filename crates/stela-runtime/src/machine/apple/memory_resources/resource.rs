@@ -1,5 +1,7 @@
 //! Borrowed dispatch to the actual placed memory resource, never copied state.
-use super::{Prepared, amcc, t6020, t8112};
+use super::Prepared;
+use super::t6020;
+use super::t8112;
 use stela_contracts::bus::Access;
 use stela_contracts::bus::Bus;
 use stela_contracts::bus::DeviceId;
@@ -113,7 +115,7 @@ impl Resource<'_> {
             Self::T6020(_) => Err("T602x display PTD alias has no qualified source owner"),
         }
     }
-    pub(in crate::machine::apple) fn locked_regions(&self) -> Option<amcc::Locked> {
+    pub(in crate::machine::apple) fn locked_regions(&self) -> Option<stela_soc_data::amcc::Locked> {
         match self {
             Self::Direct(owner) => Some(owner.locked_regions()),
             Self::T8112(_) => None,

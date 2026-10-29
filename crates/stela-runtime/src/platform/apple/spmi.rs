@@ -68,8 +68,14 @@
 //! every generation but Gen2, command types outside the extended/scalar register
 //! and four payloadless forms, unqualified slave command effects, and request
 //! or response overflow refuse.
-mod config;
-pub use config::{Configuration, Profile};
+
+#[cfg(test)]
+use stela_soc_data::spmi::BANK_B;
+#[cfg(test)]
+use stela_soc_data::spmi::BANK_BYTES;
+#[cfg(test)]
+use stela_soc_data::spmi::BANK_C;
+use stela_soc_data::spmi::{Configuration, Profile};
 
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use {
@@ -79,12 +85,6 @@ use {
     stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire,
 };
 
-pub const BANK_BYTES: u64 = 0x4000;
-/// Bank B's device offset; the placement maps `reg[1]` here.
-pub const BANK_B: u64 = BANK_BYTES;
-/// The device offset of `reg[2]`: Gen1's independently mapped fault-counter
-/// view, or the Gen3 and Gen4 arbiter bank.
-pub const BANK_C: u64 = 2 * BANK_BYTES;
 const NAME: &str = "SPMI";
 const GROUPS: usize = 9;
 const LAST: u32 = 1 << 15;
@@ -1301,9 +1301,9 @@ mod tests {
     }
     #[test]
     fn pmu_output_edges_latch_local_vector_independently_of_mask_response_and_ack() {
-        use crate::platform::apple::{
-            counter::FREQUENCY_HZ,
-            pmu::{ClockOffset, Pmu, Rtc},
+        use {
+            crate::platform::apple::counter::FREQUENCY_HZ, crate::platform::apple::pmu::Pmu,
+            stela_soc_data::pmu::ClockOffset, stela_soc_data::pmu::Rtc,
         };
         let rtc = Rtc {
             upcount: 0x1406,
@@ -1385,9 +1385,10 @@ mod tests {
 
     #[test]
     fn autonomous_preflight_refusal_does_not_advance_any_peer() {
-        use crate::platform::apple::{
-            counter::FREQUENCY_HZ,
-            pmu::{ClockOffset, Pmu, RTC_HZ, Rtc},
+        use {
+            crate::platform::apple::counter::FREQUENCY_HZ, crate::platform::apple::pmu::Pmu,
+            crate::platform::apple::pmu::RTC_HZ, stela_soc_data::pmu::ClockOffset,
+            stela_soc_data::pmu::Rtc,
         };
         struct Peer(alloc::rc::Rc<core::cell::Cell<u32>>);
         impl SpmiSlave for Peer {
@@ -1436,7 +1437,10 @@ mod tests {
 
     #[test]
     fn routed_outputs_require_unique_real_deasserted_owners_and_valid_vectors() {
-        use crate::platform::apple::pmu::{ClockOffset, Pmu, Rtc};
+        use {
+            crate::platform::apple::pmu::Pmu, stela_soc_data::pmu::ClockOffset,
+            stela_soc_data::pmu::Rtc,
+        };
         let mut c = Spmi::with_configuration(
             AicInput::new(0, 1),
             Configuration::new(Profile::Gen1, 192, [256, 256]).unwrap(),
@@ -1475,9 +1479,9 @@ mod tests {
 
     #[test]
     fn actual_pmic_alarm_time_and_output_continue_while_spmi_master_clock_is_paused() {
-        use crate::platform::apple::{
-            counter::FREQUENCY_HZ,
-            pmu::{ClockOffset, Pmu, Rtc},
+        use {
+            crate::platform::apple::counter::FREQUENCY_HZ, crate::platform::apple::pmu::Pmu,
+            stela_soc_data::pmu::ClockOffset, stela_soc_data::pmu::Rtc,
         };
         let rtc = Rtc {
             upcount: 0xf802,

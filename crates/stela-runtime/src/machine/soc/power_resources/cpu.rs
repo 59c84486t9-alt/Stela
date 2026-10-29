@@ -7,12 +7,12 @@
 mod t6000;
 
 use super::records::{Layout, Record};
-use crate::platform::apple::pmgr::coverage::DomainId;
 use alloc::{collections::BTreeSet, vec::Vec};
 use stela_contracts::Chip;
 use stela_contracts::adt::Node;
 use stela_contracts::identity::Identity;
 use stela_engine::machine::engine::ProcessorTarget;
+use stela_soc_data::pmgr::coverage::DomainId;
 
 /// The existing board reader supplies these normalized views in original
 /// record order. This module reuses that reader's record parser to check the

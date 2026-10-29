@@ -1,8 +1,9 @@
 //! Direct T6000 MCC placement, qualified independently of T8112's PMP service.
 //! Descriptor parsing does not admit a native-memory completion capability.
 use super::{MemoryController, PTD_RANGE, PtdBank};
+use crate::platform::apple::mcc;
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
-use {crate::platform::apple::mcc, crate::platform::apple::ptd, stela_contracts::adt::Node};
+use stela_contracts::adt::Node;
 
 pub mod t6020;
 
@@ -38,14 +39,17 @@ impl DirectMemoryCache {
         {
             return Err("direct MCC descriptor does not match actual memory resources");
         }
-        let geometry = ptd::Geometry::new((self.ptd.physical, ptd::PTD_BYTES), self.ptd_updates)?;
+        let geometry = stela_soc_data::ptd::Geometry::new(
+            (self.ptd.physical, stela_soc_data::ptd::PTD_BYTES),
+            self.ptd_updates,
+        )?;
         if self.ptd_entries != geometry.entries() {
             return Err("PTD descriptor capacity differs from its actual bank/update geometry");
         }
         let ptd_end = self
             .ptd
             .physical
-            .checked_add(ptd::PTD_BYTES)
+            .checked_add(stela_soc_data::ptd::PTD_BYTES)
             .ok_or("PTD bank end overflows")?;
         let mut mapped = Vec::new();
         for &pa in &self.apertures {
@@ -135,8 +139,8 @@ fn ranges(
 pub(super) fn publication_ranges(
     records: &[u8],
     entries: usize,
-) -> Result<(Vec<ptd::Range>, Vec<u32>), String> {
-    if entries == 0 || entries > ptd::MAX_ENTRIES {
+) -> Result<(Vec<stela_soc_data::ptd::Range>, Vec<u32>), String> {
+    if entries == 0 || entries > stela_soc_data::ptd::MAX_ENTRIES {
         return Err("PMP PTD descriptor capacity exceeds actual interrupt-routing storage".into());
     }
     if records.is_empty() || !records.len().is_multiple_of(PTD_RANGE) {
@@ -164,7 +168,7 @@ pub(super) fn publication_ranges(
             .position(|&byte| byte == 0)
             .unwrap_or(name.len());
         let name = core::str::from_utf8(&name[..end]).map_err(|_| "PTD range name is not UTF-8")?;
-        ranges.push(ptd::Range {
+        ranges.push(stela_soc_data::ptd::Range {
             id,
             start,
             count,
@@ -228,13 +232,13 @@ pub(super) fn direct_memory_cache(
     // PMGR reg3/reg6 are original zero-length sentinels. Validate the
     // selected actual owner, not unrelated slots that are never mounted here.
     let bank = range_at(&pmgr, translate, PTD_PMGR_REG)?;
-    if bank.1 != ptd::PTD_BYTES {
+    if bank.1 != stela_soc_data::ptd::PTD_BYTES {
         return Err("T6000 PTD selector8 is not one complete bank".into());
     }
     let index = usize::try_from(scalar(&pmp, "ptd-update-reg-index")?)
         .map_err(|_| "PMP update reg index overflows")?;
     let updates = range_at(&pmp, translate, index)?;
-    let geometry = ptd::Geometry::new(bank, updates).map_err(String::from)?;
+    let geometry = stela_soc_data::ptd::Geometry::new(bank, updates).map_err(String::from)?;
     let entries = geometry.entries();
     let records = pmp
         .child("iop-pmp-nub")
@@ -297,7 +301,7 @@ mod tests {
                 (if [3, 6].contains(&index) {
                     0u64
                 } else if index == 41 {
-                    ptd::PTD_BYTES
+                    stela_soc_data::ptd::PTD_BYTES
                 } else {
                     0x1000u64
                 })
@@ -327,7 +331,10 @@ mod tests {
         )
     }
     fn locks() -> MemoryController {
-        use crate::platform::apple::amcc::{Layout, LockGroup, Register};
+        use {
+            stela_soc_data::amcc::Layout, stela_soc_data::amcc::LockGroup,
+            stela_soc_data::amcc::Register,
+        };
         let reg = |offset, mask, value| Register {
             offset,
             mask,
@@ -427,7 +434,7 @@ mod tests {
         assert!(invalid.validate(&locks).is_err());
         let mut invalid = descriptor.clone();
         invalid.ptd.physical = locks.apertures[0];
-        invalid.ptd_updates.0 = invalid.ptd.physical + ptd::UPDATE_OFFSET;
+        invalid.ptd_updates.0 = invalid.ptd.physical + stela_soc_data::ptd::UPDATE_OFFSET;
         assert!(invalid.validate(&locks).is_err());
         let mut invalid = descriptor;
         invalid.ptd.ranges.push(invalid.ptd.ranges[0].clone());

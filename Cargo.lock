@@ -1926,6 +1926,7 @@ dependencies = [
  "stela-formats",
  "stela-loader",
  "stela-runtime",
+ "stela-soc-data",
  "tempfile",
  "windows-sys 0.61.2",
  "zeroize",
@@ -2056,6 +2057,7 @@ dependencies = [
  "stela-engine",
  "stela-formats",
  "stela-runtime",
+ "stela-soc-data",
  "tempfile",
 ]
 
@@ -2091,8 +2093,17 @@ dependencies = [
  "stela-drivers",
  "stela-engine",
  "stela-formats",
+ "stela-soc-data",
  "tempfile",
  "zeroize",
+]
+
+[[package]]
+name = "stela-soc-data"
+version = "0.1.0"
+dependencies = [
+ "stela-contracts",
+ "stela-formats",
 ]
 
 [[package]]
@@ -2651,6 +2662,7 @@ dependencies = [
  "stela-formats",
  "stela-loader",
  "stela-runtime",
+ "stela-soc-data",
  "tempfile",
  "xz2",
  "zip",

@@ -30,6 +30,7 @@ diagnostics = []
 native-profile = ["stela-runtime/native-profile", "stela-engine/native-profile"]
 
 [dependencies]
+stela-soc-data = { path = "../stela-soc-data", default-features = false }
 stela-engine = { path = "../stela-engine", default-features = false }
 stela-contracts = { path = "../stela-contracts", default-features = false }
 stela-crypto = { path = "../stela-crypto" }

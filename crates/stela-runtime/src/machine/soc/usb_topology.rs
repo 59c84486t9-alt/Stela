@@ -692,7 +692,7 @@ mod tests {
             ],
         );
         let gpio = GpioBank {
-            profile: gpio::Profile::T8101,
+            profile: stela_soc_data::gpio::Profile::T8101,
             no_restore_pins: Vec::new(),
             physical: 0x23c100000,
             bytes: 0x100000,
@@ -1060,7 +1060,7 @@ mod tests {
         let bytes = usb(&ranges, 0xa4, &irqs);
         let node = Node::root(&bytes).unwrap();
         let mut routes = found.darts.clone();
-        routes[0].profile = dart::Profile::T6000;
+        routes[0].profile = stela_soc_data::dart::Profile::T6000;
         routes[0].remap = vec![(0, 1)];
         routes[0].sids = vec![1, 3];
         let routed = usb_controller(&node, &flat_fixture_extent(&Some), &routes).unwrap();

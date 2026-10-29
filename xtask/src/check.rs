@@ -48,8 +48,9 @@ pub fn run(fix: bool) -> Result<()> {
     let cross = install_targets();
     let mut boot_lane = vec![
         // Cargo caps Clippy lints on dependencies of the boot package.
-        // Select each canonical execution and device owner too, so its
-        // freestanding-only branches are checked directly.
+        // Select each canonical hardware-data, execution and device owner
+        // so its freestanding-only branches are checked directly.
+        uefi(["-p", "stela-soc-data", "--no-default-features"]),
         uefi(["-p", "stela-engine", "--no-default-features"]),
         uefi(["-p", "stela-runtime", "--no-default-features"]),
         uefi(BOOT),

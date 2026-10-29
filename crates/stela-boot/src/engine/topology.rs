@@ -293,8 +293,8 @@ pub(crate) struct Join {
     pub error_interrupt: u32,
     pub start: stela_runtime::machine::soc::assigned::StartId,
     pub enable_core: Function,
-    pub core_power: stela_runtime::machine::soc::assigned::DomainId,
-    pub cluster_power: stela_runtime::machine::soc::assigned::DomainId,
+    pub core_power: stela_soc_data::pmgr::coverage::DomainId,
+    pub cluster_power: stela_soc_data::pmgr::coverage::DomainId,
     pub cpu_impl: RegisterRange,
     pub acc_impl: RegisterRange,
     pub cpm_impl: RegisterRange,
@@ -792,7 +792,6 @@ mod tests {
         stela_runtime::machine::soc::assigned::ClusterId,
         stela_runtime::machine::soc::assigned::ClusterSlot,
         stela_runtime::machine::soc::assigned::CoreKind,
-        stela_runtime::machine::soc::assigned::DomainId,
         stela_runtime::machine::soc::assigned::InterruptId,
         stela_runtime::machine::soc::assigned::InterruptTarget,
         stela_runtime::machine::soc::assigned::KindId,
@@ -803,6 +802,7 @@ mod tests {
         stela_runtime::machine::soc::assigned::SharedCache,
         stela_runtime::machine::soc::assigned::StartId,
         stela_runtime::machine::soc::assigned::StartResource,
+        stela_soc_data::pmgr::coverage::DomainId,
     };
 
     fn cpuid_identity(maximum: u32, vendor: [u32; 3]) -> native::Cpuid {

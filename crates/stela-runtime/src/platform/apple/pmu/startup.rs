@@ -615,15 +615,17 @@ mod tests {
 
     #[test]
     fn real_master_retains_native_loader_ownership_and_failed_start_payload() {
+        use crate::platform::apple::spmi::Spmi;
         use alloc::{boxed::Box, rc::Rc};
         use core::cell::RefCell;
-        use {
-            crate::platform::apple::spmi, crate::platform::apple::spmi::Spmi,
-            stela_contracts::bus::Access, stela_contracts::bus::Lifecycle,
-            stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
-            stela_contracts::bus::MmioError, stela_contracts::bus::Width,
-            stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch,
-        };
+        use stela_contracts::bus::Access;
+        use stela_contracts::bus::Lifecycle;
+        use stela_contracts::bus::LifecycleState;
+        use stela_contracts::bus::MmioDevice;
+        use stela_contracts::bus::MmioError;
+        use stela_contracts::bus::Width;
+        use stela_contracts::interrupt::AicInput;
+        use stela_contracts::interrupt::InterruptLatch;
         struct Owned(Rc<RefCell<Pmu>>);
         impl SpmiSlave for Owned {
             fn read(&mut self, address: u16, bytes: &mut [u8], now: u64) -> Result<(), SlaveError> {
@@ -640,7 +642,12 @@ mod tests {
         let owner = Rc::new(RefCell::new(pmic));
         let mut master = Spmi::with_configuration(
             AicInput::new(0, 228),
-            spmi::Configuration::new(spmi::Profile::Gen1, 192, [256, 256]).unwrap(),
+            stela_soc_data::spmi::Configuration::new(
+                stela_soc_data::spmi::Profile::Gen1,
+                192,
+                [256, 256],
+            )
+            .unwrap(),
         );
         master.attach(15, Box::new(Owned(owner.clone()))).unwrap();
         let live = LifecycleState {
@@ -764,14 +771,15 @@ mod tests {
     }
     #[test]
     fn paused_master_still_advances_the_same_native_pmic_clock_without_firmware_completion() {
+        use crate::platform::apple::spmi::Spmi;
         use alloc::{boxed::Box, rc::Rc};
         use core::cell::RefCell;
-        use {
-            crate::platform::apple::spmi, crate::platform::apple::spmi::Spmi,
-            stela_contracts::bus::Access, stela_contracts::bus::Lifecycle,
-            stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
-            stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch,
-        };
+        use stela_contracts::bus::Access;
+        use stela_contracts::bus::Lifecycle;
+        use stela_contracts::bus::LifecycleState;
+        use stela_contracts::bus::MmioDevice;
+        use stela_contracts::interrupt::AicInput;
+        use stela_contracts::interrupt::InterruptLatch;
         struct Owned(Rc<RefCell<Pmu>>);
         impl SpmiSlave for Owned {
             fn read(&mut self, at: u16, bytes: &mut [u8], now: u64) -> Result<(), SlaveError> {
@@ -798,7 +806,12 @@ mod tests {
         owner.borrow_mut().write(0xc804, &[0], 0).unwrap();
         let mut master = Spmi::with_configuration(
             AicInput::new(0, 228),
-            spmi::Configuration::new(spmi::Profile::Gen1, 192, [256, 256]).unwrap(),
+            stela_soc_data::spmi::Configuration::new(
+                stela_soc_data::spmi::Profile::Gen1,
+                192,
+                [256, 256],
+            )
+            .unwrap(),
         );
         master.attach(15, Box::new(Owned(owner.clone()))).unwrap();
         let paused = LifecycleState {

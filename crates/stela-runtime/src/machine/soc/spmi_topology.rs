@@ -1,5 +1,15 @@
 //! DeviceTree placement and validation for spmi topology.
-use super::{ASC, Node, PMU, SPMI, String, Vec, apertures, format, pmu, rtbuddy_nub, smc, spmi};
+use super::ASC;
+use super::Node;
+use super::PMU;
+use super::SPMI;
+use super::String;
+use super::Vec;
+use super::apertures;
+use super::format;
+use super::pmu;
+use super::rtbuddy_nub;
+use super::smc;
 
 /// A Dialog PMU's slave ID and the register windows its `info-*`
 /// properties name.
@@ -13,13 +23,13 @@ pub struct SpmiPmu {
     pub mailbox: Option<FirmwareMailbox>,
     pub alarm_monitor: u8,
     pub rtc_helper: Option<smc::RtcKeyProfile>,
-    pub identity: Option<pmu::Window>,
+    pub identity: Option<stela_soc_data::pmu::Window>,
     /// Outside-scratch log, requiring explicit cold/retained history at placement.
-    pub fault_log: Option<pmu::Window>,
+    pub fault_log: Option<stela_soc_data::pmu::Window>,
     /// Outside-scratch off-to-wake source, likewise.
-    pub wake_source: Option<pmu::Window>,
-    pub windows: Vec<pmu::Window>,
-    pub rtc: Option<pmu::Rtc>,
+    pub wake_source: Option<stela_soc_data::pmu::Window>,
+    pub windows: Vec<stela_soc_data::pmu::Window>,
+    pub rtc: Option<stela_soc_data::pmu::Rtc>,
 }
 
 /// A PMIC firmware mailbox (`fw-mcom-address`, `fw-host-irq-address` and, on
@@ -38,7 +48,10 @@ impl SpmiPmu {
     /// retained-history owner.
     pub fn configuration(
         &self,
-        mut history: impl FnMut(pmu::Retained, pmu::Window) -> Result<Vec<u8>, String>,
+        mut history: impl FnMut(
+            stela_soc_data::pmu::Retained,
+            stela_soc_data::pmu::Window,
+        ) -> Result<Vec<u8>, String>,
     ) -> Result<pmu::Configuration, String> {
         let mut configuration =
             pmu::Configuration::new(self.windows.clone(), self.rtc, self.alarm_monitor)?;
@@ -56,23 +69,28 @@ impl SpmiPmu {
     }
 
     /// The retained-history owners whose initial bytes placement supplies.
-    pub fn retained(&self) -> impl Iterator<Item = (pmu::Retained, pmu::Window)> + use<> {
-        let fault = self.fault_log.map(|log| (pmu::Retained::FaultLog, log));
+    pub fn retained(
+        &self,
+    ) -> impl Iterator<Item = (stela_soc_data::pmu::Retained, stela_soc_data::pmu::Window)> + use<>
+    {
+        let fault = self
+            .fault_log
+            .map(|log| (stela_soc_data::pmu::Retained::FaultLog, log));
         let wake = self
             .wake_source
-            .map(|source| (pmu::Retained::WakeSource, source));
+            .map(|source| (stela_soc_data::pmu::Retained::WakeSource, source));
         fault.into_iter().chain(wake)
     }
 }
 
-pub type SpmiConfiguration = spmi::Configuration;
+use stela_soc_data::spmi::Configuration;
 
 /// A source-qualified SPMI controller with independent FIFO/vector geometry.
 /// `bank_c` is `reg[2]`: Gen1's optional fault-counter view or the Gen3 and
 /// Gen4 arbiter bank.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpmiController {
-    pub configuration: SpmiConfiguration,
+    pub configuration: Configuration,
     pub bank_c: Option<(u64, u64)>,
     pub banks: [(u64, u64); 2],
     pub irq: u32,
@@ -97,10 +115,10 @@ pub(super) fn spmi_controllers(
             return Err("SPMI generation is not one full32 word".into());
         }
         let profile = match node.first_u32("gen") {
-            Some(1) => spmi::Profile::Gen1,
-            Some(2) => spmi::Profile::Gen2,
-            Some(3) => spmi::Profile::Gen3,
-            Some(4) => spmi::Profile::Gen4,
+            Some(1) => stela_soc_data::spmi::Profile::Gen1,
+            Some(2) => stela_soc_data::spmi::Profile::Gen2,
+            Some(3) => stela_soc_data::spmi::Profile::Gen3,
+            Some(4) => stela_soc_data::spmi::Profile::Gen4,
             _ => return Err("SPMI controller generation is unqualified".into()),
         };
         let regs = apertures::registers(&node).ok_or("SPMI controller has no reg")?;
@@ -162,7 +180,8 @@ pub(super) fn spmi_controllers(
             .and_then(|cells| cells.try_into().ok())
             .ok_or("SPMI has no two FIFO byte depths")?;
         let configuration =
-            spmi::Configuration::new(profile, cells[0], queue_bytes).map_err(String::from)?;
+            stela_soc_data::spmi::Configuration::new(profile, cells[0], queue_bytes)
+                .map_err(String::from)?;
         let counters = match node.property("fault-counters-enabled") {
             None => false,
             Some(bytes) if bytes.len() == 4 => match node.first_u32("fault-counters-enabled") {
@@ -174,7 +193,7 @@ pub(super) fn spmi_controllers(
         };
         let bank_c = if profile.arbiter_bank() {
             Some(bank(2)?)
-        } else if counters && profile == spmi::Profile::Gen1 {
+        } else if counters && profile == stela_soc_data::spmi::Profile::Gen1 {
             let &(offset, bytes) = regs
                 .get(2)
                 .filter(|(_, bytes)| Some(*bytes) == profile.counter_bytes())
@@ -303,11 +322,11 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
         return Err("PMU interrupts are not one output and one firmware mailbox".into());
     }
     let address = |value: u32| u16::try_from(value).map_err(|_| "PMU address above 16 bits");
-    let pair = |name: &str| -> Result<Option<pmu::Window>, String> {
+    let pair = |name: &str| -> Result<Option<stela_soc_data::pmu::Window>, String> {
         match node.cells32(name).as_deref() {
             None => Ok(None),
             Some(&[base, bytes]) if node.property(name).is_some_and(|value| value.len() == 8) => {
-                Ok(Some(pmu::Window {
+                Ok(Some(stela_soc_data::pmu::Window {
                     base: address(base)?,
                     bytes: address(bytes)?,
                 }))
@@ -330,7 +349,7 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
     windows.extend(pair("info-fault_shadow")?);
     // A byte-counted history (`_readFaultLog`, `_readOff2WakeSource`) is its
     // own retained owner outside scratch, and scratch storage inside it.
-    let retained = |name: &str| -> Result<Option<pmu::Window>, String> {
+    let retained = |name: &str| -> Result<Option<stela_soc_data::pmu::Window>, String> {
         let Some(log) = pair(name)? else {
             return Ok(None);
         };
@@ -355,13 +374,13 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
     let fault_log = retained("info-fault_log")?;
     let wake_source = retained("info-off2wake_source")?;
     if let Some(base) = single("info-leg_scrpad")? {
-        windows.push(pmu::Window {
+        windows.push(stela_soc_data::pmu::Window {
             base,
-            bytes: pmu::LEGACY_SCRATCH_BYTES,
+            bytes: stela_soc_data::pmu::LEGACY_SCRATCH_BYTES,
         });
     }
     if let Some(base) = single("info-pm_setting")? {
-        windows.push(pmu::Window { base, bytes: 1 });
+        windows.push(stela_soc_data::pmu::Window { base, bytes: 1 });
     }
     // The SOCD and LPM windows lie inside the scratchpad.
     let inside = |base: u16, bytes: u16| {
@@ -389,11 +408,13 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
                 single(name)?.ok_or_else(|| format!("PMU RTC has no {name}"))
             };
             // Without `info-clock_offset` the driver keeps the offset in the
-            // legacy scratchpad (`pmu::ClockOffset::LegacyScratch`).
+            // legacy scratchpad (`stela_soc_data::pmu::ClockOffset::LegacyScratch`).
             let clock_offset = match pair("info-clock_offset")? {
-                Some(window) if window.bytes == 6 => pmu::ClockOffset::Register(window.base),
+                Some(window) if window.bytes == 6 => {
+                    stela_soc_data::pmu::ClockOffset::Register(window.base)
+                }
                 Some(_) => return Err("PMU RTC clock offset is not six bytes".into()),
-                None => pmu::ClockOffset::LegacyScratch(
+                None => stela_soc_data::pmu::ClockOffset::LegacyScratch(
                     single("info-leg_scrpad")?
                         .ok_or("PMU RTC has neither a clock offset nor a legacy scratchpad")?,
                 ),
@@ -418,7 +439,7 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
                     })
                     .transpose()
             };
-            Some(pmu::Rtc {
+            Some(stela_soc_data::pmu::Rtc {
                 upcount,
                 clock_offset,
                 alarm_control: need("info-rtc_alarm_ctrl")?,
@@ -426,7 +447,8 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
                 alarm_offset: need("info-rtc_alarm_offset")?,
                 alarm_event: need("info-rtc_alarm_event")?,
                 irq_mask: need("info-rtc_irq_mask_offset")?,
-                event_mask: bits("info-rtc_alarm_event_mask")?.unwrap_or(pmu::DEFAULT_EVENT_MASK),
+                event_mask: bits("info-rtc_alarm_event_mask")?
+                    .unwrap_or(stela_soc_data::pmu::DEFAULT_EVENT_MASK),
                 interrupt_mask: bits("info-rtc_alarm_mask")?
                     .ok_or("PMU RTC has no info-rtc_alarm_mask")?,
             })
@@ -601,12 +623,12 @@ mod tests {
         assert!(pmu.primary);
         assert_eq!(pmu.alarm_monitor, 1);
         assert_eq!(pmu.interrupt, None);
-        let window = |base, bytes| pmu::Window { base, bytes };
+        let window = |base, bytes| stela_soc_data::pmu::Window { base, bytes };
         assert_eq!(
             pmu.windows,
             [
                 window(0x8000, 0x2800),
-                window(0xf700, pmu::LEGACY_SCRATCH_BYTES),
+                window(0xf700, stela_soc_data::pmu::LEGACY_SCRATCH_BYTES),
                 window(0xf801, 1),
             ]
         );
@@ -615,7 +637,11 @@ mod tests {
         let rtc = pmu.rtc.unwrap();
         assert_eq!(
             (rtc.upcount, rtc.clock_offset, rtc.alarm_enable),
-            (0xf802, pmu::ClockOffset::Register(0xf900), 0x40)
+            (
+                0xf802,
+                stela_soc_data::pmu::ClockOffset::Register(0xf900),
+                0x40
+            )
         );
         // J473AP gives no event mask: the driver's default holds.
         assert_eq!((rtc.event_mask, rtc.interrupt_mask), (0x1, 0x1));
@@ -713,12 +739,12 @@ mod tests {
             panic!("two PMUs");
         };
         assert!(chapel.rtc.unwrap().shares_event());
-        let window = |base, bytes| pmu::Window { base, bytes };
+        let window = |base, bytes| stela_soc_data::pmu::Window { base, bytes };
         assert_eq!(
             chapel.retained().collect::<Vec<_>>(),
             [
-                (pmu::Retained::FaultLog, window(0x2200, 7)),
-                (pmu::Retained::WakeSource, window(0x281c, 2)),
+                (stela_soc_data::pmu::Retained::FaultLog, window(0x2200, 7)),
+                (stela_soc_data::pmu::Retained::WakeSource, window(0x281c, 2)),
             ]
         );
         assert_eq!(spitfire.retained().count(), 1);
@@ -803,7 +829,7 @@ mod tests {
         let pmu = spmi_pmu(&io.children().unwrap()[0], &io).unwrap();
         assert_eq!(
             pmu.rtc.unwrap().clock_offset,
-            pmu::ClockOffset::LegacyScratch(0xf700)
+            stela_soc_data::pmu::ClockOffset::LegacyScratch(0xf700)
         );
         let bytes = node(false);
         let io = Node::root(&bytes).unwrap();
@@ -1025,7 +1051,10 @@ mod tests {
             (0x7870_4000, 0x4000),
             (0x7870_0000, 0x4000),
         ];
-        for (generation, profile) in [(3, spmi::Profile::Gen3), (4, spmi::Profile::Gen4)] {
+        for (generation, profile) in [
+            (3, stela_soc_data::spmi::Profile::Gen3),
+            (4, stela_soc_data::spmi::Profile::Gen4),
+        ] {
             let bytes = tree(generation, &banks);
             let io = Node::root(&bytes).unwrap();
             let [controller] =

@@ -3,17 +3,27 @@
 //! lifecycle. The host's inputs (console, disks, cables, scanout, entropy and
 //! board firmware files) come from the caller, so `stela.efi` and
 //! `stela-dev boot check` mount the same machine.
-use super::apple::{
-    AicInput, AppleDevices, AscLines, ConsoleSink, Range, RtcEpoch, Scanout, SepEntropy,
-    SepProvisioning, UsbCables, UsbId, WallClock,
-    memory_resources::{amcc, t6000_cold, t8112},
-    sep_state, typec,
-};
+use super::apple::AicInput;
+use super::apple::AppleDevices;
+use super::apple::AscLines;
+use super::apple::ConsoleSink;
+use super::apple::Range;
+use super::apple::RtcEpoch;
+use super::apple::Scanout;
+use super::apple::SepEntropy;
+use super::apple::SepProvisioning;
+use super::apple::UsbCables;
+use super::apple::UsbId;
+use super::apple::memory_resources::t6000_cold;
+use super::apple::memory_resources::t8112;
+use super::apple::sep_state;
+use super::apple::typec;
 use super::soc::{Board, PmgrBankRefusal};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::fmt;
 use stela_drivers::block::BlockDevice;
 use stela_engine::machine::ctrr;
+use stela_soc_data::pmu::WallClock;
 
 /// Already constructed native owners, consumed by the board mount. Descriptor
 /// equality is checked before any host input or bus placement is consumed.
@@ -82,8 +92,8 @@ impl MemoryResources {
 pub fn memory_locks(
     read_only_region: Option<(u64, u64)>,
     core_locks: &ctrr::CoreLocks,
-) -> amcc::Programmed {
-    let mut programmed = amcc::ctrr_a(read_only_region);
+) -> stela_soc_data::amcc::Programmed {
+    let mut programmed = stela_soc_data::amcc::ctrr_a(read_only_region);
     for locked in &core_locks.locked {
         let group = match locked.region {
             ctrr::LockRegion::CtrrC => 2,
@@ -125,7 +135,7 @@ pub fn clpc_absence(hidden: &[String], log: &mut dyn FnMut(fmt::Arguments<'_>)) 
 /// What the host connects to the board.
 pub struct Inputs<'f> {
     /// The region iBoot leaves in each memory-controller lock group.
-    pub programmed: amcc::Programmed,
+    pub programmed: stela_soc_data::amcc::Programmed,
     /// The entry point a boot bundle hands off to, on which boot firmware
     /// locks every PE's RVBAR.
     pub reset: Option<u64>,
@@ -632,7 +642,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
             .ok_or("CPU cluster has no DT event selection")?;
         // The board validated each CPM word against the translated DT reg.
         devices.add_cpm_power(
-            cluster.base + crate::platform::apple::cpm::T8112_OFFSET,
+            cluster.base + stela_soc_data::cpm::T8112_OFFSET,
             cluster.counter_map,
         )?;
         devices.add_cpu_cluster(
@@ -667,7 +677,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         devices.add_io_access_controller(
             &controller.apertures,
             controller.layout,
-            amcc::ctrr_a(programmed[0]),
+            stela_soc_data::amcc::ctrr_a(programmed[0]),
         )?;
     }
     if !native_memory && let Some(mcc) = memory_cache {

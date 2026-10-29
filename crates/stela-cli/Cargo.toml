@@ -9,6 +9,7 @@ name = "stela"
 path = "src/main.rs"
 
 [dependencies]
+stela-soc-data = { path = "../stela-soc-data", default-features = false }
 stela-engine = { path = "../stela-engine" }
 stela-contracts = { path = "../stela-contracts" }
 stela-formats = { path = "../stela-formats", default-features = false }

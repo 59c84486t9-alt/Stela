@@ -5,8 +5,8 @@
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
 use {
-    super::super::ptd::Range, super::super::ptd::transport::notifications::LocalNotifications,
-    stela_contracts::bus::Access, stela_contracts::bus::MmioError,
+    super::super::ptd::transport::notifications::LocalNotifications, stela_contracts::bus::Access,
+    stela_contracts::bus::MmioError, stela_soc_data::ptd::Range,
 };
 
 pub mod cache;

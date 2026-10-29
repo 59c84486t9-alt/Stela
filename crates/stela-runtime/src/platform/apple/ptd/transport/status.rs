@@ -131,11 +131,11 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
     use {
-        crate::platform::apple::ptd::Range, crate::platform::apple::ptd::UPDATE_OFFSET,
         crate::platform::apple::ptd::transport::Observation, stela_contracts::bus::Access,
         stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState,
         stela_contracts::bus::MmioDevice, stela_contracts::bus::Width as BusWidth,
-        stela_contracts::interrupt::InterruptLatch,
+        stela_contracts::interrupt::InterruptLatch, stela_soc_data::ptd::Range,
+        stela_soc_data::ptd::UPDATE_OFFSET,
     };
 
     const PATTERN: [u32; 12] = [

@@ -30,6 +30,7 @@
 //! does any CPU mask naming a CPU the model does not serve.
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use stela_soc_data::aic::{AIC1_EVENT, AIC1_MAX_IRQ};
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -45,14 +46,12 @@ const NAME: &str = "aic1";
 const INFO: u64 = 0x0004;
 const WHOAMI: u64 = 0x2000;
 /// The event register, inside the core block (Linux `AIC_EVENT`).
-pub const AIC1_EVENT: u64 = 0x2004;
 const IPI_SEND: u64 = 0x2008;
 const IPI_ACK: u64 = 0x200c;
 const IPI_MASK_SET: u64 = 0x2024;
 const IPI_MASK_CLR: u64 = 0x2028;
 const TARGET_CPU: u64 = 0x3000;
 /// The AICv1's IRQs (`AIC_MAX_IRQ`), which fix its array layout.
-pub const AIC1_MAX_IRQ: u16 = 0x400;
 const MAX_IRQ: u16 = AIC1_MAX_IRQ;
 const WORDS: usize = MAX_IRQ as usize / 32;
 const ARRAYS: u64 = TARGET_CPU + 4 * MAX_IRQ as u64;

@@ -9,7 +9,8 @@
 //! Zero initial controls/explicit weights are Stela software policy, not Apple
 //! reset, capacity, timing or completed DRAM programming. Source cacheless
 //! disable_mcc command/waiter evidence is retained in t6000-mcc-backend-20261021-1.
-use super::{Prepared, amcc, mcc, ptd};
+use super::Prepared;
+use super::mcc;
 use crate::machine::apple::AppleDevices;
 use crate::machine::soc::Board;
 use crate::machine::soc::DirectMemoryCache;
@@ -18,14 +19,15 @@ use crate::machine::soc::PowerOwner;
 use crate::machine::soc::PowerStates;
 use crate::platform::apple::pmgr;
 use crate::platform::apple::pmgr::Pmgr;
-use crate::platform::apple::pmgr::coverage;
-use crate::platform::apple::pmgr::coverage::Consumer;
-use crate::platform::apple::pmgr::coverage::LifecycleSinks;
+use crate::platform::apple::ptd;
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 use stela_contracts::Chip;
 use stela_contracts::bus::LifecycleState;
 use stela_contracts::bus::Width;
 use stela_engine::memory::RegisteredSystemRam;
+use stela_soc_data::pmgr::coverage;
+use stela_soc_data::pmgr::coverage::Consumer;
+use stela_soc_data::pmgr::coverage::LifecycleSinks;
 
 /// Entire new-software control image, independent of RAM capacity and opaque
 /// DT config-data/alternate dramcfg-data. Every weight is an explicit policy.
@@ -68,14 +70,14 @@ pub struct Plan {
     domains: Vec<u64>,
     ram: Arc<RegisteredSystemRam>,
     generation: u64,
-    programmed: amcc::Programmed,
+    programmed: stela_soc_data::amcc::Programmed,
     configuration: Configuration,
 }
 impl Plan {
     pub fn prepare_ap_frontend(
         board: &Board,
         ram: &Arc<RegisteredSystemRam>,
-        programmed: amcc::Programmed,
+        programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
     ) -> Result<Self, String> {
         if board.cpus.chip != Chip::AppleM1 || board.memory_cache.is_some() {
@@ -104,7 +106,7 @@ impl Plan {
         direct: &DirectMemoryCache,
         power: &PowerStates,
         ram: &Arc<RegisteredSystemRam>,
-        programmed: amcc::Programmed,
+        programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
     ) -> Result<Self, String> {
         geometry(controller, direct, ram, programmed)?;
@@ -381,19 +383,20 @@ fn contains(direct: &DirectMemoryCache, address: u64) -> bool {
         .apertures
         .iter()
         .any(|&start| address >= start && address - start < mcc::APERTURE_BYTES)
-        || address >= direct.ptd.physical && address - direct.ptd.physical < ptd::PTD_BYTES
+        || address >= direct.ptd.physical
+            && address - direct.ptd.physical < stela_soc_data::ptd::PTD_BYTES
 }
 fn geometry(
     controller: &MemoryController,
     direct: &DirectMemoryCache,
     ram: &RegisteredSystemRam,
-    programmed: amcc::Programmed,
+    programmed: stela_soc_data::amcc::Programmed,
 ) -> Result<(), String> {
     direct.validate(controller).map_err(String::from)?;
     if direct.ptd_entries != ptd::transport::notifications::NativeProfile::T6000.entries() as usize
         || direct.ptd_updates.1 != 0xc00
         || controller.layout.cache_status
-            != Some(amcc::Register {
+            != Some(stela_soc_data::amcc::Register {
                 offset: 0x1c00,
                 mask: 0x1f,
                 value: 0,
@@ -411,7 +414,8 @@ fn geometry(
             .apertures
             .iter()
             .any(|&p| p < end && source < p + mcc::APERTURE_BYTES)
-            || direct.ptd.physical < end && source < direct.ptd.physical + ptd::PTD_BYTES
+            || direct.ptd.physical < end
+                && source < direct.ptd.physical + stela_soc_data::ptd::PTD_BYTES
         {
             return Err("cold T6000 MMIO overlaps the actual canonical RAM".into());
         }
@@ -452,15 +456,15 @@ mod tests {
     use crate::machine::soc::ClockRole;
     use crate::machine::soc::PowerResource;
     use crate::platform::apple::pmgr::PowerState;
-    use crate::platform::apple::pmgr::coverage::Admission;
-    use crate::platform::apple::pmgr::coverage::Domain;
-    use crate::platform::apple::pmgr::coverage::DomainId;
     use alloc::{boxed::Box, vec};
     use core::{cell::UnsafeCell, ptr::NonNull};
     use stela_contracts::bus::Access;
     use stela_contracts::interrupt::InterruptLatch;
     use stela_engine::memory::ReservedSystemRamRange;
     use stela_engine::memory::system_ram::fixture;
+    use stela_soc_data::pmgr::coverage::Admission;
+    use stela_soc_data::pmgr::coverage::Domain;
+    use stela_soc_data::pmgr::coverage::DomainId;
     const SUPPLY: u64 = 0x1000;
     const RAM: u64 = 0x800000000;
     #[repr(C, align(16))]
@@ -496,7 +500,7 @@ mod tests {
         // descriptor here; the transformed inner layout is not that input.
         let mut layout = original.router.lock_layout;
         assert!(layout.cache_status.is_none());
-        layout.cache_status = Some(amcc::Register {
+        layout.cache_status = Some(stela_soc_data::amcc::Register {
             offset: 0x1c00,
             mask: 0x1f,
             value: 0,
@@ -639,7 +643,7 @@ mod tests {
         let (bank, _, offset) = owner.publication_binding();
         assert_eq!(
             devices.bus.route(update, Width::Double).unwrap(),
-            (joint, offset + ptd::UPDATE_OFFSET)
+            (joint, offset + stela_soc_data::ptd::UPDATE_OFFSET)
         );
         assert_eq!(bank, direct.ptd.physical);
         assert_eq!(

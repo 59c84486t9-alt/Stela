@@ -157,7 +157,7 @@ mod tests {
             owners.push(
                 devices
                     .add_dart_group_for_profile(
-                        dart::Profile::T6000,
+                        stela_soc_data::dart::Profile::T6000,
                         &[Range {
                             physical,
                             bytes: 0x4000,
@@ -291,12 +291,12 @@ mod tests {
     }
     use {
         crate::machine::soc::DirectMemoryCache, crate::machine::soc::MemoryController,
-        crate::machine::soc::PtdBank, crate::platform::apple::amcc::Layout,
-        crate::platform::apple::amcc::LockGroup, crate::platform::apple::amcc::Register,
-        crate::platform::apple::mcc, crate::platform::apple::mcc::Configuration,
-        crate::platform::apple::ptd, stela_contracts::bus::Lifecycle,
-        stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioError,
-        stela_contracts::interrupt::InterruptLatch,
+        crate::machine::soc::PtdBank, crate::platform::apple::mcc,
+        crate::platform::apple::mcc::Configuration, crate::platform::apple::ptd,
+        stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState,
+        stela_contracts::bus::MmioError, stela_contracts::interrupt::InterruptLatch,
+        stela_soc_data::amcc::Layout, stela_soc_data::amcc::LockGroup,
+        stela_soc_data::amcc::Register,
     };
     fn prepared() -> memory_resources::Prepared {
         let reg = |offset, mask, value| Register {
@@ -333,7 +333,7 @@ mod tests {
             alternate_dram_configuration: 0xffff0000,
             ptd: PtdBank {
                 physical: 0x28e3c0000,
-                ranges: vec![ptd::Range {
+                ranges: vec![stela_soc_data::ptd::Range {
                     id: 1,
                     start: 0,
                     count: 2,
@@ -347,7 +347,7 @@ mod tests {
         memory_resources::Prepared::new(
             descriptor,
             &locks,
-            memory_resources::amcc::ctrr_a(Some((0x800004000, 0x4000))),
+            stela_soc_data::amcc::ctrr_a(Some((0x800004000, 0x4000))),
             Configuration {
                 dram: vec![[7; 4]; 2],
                 weights: [1; 32],
@@ -399,7 +399,10 @@ mod tests {
         );
         assert_eq!(
             devices.bus.route(SHARED, Width::Double),
-            Ok((id, 2 * mcc::APERTURE_BYTES + ptd::UPDATE_OFFSET))
+            Ok((
+                id,
+                2 * mcc::APERTURE_BYTES + stela_soc_data::ptd::UPDATE_OFFSET
+            ))
         );
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 17, &mut latch);
@@ -487,16 +490,16 @@ mod tests {
                 }
                 2 => bindings.push((pa, bytes, offset)),
                 3 => bindings.push((
-                    pa + ptd::UPDATE_OFFSET,
-                    bytes - ptd::UPDATE_OFFSET,
-                    offset + ptd::UPDATE_OFFSET,
+                    pa + stela_soc_data::ptd::UPDATE_OFFSET,
+                    bytes - stela_soc_data::ptd::UPDATE_OFFSET,
+                    offset + stela_soc_data::ptd::UPDATE_OFFSET,
                 )),
                 _ => {
-                    bindings.push((pa, ptd::UPDATE_OFFSET, offset + 8));
+                    bindings.push((pa, stela_soc_data::ptd::UPDATE_OFFSET, offset + 8));
                     bindings.push((
-                        pa + ptd::UPDATE_OFFSET,
-                        bytes - ptd::UPDATE_OFFSET,
-                        offset + ptd::UPDATE_OFFSET,
+                        pa + stela_soc_data::ptd::UPDATE_OFFSET,
+                        bytes - stela_soc_data::ptd::UPDATE_OFFSET,
+                        offset + stela_soc_data::ptd::UPDATE_OFFSET,
                     ));
                 }
             }
@@ -656,7 +659,10 @@ mod tests {
         let bank = io.translate_range(bank, bank_bytes).unwrap();
         assert_eq!(
             (bank, bank_bytes),
-            (SHARED - ptd::UPDATE_OFFSET, ptd::PTD_BYTES)
+            (
+                SHARED - stela_soc_data::ptd::UPDATE_OFFSET,
+                stela_soc_data::ptd::PTD_BYTES
+            )
         );
         let pmp = io.child("pmp").unwrap();
         let index = u32::from_le_bytes(
@@ -677,7 +683,7 @@ mod tests {
             Ok((
                 physical,
                 bytes,
-                2 * mcc::APERTURE_BYTES + ptd::UPDATE_OFFSET
+                2 * mcc::APERTURE_BYTES + stela_soc_data::ptd::UPDATE_OFFSET
             ))
         );
     }

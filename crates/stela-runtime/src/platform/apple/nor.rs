@@ -19,22 +19,27 @@
 //! erase at that boundary (zero busy latency), so WIP is always clear;
 //! status WEL follows WREN/WRDI and is consumed by program/erase/WRSR.
 //! Unsupported commands refuse before their byte is accepted.
-use alloc::{collections::BTreeSet, vec, vec::Vec};
-pub mod nvram;
+use alloc::collections::BTreeSet;
+#[cfg(test)]
+use alloc::vec;
+use alloc::vec::Vec;
+
 pub mod persist;
 
-pub const CAPACITY: usize = 0x800000;
-pub const PAGE_SIZE: usize = 256;
-pub const SECTOR_SIZE: usize = 0x1000;
-pub const BLOCK_SIZE: usize = 0x10000;
-pub const JEDEC_ID: [u8; 3] = [0xef, 0x60, 0x17];
-pub const ERASED: u8 = 0xff;
-/// J473 boot-firmware regions: header space, then the two iBoot slots.
-pub const FIRMWARE: [(u32, u32); 3] = [(0, 0x20000), (0x20000, 0x2c0000), (0x2e0000, 0x2c0000)];
-/// The CHRP NVRAM partition. Its two active banks occupy its first 128 KiB.
-pub const ANVRAM: (u32, u32) = (0x700000, 0x100000);
-/// J473 diagnostic-data regions.
-pub const SYSCFG: [(u32, u32); 2] = [(0x5a0000, 0x2000), (0x5a4000, 0x20000)];
+#[cfg(test)]
+use stela_soc_data::nor::ANVRAM;
+use stela_soc_data::nor::BLOCK_SIZE;
+use stela_soc_data::nor::CAPACITY;
+use stela_soc_data::nor::ERASED;
+use stela_soc_data::nor::Image;
+use stela_soc_data::nor::JEDEC_ID;
+use stela_soc_data::nor::PAGE_SIZE;
+use stela_soc_data::nor::SECTOR_SIZE;
+#[cfg(test)]
+use stela_soc_data::nor::SYSCFG;
+#[cfg(test)]
+use stela_soc_data::nor::nvram;
+
 const WEL: u8 = 2;
 const READ: u8 = 0x03;
 const FAST_READ: u8 = 0x0b;
@@ -46,105 +51,6 @@ const WRITE_STATUS: u8 = 0x01;
 const WRITE_ENABLE: u8 = 0x06;
 const WRITE_DISABLE: u8 = 0x04;
 const READ_ID: u8 = 0x9f;
-
-/// The NOR image. [`persist`] loads a whole image from a host partition
-/// before boot, the proxy is derived from it ([`Image::current_bank`]), and
-/// the die reports the sectors each committed program or erase changed
-/// ([`Nor::take_dirty`]) for the host to store; there is no independent
-/// proxy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Image(Vec<u8>);
-impl Image {
-    pub fn fresh() -> Self {
-        let mut image = Self(vec![ERASED; CAPACITY]);
-        image.0[ANVRAM.0 as usize..ANVRAM.0 as usize + nvram::BANK_SIZE]
-            .copy_from_slice(&nvram::empty_bank());
-        image
-    }
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, &'static str> {
-        if bytes.len() != CAPACITY {
-            return Err("NOR image is not 8 MiB");
-        }
-        Ok(Self(bytes))
-    }
-    pub fn bytes(&self) -> &[u8] {
-        &self.0
-    }
-    pub fn bank(&self, bank: u32) -> Result<&[u8], &'static str> {
-        if bank >= nvram::BANK_COUNT {
-            return Err("NVRAM bank is outside anvram");
-        }
-        let start = ANVRAM.0 as usize + bank as usize * nvram::BANK_SIZE;
-        Ok(&self.0[start..start + nvram::BANK_SIZE])
-    }
-    /// The newest valid NVRAM bank, by generation; the higher bank wins a
-    /// tie.
-    pub fn current_bank(&self) -> Result<u32, &'static str> {
-        (0..nvram::BANK_COUNT)
-            .filter_map(|bank| {
-                let bytes = self.bank(bank).ok()?;
-                nvram::validate(bytes).ok()?;
-                Some((nvram::generation(bytes), bank))
-            })
-            .max_by_key(|&(generation, bank)| (generation, bank))
-            .map(|(_, bank)| bank)
-            .ok_or("the NOR image holds no valid NVRAM bank")
-    }
-    /// The bank boot firmware hands off, without changing the flash image.
-    ///
-    /// iBoot's CHRP reader skips bad banks, including bad Adler-32, and
-    /// succeeds with no imported variables when none survives (26A434 J473
-    /// raw offsets 0xec2ec..0xec2f4, 0xec52c..0xec598). Its handoff then
-    /// serializes the environment when no bank was loaded (0xece34..0xece50).
-    /// Stela supplies its empty environment in that case. The damaged banks
-    /// remain on the die until the guest erases/programs them itself.
-    ///
-    /// A checksummed Apple header at a bank boundary identifies damaged NOR;
-    /// a completely erased die is also NOR. Unidentified nonblank data is
-    /// refused, rather than treating a wrong host partition as corrupt NVRAM.
-    pub fn boot_bank(&self) -> Result<(u32, Vec<u8>), &'static str> {
-        if let Ok(current) = self.current_bank() {
-            return Ok((current, self.bank(current)?.to_vec()));
-        }
-        if self.0.iter().all(|&byte| byte == ERASED)
-            || (0..nvram::BANK_COUNT)
-                .any(|bank| nvram::has_apple_header(self.bank(bank).expect("bank in anvram")))
-        {
-            return Ok((nvram::CURRENT_BANK, nvram::empty_bank()));
-        }
-        Err("the NOR image has neither a valid NVRAM bank nor an identifiable Apple bank header")
-    }
-    /// Save `bank` as XNU's `IONVRAMCHRPHandler` does: into the bank after
-    /// the current one, round robin. `bank` must be valid and newer than the
-    /// current bank. Returns the bank written and the offsets of the erase
-    /// sectors it changed, for the host to store.
-    pub fn save_bank(&mut self, bank: &[u8]) -> Result<(u32, Vec<usize>), &'static str> {
-        nvram::validate(bank)?;
-        let current = self.current_bank()?;
-        let old = nvram::generation(self.bank(current)?);
-        if nvram::generation(bank) <= old {
-            return Err("a saved NVRAM bank must be newer than the current one");
-        }
-        let next = (current + 1) % nvram::BANK_COUNT;
-        let start = ANVRAM.0 as usize + next as usize * nvram::BANK_SIZE;
-        let changed = (start..start + nvram::BANK_SIZE)
-            .step_by(SECTOR_SIZE)
-            .filter(|&sector| {
-                self.0[sector..sector + SECTOR_SIZE] != bank[sector - start..][..SECTOR_SIZE]
-            })
-            .collect();
-        self.0[start..start + nvram::BANK_SIZE].copy_from_slice(bank);
-        Ok((next, changed))
-    }
-
-    pub fn with_proxy(mut self, bank: u32, proxy: &[u8]) -> Result<Self, &'static str> {
-        nvram::validate(proxy)?;
-        self.bank(bank)?;
-        let start = ANVRAM.0 as usize + bank as usize * nvram::BANK_SIZE;
-        self.0[start..start + proxy.len()].copy_from_slice(proxy);
-        Ok(self)
-    }
-}
 
 #[derive(Clone)]
 struct Transaction {
@@ -181,7 +87,10 @@ impl Nor {
             .into_iter()
             .map(|sector| {
                 let offset = sector * SECTOR_SIZE;
-                (offset, self.image.0[offset..offset + SECTOR_SIZE].to_vec())
+                (
+                    offset,
+                    self.image.bytes()[offset..offset + SECTOR_SIZE].to_vec(),
+                )
             })
             .collect()
     }
@@ -234,7 +143,7 @@ impl Nor {
                     let base = t.address & !(PAGE_SIZE - 1);
                     for (i, byte) in t.data.into_iter().enumerate() {
                         let offset = (base | ((t.address + i) & (PAGE_SIZE - 1))) % CAPACITY;
-                        self.image.0[offset] &= byte;
+                        self.image.bytes_mut()[offset] &= byte;
                         self.dirty.insert(offset / SECTOR_SIZE);
                     }
                     self.enabled = false;
@@ -246,7 +155,7 @@ impl Nor {
                         BLOCK_SIZE
                     };
                     let base = (t.address % CAPACITY) & !(size - 1);
-                    self.image.0[base..base + size].fill(ERASED);
+                    self.image.bytes_mut()[base..base + size].fill(ERASED);
                     self.dirty
                         .extend(base / SECTOR_SIZE..(base + size) / SECTOR_SIZE);
                     self.enabled = false;
@@ -308,7 +217,7 @@ impl Nor {
             FAST_READ if t.position == 3 => ERASED,
             READ | FAST_READ => {
                 let prefix = if t.command == READ { 3 } else { 4 };
-                self.image.0[(t.address + t.position - prefix) % CAPACITY]
+                self.image.bytes()[(t.address + t.position - prefix) % CAPACITY]
             }
             PROGRAM => {
                 if t.data.len() == PAGE_SIZE {
@@ -442,9 +351,9 @@ mod tests {
         // A nonempty bank whose payload was not programmed completely.
         for bank in 0..nvram::BANK_COUNT {
             let start = ANVRAM.0 as usize + bank as usize * nvram::BANK_SIZE;
-            image.0[start + PAGE_SIZE..start + nvram::BANK_SIZE].fill(ERASED);
+            image.bytes_mut()[start + PAGE_SIZE..start + nvram::BANK_SIZE].fill(ERASED);
         }
-        image.0[SYSCFG[0].0 as usize + 10] = 0x42;
+        image.bytes_mut()[SYSCFG[0].0 as usize + 10] = 0x42;
         let before = image.clone();
         assert!(image.current_bank().is_err());
         let (bank, proxy) = image.boot_bank().unwrap();
@@ -460,17 +369,17 @@ mod tests {
     fn erased_flash_recovers_but_unidentified_data_and_corrupt_headers_refuse() {
         let mut image = Image::from_bytes(vec![ERASED; CAPACITY]).unwrap();
         assert_eq!(image.boot_bank().unwrap().1, nvram::empty_bank());
-        image.0[12] = 0x42;
+        image.bytes_mut()[12] = 0x42;
         assert!(image.boot_bank().is_err());
         let mut image = Image::fresh();
-        image.0[ANVRAM.0 as usize + 1] ^= 1;
+        image.bytes_mut()[ANVRAM.0 as usize + 1] ^= 1;
         assert!(image.boot_bank().is_err());
     }
 
     #[test]
     fn a_guest_save_after_recovery_replaces_only_its_selected_bank() {
         let mut image = Image::fresh();
-        image.0[ANVRAM.0 as usize + 100] ^= 1;
+        image.bytes_mut()[ANVRAM.0 as usize + 100] ^= 1;
         let (_, proxy) = image.boot_bank().unwrap();
         let mut variables = nvram::Variables::parse(&proxy).unwrap();
         variables

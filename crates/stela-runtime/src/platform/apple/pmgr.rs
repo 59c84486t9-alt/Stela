@@ -19,7 +19,7 @@
 //! unavailable admission evidence permits controller-state completion without
 //! inventing a functional device. Uncovered domains retain named refusals. Parent
 //! arbitration is not modeled; coverage includes their actual consumers.
-pub mod coverage;
+
 pub mod dvfs;
 #[cfg(test)]
 pub mod install;

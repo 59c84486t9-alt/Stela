@@ -10,12 +10,13 @@
 //! completion.
 use super::{
     Ans, COMMAND_BYTES, COMPLETION_BYTES, MODE_RESTORE, NVMMU_PAGE_BYTES, Queue, bfh, die,
-    namespace::{BLOCK_BYTES, ReadPlan},
+    namespace::ReadPlan,
     prp::{MAX_TRANSFER, Prps, dma_error},
     tunables,
 };
 use alloc::{vec, vec::Vec};
 use stela_drivers::block::{BlockError, Finished, Request};
+use stela_soc_data::ans::BLOCK_BYTES;
 use {crate::platform::apple::sart::Sart, stela_contracts::dma::Port};
 
 pub(super) const IDENTIFY_BYTES: usize = 4096;

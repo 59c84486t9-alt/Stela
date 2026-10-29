@@ -243,7 +243,7 @@ mod tests {
             .map(|sep| sep.unwrap())
         };
         let mut routed = found.darts.clone();
-        routed[0].profile = dart::Profile::T6000;
+        routed[0].profile = stela_soc_data::dart::Profile::T6000;
         routed[0].streams = 16;
         routed[0].sids = alloc::vec![0, 4, 15];
         routed[0].mappers = alloc::vec![(0x84, 4)];
@@ -299,7 +299,7 @@ mod tests {
                 .contains("incoming remapped source")
         );
         routed[0] = good;
-        routed[0].profile = dart::Profile::T8110;
+        routed[0].profile = stela_soc_data::dart::Profile::T8110;
         assert_eq!(place(&routed).unwrap().stream, 5);
         // Admitted only with its distinguishing `role = SEP`; the nub is kept
         // as a modeled child, and neither is a bare flat-list compatible.

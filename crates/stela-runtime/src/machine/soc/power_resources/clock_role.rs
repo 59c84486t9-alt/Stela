@@ -144,8 +144,8 @@ mod tests {
     use super::*;
     use alloc::{string::ToString, vec};
     use {
-        crate::platform::apple::pmgr::coverage::Admission,
-        crate::platform::apple::pmgr::coverage::Domain, stela_contracts::adt::encode,
+        stela_contracts::adt::encode, stela_soc_data::pmgr::coverage::Admission,
+        stela_soc_data::pmgr::coverage::Domain,
     };
 
     fn words(words: &[u32]) -> Vec<u8> {

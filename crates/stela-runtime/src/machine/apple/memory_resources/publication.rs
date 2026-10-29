@@ -1,7 +1,8 @@
 //! PTD publication geometry shared by the direct-memory and DCS frontends.
-use crate::platform::apple::ptd::{
-    PTD_BYTES, UPDATE_OFFSET,
-    transport::{IRQ_STATUS, status},
+use {
+    crate::platform::apple::ptd::transport::IRQ_STATUS,
+    crate::platform::apple::ptd::transport::status, stela_soc_data::ptd::PTD_BYTES,
+    stela_soc_data::ptd::UPDATE_OFFSET,
 };
 
 /// Placement and implemented capacity of a prepared publication bank.

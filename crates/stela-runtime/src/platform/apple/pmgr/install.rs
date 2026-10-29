@@ -921,7 +921,7 @@ mod tests {
     }
     #[test]
     fn both_families_use_actual_native_binding_bank_without_claiming_hardware_completion() {
-        use crate::platform::apple::power::{Kind, Power};
+        use {crate::platform::apple::power::Power, stela_soc_data::power::Kind};
         let mut bus = Bus::new();
         let offsets = Kind::NubBindings.offsets();
         let model = Power::from_snapshot(

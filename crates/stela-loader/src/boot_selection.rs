@@ -77,7 +77,7 @@
 //! not read).
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Result, bail, ensure};
-use stela_runtime::machine::apple::nor::nvram::{Partition, Variables};
+use {stela_soc_data::nor::nvram::Partition, stela_soc_data::nor::nvram::Variables};
 
 pub const BOOT_VOLUME: &[u8] = b"boot-volume";
 pub const ALT_BOOT_VOLUME: &[u8] = b"alt-boot-volume";
@@ -691,7 +691,7 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stela_runtime::machine::apple::nor::nvram::empty_bank;
+    use stela_soc_data::nor::nvram::empty_bank;
 
     const PARTITION: &str = "A1B2C3D4-0000-1111-2222-333344445555";
     const GROUP: &str = "A304C51B-D22F-4CDD-829D-3E30CB5BD87B";

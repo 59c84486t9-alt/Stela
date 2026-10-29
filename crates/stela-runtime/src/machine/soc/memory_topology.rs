@@ -1,12 +1,18 @@
 //! DeviceTree placement and validation for memory topology.
+use super::MCC;
+use super::Node;
+use super::SOCS;
+use super::String;
+use super::Vec;
+use super::apertures;
+use super::format;
 use super::memory_resources;
-use super::{MCC, Node, SOCS, String, Vec, amcc, apertures, format, ptd};
 
 /// An `mcc,t8112`: its cache in the AMCC aperture, its DRAM channels and
 /// the PMP PTD bank it writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryCache {
-    pub cache: amcc::Cache,
+    pub cache: stela_soc_data::amcc::Cache,
     /// The DCS channels (`reg[2]`) in guest PA: base, bytes and the
     /// `dcs_num_channels` that share them evenly.
     pub channels: (u64, u64, usize),
@@ -25,7 +31,7 @@ pub struct MemoryCache {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PtdBank {
     pub physical: u64,
-    pub ranges: Vec<ptd::Range>,
+    pub ranges: Vec<stela_soc_data::ptd::Range>,
     /// Original fourth word, in exactly the same order as ranges. Not AIC IDs.
     pub interrupts: Vec<u32>,
 }
@@ -39,7 +45,7 @@ pub(super) const PTD_RANGE: usize = 32;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryController {
     pub apertures: Vec<u64>,
-    pub layout: amcc::Layout,
+    pub layout: stela_soc_data::amcc::Layout,
 }
 
 /// The property iBoot's AMCC map always states.
@@ -52,7 +58,7 @@ fn lock_register(
     path: &str,
     name: &str,
     bit: bool,
-) -> Result<amcc::Register, String> {
+) -> Result<stela_soc_data::amcc::Register, String> {
     let field = |suffix: &str| {
         node.first_u32(&format!("{name}-reg-{suffix}"))
             .ok_or_else(|| format!("{path} has no {name}-reg-{suffix}"))
@@ -62,7 +68,7 @@ fn lock_register(
     if value & !mask != 0 {
         return Err(format!("{path} {name}-reg-value has bits outside its mask"));
     }
-    Ok(amcc::Register {
+    Ok(stela_soc_data::amcc::Register {
         offset: u64::from(field("offset")?),
         mask,
         value,
@@ -73,7 +79,7 @@ fn lock_register_optional(
     node: &Node<'_>,
     path: &str,
     name: &str,
-) -> Result<Option<amcc::Register>, String> {
+) -> Result<Option<stela_soc_data::amcc::Register>, String> {
     let present = ["offset", "mask", "value"]
         .iter()
         .any(|suffix| node.property(&format!("{name}-reg-{suffix}")).is_some());
@@ -84,7 +90,10 @@ fn lock_register_optional(
 
 /// The lock group at `path` (a child of `node`), or `None` for a template
 /// node iBoot left empty (no `page-size-shift`) or none at all.
-fn lock_group(node: &Node<'_>, path: &str) -> Result<Option<amcc::LockGroup>, String> {
+fn lock_group(
+    node: &Node<'_>,
+    path: &str,
+) -> Result<Option<stela_soc_data::amcc::LockGroup>, String> {
     let name = path.rsplit('/').next().unwrap_or(path);
     let Some(group) = node.child(name) else {
         return Ok(None);
@@ -94,7 +103,7 @@ fn lock_group(node: &Node<'_>, path: &str) -> Result<Option<amcc::LockGroup>, St
     };
     let register = |name: &str, bit: bool| lock_register(&group, path, name, bit);
     let optional_register = |name: &str| lock_register_optional(&group, path, name);
-    Ok(Some(amcc::LockGroup {
+    Ok(Some(stela_soc_data::amcc::LockGroup {
         page_size_shift,
         lower_limit: register("lower-limit", false)?,
         upper_limit: register("upper-limit", false)?,
@@ -154,7 +163,7 @@ pub(super) fn memory_controller_named(
     if node.child(&format!("{controller}-ctrr-a")).is_none() {
         return Err(format!("missing lock group {path}/{controller}-ctrr-a"));
     }
-    let mut groups = [None; amcc::GROUPS];
+    let mut groups = [None; stela_soc_data::amcc::GROUPS];
     for (group, suffix) in groups.iter_mut().zip(["a", "b", "c", "d"]) {
         *group = lock_group(&node, &format!("{path}/{controller}-ctrr-{suffix}"))?;
     }
@@ -169,7 +178,7 @@ pub(super) fn memory_controller_named(
                 .map(|cell| u64::from_le_bytes(*cell))
         })
         .ok_or("/chosen has no dram-base")?;
-    let layout = amcc::Layout {
+    let layout = stela_soc_data::amcc::Layout {
         aperture_bytes: u64::from(number("aperture-size")?),
         planes: number("plane-count")?,
         stride: u64::from(number("plane-stride")?),
@@ -245,8 +254,8 @@ pub(super) fn memory_cache(
             .ok_or_else(|| format!("{PATH} has no {name}"))
     };
     let bank = range(&node, PATH, number("pmp_ptd_reg_idx")? as usize)?;
-    if bank.1 != ptd::PTD_BYTES
-        || u64::from(number("pmp_ptd_update_space_offset")?) != ptd::UPDATE_OFFSET
+    if bank.1 != stela_soc_data::ptd::PTD_BYTES
+        || u64::from(number("pmp_ptd_update_space_offset")?) != stela_soc_data::ptd::UPDATE_OFFSET
     {
         return Err(format!("{PATH} PTD registers are not one PTD bank"));
     }
@@ -257,7 +266,7 @@ pub(super) fn memory_cache(
         .first_u32("ptd-update-reg-index")
         .ok_or("/arm-io/pmp has no ptd-update-reg-index")?;
     let updates = range(&pmp, "/arm-io/pmp", index as usize)?;
-    let geometry = ptd::Geometry::new(bank, updates).map_err(String::from)?;
+    let geometry = stela_soc_data::ptd::Geometry::new(bank, updates).map_err(String::from)?;
     let records = pmp
         .child("iop-pmp-nub")
         .and_then(|nub| nub.property("ptd-range"))
@@ -270,7 +279,7 @@ pub(super) fn memory_cache(
         interrupts,
     };
     Ok(Some(MemoryCache {
-        cache: amcc::Cache {
+        cache: stela_soc_data::amcc::Cache {
             shared: in_aperture(0)?,
             broadcast: in_aperture(3)?.0,
             bytes,
@@ -495,39 +504,39 @@ mod tests {
         );
         let controller = MemoryController {
             apertures: vec![0x2_0000_0000],
-            layout: amcc::Layout {
+            layout: stela_soc_data::amcc::Layout {
                 aperture_bytes: 0xf4_0000,
                 planes: 4,
                 stride: 0x4_0000,
-                cache_status: Some(amcc::Register {
+                cache_status: Some(stela_soc_data::amcc::Register {
                     offset: 0x424,
                     mask: 1,
                     value: 1,
                 }),
                 groups: [
-                    Some(amcc::LockGroup {
+                    Some(stela_soc_data::amcc::LockGroup {
                         page_size_shift: 14,
-                        lower_limit: amcc::Register {
+                        lower_limit: stela_soc_data::amcc::Register {
                             offset: 0x680,
                             mask: u32::MAX,
                             value: 0,
                         },
-                        upper_limit: amcc::Register {
+                        upper_limit: stela_soc_data::amcc::Register {
                             offset: 0x684,
                             mask: u32::MAX,
                             value: 0,
                         },
-                        enable: Some(amcc::Register {
+                        enable: Some(stela_soc_data::amcc::Register {
                             offset: 0x688,
                             mask: 1,
                             value: 1,
                         }),
-                        write_disable: Some(amcc::Register {
+                        write_disable: Some(stela_soc_data::amcc::Register {
                             offset: 0x7f0,
                             mask: 1,
                             value: 1,
                         }),
-                        lock: Some(amcc::Register {
+                        lock: Some(stela_soc_data::amcc::Register {
                             offset: 0x68c,
                             mask: 1,
                             value: 1,
@@ -559,7 +568,7 @@ mod tests {
         assert_eq!(
             found(0x1_0000, Some(&controller)),
             Ok(Some(MemoryCache {
-                cache: amcc::Cache {
+                cache: stela_soc_data::amcc::Cache {
                     shared: (0x10_0000, 0x8_0000),
                     broadcast: 0xf0_0000,
                     bytes: 8 << 20,
@@ -572,13 +581,13 @@ mod tests {
                     physical: 0x2_3b3c_0000,
                     interrupts: vec![0, 0],
                     ranges: vec![
-                        ptd::Range {
+                        stela_soc_data::ptd::Range {
                             id: 1,
                             start: 0,
                             count: 1,
                             name: "NULL".into(),
                         },
-                        ptd::Range {
+                        stela_soc_data::ptd::Range {
                             id: 2,
                             start: 1,
                             count: 1,
@@ -596,8 +605,12 @@ mod tests {
 
     #[test]
     fn pmp_range_capacity_is_bounded_by_its_own_update_alias() {
-        let bank = (0x23b3c0000, ptd::PTD_BYTES);
-        let geometry = ptd::Geometry::new(bank, (bank.0 + ptd::UPDATE_OFFSET, 0x4000)).unwrap();
+        let bank = (0x23b3c0000, stela_soc_data::ptd::PTD_BYTES);
+        let geometry = stela_soc_data::ptd::Geometry::new(
+            bank,
+            (bank.0 + stela_soc_data::ptd::UPDATE_OFFSET, 0x4000),
+        )
+        .unwrap();
         let mut record = [0u8; PTD_RANGE];
         record[..4].copy_from_slice(&1u32.to_le_bytes());
         record[4..8].copy_from_slice(&2047u32.to_le_bytes());
@@ -638,7 +651,7 @@ mod tests {
             pmp.pairs("reg").unwrap()[pmp.first_u32("ptd-update-reg-index").unwrap() as usize];
         assert_eq!(bank, (0x3b3c0000, 0x20000));
         assert_eq!(updates, (0x3b3d0000, 0x4000));
-        let geometry = ptd::Geometry::new(bank, updates).unwrap();
+        let geometry = stela_soc_data::ptd::Geometry::new(bank, updates).unwrap();
         assert_eq!(geometry.entries(), 2048);
         let records = pmp
             .child("iop-pmp-nub")

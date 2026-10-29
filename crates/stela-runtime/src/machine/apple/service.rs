@@ -18,7 +18,7 @@ pub struct AicDelivery {
 pub enum ServiceInput {
     Aic(AicDelivery),
     CpuRelease {
-        core: cpustart::Core,
+        core: stela_soc_data::cpustart::Core,
         cpu: CpuIndex,
         now: u64,
     },
@@ -174,7 +174,7 @@ impl AppleDevices {
         }
     }
 
-    fn release_core(&mut self, core: cpustart::Core) -> Result<(), DeviceError> {
+    fn release_core(&mut self, core: stela_soc_data::cpustart::Core) -> Result<(), DeviceError> {
         let starter = self.cpu_start.as_ref().expect("captured CPU start owner");
         let affinity = u64::from(core.cluster) << 8 | u64::from(core.core);
         let cpu = starter
@@ -589,7 +589,7 @@ mod tests {
                     now: 10
                 }),
                 ServiceInput::CpuRelease {
-                    core: cpustart::Core {
+                    core: stela_soc_data::cpustart::Core {
                         cluster: 0,
                         core: 0
                     },

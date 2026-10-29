@@ -39,6 +39,10 @@
 //! which a counter that never counts never sets. So each is held as 64 bits
 //! (inference).
 use stela_compiler::aarch64::system::registers::Encoding;
+use stela_soc_data::core_counters::{
+    AON, AON_EXTRA, AON_SLOTS, AON_STRIDE, EXTRA_SLOTS, EXTRA_STRIDE, MAX_AON, STALL, STALL_SLOTS,
+    STALL_STRIDE,
+};
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -46,70 +50,9 @@ use {
 };
 
 const NAME: &str = "cpu-impl-reg counters";
-/// The core performance counters' slots: eight 0x10 apart, then the
-/// T6050's two more 8 apart.
-const AON: u64 = 0x4000;
-const AON_STRIDE: u64 = 0x10;
-const AON_SLOTS: usize = 8;
-const AON_EXTRA: u64 = 0x3fc0;
-const EXTRA_STRIDE: u64 = 8;
-/// The memory-stall counters' slots.
-const STALL: u64 = 0x6030;
-const STALL_STRIDE: u64 = 8;
-const STALL_SLOTS: usize = 8;
-const EXTRA_SLOTS: usize = 2;
-const MAX_AON: usize = AON_SLOTS + EXTRA_SLOTS;
-
-/// The source-qualified counter slots exposed by both views of a SoC's cores.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Layout {
-    aon: u8,
-    stall: u8,
-}
-
-/// The counters of the SoC with `chip_id`: the System registers its CLPC's
-/// `CorePerfSampler::sample` and `CoreMemStallSampler::sample` read (and,
-/// on the Ultras and the T6050, the second CLPC's two more memory-stall
-/// counters, S3_1_C15_C14_3 and C15_3: kernelcache.release.mac14j
-/// 0xfffffe0009f7c420).
-pub fn layout(chip_id: u32) -> Option<Layout> {
-    let (aon, stall) = match chip_id {
-        0x8103 | 0x8112 => (3, 4),
-        0x6000 | 0x6001 | 0x6020 | 0x6021 => (4, 6),
-        0x6002 | 0x6022 => (4, 8),
-        // AppleT8140CLPC in 26A434 kernelcache.release.mac17p reads
-        // AON0..2 (file 0x2b61478, 0x2b61460, 0x2b62cd0) and
-        // stall0..4 (0x2b6aff8..0x2b6b0a8). Its config methods at
-        // 0x2b71a64/0x2b71aac use the same 0x4000/0x6010 bases.
-        // The A18 Pro uses an M4 ISA profile but has its own sampler row.
-        0x8122 | 0x8140 => (3, 5),
-        0x6030 => (4, 5),
-        0x6031 | 0x6034 | 0x6040 | 0x6041 => (5, 6),
-        0x6032 => (5, 8),
-        0x8132 | 0x8142 | 0x8152 => (5, 5),
-        0x6050 => (10, 8),
-        _ => return None,
-    };
-    Some(Layout { aon, stall })
-}
-
-impl Layout {
-    /// The window ranges a block of this layout maps, as (offset, bytes):
-    /// each kind's described slots, from the first to the last.
-    pub fn windows(self) -> impl Iterator<Item = (u64, u64)> {
-        let aon = usize::from(self.aon);
-        [
-            (AON, aon.min(AON_SLOTS) as u64 * AON_STRIDE),
-            (
-                AON_EXTRA,
-                aon.saturating_sub(AON_SLOTS) as u64 * EXTRA_STRIDE,
-            ),
-            (STALL, u64::from(self.stall) * STALL_STRIDE),
-        ]
-        .into_iter()
-        .filter(|&(_, bytes)| bytes != 0)
-    }
-}
+use stela_soc_data::core_counters::Layout;
+#[cfg(test)]
+use stela_soc_data::core_counters::layout;
 
 /// One counter: a core performance or a memory-stall slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,8 +119,8 @@ impl CoreCounters {
 
     fn exists(&self, counter: Counter) -> bool {
         match counter {
-            Counter::Aon(n) => n < usize::from(self.layout.aon),
-            Counter::Stall(k) => k < usize::from(self.layout.stall),
+            Counter::Aon(n) => n < self.layout.aon_slots(),
+            Counter::Stall(k) => k < self.layout.stall_slots(),
         }
     }
 
@@ -361,8 +304,8 @@ mod tests {
             assert_eq!(block.register(encoding, None), Some(offset));
         }
         assert_eq!(block.register(STALL_0, None), Some(0));
-        assert_eq!(layout(0x6022).unwrap().stall, 8);
-        assert_eq!(layout(0x6021).unwrap().stall, 6);
+        assert_eq!(layout(0x6022).unwrap().stall_slots(), 8);
+        assert_eq!(layout(0x6021).unwrap().stall_slots(), 6);
         assert!(layout(0x1234).is_none());
     }
 

@@ -33,7 +33,14 @@
 //!   the Gen1-3 handlers inherit the base `getQueueDepths`, which returns
 //!   false (fffffe0009e384e0), and take the DT's depths.
 
-use super::{BANK_B, BANK_C};
+/// Logical bank stride used by the controller's independently placed views.
+/// Bank B's device offset; the placement maps `reg[1]` here.
+pub const BANK_BYTES: u64 = 0x4000;
+/// Bank B's device offset; the placement maps `reg[1]` here.
+pub const BANK_B: u64 = BANK_BYTES;
+/// The device offset of `reg[2]`: Gen1's independently mapped fault-counter
+/// view, or the Gen3 and Gen4 arbiter bank.
+pub const BANK_C: u64 = 2 * BANK_BYTES;
 const WORD_BYTES: u32 = 4;
 /// A full extended read consumes one header plus four payload words.
 const COMPLETE_CHUNK_BYTES: u32 = 5 * WORD_BYTES;
@@ -147,7 +154,7 @@ impl Profile {
             },
         }
     }
-    pub(super) fn counter(self, offset: u64) -> bool {
+    pub fn counter(self, offset: u64) -> bool {
         let runs = |base: u64| {
             offset.checked_sub(base).is_some_and(|at| {
                 GEN3_COUNTER_RUNS
@@ -220,12 +227,12 @@ impl Configuration {
     pub const fn queue_bytes(self) -> [u32; 2] {
         self.queue_bytes
     }
-    pub(super) const fn response_words(self) -> usize {
+    pub const fn response_words(self) -> usize {
         (self.queue_bytes[1] / WORD_BYTES) as usize
     }
     /// The depth register: request words in bits 25:16, response words in
     /// bits 9:0.
-    pub(super) const fn depth_register(self) -> u32 {
+    pub const fn depth_register(self) -> u32 {
         ((self.queue_bytes[0] / WORD_BYTES) << 16) | (self.queue_bytes[1] / WORD_BYTES)
     }
 }

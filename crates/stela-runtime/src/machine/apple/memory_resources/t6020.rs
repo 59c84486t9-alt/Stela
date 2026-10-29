@@ -6,13 +6,12 @@
 //! or a source-supported initial CPU/PMGR handoff. Root owns those joins.
 use crate::machine::soc::MemoryController;
 use crate::machine::soc::T6020Memory;
-use crate::platform::apple::amcc;
 use crate::platform::apple::amcc::Amcc;
 use crate::platform::apple::mcc::t6020;
 use crate::platform::apple::mcc::t6020::Configuration;
 use crate::platform::apple::mcc::t6020::Controller;
 use crate::platform::apple::mcc::t6020::View;
-use crate::platform::apple::ptd;
+
 use alloc::{string::String, sync::Arc, vec::Vec};
 use stela_contracts::bus::Access;
 use stela_contracts::bus::Direction;
@@ -29,7 +28,7 @@ pub mod cold;
 
 const NAME: &str = "t6020-mcc-amcc";
 const PTD_OFFSET: u64 = t6020::MAX_APERTURES as u64 * t6020::APERTURE_BYTES;
-const AUXILIARY_OFFSET: u64 = PTD_OFFSET + ptd::PTD_BYTES;
+const AUXILIARY_OFFSET: u64 = PTD_OFFSET + stela_soc_data::ptd::PTD_BYTES;
 
 /// One actual RAM owner and one shared controller/lock state. Numeric geometry
 /// cannot substitute for this Arc identity or a later live canonical service.
@@ -52,7 +51,7 @@ impl Prepared {
     pub fn new(
         descriptor: T6020Memory,
         source_locks: MemoryController,
-        programmed: amcc::Programmed,
+        programmed: stela_soc_data::amcc::Programmed,
         configuration: Configuration,
         lifecycle: LifecycleState,
         ram: Arc<RegisteredSystemRam>,
@@ -60,7 +59,7 @@ impl Prepared {
         descriptor.validate(&source_locks).map_err(String::from)?;
         validate_ram(&descriptor, &source_locks, programmed, &ram).map_err(String::from)?;
         if source_locks.layout.cache_status
-            != Some(amcc::Register {
+            != Some(stela_soc_data::amcc::Register {
                 offset: t6020::CACHE_STATUS,
                 mask: 1,
                 value: 0,
@@ -128,7 +127,7 @@ impl Prepared {
     pub fn registered_ram(&self) -> &Arc<RegisteredSystemRam> {
         &self.ram
     }
-    pub fn locked_regions(&self) -> amcc::Locked {
+    pub fn locked_regions(&self) -> stela_soc_data::amcc::Locked {
         self.locks.locked_regions()
     }
     pub fn controller(&self) -> &Controller {
@@ -155,7 +154,11 @@ impl Prepared {
     /// Owned extent, including refused PTD effects. This is deliberately not
     /// an implemented publication binding or a display alias grant.
     pub(super) fn publication_footprint(&self) -> (u64, u64, u64) {
-        (self.descriptor.ptd.physical, ptd::PTD_BYTES, PTD_OFFSET)
+        (
+            self.descriptor.ptd.physical,
+            stela_soc_data::ptd::PTD_BYTES,
+            PTD_OFFSET,
+        )
     }
     fn live_generation(&self) -> Result<(), &'static str> {
         if self
@@ -246,7 +249,7 @@ impl Prepared {
 fn validate_ram(
     descriptor: &T6020Memory,
     locks: &MemoryController,
-    programmed: amcc::Programmed,
+    programmed: stela_soc_data::amcc::Programmed,
     ram: &RegisteredSystemRam,
 ) -> Result<(), &'static str> {
     let mut regions = ram.placements().collect::<Vec<_>>();
@@ -260,7 +263,7 @@ fn validate_ram(
         .map(|&pa| (pa, t6020::APERTURE_BYTES))
         .collect::<Vec<_>>();
     mmio.extend([
-        (descriptor.ptd.physical, ptd::PTD_BYTES),
+        (descriptor.ptd.physical, stela_soc_data::ptd::PTD_BYTES),
         descriptor.auxiliary,
     ]);
     for &(source, _, bytes) in &regions {
@@ -407,15 +410,15 @@ pub(in crate::machine::apple) mod tests {
     use super::*;
     use crate::machine::apple::AppleDevices;
     use crate::machine::soc::PtdBank;
-    use crate::platform::apple::amcc::Layout;
-    use crate::platform::apple::amcc::LockGroup;
-    use crate::platform::apple::amcc::Register;
     use core::{cell::UnsafeCell, ptr::NonNull};
     use stela_contracts::interrupt::InterruptLatch;
     use stela_engine::machine::Devices;
     use stela_engine::machine::engine::DeviceReadShape;
     use stela_engine::memory::ReservedSystemRamRange;
     use stela_engine::memory::system_ram::fixture;
+    use stela_soc_data::amcc::Layout;
+    use stela_soc_data::amcc::LockGroup;
+    use stela_soc_data::amcc::Register;
     const RAM: u64 = 0x10000000000;
     #[repr(C, align(16))]
     struct Storage(UnsafeCell<[u8; 0x10000]>);
@@ -461,7 +464,7 @@ pub(in crate::machine::apple) mod tests {
                 ranges: [14, 18, 28]
                     .into_iter()
                     .enumerate()
-                    .map(|(index, id)| ptd::Range {
+                    .map(|(index, id)| stela_soc_data::ptd::Range {
                         id,
                         start: index as u32,
                         count: 1,
@@ -519,7 +522,7 @@ pub(in crate::machine::apple) mod tests {
         Prepared::new(
             descriptor,
             locks,
-            amcc::ctrr_a(Some((RAM, 0x8000))),
+            stela_soc_data::amcc::ctrr_a(Some((RAM, 0x8000))),
             configuration,
             running(),
             ram,
@@ -536,7 +539,10 @@ pub(in crate::machine::apple) mod tests {
             let owner = prepared(count, ram(RAM));
             let bindings = owner.bindings();
             assert_eq!(bindings.len(), count + 2);
-            assert_eq!(bindings[count], (0x28e3c0000, ptd::PTD_BYTES, PTD_OFFSET));
+            assert_eq!(
+                bindings[count],
+                (0x28e3c0000, stela_soc_data::ptd::PTD_BYTES, PTD_OFFSET)
+            );
             assert_eq!(bindings[count + 1], (0x28e4d0000, 0x149c, AUXILIARY_OFFSET));
             if count == 16 {
                 assert_eq!(
@@ -646,7 +652,7 @@ pub(in crate::machine::apple) mod tests {
             Prepared::new(
                 descriptor.clone(),
                 locks.clone(),
-                amcc::ctrr_a(Some((RAM + 0x10000, 0x4000))),
+                stela_soc_data::amcc::ctrr_a(Some((RAM + 0x10000, 0x4000))),
                 configuration.clone(),
                 running(),
                 ram(RAM)
@@ -727,7 +733,7 @@ pub(in crate::machine::apple) mod tests {
         let resource = super::super::resource_for(&devices.bus, id).unwrap();
         assert_eq!(
             resource.publication_footprint(),
-            (0x28e3c0000, ptd::PTD_BYTES, PTD_OFFSET)
+            (0x28e3c0000, stela_soc_data::ptd::PTD_BYTES, PTD_OFFSET)
         );
         assert!(resource.publication_binding().is_err());
         assert!(
@@ -740,7 +746,7 @@ pub(in crate::machine::apple) mod tests {
         for (offset, bytes) in [
             (PTD_OFFSET, 8),
             (PTD_OFFSET, 4),
-            (PTD_OFFSET + ptd::UPDATE_OFFSET, 8),
+            (PTD_OFFSET + stela_soc_data::ptd::UPDATE_OFFSET, 8),
         ] {
             assert!(!resource.supports_pair(offset, bytes));
             assert!(
@@ -751,7 +757,7 @@ pub(in crate::machine::apple) mod tests {
         }
         assert_eq!(
             devices.bus.route(0x28e3d0000, Width::Double),
-            Ok((id, PTD_OFFSET + ptd::UPDATE_OFFSET))
+            Ok((id, PTD_OFFSET + stela_soc_data::ptd::UPDATE_OFFSET))
         );
         assert!(
             devices

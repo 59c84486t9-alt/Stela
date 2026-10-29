@@ -1,7 +1,7 @@
 //! Generation-specific original DART topology and native placement gates.
 use super::{DartInstance, IOMMU_MAPPER, Iommu, Node, name_of, power_resources};
-use crate::platform::apple::dart::{self, Profile};
 use alloc::{format, string::String, vec::Vec};
+use stela_soc_data::dart::Profile;
 
 /// Every visible DART requirement, preserving separate translation windows.
 /// Modern t8110 and qualified T6000 paired capture retain distinct cacheless
@@ -95,7 +95,7 @@ pub(super) fn iommu(
                 // instance of one node shares it (J700AP `dart-ane` mixes
                 // 0xc000- and 0x20000-byte windows of revision 2.2).
                 let (physical, revision) = translate(offset, bytes)
-                    .filter(|at| at.is_multiple_of(dart::DAPF_BYTES))
+                    .filter(|at| at.is_multiple_of(stela_soc_data::dart::DAPF_BYTES))
                     .zip(profile.for_translation_window(bytes))
                     .ok_or_else(|| {
                         format!(
@@ -132,7 +132,10 @@ pub(super) fn iommu(
                     && smmu.is_none() =>
             {
                 let physical = translate(offset, bytes)
-                    .filter(|at| at.is_multiple_of(dart::DAPF_BYTES) && bytes == dart::DAPF_BYTES)
+                    .filter(|at| {
+                        at.is_multiple_of(stela_soc_data::dart::DAPF_BYTES)
+                            && bytes == stela_soc_data::dart::DAPF_BYTES
+                    })
                     .ok_or_else(|| {
                         format!("{path} SMMU instance is not one translated aligned 16 KiB block")
                     })?;
@@ -151,15 +154,18 @@ pub(super) fn iommu(
     let apf = match apf {
         None => None,
         Some((filter, filter_bytes)) => {
-            let at = translate(filter, dart::DAPF_BYTES)
+            let at = translate(filter, stela_soc_data::dart::DAPF_BYTES)
                 .filter(|at| {
-                    at.is_multiple_of(dart::DAPF_BYTES) && filter_bytes == dart::DAPF_BYTES
+                    at.is_multiple_of(stela_soc_data::dart::DAPF_BYTES)
+                        && filter_bytes == stela_soc_data::dart::DAPF_BYTES
                 })
                 .ok_or_else(|| format!("{path} APF is not one aligned 16 KiB block"))?;
             let slices = node
                 .first_u32("n-apfs-instance-0")
                 .and_then(|count| usize::try_from(count).ok())
-                .filter(|&count| count > 0 && count as u64 * 0x40 <= dart::DAPF_BYTES)
+                .filter(|&count| {
+                    count > 0 && count as u64 * 0x40 <= stela_soc_data::dart::DAPF_BYTES
+                })
                 .ok_or_else(|| format!("{path} has no n-apfs-instance-0 slice count"))?;
             Some((at, slices))
         }
@@ -386,7 +392,8 @@ pub(super) fn legacy_requirements<'a>(
         return Err("legacy translation descriptors do not match their physical reg ordinals");
     }
     if reg.as_chunks::<16>().0.iter().any(|pair| {
-        u64::from_le_bytes(pair[8..16].try_into().expect("complete reg size")) != dart::DAPF_BYTES
+        u64::from_le_bytes(pair[8..16].try_into().expect("complete reg size"))
+            != stela_soc_data::dart::DAPF_BYTES
     }) {
         return Err("requires unsupported legacy DART register geometry");
     }

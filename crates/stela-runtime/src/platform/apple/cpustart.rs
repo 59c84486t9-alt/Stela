@@ -33,17 +33,7 @@ const STOP: u64 = 0x0;
 const STARTUP: u64 = 0x4;
 const START: u64 = 0x8;
 
-/// The registers' span for `clusters` clusters.
-pub fn bytes(clusters: u8) -> u64 {
-    START + 4 * u64::from(clusters)
-}
-
-/// A core: its cluster and its number in the cluster.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Core {
-    pub cluster: u8,
-    pub core: u8,
-}
+use stela_soc_data::cpustart::{Core, bytes};
 
 #[derive(Debug, Clone)]
 pub struct CpuStart {

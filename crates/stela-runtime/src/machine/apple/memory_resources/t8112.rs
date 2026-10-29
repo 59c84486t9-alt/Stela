@@ -13,8 +13,7 @@ use crate::machine::soc::MemoryCache;
 use crate::platform::apple::dcs::native::ChannelProgress;
 pub use crate::platform::apple::dcs::native::{CHANNEL_STRIDE, CHANNELS, ChannelConfiguration};
 use crate::platform::apple::pmp::duties::Duties;
-use crate::platform::apple::ptd;
-use crate::platform::apple::ptd::Geometry;
+
 use crate::platform::apple::ptd::Ptd;
 #[cfg(test)]
 use crate::platform::apple::ptd::transport::IRQ_STATUS;
@@ -32,6 +31,7 @@ use stela_contracts::bus::Width;
 use stela_contracts::bus::refuse;
 use stela_engine::memory::CanonicalRamService;
 use stela_engine::memory::RegisteredSystemRam;
+use stela_soc_data::ptd::Geometry;
 
 const DCS_BYTES: u64 = CHANNEL_STRIDE * CHANNELS as u64;
 const PTD_OFFSET: u64 = DCS_BYTES;
@@ -67,13 +67,13 @@ impl Prepared {
             .checked_add(bytes)
             .ok_or("T8112 DCS extent overflows")?;
         let geometry = Geometry::new(
-            (descriptor.ptd.physical, ptd::PTD_BYTES),
+            (descriptor.ptd.physical, stela_soc_data::ptd::PTD_BYTES),
             descriptor.ptd_updates,
         )?;
         let bank_end = descriptor
             .ptd
             .physical
-            .checked_add(ptd::PTD_BYTES)
+            .checked_add(stela_soc_data::ptd::PTD_BYTES)
             .ok_or("T8112 PTD extent overflows")?;
         if channels != CHANNELS || bytes != DCS_BYTES || !physical.is_multiple_of(CHANNEL_STRIDE) {
             return Err("T8112 DCS placement is not eight complete source-stride channels");
@@ -124,7 +124,7 @@ impl Prepared {
     pub fn initialize_amcc_locks(
         &self,
         controller: crate::machine::soc::MemoryController,
-        programmed: crate::platform::apple::amcc::Programmed,
+        programmed: stela_soc_data::amcc::Programmed,
         lifecycle: LifecycleState,
     ) -> Result<amcc::LockResource, &'static str> {
         amcc::LockResource::initialized(self, controller, programmed, lifecycle)
@@ -240,7 +240,7 @@ impl Prepared {
     fn in_bank(&self, offset: u64, width: Width, direction: Direction) -> Result<(), MmioError> {
         if offset
             .checked_add(width.bytes())
-            .is_some_and(|end| end <= PTD_OFFSET + ptd::PTD_BYTES)
+            .is_some_and(|end| end <= PTD_OFFSET + stela_soc_data::ptd::PTD_BYTES)
         {
             Ok(())
         } else {
@@ -338,7 +338,7 @@ mod tests {
     use super::*;
     use crate::machine::apple::AppleDevices;
     use crate::machine::soc::PtdBank;
-    use crate::platform::apple::amcc;
+
     use alloc::{boxed::Box, vec};
     use core::{cell::UnsafeCell, ptr::NonNull};
     use stela_contracts::interrupt::InterruptLatch;
@@ -386,7 +386,7 @@ mod tests {
     pub(super) fn descriptor() -> MemoryCache {
         MemoryCache {
             // Cache/AMCC are deliberately not part of this composition.
-            cache: amcc::Cache {
+            cache: stela_soc_data::amcc::Cache {
                 shared: (0, 0),
                 broadcast: 0,
                 bytes: 0,
@@ -395,7 +395,7 @@ mod tests {
             channels: (DCS, DCS_BYTES, CHANNELS),
             ptd: PtdBank {
                 physical: PTD,
-                ranges: vec![ptd::Range {
+                ranges: vec![stela_soc_data::ptd::Range {
                     id: 73,
                     start: 0,
                     count: 256,
@@ -403,7 +403,7 @@ mod tests {
                 }],
                 interrupts: vec![0xfedcba98],
             },
-            ptd_updates: (PTD + ptd::UPDATE_OFFSET, 0x4000),
+            ptd_updates: (PTD + stela_soc_data::ptd::UPDATE_OFFSET, 0x4000),
             ptd_entries: ALIAS_ENTRIES,
         }
     }
@@ -462,7 +462,7 @@ mod tests {
         assert!(local.owns(&publication));
         assert!(!local.owns(owner_for_other_bank().publication_bank()));
         let update = owner
-            .display_publication_view(PTD + ptd::UPDATE_OFFSET, 0x4000)
+            .display_publication_view(PTD + stela_soc_data::ptd::UPDATE_OFFSET, 0x4000)
             .unwrap();
         let mut board = AppleDevices::new();
         board.add_t8112_memory_resources(owner).unwrap();
@@ -499,7 +499,7 @@ mod tests {
         let resource = super::super::resource_for(&board.bus, id).unwrap();
         assert_eq!(
             resource.publication_binding().unwrap(),
-            (PTD, ptd::PTD_BYTES, PTD_OFFSET)
+            (PTD, stela_soc_data::ptd::PTD_BYTES, PTD_OFFSET)
         );
         assert_eq!(
             resource.display_publication_view(update.0, update.1),
@@ -524,7 +524,7 @@ mod tests {
             (PTD_OFFSET + 256 * 16, 8),
             (PTD_OFFSET + 8, 8),
             (PTD_OFFSET, 4),
-            (PTD_OFFSET + ptd::UPDATE_OFFSET, 8),
+            (PTD_OFFSET + stela_soc_data::ptd::UPDATE_OFFSET, 8),
             (DRAIN, 8),
         ] {
             assert!(!resource.supports_pair(offset, bytes));
@@ -539,19 +539,19 @@ mod tests {
     #[test]
     fn placement_keeps_actual_amcc_lock_identity_and_refuses_a_second_publication_owner() {
         let mut board = AppleDevices::new();
-        let reg = |offset| amcc::Register {
+        let reg = |offset| stela_soc_data::amcc::Register {
             offset,
             mask: u32::MAX,
             value: 1,
         };
-        let layout = amcc::Layout {
+        let layout = stela_soc_data::amcc::Layout {
             aperture_bytes: 0x1000,
             planes: 1,
             stride: 0x1000,
             cache_status: None,
             dram_base: 0x800000000,
             groups: [
-                Some(amcc::LockGroup {
+                Some(stela_soc_data::amcc::LockGroup {
                     page_size_shift: 14,
                     lower_limit: reg(0x680),
                     upper_limit: reg(0x684),
@@ -564,7 +564,7 @@ mod tests {
                 None,
             ],
         };
-        let programmed = amcc::ctrr_a(Some((0x800004000, 0x4000)));
+        let programmed = stela_soc_data::amcc::ctrr_a(Some((0x800004000, 0x4000)));
         board
             .add_memory_controller(&[0x400000000], layout, programmed, None)
             .unwrap();
@@ -595,7 +595,7 @@ mod tests {
         let mut access = Access::new(0, 5, &mut latch);
         owner
             .write(
-                PTD_OFFSET + ptd::UPDATE_OFFSET,
+                PTD_OFFSET + stela_soc_data::ptd::UPDATE_OFFSET,
                 Width::Double,
                 7,
                 &mut access,
@@ -616,8 +616,8 @@ mod tests {
         );
         for (physical, bytes) in [
             (PTD, 0x4000),
-            (PTD + ptd::UPDATE_OFFSET, 0x3ff8),
-            (PTD + ptd::UPDATE_OFFSET, 0x10008),
+            (PTD + stela_soc_data::ptd::UPDATE_OFFSET, 0x3ff8),
+            (PTD + stela_soc_data::ptd::UPDATE_OFFSET, 0x10008),
             (u64::MAX, 16),
         ] {
             assert!(owner.display_publication_view(physical, bytes).is_err());
@@ -690,7 +690,7 @@ mod tests {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 9, &mut latch);
         assert_eq!(owner.read(0x41c, Width::Word, &mut access), Ok(0x14a));
-        for offset in [0x4000, DCS_BYTES + ptd::PTD_BYTES] {
+        for offset in [0x4000, DCS_BYTES + stela_soc_data::ptd::PTD_BYTES] {
             assert!(owner.read(offset, Width::Word, &mut access).is_err());
         }
         let paused = LifecycleState {
@@ -768,7 +768,7 @@ mod tests {
         for row in records {
             let word = |i| u32::from_le_bytes(row[i..i + 4].try_into().unwrap());
             let name = row[16..].split(|b| *b == 0).next().unwrap();
-            source.ptd.ranges.push(ptd::Range {
+            source.ptd.ranges.push(stela_soc_data::ptd::Range {
                 id: word(0),
                 start: word(4),
                 count: word(8),

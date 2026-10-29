@@ -31,12 +31,10 @@ use std::{
     path::Path,
 };
 use stela_loader::boot_selection;
-use stela_runtime::{
-    machine::apple::{
-        nor::{CAPACITY, Image, nvram::Variables},
-        sep_state,
-    },
-    pc::boot_log,
+use {
+    stela_runtime::machine::apple::sep_state, stela_runtime::pc::boot_log,
+    stela_soc_data::nor::CAPACITY, stela_soc_data::nor::Image,
+    stela_soc_data::nor::nvram::Variables,
 };
 
 const MAGIC: &str = "STELA MACHINE STATE 1";
@@ -158,8 +156,8 @@ pub(super) fn reset_nvram(
         Nvram::Blank => writeln!(text, "  NVRAM          blank; it is written fresh")?,
         Nvram::Valid(variables) => {
             let count = [
-                stela_runtime::machine::apple::nor::nvram::Partition::System,
-                stela_runtime::machine::apple::nor::nvram::Partition::Common,
+                stela_soc_data::nor::nvram::Partition::System,
+                stela_soc_data::nor::nvram::Partition::Common,
             ]
             .iter()
             .map(|p| variables.list(*p).count())

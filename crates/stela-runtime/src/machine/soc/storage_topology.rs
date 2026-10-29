@@ -1,10 +1,28 @@
 //! DeviceTree placement and validation for storage topology.
+use super::AES;
+use super::ASC;
+use super::Device;
+use super::DomainId;
+use super::GPIO_FUNCTION;
+use super::GpioBank;
+use super::Iommu;
+use super::NOR;
+use super::Node;
+use super::SART;
+use super::SPI;
+use super::String;
+use super::Vec;
+use super::ans;
+use super::apertures;
+use super::asc;
 use super::dma_routes::{native_dma_phandle, native_mapper_input};
-use super::{
-    AES, ASC, Device, DomainId, GPIO_FUNCTION, GpioBank, Iommu, NOR, Node, SART, SPI, String, Vec,
-    aes, ans, apertures, asc, format, name_of, nor, power_resources, rtbuddy_nub, sart,
-    single_range, spi,
-};
+use super::format;
+use super::name_of;
+use super::power_resources;
+use super::rtbuddy_nub;
+use super::sart;
+use super::single_range;
+use super::spi;
 
 /// `/arm-io/ans` properties under which SPTM's `nvme_bootstrap`
 /// (0x270c8a74..8bc0, 0x270c8dac) drives banks or flows the ANS2 model
@@ -24,7 +42,7 @@ const UNMODELED_ANS_SPTM: [&str; 4] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpiNor {
     pub device: Device,
-    pub image: nor::Image,
+    pub image: stela_soc_data::nor::Image,
     /// The AP GPIO pin of an external chip select.
     pub select: Option<u32>,
 }
@@ -72,13 +90,16 @@ pub(super) fn spi_nor(
     {
         return Err("unsupported NOR SPI configuration or chip select".into());
     }
-    if flash.cells32("ranges").as_deref() != Some(&[0, 0, nor::CAPACITY as u32]) {
+    if flash.cells32("ranges").as_deref() != Some(&[0, 0, stela_soc_data::nor::CAPACITY as u32]) {
         return Err("unsupported NOR ranges".into());
     }
     for (name, regions) in [
-        ("firmware", nor::FIRMWARE.as_slice()),
-        ("anvram", core::slice::from_ref(&nor::ANVRAM)),
-        ("syscfg", nor::SYSCFG.as_slice()),
+        ("firmware", stela_soc_data::nor::FIRMWARE.as_slice()),
+        (
+            "anvram",
+            core::slice::from_ref(&stela_soc_data::nor::ANVRAM),
+        ),
+        ("syscfg", stela_soc_data::nor::SYSCFG.as_slice()),
     ] {
         let expected = regions
             .iter()
@@ -91,8 +112,8 @@ pub(super) fn spi_nor(
         }
     }
     let chosen = root.child("chosen").ok_or("NVRAM chosen missing")?;
-    if chosen.first_u32("nvram-bank-size") != Some(nor::nvram::BANK_SIZE as u32)
-        || chosen.first_u32("nvram-bank-count") != Some(nor::nvram::BANK_COUNT)
+    if chosen.first_u32("nvram-bank-size") != Some(stela_soc_data::nor::nvram::BANK_SIZE as u32)
+        || chosen.first_u32("nvram-bank-count") != Some(stela_soc_data::nor::nvram::BANK_COUNT)
     {
         return Err("unsupported NVRAM bank geometry".into());
     }
@@ -102,7 +123,7 @@ pub(super) fn spi_nor(
     let proxy = chosen
         .property("nvram-proxy-data")
         .ok_or("NVRAM proxy missing")?;
-    let image = nor::Image::fresh()
+    let image = stela_soc_data::nor::Image::fresh()
         .with_proxy(current, proxy)
         .map_err(String::from)?;
     let select = if node.property("internal-cs").is_some() {
@@ -151,13 +172,13 @@ pub struct AesEngine {
     pub instance: usize,
     pub ranges: [(u64, u64); 2],
     pub dkey: Option<(u64, u64)>,
-    pub config: aes::Config,
+    pub config: stela_soc_data::aes::Config,
     pub irq: u32,
     pub iommu: usize,
     pub stream: u32,
 }
 
-pub type AnsQueueGeometry = ans::QueueGeometry;
+use stela_soc_data::ans::QueueGeometry;
 
 /// ANS2's DT placement. `reg[0]` is the ASC wrapper; `reg[3]` is the
 /// NVMe aperture. `iommu-parent` names SART itself, not a DART stream.
@@ -167,7 +188,7 @@ pub type AnsQueueGeometry = ans::QueueGeometry;
 /// (`ans::VDMA_CACHE_OFFSET`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnsController {
-    pub geometry: AnsQueueGeometry,
+    pub geometry: QueueGeometry,
     pub wrapper: (u64, u64),
     pub nvme: (u64, u64),
     pub vdma: Option<(u64, u64)>,
@@ -183,7 +204,7 @@ pub struct AnsController {
     pub sart_exclusive_bounds: bool,
     pub interrupts: [u16; 4],
     pub completion_irq: u16,
-    pub namespaces: Vec<ans::Description>,
+    pub namespaces: Vec<stela_soc_data::ans::Description>,
     pub clock_gates: Vec<DomainId>,
     pub power_gates: Vec<DomainId>,
 }
@@ -219,7 +240,7 @@ pub(super) fn ans_controller(
     if node.property("nvme-linear-sq").is_none() {
         return Err("ANS2 requires the modeled linear submission contract".into());
     }
-    let geometry = AnsQueueGeometry::linear(
+    let geometry = QueueGeometry::linear(
         node.first_u32("nvme-queue-entries")
             .ok_or("ANS2 has no nvme-queue-entries handoff")?,
     )
@@ -325,7 +346,7 @@ pub(super) fn ans_controller(
     };
     let interrupts = [irq(0)?, irq(1)?, irq(2)?, irq(3)?];
     let completion_irq = irq(index)?;
-    let namespaces = ans::Description::decode(
+    let namespaces = stela_soc_data::ans::Description::decode(
         node.property("namespaces")
             .ok_or("ANS2 has no namespaces")?,
     )
@@ -380,25 +401,27 @@ pub(super) fn aes_engine(
     };
     let version = number("aes-version")?;
     let reg = apertures::registers(&node).unwrap_or_default();
-    let (block, key_disable, dkey) = match (reg.as_slice(), version >= aes::DKEY_VERSION) {
-        (&[block, key_disable], false) => (block, key_disable, None),
-        (&[block, key_disable, dkey], true) => (block, key_disable, Some(dkey)),
-        _ => {
-            return Err(format!(
-                "{PATH} aes-version {version} has {} register ranges",
-                reg.len()
-            ));
-        }
-    };
+    let (block, key_disable, dkey) =
+        match (reg.as_slice(), version >= stela_soc_data::aes::DKEY_VERSION) {
+            (&[block, key_disable], false) => (block, key_disable, None),
+            (&[block, key_disable, dkey], true) => (block, key_disable, Some(dkey)),
+            _ => {
+                return Err(format!(
+                    "{PATH} aes-version {version} has {} register ranges",
+                    reg.len()
+                ));
+            }
+        };
     let place = |(offset, bytes): (u64, u64)| {
         translate(offset, bytes)
             .map(|physical| (physical, bytes))
             .ok_or_else(|| format!("{PATH} lies outside /arm-io ranges"))
     };
-    let config = aes::Config {
+    let config = stela_soc_data::aes::Config {
         version,
-        address_width: optional("address-width")?.unwrap_or(aes::DEFAULT_ADDRESS_WIDTH),
-        key_disable: aes::KeyDisable {
+        address_width: optional("address-width")?
+            .unwrap_or(stela_soc_data::aes::DEFAULT_ADDRESS_WIDTH),
+        key_disable: stela_soc_data::aes::KeyDisable {
             bytes: key_disable.1,
             word: optional("sioaesdisable-offset")?.unwrap_or(0),
             keys: [
@@ -460,9 +483,12 @@ mod tests {
         let words = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let pairs = |v: &[u64]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let partitions: Vec<_> = [
-            ("firmware", nor::FIRMWARE.as_slice()),
-            ("anvram", core::slice::from_ref(&nor::ANVRAM)),
-            ("syscfg", nor::SYSCFG.as_slice()),
+            ("firmware", stela_soc_data::nor::FIRMWARE.as_slice()),
+            (
+                "anvram",
+                core::slice::from_ref(&stela_soc_data::nor::ANVRAM),
+            ),
+            ("syscfg", stela_soc_data::nor::SYSCFG.as_slice()),
         ]
         .into_iter()
         .map(|(name, regions)| {
@@ -481,7 +507,10 @@ mod tests {
                 ("name", b"spinor"),
                 ("compatible", NOR.as_bytes()),
                 ("reg", &words(&[0, 25, 0x08010000, 0, 20, 0, 0, 0])),
-                ("ranges", &words(&[0, 0, nor::CAPACITY as u32])),
+                (
+                    "ranges",
+                    &words(&[0, 0, stela_soc_data::nor::CAPACITY as u32]),
+                ),
             ],
             &partitions,
         );
@@ -526,7 +555,10 @@ mod tests {
         let chosen = encode(
             &[
                 ("name", b"chosen"),
-                ("nvram-proxy-data", &nor::nvram::empty_bank()),
+                (
+                    "nvram-proxy-data",
+                    &stela_soc_data::nor::nvram::empty_bank(),
+                ),
                 ("nvram-bank-size", &words(&[65536])),
                 ("nvram-bank-count", &words(&[2])),
                 ("nvram-current-bank", &words(&[0])),
@@ -557,7 +589,10 @@ mod tests {
         assert_eq!(placed.device.physical, 0x2_3510_4000);
         assert_eq!(placed.device.irq, 749);
         assert_eq!(placed.select, Some(49));
-        assert_eq!(placed.image.bank(0).unwrap(), nor::nvram::empty_bank());
+        assert_eq!(
+            placed.image.bank(0).unwrap(),
+            stela_soc_data::nor::nvram::empty_bank()
+        );
         assert!(spi_nor(&root, &io, &flat_fixture_extent(&|_| None), 99, Some(&bank)).is_err());
         assert!(spi_nor(&root, &io, &flat_fixture_extent(&Some), 100, Some(&bank)).is_err());
         assert!(spi_nor(&root, &io, &flat_fixture_extent(&translate), 99, None).is_err());
@@ -674,7 +709,7 @@ mod tests {
         assert_eq!(placed.interrupts, [718, 717, 720, 719]);
         assert_eq!(
             placed.namespaces[2],
-            ans::Description {
+            stela_soc_data::ans::Description {
                 id: 3,
                 kind: 13,
                 blocks: 32768

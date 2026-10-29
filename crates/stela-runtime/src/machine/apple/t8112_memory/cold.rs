@@ -2,10 +2,8 @@
 //! Software backing is declared here. Switched inputs come from the actual
 //! PMGR; an explicitly certified input-free AP frontend owns its software state.
 //! Neither case nor clear words certify Apple hardware/private PMP readiness.
-use super::super::{
-    AppleDevices,
-    memory_resources::{amcc, t8112},
-};
+use super::super::AppleDevices;
+use super::super::memory_resources::t8112;
 use crate::machine::soc::Board;
 use crate::machine::soc::MemoryCache;
 use crate::machine::soc::MemoryController;
@@ -13,16 +11,16 @@ use crate::machine::soc::PowerOwner;
 use crate::machine::soc::PowerStates;
 use crate::platform::apple::pmgr;
 use crate::platform::apple::pmgr::Pmgr;
-use crate::platform::apple::pmgr::coverage;
-use crate::platform::apple::pmgr::coverage::Consumer;
-use crate::platform::apple::pmgr::coverage::LifecycleSinks;
-use crate::platform::apple::ptd;
-use crate::platform::apple::ptd::Geometry;
+
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 use stela_contracts::Chip;
 use stela_contracts::bus::LifecycleState;
 use stela_contracts::bus::Width;
 use stela_engine::memory::RegisteredSystemRam;
+use stela_soc_data::pmgr::coverage;
+use stela_soc_data::pmgr::coverage::Consumer;
+use stela_soc_data::pmgr::coverage::LifecycleSinks;
+use stela_soc_data::ptd::Geometry;
 use t8112::cache::{EmptyResource, SoftwareImage, ZeroWayConfiguration};
 
 const SHARED: (u64, u64) = (0x100000, 0x80000);
@@ -57,7 +55,7 @@ pub struct Plan {
     source_power: PowerStates,
     lifecycle: LifecycleInput,
     ram: Arc<RegisteredSystemRam>,
-    programmed: amcc::Programmed,
+    programmed: stela_soc_data::amcc::Programmed,
     configuration: Configuration,
 }
 // Private constructors prevent a missing/failed dependency lookup from granting
@@ -80,7 +78,7 @@ impl Plan {
     pub fn prepare(
         board: &Board,
         ram: &Arc<RegisteredSystemRam>,
-        programmed: amcc::Programmed,
+        programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
     ) -> Result<Self, String> {
         Self::prepare_board(
@@ -98,7 +96,7 @@ impl Plan {
     pub fn prepare_ap_frontend(
         board: &Board,
         ram: &Arc<RegisteredSystemRam>,
-        programmed: amcc::Programmed,
+        programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
     ) -> Result<Self, String> {
         Self::prepare_board(
@@ -113,7 +111,7 @@ impl Plan {
     fn prepare_board(
         board: &Board,
         ram: &Arc<RegisteredSystemRam>,
-        programmed: amcc::Programmed,
+        programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
         policy: LifecyclePolicy,
     ) -> Result<Self, String> {
@@ -146,7 +144,7 @@ impl Plan {
         cache: &MemoryCache,
         states: &PowerStates,
         ram: &Arc<RegisteredSystemRam>,
-        programmed: amcc::Programmed,
+        programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
     ) -> Result<Self, String> {
         Self::prepare_resources_with_policy(
@@ -165,7 +163,7 @@ impl Plan {
         cache: &MemoryCache,
         states: &PowerStates,
         ram: &Arc<RegisteredSystemRam>,
-        programmed: amcc::Programmed,
+        programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
         policy: LifecyclePolicy,
     ) -> Result<Self, String> {
@@ -431,7 +429,7 @@ fn geometry(
     controller: &MemoryController,
     cache: &MemoryCache,
     ram: &RegisteredSystemRam,
-    programmed: amcc::Programmed,
+    programmed: stela_soc_data::amcc::Programmed,
 ) -> Result<(), String> {
     let [physical] = controller.apertures[..] else {
         return Err("cold T8112 AMCC requires its one original aperture".into());
@@ -458,8 +456,11 @@ fn geometry(
     {
         return Err("cold T8112 AMCC/cache/DCS geometry differs from the source profile".into());
     }
-    let geometry = Geometry::new((cache.ptd.physical, ptd::PTD_BYTES), cache.ptd_updates)
-        .map_err(String::from)?;
+    let geometry = Geometry::new(
+        (cache.ptd.physical, stela_soc_data::ptd::PTD_BYTES),
+        cache.ptd_updates,
+    )
+    .map_err(String::from)?;
     if geometry.entries() != PTD_ENTRIES
         || cache.ptd_entries != PTD_ENTRIES
         || cache.ptd.ranges.is_empty()
@@ -473,7 +474,7 @@ fn geometry(
     let ptd_end = cache
         .ptd
         .physical
-        .checked_add(ptd::PTD_BYTES)
+        .checked_add(stela_soc_data::ptd::PTD_BYTES)
         .ok_or("cold T8112 PTD wraps")?;
     if physical < ptd_end && cache.ptd.physical < dcs_end {
         return Err("cold T8112 AMCC/DCS union overlaps PTD".into());
@@ -519,14 +520,14 @@ mod tests {
     use crate::machine::soc::PowerResource;
     use crate::platform::apple::pmgr::DomainState;
     use crate::platform::apple::pmgr::PowerState;
-    use crate::platform::apple::pmgr::coverage::Admission;
-    use crate::platform::apple::pmgr::coverage::Domain;
-    use crate::platform::apple::pmgr::coverage::DomainId;
     use alloc::boxed::Box;
     use stela_contracts::bus::Access;
     use stela_contracts::bus::MmioDevice;
     use stela_contracts::interrupt::InterruptLatch;
     use stela_engine::machine::Devices;
+    use stela_soc_data::pmgr::coverage::Admission;
+    use stela_soc_data::pmgr::coverage::Domain;
+    use stela_soc_data::pmgr::coverage::DomainId;
 
     const SUPPLY: u64 = 0x1000;
     fn id(device: u16) -> DomainId {

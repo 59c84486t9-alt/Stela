@@ -15,16 +15,30 @@
 //! without that evidence refuses: the T6050's M cores, whose caches no
 //! source gives, the M6's M cores, and a T6050 template whose fused variant
 //! is not merged yet (the boot bundle merges it, `stela_loader::soc_variant`).
-use crate::platform::apple::{
-    aes, agx,
-    aic::{AIC2_DIE_STRIDE, AIC2_MAX_DIES, AIC3_IRQ_CFG, AIC3_TIMESTAMPS, AicLayout},
-    aic1::AIC1_EVENT,
-    amcc, ans, asc, atc_phy, bridge, cluster, core_counters, coresight, cpm, cpustart, dart, dcp,
-    dpe, energy, fuse, gpio, i2c, nor,
-    pmgr::coverage::DomainId,
-    pmu, power, ptd, sart, smc, spi, spmi, wake,
-};
+use crate::platform::apple::agx;
+use crate::platform::apple::ans;
+use crate::platform::apple::asc;
+use crate::platform::apple::atc_phy;
+use crate::platform::apple::bridge;
+use crate::platform::apple::cluster;
+use crate::platform::apple::coresight;
+use crate::platform::apple::dcp;
+use crate::platform::apple::energy;
+use crate::platform::apple::fuse;
+use crate::platform::apple::i2c;
+use crate::platform::apple::pmu;
+use crate::platform::apple::sart;
+use crate::platform::apple::smc;
+use crate::platform::apple::spi;
+use crate::platform::apple::wake;
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
+use stela_soc_data::aic::AIC1_EVENT;
+use stela_soc_data::aic::AIC2_DIE_STRIDE;
+use stela_soc_data::aic::AIC2_MAX_DIES;
+use stela_soc_data::aic::AIC3_IRQ_CFG;
+use stela_soc_data::aic::AIC3_TIMESTAMPS;
+use stela_soc_data::aic::AicLayout;
+use stela_soc_data::pmgr::coverage::DomainId;
 use {
     stela_contracts::Chip, stela_contracts::adt::Node, stela_contracts::caches::Cache,
     stela_contracts::caches::Caches, stela_contracts::identity::Identity,
@@ -47,9 +61,9 @@ pub use usb_topology::{
 use usb_topology::{typec_devices, usb_controllers};
 mod spmi_topology;
 use spmi_topology::spmi_controllers;
-pub use spmi_topology::{FirmwareMailbox, SpmiConfiguration, SpmiController, SpmiPmu};
+pub use spmi_topology::{FirmwareMailbox, SpmiController, SpmiPmu};
 mod storage_topology;
-pub use storage_topology::{AesEngine, AnsController, AnsQueueGeometry, SpiNor};
+pub use storage_topology::{AesEngine, AnsController, SpiNor};
 use storage_topology::{aes_engine, ans_controller, spi_nor};
 mod memory_topology;
 pub use memory_topology::{MemoryCache, MemoryController, PtdBank};
@@ -166,7 +180,7 @@ struct Soc {
     aon_fuses: Option<usize>,
     cpu_start: Option<u64>,
     wake_masks: Option<WakeLayout>,
-    power_banks: &'static [(usize, power::Kind)],
+    power_banks: &'static [(usize, stela_soc_data::power::Kind)],
     dpe_reg: Option<usize>,
     bridge_fields: Option<&'static [&'static [(u64, u32)]]>,
 }
@@ -667,11 +681,11 @@ const SOCS: [Soc; 22] = [
         // initRegMaps, kernel file 0x2fa31bc..0x2fa3620: RegMap
         // 0x68/0x64/0x62/0x65. DT gives the addresses, not enum bindings.
         power_banks: &[
-            (31, power::Kind::Volman),
-            (30, power::Kind::Marker),
-            (34, power::Kind::Gpce),
-            (32, power::Kind::Gating),
-            (35, power::Kind::Tvm),
+            (31, stela_soc_data::power::Kind::Volman),
+            (30, stela_soc_data::power::Kind::Marker),
+            (34, stela_soc_data::power::Kind::Gpce),
+            (32, stela_soc_data::power::Kind::Gating),
+            (35, stela_soc_data::power::Kind::Tvm),
         ],
         dpe_reg: Some(29),
         bridge_fields: Some(&bridge::tunables::T8112),
@@ -1175,7 +1189,7 @@ pub struct LockdownBlock {
 pub struct CounterBlock {
     pub cpu: usize,
     pub physical: u64,
-    pub layout: core_counters::Layout,
+    pub layout: stela_soc_data::core_counters::Layout,
 }
 
 /// The `compatible` of the S5L UART the engine models (`platform::apple::uart`).
@@ -1185,7 +1199,7 @@ pub const WATCHDOG: &str = "wdt,s5l8960x";
 /// The AIC versions the engine models (`platform::apple::aic1` and `aic`).
 const AICS: [&str; 3] = ["aic,1", "aic,2", "aic,3"];
 /// The modern DART compatible; native legacy families are selected through
-/// [`dart::Profile::from_compatible`], with separate optional-feature gates.
+/// [`stela_soc_data::dart::Profile::from_compatible`], with separate optional-feature gates.
 pub const DART: &str = "dart,t8110";
 /// The `compatible` of a DART child naming one client's stream (its `reg`),
 /// which XNU's IODARTMapper binds and clients name as `iommu-parent`.
@@ -1519,12 +1533,12 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         || usb_controller_compatible(name, property("compatible"))
         || T6000_EXTERNAL_OUTPUT_ADMITTED && name == DISPEXT_T6000
         || [GPIO_T6000, GPIO_S5L].contains(&name)
-            && gpio_profile(&property) == Some(gpio::Profile::S5l8960x)
-        || dart::Profile::from_compatible(name.as_bytes()).is_some_and(|profile| {
-            property("compatible")
-                .is_none_or(|bytes| dart::Profile::from_compatible(bytes) == Some(profile))
-                && (profile == dart::Profile::T8110
-                    || dart_topology::legacy_requirements(profile, &property).is_ok())
+            && gpio_profile(&property) == Some(stela_soc_data::gpio::Profile::S5l8960x)
+        || stela_soc_data::dart::Profile::from_compatible(name.as_bytes()).is_some_and(|profile| {
+            property("compatible").is_none_or(|bytes| {
+                stela_soc_data::dart::Profile::from_compatible(bytes) == Some(profile)
+            }) && (profile == stela_soc_data::dart::Profile::T8110
+                || dart_topology::legacy_requirements(profile, &property).is_ok())
         })
         || GPU_ADMITTED && (name == GFX_MAPPER || admitted_gpu(name))
         || AICS.contains(&name)
@@ -1805,7 +1819,7 @@ pub struct DartInstance {
 /// the DART. Per-instance DMA selection remains the bus master's contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Iommu {
-    pub profile: dart::Profile,
+    pub profile: stela_soc_data::dart::Profile,
     pub instances: Vec<DartInstance>,
     pub streams: u16,
     pub irq: u32,
@@ -2006,7 +2020,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         return Err("CPU register roster differs from processor topology".into());
     }
     let mut counters = Vec::new();
-    if let Some(layout) = core_counters::layout(chip_id) {
+    if let Some(layout) = stela_soc_data::core_counters::layout(chip_id) {
         let end = layout
             .windows()
             .map(|(offset, bytes)| offset + bytes)
@@ -2470,7 +2484,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(bank.profile, gpio::Profile::S5l8960x);
+        assert_eq!(bank.profile, stela_soc_data::gpio::Profile::S5l8960x);
         assert_eq!(
             (
                 bank.physical,
@@ -2680,7 +2694,10 @@ mod tests {
         );
         let mut bases = Vec::new();
         for controller in controllers {
-            assert_eq!(controller.configuration.profile(), spmi::Profile::Gen1);
+            assert_eq!(
+                controller.configuration.profile(),
+                stela_soc_data::spmi::Profile::Gen1
+            );
             assert_eq!(controller.configuration.response_vector(), 192);
             assert_eq!(controller.configuration.queue_bytes(), [256, 256]);
             for (base, bytes) in controller.banks {
@@ -3210,7 +3227,7 @@ mod tests {
             ]
         );
         // Each PE's sampler counters, in its cpu-impl-reg.
-        let layout = core_counters::layout(0x8112).unwrap();
+        let layout = stela_soc_data::core_counters::layout(0x8112).unwrap();
         assert_eq!(
             found.counters,
             [
@@ -3335,7 +3352,7 @@ mod tests {
         assert_eq!(
             found.darts,
             [Iommu {
-                profile: dart::Profile::T8110,
+                profile: stela_soc_data::dart::Profile::T8110,
                 instances: vec![DartInstance {
                     physical: 0x2_3500_4000,
                     bytes: 0x4000,
@@ -3365,10 +3382,10 @@ mod tests {
                 instance: 0,
                 ranges: [(0x2_3500_c000, 0x4000), (0x2_3d2d_c000, 0x8000)],
                 dkey: None,
-                config: aes::Config {
+                config: stela_soc_data::aes::Config {
                     version: 3,
-                    address_width: aes::DEFAULT_ADDRESS_WIDTH,
-                    key_disable: aes::KeyDisable {
+                    address_width: stela_soc_data::aes::DEFAULT_ADDRESS_WIDTH,
+                    key_disable: stela_soc_data::aes::KeyDisable {
                         bytes: 0x8000,
                         word: 0,
                         keys: [None; 3],
@@ -3421,10 +3438,10 @@ mod tests {
         assert_eq!(wide.dkey, Some((0x2_3d07_8000, 0x4000)));
         assert_eq!(
             wide.config,
-            aes::Config {
+            stela_soc_data::aes::Config {
                 version: 5,
                 address_width: 42,
-                key_disable: aes::KeyDisable {
+                key_disable: stela_soc_data::aes::KeyDisable {
                     bytes: 0x8000,
                     word: 0,
                     keys: [Some(0x40), Some(0x44), Some(0x48)],
@@ -3466,7 +3483,7 @@ mod tests {
         );
         let io = Node::root(&bytes).unwrap().child("arm-io").unwrap();
         let mut routes = found.darts.clone();
-        routes[0].profile = dart::Profile::T6000;
+        routes[0].profile = stela_soc_data::dart::Profile::T6000;
         routes[0].remap = vec![(3, 1)];
         routes[0].sids = vec![0, 1, 15];
         let routed = aes_engine(&io, &flat_fixture_extent(&Some), &routes)
@@ -3985,7 +4002,7 @@ mod tests {
         assert_eq!(node.first_u32("sids"), Some(0x8001));
         let darts = [iommu(&node, &|address, bytes| io.translate_range(address, bytes)).unwrap()];
         let dart = &darts[0];
-        assert_eq!(dart.profile, dart::Profile::T6000);
+        assert_eq!(dart.profile, stela_soc_data::dart::Profile::T6000);
         assert_eq!(dart.streams, 16);
         assert_eq!(dart.sids, [0, 15]);
         assert_eq!(dart.instances.len(), 1);

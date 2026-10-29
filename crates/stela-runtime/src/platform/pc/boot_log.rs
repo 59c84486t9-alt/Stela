@@ -36,7 +36,6 @@
 //! directory or FAT: [`file_runs`] gives the block-aligned runs of its
 //! clusters, wherever they lie, that hold the bytes its layout needs.
 use super::fat32;
-use crate::machine::apple::{nor::CAPACITY, sep_state};
 use alloc::{collections::VecDeque, format, vec, vec::Vec};
 use core::{
     convert::Infallible,
@@ -44,6 +43,7 @@ use core::{
 };
 use sha2::{Digest, Sha256};
 use stela_drivers::block::{BlockDevice, BlockError, Finished, Request};
+use {crate::machine::apple::sep_state, stela_soc_data::nor::CAPACITY};
 
 /// Where the region starts in the machine-state partition.
 pub const OFFSET: u64 = CAPACITY as u64 + sep_state::BYTES;

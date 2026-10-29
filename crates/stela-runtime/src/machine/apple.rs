@@ -6,7 +6,7 @@
 pub mod t6000_pmgr;
 
 use super::soc::PowerOwner;
-pub use crate::platform::apple::pmu::{RtcEpoch, WallClock};
+pub use crate::platform::apple::pmu::RtcEpoch;
 use crate::platform::usb::{
     Function, Speed,
     ecm::Ecm,
@@ -34,53 +34,94 @@ use stela_engine::machine::engine::Start;
 use stela_engine::machine::engine::Transition;
 use stela_engine::machine::registers::Lines;
 use stela_engine::system::access::AccessKind;
-use {
-    crate::platform::apple::aes, crate::platform::apple::aes::Aes,
-    crate::platform::apple::agx::firmware::Coprocessor as GfxCoprocessor,
-    crate::platform::apple::agx::sgx::Sgx, crate::platform::apple::agx::uat,
-    crate::platform::apple::agx::uat::Agent, crate::platform::apple::aic::Aic2,
-    crate::platform::apple::aic::Aic2Config, crate::platform::apple::aic1::Aic1,
-    crate::platform::apple::amcc, crate::platform::apple::amcc::Amcc, crate::platform::apple::ans,
-    crate::platform::apple::ans::Ans, crate::platform::apple::asc,
-    crate::platform::apple::asc::Asc, crate::platform::apple::atc_phy,
-    crate::platform::apple::atc_phy::AtcPhy, crate::platform::apple::bridge::Bridge,
-    crate::platform::apple::cluster, crate::platform::apple::cluster::Cluster,
-    crate::platform::apple::core_counters, crate::platform::apple::core_counters::CoreCounters,
-    crate::platform::apple::coresight, crate::platform::apple::coresight::PcSampler,
-    crate::platform::apple::coresight::SoftwareLock, crate::platform::apple::cpm::Cpm,
-    crate::platform::apple::cpustart, crate::platform::apple::cpustart::CpuStart,
-    crate::platform::apple::dart, crate::platform::apple::dart::Dart, crate::platform::apple::dcp,
-    crate::platform::apple::display as display_hw, crate::platform::apple::dpe::Dpe,
-    crate::platform::apple::dwc3, crate::platform::apple::dwc3::Dwc3,
-    crate::platform::apple::dwc3::PortState, crate::platform::apple::energy,
-    crate::platform::apple::energy::Energy, crate::platform::apple::fuse,
-    crate::platform::apple::fuse::AonFuses, crate::platform::apple::gpio::Gpio,
-    crate::platform::apple::gpio::Net, crate::platform::apple::gpio::OpenDrain,
-    crate::platform::apple::hpm::Firmware, crate::platform::apple::hpm::Hpm,
-    crate::platform::apple::hpm::Summary, crate::platform::apple::i2c,
-    crate::platform::apple::i2c::I2c, crate::platform::apple::ipi,
-    crate::platform::apple::ipi::Affinity, crate::platform::apple::ipi::FastIpi,
-    crate::platform::apple::lockdown, crate::platform::apple::lockdown::Lockdown,
-    crate::platform::apple::perf::PerfCounters, crate::platform::apple::pmgr::ACTIVE,
-    crate::platform::apple::pmgr::DomainState, crate::platform::apple::pmgr::POWER_GATED,
-    crate::platform::apple::pmgr::Pmgr, crate::platform::apple::pmgr::PowerState,
-    crate::platform::apple::pmgr::coverage, crate::platform::apple::pmgr::coverage::Consumer,
-    crate::platform::apple::pmgr::coverage::LifecycleSinks, crate::platform::apple::pmp,
-    crate::platform::apple::pmu, crate::platform::apple::pmu::Pmu, crate::platform::apple::power,
-    crate::platform::apple::power::Power, crate::platform::apple::ptd,
-    crate::platform::apple::rtkit::RtKit, crate::platform::apple::sart,
-    crate::platform::apple::sart::Sart, crate::platform::apple::sep,
-    crate::platform::apple::sep::Sep, crate::platform::apple::smc,
-    crate::platform::apple::smc::Smc, crate::platform::apple::spi::Spi,
-    crate::platform::apple::spmi, crate::platform::apple::spmi::Spmi,
-    crate::platform::apple::uart::S5lUart, crate::platform::apple::wake,
-    crate::platform::apple::wake::WakeMasks, crate::platform::apple::wdt,
-    crate::platform::apple::wdt::AppleWdt, stela_contracts::bus::Access, stela_contracts::bus::Bus,
-    stela_contracts::bus::DeviceId, stela_contracts::bus::LifecycleState,
-    stela_contracts::bus::MapError, stela_contracts::bus::MmioDevice,
-    stela_contracts::bus::MmioError, stela_contracts::bus::Width,
-    stela_contracts::interrupt::CpuIndex, stela_contracts::interrupt::InterruptLatch,
-};
+
+use crate::platform::apple::aes;
+use crate::platform::apple::aes::Aes;
+use crate::platform::apple::agx::firmware::Coprocessor as GfxCoprocessor;
+use crate::platform::apple::agx::sgx::Sgx;
+use crate::platform::apple::agx::uat;
+use crate::platform::apple::agx::uat::Agent;
+use crate::platform::apple::aic::Aic2;
+use crate::platform::apple::aic1::Aic1;
+use crate::platform::apple::amcc::Amcc;
+use crate::platform::apple::ans;
+use crate::platform::apple::ans::Ans;
+use crate::platform::apple::asc;
+use crate::platform::apple::asc::Asc;
+use crate::platform::apple::atc_phy;
+use crate::platform::apple::atc_phy::AtcPhy;
+use crate::platform::apple::bridge::Bridge;
+use crate::platform::apple::cluster;
+use crate::platform::apple::cluster::Cluster;
+use crate::platform::apple::core_counters::CoreCounters;
+use crate::platform::apple::coresight;
+use crate::platform::apple::coresight::PcSampler;
+use crate::platform::apple::coresight::SoftwareLock;
+use crate::platform::apple::cpm::Cpm;
+use crate::platform::apple::cpustart::CpuStart;
+use crate::platform::apple::dart;
+use crate::platform::apple::dart::Dart;
+use crate::platform::apple::dcp;
+use crate::platform::apple::display as display_hw;
+use crate::platform::apple::dpe::Dpe;
+use crate::platform::apple::dwc3;
+use crate::platform::apple::dwc3::Dwc3;
+use crate::platform::apple::dwc3::PortState;
+use crate::platform::apple::energy;
+use crate::platform::apple::energy::Energy;
+use crate::platform::apple::fuse;
+use crate::platform::apple::fuse::AonFuses;
+use crate::platform::apple::gpio::Gpio;
+use crate::platform::apple::gpio::Net;
+use crate::platform::apple::gpio::OpenDrain;
+use crate::platform::apple::hpm::Firmware;
+use crate::platform::apple::hpm::Hpm;
+use crate::platform::apple::hpm::Summary;
+use crate::platform::apple::i2c;
+use crate::platform::apple::i2c::I2c;
+use crate::platform::apple::ipi;
+use crate::platform::apple::ipi::Affinity;
+use crate::platform::apple::ipi::FastIpi;
+use crate::platform::apple::lockdown;
+use crate::platform::apple::lockdown::Lockdown;
+use crate::platform::apple::perf::PerfCounters;
+use crate::platform::apple::pmgr::ACTIVE;
+use crate::platform::apple::pmgr::DomainState;
+use crate::platform::apple::pmgr::POWER_GATED;
+use crate::platform::apple::pmgr::Pmgr;
+use crate::platform::apple::pmgr::PowerState;
+use crate::platform::apple::pmp;
+use crate::platform::apple::pmu;
+use crate::platform::apple::pmu::Pmu;
+use crate::platform::apple::power::Power;
+use crate::platform::apple::rtkit::RtKit;
+use crate::platform::apple::sart;
+use crate::platform::apple::sart::Sart;
+use crate::platform::apple::sep;
+use crate::platform::apple::sep::Sep;
+use crate::platform::apple::smc;
+use crate::platform::apple::smc::Smc;
+use crate::platform::apple::spi::Spi;
+use crate::platform::apple::spmi::Spmi;
+use crate::platform::apple::uart::S5lUart;
+use crate::platform::apple::wake;
+use crate::platform::apple::wake::WakeMasks;
+use crate::platform::apple::wdt;
+use crate::platform::apple::wdt::AppleWdt;
+use stela_contracts::bus::Access;
+use stela_contracts::bus::Bus;
+use stela_contracts::bus::DeviceId;
+use stela_contracts::bus::LifecycleState;
+use stela_contracts::bus::MapError;
+use stela_contracts::bus::MmioDevice;
+use stela_contracts::bus::MmioError;
+use stela_contracts::bus::Width;
+use stela_contracts::interrupt::CpuIndex;
+use stela_contracts::interrupt::InterruptLatch;
+use stela_soc_data::aic::Aic2Config;
+use stela_soc_data::pmgr::coverage;
+use stela_soc_data::pmgr::coverage::Consumer;
+use stela_soc_data::pmgr::coverage::LifecycleSinks;
 use {stela_contracts::dma::Physical, stela_contracts::dma::Port};
 
 mod canonical_reads;
@@ -100,13 +141,12 @@ pub use service::{AicDelivery, ServiceBatch, ServiceInput};
 pub use sleep::PowerLog;
 pub use t8112_memory::cold as t8112_cold;
 
+#[cfg(test)]
+use stela_soc_data::aic::AIC1_EVENT;
+use stela_soc_data::aic::AicLayout;
 pub use {
-    crate::platform::apple::aic::AIC2_IRQ_CFG, crate::platform::apple::aic::AIC3_IRQ_CFG,
-    crate::platform::apple::aic::AicLayout, crate::platform::apple::aic1::AIC1_EVENT,
-    crate::platform::apple::asc::Lines as AscLines,
-    crate::platform::apple::dart::Profile as DartProfile,
-    crate::platform::apple::dcp::Log as DisplayLog, crate::platform::apple::nor,
-    crate::platform::apple::pmp::native as native_pmp,
+    crate::platform::apple::asc::Lines as AscLines, crate::platform::apple::dcp::Log as DisplayLog,
+    crate::platform::apple::nor, crate::platform::apple::pmp::native as native_pmp,
     crate::platform::apple::pmp::native::services::Clock as NativePmpClock,
     crate::platform::apple::scanout::ChannelMasks as ScanoutMasks,
     crate::platform::apple::scanout::Mode as ScanoutMode,
@@ -884,7 +924,7 @@ impl AppleDevices {
             .bus
             .install(
                 Box::new(CpuStart::new(clusters)),
-                &[(physical, cpustart::bytes(clusters), 0)],
+                &[(physical, stela_soc_data::cpustart::bytes(clusters), 0)],
             )
             .map_err(|error| format!("CPU start placement: {error:?}"))?;
         self.cpu_start = Some(CpuStarter {
@@ -901,7 +941,7 @@ impl AppleDevices {
         &mut self,
         cpu: usize,
         physical: u64,
-        layout: core_counters::Layout,
+        layout: stela_soc_data::core_counters::Layout,
     ) -> Result<(), MapError> {
         let device = self.bus.add(Box::new(CoreCounters::new(layout)));
         for (offset, bytes) in layout.windows() {
@@ -936,9 +976,9 @@ impl AppleDevices {
     pub fn add_memory_controller(
         &mut self,
         apertures: &[u64],
-        layout: amcc::Layout,
-        programmed: amcc::Programmed,
-        cache: Option<amcc::Cache>,
+        layout: stela_soc_data::amcc::Layout,
+        programmed: stela_soc_data::amcc::Programmed,
+        cache: Option<stela_soc_data::amcc::Cache>,
     ) -> Result<(), String> {
         let device = self.map_lock_controller(apertures, layout, programmed, cache)?;
         self.memory_controller = Some(device);
@@ -950,8 +990,8 @@ impl AppleDevices {
     pub fn add_io_access_controller(
         &mut self,
         apertures: &[u64],
-        layout: amcc::Layout,
-        programmed: amcc::Programmed,
+        layout: stela_soc_data::amcc::Layout,
+        programmed: stela_soc_data::amcc::Programmed,
     ) -> Result<(), String> {
         self.map_lock_controller(apertures, layout, programmed, None)?;
         Ok(())
@@ -960,9 +1000,9 @@ impl AppleDevices {
     fn map_lock_controller(
         &mut self,
         apertures: &[u64],
-        layout: amcc::Layout,
-        programmed: amcc::Programmed,
-        cache: Option<amcc::Cache>,
+        layout: stela_soc_data::amcc::Layout,
+        programmed: stela_soc_data::amcc::Programmed,
+        cache: Option<stela_soc_data::amcc::Cache>,
     ) -> Result<DeviceId, String> {
         if cache.is_some() {
             return Err(
@@ -1004,7 +1044,7 @@ impl AppleDevices {
         range: Range,
         channels: usize,
         ptd: u64,
-        ranges: &[ptd::Range],
+        ranges: &[stela_soc_data::ptd::Range],
     ) -> Result<(), String> {
         let _ = (range, channels, ptd, ranges);
         Err("MCC/DCS/PTD mount requires an actual qualified memory, drain and service owner".into())
@@ -1317,7 +1357,7 @@ impl AppleDevices {
     pub fn add_spmi(
         &mut self,
         placement: &super::soc::SpmiController,
-        wall: Option<pmu::WallClock>,
+        wall: Option<stela_soc_data::pmu::WallClock>,
     ) -> Result<(), String> {
         if placement.pmus.iter().any(|pmu| pmu.rtc_helper.is_some()) {
             return Err("SMC RTC helper requires an explicit virtual RTC epoch authority".into());
@@ -1337,7 +1377,7 @@ impl AppleDevices {
     pub fn add_spmi_with_epoch(
         &mut self,
         placement: &super::soc::SpmiController,
-        wall: Option<pmu::WallClock>,
+        wall: Option<stela_soc_data::pmu::WallClock>,
         epoch: pmu::RtcEpoch,
     ) -> Result<(), String> {
         self.add_spmi_with_resources(placement, wall, epoch, &[])
@@ -1349,9 +1389,9 @@ impl AppleDevices {
     pub fn add_spmi_with_resources(
         &mut self,
         placement: &super::soc::SpmiController,
-        wall: Option<pmu::WallClock>,
+        wall: Option<stela_soc_data::pmu::WallClock>,
         epoch: pmu::RtcEpoch,
-        history: &[(u8, pmu::Retained, Vec<u8>)],
+        history: &[(u8, stela_soc_data::pmu::Retained, Vec<u8>)],
     ) -> Result<(), String> {
         for (index, (sid, kind, bytes)) in history.iter().enumerate() {
             if history[..index]
@@ -1426,12 +1466,12 @@ impl AppleDevices {
         let id = self.bus.add(Box::new(controller));
         for (bank, &(base, bytes)) in placement.banks.iter().enumerate() {
             self.bus
-                .map(id, base, bytes, bank as u64 * spmi::BANK_B)
+                .map(id, base, bytes, bank as u64 * stela_soc_data::spmi::BANK_B)
                 .map_err(|e| format!("SPMI bank placement: {e:?}"))?;
         }
         if let Some((base, bytes)) = placement.bank_c {
             self.bus
-                .map(id, base, bytes, spmi::BANK_C)
+                .map(id, base, bytes, stela_soc_data::spmi::BANK_C)
                 .map_err(|e| format!("SPMI reg[2] placement: {e:?}"))?;
         }
         if let Some((clock, profile)) = primary_clock {
@@ -1564,7 +1604,7 @@ impl AppleDevices {
     /// Legacy filter and capture variants need their own native contracts.
     pub fn add_dart_group_for_profile(
         &mut self,
-        profile: dart::Profile,
+        profile: stela_soc_data::dart::Profile,
         ranges: &[Range],
         streams: usize,
         irq: Option<AicInput>,
@@ -1579,15 +1619,17 @@ impl AppleDevices {
             );
         }
         if apf.is_some_and(|(physical, slices)| {
-            !physical.is_multiple_of(dart::DAPF_BYTES)
+            !physical.is_multiple_of(stela_soc_data::dart::DAPF_BYTES)
                 || slices == 0
-                || slices as u64 > dart::DAPF_BYTES / 0x40
+                || slices as u64 > stela_soc_data::dart::DAPF_BYTES / 0x40
         }) {
             return Err("DART APF requires one aligned window with a native slice count".into());
         }
         if ranges.iter().any(|range| {
             !profile.admits_window(range.bytes)
-                || !range.physical.is_multiple_of(dart::DAPF_BYTES)
+                || !range
+                    .physical
+                    .is_multiple_of(stela_soc_data::dart::DAPF_BYTES)
                 || range.physical.checked_add(range.bytes).is_none()
         }) {
             return Err(
@@ -1621,8 +1663,12 @@ impl AppleDevices {
             if index == 0
                 && let Some((physical, _)) = apf
             {
-                self.bus
-                    .map(device, physical, dart::DAPF_BYTES, dart::DAPF_OFFSET)?;
+                self.bus.map(
+                    device,
+                    physical,
+                    stela_soc_data::dart::DAPF_BYTES,
+                    dart::DAPF_OFFSET,
+                )?;
             }
             ids.push(DartId(device));
         }
@@ -1693,8 +1739,12 @@ impl AppleDevices {
         let device = self.bus.add(Box::new(model));
         self.bus.map(device, range.physical, range.bytes, 0)?;
         if let Some((physical, _)) = apf {
-            self.bus
-                .map(device, physical, dart::DAPF_BYTES, dart::DAPF_OFFSET)?;
+            self.bus.map(
+                device,
+                physical,
+                stela_soc_data::dart::DAPF_BYTES,
+                dart::DAPF_OFFSET,
+            )?;
         }
         Ok(DartId(device))
     }
@@ -2105,7 +2155,7 @@ impl AppleDevices {
     pub fn add_aes(
         &mut self,
         ranges: &[Range],
-        config: aes::Config,
+        config: stela_soc_data::aes::Config,
         irq: Option<AicInput>,
         (dart, stream): (DartId, usize),
         uid: Option<[u8; 32]>,
@@ -2492,7 +2542,11 @@ impl AppleDevices {
     }
 
     /// A typed SOC configuration bank at its DT `reg` address.
-    pub fn add_soc_power(&mut self, physical: u64, kind: power::Kind) -> Result<(), String> {
+    pub fn add_soc_power(
+        &mut self,
+        physical: u64,
+        kind: stela_soc_data::power::Kind,
+    ) -> Result<(), String> {
         let model = Power::new(kind);
         let device = self.bus.add(Box::new(model));
         for offset in kind.offsets() {
@@ -3283,7 +3337,7 @@ impl Devices for AppleDevices {
 
     fn memory_lock(&self) -> stela_engine::machine::mmu::MemoryLocks {
         let Some(device) = self.memory_controller else {
-            return [None; amcc::GROUPS];
+            return [None; stela_soc_data::amcc::GROUPS];
         };
         if let Some(locked) = memory_resources::resource_for(&self.bus, device)
             .and_then(|owner| owner.locked_regions())
@@ -3302,7 +3356,7 @@ impl Devices for AppleDevices {
         } else {
             self.bus
                 .device::<Amcc>(device)
-                .map_or([None; amcc::GROUPS], Amcc::locked_regions)
+                .map_or([None; stela_soc_data::amcc::GROUPS], Amcc::locked_regions)
         }
     }
 
@@ -3598,11 +3652,11 @@ mod tests {
     use super::*;
 
     /// The J473 `/arm-io/aes`: version 3, one key-disable word.
-    fn j473_aes() -> aes::Config {
-        aes::Config {
+    fn j473_aes() -> stela_soc_data::aes::Config {
+        stela_soc_data::aes::Config {
             version: 3,
-            address_width: aes::DEFAULT_ADDRESS_WIDTH,
-            key_disable: aes::KeyDisable {
+            address_width: stela_soc_data::aes::DEFAULT_ADDRESS_WIDTH,
+            key_disable: stela_soc_data::aes::KeyDisable {
                 bytes: 0x8000,
                 word: 0,
                 keys: [None; 3],
@@ -3635,9 +3689,9 @@ mod tests {
         const ROOT: u64 = 0x8_0000_0000;
         const PAGE: u64 = 0x4000;
         for profile in [
-            dart::Profile::T8020,
-            dart::Profile::T6000,
-            dart::Profile::T8110,
+            stela_soc_data::dart::Profile::T8020,
+            stela_soc_data::dart::Profile::T6000,
+            stela_soc_data::dart::Profile::T8110,
         ] {
             let mut d = AppleDevices::new();
             let ranges = [
@@ -3655,7 +3709,7 @@ mod tests {
                 .unwrap();
             let mut ram = Ram::new(ROOT, (4 * PAGE) as usize);
             let descriptor = |physical: u64| {
-                if profile == dart::Profile::T8020 {
+                if profile == stela_soc_data::dart::Profile::T8020 {
                     physical | 1
                 } else {
                     physical >> 4 | 1
@@ -3663,11 +3717,12 @@ mod tests {
             };
             ram.put_u64(ROOT + 8, descriptor(ROOT + PAGE));
             ram.put_u64(ROOT + PAGE + 8, descriptor(ROOT + 2 * PAGE) | 0xfff << 40);
-            let (enabled, tcr, ttbr, ttbr_value, translate) = if profile == dart::Profile::T8110 {
-                (0xc00, 0x1004, 0x1404, ROOT >> 12 | 1, 1)
-            } else {
-                (0xfc, 0x104, 0x210, ROOT >> 12 | 1 << 31, 1 << 7)
-            };
+            let (enabled, tcr, ttbr, ttbr_value, translate) =
+                if profile == stela_soc_data::dart::Profile::T8110 {
+                    (0xc00, 0x1004, 0x1404, ROOT >> 12 | 1, 1)
+                } else {
+                    (0xfc, 0x104, 0x210, ROOT >> 12 | 1 << 31, 1 << 7)
+                };
             for (offset, value) in [(enabled, 2), (tcr, translate), (ttbr, ttbr_value)] {
                 d.write(0, ranges[0].physical + offset, 4, value, 0)
                     .unwrap();
@@ -3704,10 +3759,10 @@ mod tests {
         // A window selects its register file; neither revision mounts the
         // other's, nor a window without a recovered register file.
         for (profile, bytes) in [
-            (dart::Profile::T8110, 0xc000),
-            (dart::Profile::T8110Rev22, 0x4000),
-            (dart::Profile::T8110Rev22, 0x8000),
-            (dart::Profile::T8110Rev22, 0x24000),
+            (stela_soc_data::dart::Profile::T8110, 0xc000),
+            (stela_soc_data::dart::Profile::T8110Rev22, 0x4000),
+            (stela_soc_data::dart::Profile::T8110Rev22, 0x8000),
+            (stela_soc_data::dart::Profile::T8110Rev22, 0x24000),
         ] {
             let range = Range {
                 physical: ranges[0].physical,
@@ -3722,7 +3777,7 @@ mod tests {
         let apf = 0x2_7002_0000;
         let ids = d
             .add_dart_group_for_profile(
-                dart::Profile::T8110Rev22,
+                stela_soc_data::dart::Profile::T8110Rev22,
                 &ranges,
                 16,
                 None,
@@ -3756,8 +3811,14 @@ mod tests {
         };
         for (streams, apf) in [(64, None), (16, Some((0x2_7010_0000, 1)))] {
             assert!(
-                d.add_dart_group_for_profile(dart::Profile::T8020, &[range], streams, None, apf)
-                    .is_err()
+                d.add_dart_group_for_profile(
+                    stela_soc_data::dart::Profile::T8020,
+                    &[range],
+                    streams,
+                    None,
+                    apf
+                )
+                .is_err()
             );
             assert!(d.read(0, range.physical, 4, 0).is_err());
         }
@@ -3780,21 +3841,39 @@ mod tests {
             },
         ] {
             assert!(
-                d.add_dart_group_for_profile(dart::Profile::T6000, &[invalid], 16, None, None)
-                    .is_err()
+                d.add_dart_group_for_profile(
+                    stela_soc_data::dart::Profile::T6000,
+                    &[invalid],
+                    16,
+                    None,
+                    None
+                )
+                .is_err()
             );
             assert!(d.read(0, range.physical, 4, 0).is_err());
         }
         assert!(
-            d.add_dart_group_for_profile(dart::Profile::T8020, &[range], 0, None, None)
-                .is_err()
+            d.add_dart_group_for_profile(
+                stela_soc_data::dart::Profile::T8020,
+                &[range],
+                0,
+                None,
+                None
+            )
+            .is_err()
         );
         assert!(
-            d.add_dart_group_for_profile(dart::Profile::T8020, &[], 16, None, None)
+            d.add_dart_group_for_profile(stela_soc_data::dart::Profile::T8020, &[], 16, None, None)
                 .is_err()
         );
         let ids = d
-            .add_dart_group_for_profile(dart::Profile::T8020, &[range], 16, None, None)
+            .add_dart_group_for_profile(
+                stela_soc_data::dart::Profile::T8020,
+                &[range],
+                16,
+                None,
+                None,
+            )
             .unwrap();
         let smmu = Range {
             physical: 0x2_7020_0000,
@@ -3997,7 +4076,7 @@ mod tests {
                 bytes: 0x1000,
                 irq: 749,
             },
-            image: crate::platform::apple::nor::Image::fresh(),
+            image: stela_soc_data::nor::Image::fresh(),
             select: None,
         })
         .unwrap();
@@ -4354,10 +4433,10 @@ mod tests {
         for base in [0x2_8930_4000, 0x2_8930_c000] {
             ids.push(
                 d.add_dart_group_for_profile(
-                    dart::Profile::T6000,
+                    stela_soc_data::dart::Profile::T6000,
                     &[Range {
                         physical: base,
-                        bytes: dart::DAPF_BYTES,
+                        bytes: stela_soc_data::dart::DAPF_BYTES,
                     }],
                     16,
                     Some(input),
@@ -4392,10 +4471,10 @@ mod tests {
         let umms = 0x2_8930_0000;
         let id = d
             .add_dart_group_for_profile(
-                dart::Profile::T6000,
+                stela_soc_data::dart::Profile::T6000,
                 &[Range {
                     physical: base,
-                    bytes: dart::DAPF_BYTES,
+                    bytes: stela_soc_data::dart::DAPF_BYTES,
                 }],
                 16,
                 None,
@@ -4442,7 +4521,7 @@ mod tests {
         let base = 0x2_3500_4000;
         let smmu = 0x2_7130_0000;
         {
-            let profile = dart::Profile::T8020;
+            let profile = stela_soc_data::dart::Profile::T8020;
             let legacy = d
                 .bus
                 .add(Box::new(Dart::for_profile(profile, 16, None).unwrap()));
@@ -4920,7 +4999,7 @@ mod tests {
             .add_aic(0x100000, 1024, AicLayout::aic2(0x8000, 0))
             .unwrap();
         let bank = GpioBank {
-            profile: crate::platform::apple::gpio::Profile::T8101,
+            profile: stela_soc_data::gpio::Profile::T8101,
             no_restore_pins: Vec::new(),
             physical: GPIO,
             bytes: 0x1000,
@@ -4938,7 +5017,7 @@ mod tests {
                     bytes: 0x4000,
                     irq: 749,
                 },
-                image: nor::Image::fresh(),
+                image: stela_soc_data::nor::Image::fresh(),
                 select: Some(49),
             })
             .unwrap();
@@ -4990,7 +5069,7 @@ mod tests {
         const RAM: u64 = 0x8_0000_0000;
         const SUPPLY: u64 = 0x2_3b70_0428;
         let placement = AnsController {
-            geometry: ans::QueueGeometry::DEFAULT,
+            geometry: stela_soc_data::ans::QueueGeometry::DEFAULT,
             wrapper: (WRAPPER, 0x6c000),
             nvme: (NVME, 0x60000),
             vdma: Some((VDMA, 0x44000)),
@@ -5001,7 +5080,7 @@ mod tests {
             sart_exclusive_bounds: false,
             interrupts: [718, 717, 720, 719],
             completion_irq: 724,
-            namespaces: alloc::vec![ans::Description {
+            namespaces: alloc::vec![stela_soc_data::ans::Description {
                 id: 1,
                 kind: 1,
                 blocks: 0
@@ -5127,7 +5206,7 @@ mod tests {
         let aux = AuxGpioBank {
             name: "aop-gpio".into(),
             bank: GpioBank {
-                profile: crate::platform::apple::gpio::Profile::T8101,
+                profile: stela_soc_data::gpio::Profile::T8101,
                 no_restore_pins: Vec::new(),
                 physical: BANK,
                 bytes: 0x4000,
@@ -5619,7 +5698,10 @@ mod tests {
                 assert!(d.read(0, address, 4, 0).is_err());
             }
         }
-        for profile in [dart::Profile::T6000, dart::Profile::T8110] {
+        for profile in [
+            stela_soc_data::dart::Profile::T6000,
+            stela_soc_data::dart::Profile::T8110,
+        ] {
             let mut other = AppleDevices::new();
             let absent = other
                 .add_dart(
@@ -5970,7 +6052,7 @@ mod tests {
     #[test]
     fn a_pes_sampler_counters_share_its_registers_and_window() {
         let mut devices = AppleDevices::new();
-        let layout = core_counters::layout(0x8112).unwrap();
+        let layout = stela_soc_data::core_counters::layout(0x8112).unwrap();
         let blocks = [0x2_1005_0000, 0x2_1015_0000];
         for (cpu, physical) in blocks.into_iter().enumerate() {
             devices.add_core_counters(cpu, physical, layout).unwrap();
@@ -6176,8 +6258,7 @@ mod tests {
             devices
                 .add_aic_for_processors(AIC, 1152, layout, 4)
                 .unwrap();
-            let software =
-                AIC + irq_config + 4 * u64::from(crate::platform::apple::aic::AIC2_MAX_IRQ);
+            let software = AIC + irq_config + 4 * u64::from(stela_soc_data::aic::AIC2_MAX_IRQ);
             devices.write(2, AIC + 0x14, 4, 1, 0).unwrap();
             devices.write(2, software, 4, 1 << 7, 0).unwrap();
             // MASK_CLR follows SW_SET, SW_CLR and MASK_SET, each MAX_IRQ/8 bytes.
@@ -6493,10 +6574,10 @@ mod tests {
                 None,
             )
             .unwrap();
-        let config = aes::Config {
+        let config = stela_soc_data::aes::Config {
             version: 5,
             address_width: 42,
-            key_disable: aes::KeyDisable {
+            key_disable: stela_soc_data::aes::KeyDisable {
                 bytes: 0x8000,
                 word: 0,
                 keys: [Some(0x40), Some(0x44), Some(0x48)],
@@ -6551,9 +6632,10 @@ mod tests {
                 },
             )
         };
-        for (profile, input, context) in
-            [(dart::Profile::T8110, 4, 4), (dart::Profile::T6000, 5, 4)]
-        {
+        for (profile, input, context) in [
+            (stela_soc_data::dart::Profile::T8110, 4, 4),
+            (stela_soc_data::dart::Profile::T6000, 5, 4),
+        ] {
             let mut unrelated = AppleDevices::new();
             let absent = unrelated
                 .add_dart(
@@ -6603,7 +6685,7 @@ mod tests {
             add(&mut d, owner, input).unwrap();
             assert_eq!(d.sep_masters[0].stream, input);
             d.write(0, SEP + 0x8114, 4, 1, 0).unwrap();
-            let regs = if profile == dart::Profile::T8110 {
+            let regs = if profile == stela_soc_data::dart::Profile::T8110 {
                 [
                     (0xc00, 1u64 << context),
                     (0x1000 + 4 * context, 6),
@@ -6619,7 +6701,7 @@ mod tests {
                 ]
             };
             for (offset, value) in regs {
-                if profile == dart::Profile::T6000 || offset != 0x80 {
+                if profile == stela_soc_data::dart::Profile::T6000 || offset != 0x80 {
                     d.write(0, DART + offset, 4, value, 0).unwrap();
                 }
             }

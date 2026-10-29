@@ -653,6 +653,7 @@ dependencies = [
  "stela-formats",
  "stela-loader",
  "stela-runtime",
+ "stela-soc-data",
  "uefi",
 ]
 
@@ -769,6 +770,7 @@ dependencies = [
  "stela-engine",
  "stela-formats",
  "stela-runtime",
+ "stela-soc-data",
 ]
 
 [[package]]
@@ -795,8 +797,17 @@ dependencies = [
  "stela-drivers",
  "stela-engine",
  "stela-formats",
+ "stela-soc-data",
  "tempfile",
  "zeroize",
+]
+
+[[package]]
+name = "stela-soc-data"
+version = "0.1.0"
+dependencies = [
+ "stela-contracts",
+ "stela-formats",
 ]
 
 [[package]]

@@ -2,7 +2,15 @@
 //! every transfer rewalks the actual mounted DART into the same registered RAM.
 //! No native PMP private ARM cache exists in this implementation. Ordering is
 //! coherent Normal-WB CPU visibility, never an MCC/DCS/PTD/MC completion.
-use super::{Access, AppleDevices, Asc, Bus, Dart, DeviceError, DeviceId, Memory, Port, dart};
+use super::Access;
+use super::AppleDevices;
+use super::Asc;
+use super::Bus;
+use super::Dart;
+use super::DeviceError;
+use super::DeviceId;
+use super::Memory;
+use super::Port;
 use crate::machine::soc;
 use crate::platform::apple::pmp::native::dma;
 use crate::platform::apple::pmp::native::platform::owner::Completion;
@@ -98,7 +106,7 @@ pub(super) struct PmpDma {
     dart: DeviceId,
     wrapper: (u64, u64),
     aperture: (u64, u64),
-    profile: dart::Profile,
+    profile: stela_soc_data::dart::Profile,
     streams: usize,
     owners: dma::Owners,
     service: dma::Service,
@@ -629,7 +637,9 @@ mod tests {
         let dart = devices
             .bus
             .install(
-                Box::new(Dart::for_profile(dart::Profile::T6000, 16, None).unwrap()),
+                Box::new(
+                    Dart::for_profile(stela_soc_data::dart::Profile::T6000, 16, None).unwrap(),
+                ),
                 &[(0x5000_0000, 0x4000, 0)],
             )
             .unwrap();
@@ -652,7 +662,7 @@ mod tests {
             dart,
             wrapper: pmp().wrapper,
             aperture: (0x5000_0000, 0x4000),
-            profile: dart::Profile::T8110,
+            profile: stela_soc_data::dart::Profile::T8110,
             streams: 16,
             owners,
             service,
@@ -665,7 +675,7 @@ mod tests {
             .unwrap(),
         };
         assert!(master.check_bus(&devices.bus).is_err());
-        master.profile = dart::Profile::T6000;
+        master.profile = stela_soc_data::dart::Profile::T6000;
         assert!(master.check_bus(&devices.bus).is_ok());
         master.dart = asc;
         assert!(master.check_bus(&devices.bus).is_err());

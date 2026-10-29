@@ -91,9 +91,8 @@ mod tests {
         crate::platform::apple::pmp::native::cache::publisher::Bank,
         crate::platform::apple::pmp::native::cache::publisher::Configuration,
         crate::platform::apple::pmp::native::cache::publisher::Publisher,
-        crate::platform::apple::ptd::Range,
         crate::platform::apple::ptd::transport::notifications::LocalNotifications,
-        stela_contracts::interrupt::InterruptLatch,
+        stela_contracts::interrupt::InterruptLatch, stela_soc_data::ptd::Range,
     };
 
     const LIVE: LifecycleState = LifecycleState {

@@ -5,11 +5,6 @@ use alloc::{sync::Arc, vec};
 use stela_engine::memory::RegisteredSystemRam;
 use stela_runtime::machine::apple::AppleDevices;
 use stela_runtime::machine::apple::memory_resources::LifecycleState;
-use stela_runtime::machine::apple::memory_resources::amcc;
-use stela_runtime::machine::apple::memory_resources::amcc::Layout;
-use stela_runtime::machine::apple::memory_resources::amcc::LockGroup;
-use stela_runtime::machine::apple::memory_resources::amcc::Register;
-use stela_runtime::machine::apple::memory_resources::ptd;
 use stela_runtime::machine::apple::memory_resources::t8112::CHANNEL_STRIDE;
 use stela_runtime::machine::apple::memory_resources::t8112::CHANNELS;
 use stela_runtime::machine::apple::memory_resources::t8112::ChannelConfiguration;
@@ -20,6 +15,9 @@ use stela_runtime::machine::apple::memory_resources::t8112::cache::ZeroWayConfig
 use stela_runtime::machine::soc::MemoryCache;
 use stela_runtime::machine::soc::MemoryController;
 use stela_runtime::machine::soc::PtdBank;
+use stela_soc_data::amcc::Layout;
+use stela_soc_data::amcc::LockGroup;
+use stela_soc_data::amcc::Register;
 
 const APERTURE: u64 = 0x200000000;
 const PUBLICATION: u64 = 0x300000000;
@@ -58,7 +56,7 @@ pub(super) fn devices(ram: Arc<RegisteredSystemRam>) -> Result<AppleDevices, &'s
         },
     };
     let descriptor = MemoryCache {
-        cache: amcc::Cache {
+        cache: stela_soc_data::amcc::Cache {
             shared: (0x100000, 0x80000),
             broadcast: 0xf00000,
             bytes: 0,
@@ -67,7 +65,7 @@ pub(super) fn devices(ram: Arc<RegisteredSystemRam>) -> Result<AppleDevices, &'s
         channels: (DCS, CHANNEL_STRIDE * CHANNELS as u64, CHANNELS),
         ptd: PtdBank {
             physical: PUBLICATION,
-            ranges: vec![ptd::Range {
+            ranges: vec![stela_soc_data::ptd::Range {
                 id: 1,
                 start: 0,
                 count: 256,
@@ -75,7 +73,10 @@ pub(super) fn devices(ram: Arc<RegisteredSystemRam>) -> Result<AppleDevices, &'s
             }],
             interrupts: vec![14],
         },
-        ptd_updates: (PUBLICATION + ptd::UPDATE_OFFSET, ENTRIES as u64 * 8),
+        ptd_updates: (
+            PUBLICATION + stela_soc_data::ptd::UPDATE_OFFSET,
+            ENTRIES as u64 * 8,
+        ),
         ptd_entries: ENTRIES,
     };
     let lifecycle = LifecycleState {
