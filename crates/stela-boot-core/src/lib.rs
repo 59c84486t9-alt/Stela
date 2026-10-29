@@ -37,3 +37,5 @@ pub mod worker_bindings;
 pub mod xstate;
 
 pub mod firmware_pci;
+
+pub mod ecam;
