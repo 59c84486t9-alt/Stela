@@ -3,11 +3,7 @@ use crate::x86_64::asm::{Gpr, Mem};
 
 /// The general-purpose register numbered `number`.
 pub(in crate::x86_64) const fn gpr(number: u8) -> Gpr {
-    use Gpr::*;
-    const REGISTERS: [Gpr; 16] = [
-        Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi, R8, R9, R10, R11, R12, R13, R14, R15,
-    ];
-    REGISTERS[number as usize]
+    Gpr::from_encoding(number)
 }
 
 /// `[rsp + offset]` with a 32-bit displacement: a private stack slot.

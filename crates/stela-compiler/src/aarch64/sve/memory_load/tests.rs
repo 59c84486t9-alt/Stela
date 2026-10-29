@@ -1,0 +1,641 @@
+use super::*;
+use crate::aarch64::Register;
+
+// Canonical fixed words and sizes are independent pinned XML facts.
+const CANONICAL: [(u32, Kind, ElementSize, ElementSize, Extension, bool); 66] = [
+    (
+        0xa420a000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Halfword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa440a000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Word,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa460a000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa400a000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Byte,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa4204000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Halfword,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa4404000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Word,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa4604000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa4004000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Byte,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa5e0a000,
+        Kind::Contiguous,
+        ElementSize::Doubleword,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa5e04000,
+        Kind::Contiguous,
+        ElementSize::Doubleword,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa4a0a000,
+        Kind::Contiguous,
+        ElementSize::Halfword,
+        ElementSize::Halfword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa4c0a000,
+        Kind::Contiguous,
+        ElementSize::Halfword,
+        ElementSize::Word,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa4e0a000,
+        Kind::Contiguous,
+        ElementSize::Halfword,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa4a04000,
+        Kind::Contiguous,
+        ElementSize::Halfword,
+        ElementSize::Halfword,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa4c04000,
+        Kind::Contiguous,
+        ElementSize::Halfword,
+        ElementSize::Word,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa4e04000,
+        Kind::Contiguous,
+        ElementSize::Halfword,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0x8440a000,
+        Kind::ReplicateScalar,
+        ElementSize::Byte,
+        ElementSize::Halfword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0x8440c000,
+        Kind::ReplicateScalar,
+        ElementSize::Byte,
+        ElementSize::Word,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0x8440e000,
+        Kind::ReplicateScalar,
+        ElementSize::Byte,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0x84408000,
+        Kind::ReplicateScalar,
+        ElementSize::Byte,
+        ElementSize::Byte,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0x85c0e000,
+        Kind::ReplicateScalar,
+        ElementSize::Doubleword,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0x84c0a000,
+        Kind::ReplicateScalar,
+        ElementSize::Halfword,
+        ElementSize::Halfword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0x84c0c000,
+        Kind::ReplicateScalar,
+        ElementSize::Halfword,
+        ElementSize::Word,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0x84c0e000,
+        Kind::ReplicateScalar,
+        ElementSize::Halfword,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa4002000,
+        Kind::ReplicateQuad,
+        ElementSize::Byte,
+        ElementSize::Byte,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa4000000,
+        Kind::ReplicateQuad,
+        ElementSize::Byte,
+        ElementSize::Byte,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa5802000,
+        Kind::ReplicateQuad,
+        ElementSize::Doubleword,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa5800000,
+        Kind::ReplicateQuad,
+        ElementSize::Doubleword,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa4802000,
+        Kind::ReplicateQuad,
+        ElementSize::Halfword,
+        ElementSize::Halfword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa4800000,
+        Kind::ReplicateQuad,
+        ElementSize::Halfword,
+        ElementSize::Halfword,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa5002000,
+        Kind::ReplicateQuad,
+        ElementSize::Word,
+        ElementSize::Word,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa5000000,
+        Kind::ReplicateQuad,
+        ElementSize::Word,
+        ElementSize::Word,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0x85c0c000,
+        Kind::ReplicateScalar,
+        ElementSize::Byte,
+        ElementSize::Halfword,
+        Extension::Sign,
+        false,
+    ),
+    (
+        0x85c0a000,
+        Kind::ReplicateScalar,
+        ElementSize::Byte,
+        ElementSize::Word,
+        Extension::Sign,
+        false,
+    ),
+    (
+        0x85c08000,
+        Kind::ReplicateScalar,
+        ElementSize::Byte,
+        ElementSize::Doubleword,
+        Extension::Sign,
+        false,
+    ),
+    (
+        0x8540a000,
+        Kind::ReplicateScalar,
+        ElementSize::Halfword,
+        ElementSize::Word,
+        Extension::Sign,
+        false,
+    ),
+    (
+        0x85408000,
+        Kind::ReplicateScalar,
+        ElementSize::Halfword,
+        ElementSize::Doubleword,
+        Extension::Sign,
+        false,
+    ),
+    (
+        0x84c08000,
+        Kind::ReplicateScalar,
+        ElementSize::Word,
+        ElementSize::Doubleword,
+        Extension::Sign,
+        false,
+    ),
+    (
+        0x8540c000,
+        Kind::ReplicateScalar,
+        ElementSize::Word,
+        ElementSize::Word,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0x8540e000,
+        Kind::ReplicateScalar,
+        ElementSize::Word,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa5c0a000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Halfword,
+        Extension::Sign,
+        false,
+    ),
+    (
+        0xa5a0a000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Word,
+        Extension::Sign,
+        false,
+    ),
+    (
+        0xa580a000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Doubleword,
+        Extension::Sign,
+        false,
+    ),
+    (
+        0xa5c04000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Halfword,
+        Extension::Sign,
+        true,
+    ),
+    (
+        0xa5a04000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Word,
+        Extension::Sign,
+        true,
+    ),
+    (
+        0xa5804000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Doubleword,
+        Extension::Sign,
+        true,
+    ),
+    (
+        0xa520a000,
+        Kind::Contiguous,
+        ElementSize::Halfword,
+        ElementSize::Word,
+        Extension::Sign,
+        false,
+    ),
+    (
+        0xa500a000,
+        Kind::Contiguous,
+        ElementSize::Halfword,
+        ElementSize::Doubleword,
+        Extension::Sign,
+        false,
+    ),
+    (
+        0xa5204000,
+        Kind::Contiguous,
+        ElementSize::Halfword,
+        ElementSize::Word,
+        Extension::Sign,
+        true,
+    ),
+    (
+        0xa5004000,
+        Kind::Contiguous,
+        ElementSize::Halfword,
+        ElementSize::Doubleword,
+        Extension::Sign,
+        true,
+    ),
+    (
+        0xa480a000,
+        Kind::Contiguous,
+        ElementSize::Word,
+        ElementSize::Doubleword,
+        Extension::Sign,
+        false,
+    ),
+    (
+        0xa4804000,
+        Kind::Contiguous,
+        ElementSize::Word,
+        ElementSize::Doubleword,
+        Extension::Sign,
+        true,
+    ),
+    (
+        0xa540a000,
+        Kind::Contiguous,
+        ElementSize::Word,
+        ElementSize::Word,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa560a000,
+        Kind::Contiguous,
+        ElementSize::Word,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa5404000,
+        Kind::Contiguous,
+        ElementSize::Word,
+        ElementSize::Word,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa5604000,
+        Kind::Contiguous,
+        ElementSize::Word,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa400e000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Byte,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa400c000,
+        Kind::Contiguous,
+        ElementSize::Byte,
+        ElementSize::Byte,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa580e000,
+        Kind::Contiguous,
+        ElementSize::Doubleword,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa580c000,
+        Kind::Contiguous,
+        ElementSize::Doubleword,
+        ElementSize::Doubleword,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa480e000,
+        Kind::Contiguous,
+        ElementSize::Halfword,
+        ElementSize::Halfword,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa480c000,
+        Kind::Contiguous,
+        ElementSize::Halfword,
+        ElementSize::Halfword,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0xa500e000,
+        Kind::Contiguous,
+        ElementSize::Word,
+        ElementSize::Word,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0xa500c000,
+        Kind::Contiguous,
+        ElementSize::Word,
+        ElementSize::Word,
+        Extension::Zero,
+        true,
+    ),
+    (
+        0x85800000,
+        Kind::WholePredicate,
+        ElementSize::Byte,
+        ElementSize::Byte,
+        Extension::Zero,
+        false,
+    ),
+    (
+        0x85804000,
+        Kind::WholeVector,
+        ElementSize::Byte,
+        ElementSize::Byte,
+        Extension::Zero,
+        false,
+    ),
+];
+
+#[test]
+fn canonical_sizes_aliases_and_reserved_indices() {
+    for (fixed, kind, memory_element, element, extension, indexed) in CANONICAL {
+        let data = if kind == Kind::WholePredicate {
+            PREDICATE_REGISTER_MASK
+        } else {
+            REGISTER_MASK
+        };
+        let word = fixed | (REGISTER_MASK << BASE_SHIFT) | data;
+        let operand = decode(word).unwrap().unwrap();
+        assert_eq!(operand.kind, kind);
+        assert_eq!(operand.memory_element, memory_element);
+        assert_eq!(operand.element, element);
+        assert_eq!(operand.extension, extension);
+        assert_eq!(operand.data, data as u8);
+        assert_eq!(operand.address.base, Register::Sp);
+        assert_eq!(operand.tag_checked, indexed);
+        if indexed {
+            assert!(matches!(
+                operand.address.offset,
+                Offset::Register {
+                    index: Register::X(0),
+                    ..
+                }
+            ));
+            assert_eq!(
+                decode(word | (REGISTER_MASK << INDEX_SHIFT)),
+                Some(Err(Unsupported))
+            );
+        }
+    }
+}
+
+#[test]
+fn signed_vector_offsets_and_whole_predicate_split_immediate() {
+    let contiguous = decode(CONTIGUOUS_IMMEDIATE | (DTYPE_MASK << INDEX_SHIFT))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        contiguous.address.offset,
+        Offset::Immediate {
+            value: -1,
+            scale: Scale::VectorBytes {
+                multiply: BYTE_BYTES,
+                divide: BYTE_BYTES
+            }
+        }
+    );
+    let whole = decode(WHOLE_PREDICATE | (WHOLE_IMMEDIATE_HIGH_MASK << WHOLE_IMMEDIATE_HIGH_SHIFT))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        whole.address.offset,
+        Offset::Immediate {
+            value: -8,
+            scale: Scale::PredicateBytes
+        }
+    );
+    let whole = decode(
+        WHOLE_PREDICATE
+            | (WHOLE_IMMEDIATE_HIGH_MASK << WHOLE_IMMEDIATE_HIGH_SHIFT)
+            | (WHOLE_IMMEDIATE_LOW_MASK << WHOLE_IMMEDIATE_LOW_SHIFT),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        whole.address.offset,
+        Offset::Immediate {
+            value: -1,
+            scale: Scale::PredicateBytes
+        }
+    );
+}
+
+#[test]
+fn replicate_offsets_use_bytes_and_scalar_unsigned_range() {
+    let scalar = decode(LD1RD_U64 | (SCALAR_IMMEDIATE_MASK << INDEX_SHIFT))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        scalar.address.offset,
+        Offset::Immediate {
+            value: SCALAR_IMMEDIATE_MASK as i16 * i16::from(DOUBLEWORD_BYTES),
+            scale: Scale::Bytes
+        }
+    );
+    let quad = decode(QUAD_IMMEDIATE | (DTYPE_MASK << INDEX_SHIFT))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        quad.address.offset,
+        Offset::Immediate {
+            value: -QUAD_BYTES,
+            scale: Scale::Bytes
+        }
+    );
+}
+
+#[test]
+fn unrelated_allocations_are_not_loads() {
+    const NOP: u32 = 0xd503_201f;
+    const STORE_CONTIGUOUS: u32 = 0xe400_e000;
+    for word in [0, u32::MAX, NOP, STORE_CONTIGUOUS] {
+        assert_eq!(decode(word), None);
+    }
+}

@@ -67,7 +67,7 @@
   {
     "package": "stela-compiler",
     "test": "region_census_of_real_code",
-    "source": "crates/stela-compiler/src/x86_64/block.rs",
+    "source": "crates/stela-compiler/src/x86_64/block/tests.rs",
     "kind": "manual",
     "inputs": [],
     "reason": "measurement over a local image"
