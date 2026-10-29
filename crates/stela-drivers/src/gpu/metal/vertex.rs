@@ -575,12 +575,20 @@ mod tests {
         assert_eq!(patch_input(&capabilities(), &patch), Ok(()));
         let per_vertex = VertexDescriptor {
             layouts: alloc::vec![layout(0, 16, StepFunction::PerVertex, 1)],
-            ..patch
+            ..patch.clone()
         };
         assert!(matches!(
             patch_input(&capabilities(), &per_vertex),
             Err(Error::Invalid(_))
         ));
+        let never_stepping = VertexDescriptor {
+            layouts: alloc::vec![layout(0, 16, StepFunction::PerPatch, 0)],
+            ..patch
+        };
+        assert_eq!(
+            patch_input(&capabilities(), &never_stepping),
+            Err(Error::Invalid("per-patch step rates are nonzero"))
+        );
     }
 
     #[test]
