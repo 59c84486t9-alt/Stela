@@ -107,17 +107,19 @@ enum stela_air_texture_access {
 };
 /* A [[texture(index)]] argument. depth marks the depth* types, whose texels
  * are one float. primitive is the component type: FLOAT, HALF, INT, UINT,
- * SHORT or USHORT. */
+ * SHORT or USHORT. An array<texture, length> argument is length textures
+ * from index; length is zero for one texture. */
 struct stela_air_texture {
-   unsigned argument, index;
+   unsigned argument, index, length;
    enum stela_air_texture_type type;
    enum stela_air_texture_access access;
    enum stela_air_primitive primitive;
    bool depth;
 };
-/* A [[sampler(index)]] argument. */
+/* A [[sampler(index)]] argument, or length samplers from index for an
+ * array<sampler, length> argument. */
 struct stela_air_sampler {
-   unsigned argument, index;
+   unsigned argument, index, length;
 };
 #define AIR_MAX_TEXTURES 128u
 #define AIR_MAX_SAMPLERS 16u

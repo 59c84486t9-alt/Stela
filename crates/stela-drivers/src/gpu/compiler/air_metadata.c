@@ -496,6 +496,37 @@ texture_type(const char *name, unsigned bytes, struct stela_air_texture *texture
           (!texture->depth || texture->primitive == STELA_AIR_FLOAT);
 }
 
+/* An "array<element, length>" type name's element, which *name and *bytes
+ * become. */
+static bool
+array_type(const char **name, unsigned *bytes, unsigned length)
+{
+   static const char prefix[] = "array<";
+   const char *start = *name + strlen(prefix), *end = *name + *bytes;
+   if (*bytes <= strlen(prefix) + 1 || memcmp(*name, prefix, strlen(prefix)) || end[-1] != '>')
+      return false;
+   /* The length follows the last comma; the element may hold others. */
+   const char *comma = end - 1;
+   while (comma > start && *comma != ',')
+      comma--;
+   const char *digit = comma + 1;
+   while (digit < end - 1 && *digit == ' ')
+      digit++;
+   if (*comma != ',' || digit == end - 1)
+      return false;
+   uint64_t value = 0;
+   for (; digit < end - 1; digit++) {
+      if (*digit < '0' || *digit > '9' || value > UINT32_MAX)
+         return false;
+      value = value * 10 + (unsigned)(*digit - '0');
+   }
+   while (comma > start && comma[-1] == ' ')
+      comma--;
+   *name = start;
+   *bytes = (unsigned)(comma - start);
+   return value == length && *bytes;
+}
+
 /* Whether value is used, directly or through constant expressions, in fn. */
 static bool
 used_in(LLVMValueRef value, LLVMValueRef fn, unsigned depth)
@@ -1387,9 +1418,16 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       LLVMGetAttributesAtIndex(fn, index + 1, attributes);
       const char *abi_attributes[] = {"sret", "byval", "byref", "inalloca",
          "preallocated", "nest", "swiftself", "swifterror", "elementtype"};
+      /* Texture and sampler arrays are passed by value. */
+      LLVMTypeRef byval = NULL;
       for (unsigned attribute = 0; attribute < attributes_count; attribute++) {
-         if (LLVMIsTypeAttribute(attributes[attribute]))
-            return fail(t, STELA_AIR_ARGUMENT, "unsupported typed parameter attribute");
+         if (LLVMIsTypeAttribute(attributes[attribute])) {
+            if (byval || LLVMGetEnumAttributeKind(attributes[attribute]) !=
+                            LLVMGetEnumAttributeKindForName("byval", strlen("byval")))
+               return fail(t, STELA_AIR_ARGUMENT, "unsupported typed parameter attribute");
+            byval = LLVMGetTypeAttributeValue(attributes[attribute]);
+            continue;
+         }
          if (!LLVMIsEnumAttribute(attributes[attribute]))
             continue;
          unsigned kind = LLVMGetEnumAttributeKind(attributes[attribute]);
@@ -1427,6 +1465,8 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       if (!buffer && !builtin && !interpolated && !vertex_input && !texture && !sampler &&
           !payload && !mesh && !grid && !control_points && !in_patch)
          return fail(t, STELA_AIR_ARGUMENT, "unsupported AIR argument kind at %u", index);
+      if (byval && !texture && !sampler)
+         return fail(t, STELA_AIR_ARGUMENT, "unsupported typed parameter attribute");
       if (builtin && builtins[builtin])
          return fail(t, STELA_AIR_METADATA, "duplicate builtin argument");
       builtins[builtin] = true;
@@ -1470,7 +1510,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       unsigned buffer_size = 0;
       struct stela_air_fields argument_buffer = {0};
       enum stela_air_primitive primitive = STELA_AIR_PRIMITIVE_UNKNOWN;
-      unsigned type_components = 0, location = 0;
+      unsigned type_components = 0, location = 0, locations = 0;
       const char *name = NULL, *type_name = NULL;
       unsigned name_bytes = 0, type_name_bytes = 0;
       for (unsigned f = first_field; f < fields_count;) {
@@ -1486,12 +1526,11 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             has_access = true;
          } else if ((texture || sampler || vertex_input) && stela_air_md_string(key, "air.location_index")) {
             unsigned *slot = texture ? &texture_desc.index : sampler ? &sampler_desc.index : &location;
-            unsigned locations;
             if (has_location || f + 2 > fields_count || !stela_air_md_uint(fields[f], slot) ||
-                !stela_air_md_uint(fields[f + 1], &locations))
+                !stela_air_md_uint(fields[f + 1], &locations) || !locations)
                return fail(t, STELA_AIR_METADATA, "invalid/duplicate resource or attribute location");
-            if (locations != 1)
-               return fail(t, STELA_AIR_ARGUMENT, "texture, sampler and attribute arrays are unsupported");
+            if (vertex_input && locations != 1)
+               return fail(t, STELA_AIR_ARGUMENT, "attribute arrays are unsupported");
             has_location = true;
             f += 2;
          } else if (stela_air_md_string(key, "air.read") || stela_air_md_string(key, "air.write") ||
@@ -1501,7 +1540,6 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             desc.access = stela_air_md_string(key, "air.read") ? STELA_AIR_READ :
                           stela_air_md_string(key, "air.write") ? STELA_AIR_WRITE : STELA_AIR_READ_WRITE;
          } else if (stela_air_md_string(key, "air.location_index")) {
-            unsigned locations;
             if (!buffer || has_location || f + 2 > fields_count ||
                 !stela_air_md_uint(fields[f], &desc.index) || !stela_air_md_uint(fields[f + 1], &locations) ||
                 locations != 1 || desc.index >= AIR_MAX_ARGUMENTS)
@@ -1568,18 +1606,32 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       if (texture || sampler) {
          LLVMTypeRef type = LLVMTypeOf(param);
          unsigned space = texture ? 1 : 2;
+         /* An array<element, n> argument points to its n handles, in n
+          * consecutive locations. */
+         const char *element = type_name;
+         unsigned element_bytes = type_name_bytes;
+         bool array = has_type_name && array_type(&element, &element_bytes, locations);
+         LLVMTypeRef handles = LLVMArrayType2(
+            LLVMPointerTypeInContext(LLVMGetTypeContext(type), space), locations);
          if (!has_location || !has_type_name || LLVMGetTypeKind(type) != LLVMPointerTypeKind ||
-             LLVMGetPointerAddressSpace(type) != space)
+             (array ? LLVMGetPointerAddressSpace(type) != 0 || byval != handles :
+                      LLVMGetPointerAddressSpace(type) != space || byval || locations != 1))
             return fail(t, STELA_AIR_ARGUMENT, "unsupported texture or sampler %u", index);
-         if (texture && (!has_access || !texture_type(type_name, type_name_bytes, &texture_desc)))
+         if (texture && (!has_access || !texture_type(element, element_bytes, &texture_desc)))
             return fail(t, STELA_AIR_ARGUMENT, "unsupported texture type at %u", index);
-         if (sampler && (type_name_bytes != strlen("sampler") || memcmp(type_name, "sampler", type_name_bytes)))
+         if (sampler && (element_bytes != strlen("sampler") || memcmp(element, "sampler", element_bytes)))
             return fail(t, STELA_AIR_ARGUMENT, "unsupported sampler type at %u", index);
          unsigned slot = texture ? texture_desc.index : sampler_desc.index;
+         unsigned slots = texture ? AIR_MAX_TEXTURES : AIR_MAX_SAMPLERS;
          bool *indices = texture ? texture_indices : sampler_indices;
-         if (slot >= (texture ? AIR_MAX_TEXTURES : AIR_MAX_SAMPLERS) || indices[slot])
+         if (slot >= slots || locations > slots - slot)
             return fail(t, STELA_AIR_METADATA, "duplicate or out-of-range texture or sampler location");
-         indices[slot] = true;
+         for (unsigned i = slot; i < slot + locations; i++) {
+            if (indices[i])
+               return fail(t, STELA_AIR_METADATA, "duplicate or out-of-range texture or sampler location");
+            indices[i] = true;
+         }
+         *(texture ? &texture_desc.length : &sampler_desc.length) = array ? locations : 0;
          primitive = STELA_AIR_PRIMITIVE_UNKNOWN;
          type_components = 0;
       } else if (buffer) {

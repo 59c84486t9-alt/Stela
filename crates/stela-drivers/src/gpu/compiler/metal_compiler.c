@@ -121,14 +121,17 @@ add_buffer(struct reflecting *r, const struct stela_air_buffer *buffer, bool arg
    return true;
 }
 
+/* A texture argument's slots: an array's, one per element. */
 static bool
 add_texture(struct reflecting *r, const struct stela_air_texture *texture)
 {
    struct stela_metal_reflection *out = r->out;
-   if (out->texture_count == STELA_METAL_TEXTURES)
-      return fail(r->error, STELA_AIR_LIMIT, "textures exceed the table");
-   out->textures[out->texture_count++] = (struct stela_metal_texture_use){
-      texture->index, texture_access(texture->access), texture->type, texture->primitive};
+   for (unsigned i = 0; i < (texture->length ? texture->length : 1); i++) {
+      if (out->texture_count == STELA_METAL_TEXTURES)
+         return fail(r->error, STELA_AIR_LIMIT, "textures exceed the table");
+      out->textures[out->texture_count++] = (struct stela_metal_texture_use){
+         texture->index + i, texture_access(texture->access), texture->type, texture->primitive};
+   }
    return true;
 }
 
@@ -136,9 +139,11 @@ static bool
 add_sampler(struct reflecting *r, const struct stela_air_sampler *sampler)
 {
    struct stela_metal_reflection *out = r->out;
-   if (out->sampler_count == STELA_METAL_SAMPLERS)
-      return fail(r->error, STELA_AIR_LIMIT, "samplers exceed the table");
-   out->samplers[out->sampler_count++] = sampler->index;
+   for (unsigned i = 0; i < (sampler->length ? sampler->length : 1); i++) {
+      if (out->sampler_count == STELA_METAL_SAMPLERS)
+         return fail(r->error, STELA_AIR_LIMIT, "samplers exceed the table");
+      out->samplers[out->sampler_count++] = sampler->index + i;
+   }
    return true;
 }
 
@@ -446,6 +451,7 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       .bind_sampler = stela_metal_bind_sampler,
       .bind_texture_id = stela_metal_bind_texture_id,
       .bind_sampler_id = stela_metal_bind_sampler_id,
+      .resource_id = stela_metal_resource_id,
       .texture_levels = stela_metal_texture_levels,
       .load_device_value = stela_metal_load_device_value,
       .fetch_attribute = patch || stage_in ? fetch_attribute : NULL,

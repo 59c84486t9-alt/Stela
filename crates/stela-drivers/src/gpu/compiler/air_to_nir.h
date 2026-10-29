@@ -59,6 +59,16 @@ typedef nir_deref_instr *(*stela_air_bind_texture_id)(nir_builder *b, nir_def *i
 typedef nir_deref_instr *(*stela_air_bind_sampler_id)(nir_builder *b, nir_def *id, bool integer,
                                                       void *data);
 
+/* The 64-bit MTLResourceID of an element of a texture array argument, or of
+ * a sampler array argument when texture is NULL, which bind_texture_id or
+ * bind_sampler_id then resolve. element is the 64-bit index an access names;
+ * Metal leaves one past the array undefined, but the callback must not read
+ * past the array for it. Emits straight-line NIR at the cursor; returning
+ * NULL refuses compilation. */
+typedef nir_def *(*stela_air_resource_id)(nir_builder *b, const struct stela_air_texture *texture,
+                                          const struct stela_air_sampler *sampler,
+                                          nir_def *element, void *data);
+
 /* The mip level count of a write or read_write texture argument, or with id
  * of the one an argument buffer's identifier names (texture is then NULL):
  * the count of the images bind_texture selects among. */
@@ -176,6 +186,9 @@ struct stela_air_options {
     * buffers hold device addresses, so they require bind_buffer. */
    stela_air_bind_texture_id bind_texture_id;
    stela_air_bind_sampler_id bind_sampler_id;
+   /* Texture and sampler array arguments' elements, which also need
+    * bind_texture_id or bind_sampler_id; zero refuses the arrays. */
+   stela_air_resource_id resource_id;
    /* Storage textures' level counts; NULL refuses get_num_mip_levels of
     * them. */
    stela_air_texture_levels texture_levels;

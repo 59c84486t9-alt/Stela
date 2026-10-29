@@ -116,6 +116,13 @@ nir_def *stela_metal_texture_levels(nir_builder *b, const struct stela_air_textu
 nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air_sampler *sampler,
                                           bool integer, void *stage);
 
+/* stela_air_resource_id over the argument table: the MTLResourceID in an
+ * array argument's slot for element, or ID zero, the null descriptors, for an
+ * element past the array. Refuses arrays past the table. */
+nir_def *stela_metal_resource_id(nir_builder *b, const struct stela_air_texture *texture,
+                                 const struct stela_air_sampler *sampler, nir_def *element,
+                                 void *stage);
+
 /* stela_air_bind_texture_id and stela_air_bind_sampler_id: the heap element
  * a loaded MTLResourceID names, as for an argument table's. */
 nir_deref_instr *stela_metal_bind_texture_id(nir_builder *b, nir_def *id,

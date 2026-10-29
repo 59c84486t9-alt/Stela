@@ -139,6 +139,27 @@ static const char *derived = DERIVED("%x = shl nsw i32 %w, 1\n");
 /* A constructor that calls an AIR function, which no constant folds. */
 static const char *called = DERIVED("%x = call i32 @air.unknown(i32 %w)\n");
 
+/* Texture and sampler array arguments, which a function reflects slot by
+ * slot, reading the width of the second texture. */
+static const char *arrays =
+   "declare i32 @air.get_width_texture_2d(ptr addrspace(1), i32)\n"
+   "define void @arrays(ptr byval([3 x ptr addrspace(1)]) %t, ptr byval([2 x ptr addrspace(2)]) %s,"
+   " ptr addrspace(1) %data) {\n"
+   "%h = getelementptr inbounds [3 x ptr addrspace(1)], ptr %t, i64 0, i64 1\n"
+   "%x = load ptr addrspace(1), ptr %h, align 8\n"
+   "%w = call i32 @air.get_width_texture_2d(ptr addrspace(1) %x, i32 0)\n"
+   "store i32 %w, ptr addrspace(1) %data, align 4\n"
+   "ret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @arrays, !3, !4}\n!3 = !{}\n!4 = !{!5, !6, !7}\n"
+   "!5 = !{i32 0, !\"air.texture\", !\"air.location_index\", i32 2, i32 3, !\"air.read\","
+   " !\"air.arg_type_name\", !\"array<texture2d<half, read>, 3>\", !\"air.arg_name\", !\"t\"}\n"
+   "!6 = !{i32 1, !\"air.sampler\", !\"air.location_index\", i32 1, i32 2,"
+   " !\"air.arg_type_name\", !\"array<sampler, 2>\", !\"air.arg_name\", !\"s\"}\n"
+   "!7 = !{i32 2, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n";
+
 #define VERTEX_RESULT "<{ <4 x float>, <2 x float> }>"
 
 static const char *vertex =
@@ -594,6 +615,27 @@ derived_constants_are_constructed_from_their_function_constants(void)
           strstr(error.detail, "program-scope constants"));
 }
 
+static void
+arrays_reflect_each_slot(void)
+{
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   assert(reflect(arrays, "arrays", &reflection, &error));
+   assert(reflection.texture_count == 3 && reflection.sampler_count == 2);
+   for (unsigned i = 0; i < 3; i++) {
+      assert(reflection.textures[i].index == 2 + i);
+      assert(reflection.textures[i].primitive == STELA_AIR_HALF);
+   }
+   assert(reflection.samplers[0] == 1 && reflection.samplers[1] == 2);
+
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   nir_shader *shader = compile(arrays, "arrays", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "arrays: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   stela_metal_release(shader);
+}
+
 int
 main(void)
 {
@@ -605,6 +647,7 @@ main(void)
    mesh_stages_compile_with_their_launch();
    function_constants_reflect_and_specialize();
    derived_constants_are_constructed_from_their_function_constants();
+   arrays_reflect_each_slot();
    glsl_type_singleton_decref();
    puts("metal compiler: ok");
    return 0;

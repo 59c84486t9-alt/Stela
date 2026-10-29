@@ -159,6 +159,45 @@ static void loaded_ids_index_the_heap(void)
    ralloc_free(b.shader);
 }
 
+/* An array element's ID loads from the array's slots, its element clamped
+ * to them, and is the null descriptors' past them. */
+static void array_elements_load_within_their_slots(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL, "array ids");
+   const struct stela_metal_stage stage = {.table = STELA_METAL_TABLE_PRIMARY};
+   nir_def *element = nir_u2u64(&b, nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0));
+   const struct stela_air_texture textures = {.index = 4, .length = 3};
+   const struct stela_air_sampler samplers = {.index = 1, .length = 2};
+   const unsigned firsts[] = {STELA_METAL_TABLE_TEXTURES + 4 * 8, STELA_METAL_TABLE_SAMPLERS + 1 * 8};
+   const unsigned lengths[] = {3, 2};
+   for (unsigned i = 0; i < 2; i++) {
+      nir_def *id = stela_metal_resource_id(&b, i ? NULL : &textures, i ? &samplers : NULL, element,
+                                            (void *)&stage);
+      nir_alu_instr *select = nir_def_as_alu(id);
+      assert(select->op == nir_op_bcsel && nir_src_as_uint(select->src[2].src) == 0);
+      nir_alu_instr *inside = nir_def_as_alu(select->src[0].src.ssa);
+      assert(inside->op == nir_op_ult && inside->src[0].src.ssa == element);
+      assert(nir_src_as_uint(inside->src[1].src) == lengths[i]);
+      nir_intrinsic_instr *load = intrinsic(select->src[1].src.ssa, nir_intrinsic_load_global);
+      assert(load->def.bit_size == 64 && nir_intrinsic_access(load) & ACCESS_NON_WRITEABLE);
+      nir_alu_instr *first = nir_def_as_alu(load->src[0].ssa);
+      assert(first->op == nir_op_iadd && nir_src_as_uint(first->src[1].src) == firsts[i]);
+      nir_alu_instr *slot = nir_def_as_alu(first->src[0].src.ssa);
+      assert(slot->op == nir_op_iadd);
+      intrinsic(slot->src[0].src.ssa, nir_intrinsic_load_push_constant);
+      nir_alu_instr *scaled = nir_def_as_alu(slot->src[1].src.ssa);
+      nir_alu_instr *clamped = nir_def_as_alu(scaled->src[0].src.ssa);
+      assert(clamped->op == nir_op_umin && clamped->src[0].src.ssa == element);
+      assert(nir_src_as_uint(clamped->src[1].src) == lengths[i] - 1);
+   }
+
+   const struct stela_air_texture one = {.index = 4};
+   const struct stela_air_sampler past = {.index = STELA_METAL_SAMPLERS - 1, .length = 2};
+   assert(!stela_metal_resource_id(&b, &one, NULL, element, (void *)&stage));
+   assert(!stela_metal_resource_id(&b, NULL, &past, element, (void *)&stage));
+   ralloc_free(b.shader);
+}
+
 struct census {
    unsigned push_constants, loads, stores, loops;
    unsigned push_base;
@@ -567,6 +606,7 @@ int main(void)
    buffers_load_their_table_slot();
    textures_and_samplers_index_the_heap();
    loaded_ids_index_the_heap();
+   array_elements_load_within_their_slots();
    storage_levels_index_their_run();
    accumulate_sums_each_run_in_a_loop();
    select_flags_each_command();

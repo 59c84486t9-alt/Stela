@@ -162,6 +162,24 @@ nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air
       b, table_id(b, stage, STELA_METAL_TABLE_SAMPLERS + 8u * sampler->index), integer, stage);
 }
 
+nir_def *stela_metal_resource_id(nir_builder *b, const struct stela_air_texture *texture,
+                                 const struct stela_air_sampler *sampler, nir_def *element,
+                                 void *stage)
+{
+   const struct stela_metal_stage *metal = stage;
+   unsigned index = texture ? texture->index : sampler->index;
+   unsigned length = texture ? texture->length : sampler->length;
+   unsigned slots = texture ? STELA_METAL_TEXTURES : STELA_METAL_SAMPLERS;
+   if (!length || index >= slots || length > slots - index)
+      return NULL;
+   /* The load stays within the array's slots, whatever the element. */
+   nir_def *slot = nir_umin(b, element, nir_imm_int64(b, length - 1));
+   nir_def *address = nir_iadd(b, stela_metal_load_table(b, metal->table), nir_imul_imm(b, slot, 8));
+   unsigned first = (texture ? STELA_METAL_TABLE_TEXTURES : STELA_METAL_TABLE_SAMPLERS) + 8u * index;
+   return nir_bcsel(b, nir_ult_imm(b, element, length), load(b, address, first, 64),
+                    nir_imm_int64(b, 0));
+}
+
 /* A compute kernel's builder with its arguments address and thread index,
  * inside `if (thread < count)` for the u32 count at count_offset. */
 static nir_builder kernel(const nir_shader_compiler_options *options, const char *name,

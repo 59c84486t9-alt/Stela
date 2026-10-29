@@ -25,6 +25,7 @@ static const char *module =
    " <2 x float>, i1, <2 x i32>, i32, i32)\n"
    "declare { <4 x i32>, i8 } @air.read_texture_2d_array.u.v4i32(ptr addrspace(1), <2 x i32>, i32,"
    " i32, i32)\n"
+   "declare { <4 x float>, i8 } @air.read_texture_2d.v4f32(ptr addrspace(1), <2 x i32>, i32, i32)\n"
    "declare void @air.write_texture_2d.v4f32(ptr addrspace(1), <2 x i32>, <4 x float>, i32, i32)\n"
    "declare i32 @air.get_width_texture_2d(ptr addrspace(1), i32)\n"
    "declare i32 @air.get_array_size_texture_2d_array(ptr addrspace(1))\n"
@@ -86,6 +87,56 @@ static const char *kernel_metadata =
    " !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"out\"}\n"
    "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n";
 
+/* Texture and sampler array arguments as Apple's compiler passes them: by
+ * value, each element loaded through a GEP of the handles, some wrapped in
+ * Metal's texture2d and sampler structures. The kernel samples inputs[which]
+ * with samplers[which & 1], adds inputs[2].read(gid) and writes the sum to
+ * outputs[which & 1]. */
+static const char *array_body =
+   "define void @kernel(ptr byval([4 x ptr addrspace(1)]) %inputs,"
+   " ptr byval([2 x ptr addrspace(1)]) %outputs, ptr byval([2 x ptr addrspace(2)]) %samplers,"
+   " ptr addrspace(2) %which, <2 x i32> %gid) {\n"
+   "%w = load i32, ptr addrspace(2) %which, align 4\n"
+   "%i = zext i32 %w to i64\n"
+   "%odd = and i32 %w, 1\n"
+   "%j = zext i32 %odd to i64\n"
+   "%sp = getelementptr inbounds [2 x { ptr addrspace(2) }], ptr %samplers, i64 0, i64 %j, i32 0\n"
+   "%s = load ptr addrspace(2), ptr %sp, align 8\n"
+   "%ip = getelementptr inbounds [4 x { ptr addrspace(1) }], ptr %inputs, i64 0, i64 %i, i32 0\n"
+   "%in = load ptr addrspace(1), ptr %ip, align 8\n"
+   "%sampled = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %in,"
+   " ptr addrspace(2) %s, <2 x float> <float 0.5, float 0.5>, i1 true, <2 x i32> zeroinitializer,"
+   " i1 false, float 0.0, float 0.0, i32 0)\n"
+   "%texel = extractvalue { <4 x float>, i8 } %sampled, 0\n"
+   "%cp = getelementptr inbounds [4 x ptr addrspace(1)], ptr %inputs, i64 0, i64 2\n"
+   "%c = load ptr addrspace(1), ptr %cp, align 8\n"
+   "%r = call { <4 x float>, i8 } @air.read_texture_2d.v4f32(ptr addrspace(1) %c, <2 x i32> %gid,"
+   " i32 0, i32 0)\n"
+   "%read = extractvalue { <4 x float>, i8 } %r, 0\n"
+   "%sum = fadd <4 x float> %texel, %read\n"
+   "%op = getelementptr inbounds [2 x { ptr addrspace(1) }], ptr %outputs, i64 0, i64 %j, i32 0\n"
+   "%out = load ptr addrspace(1), ptr %op, align 8\n"
+   "call void @air.write_texture_2d.v4f32(ptr addrspace(1) %out, <2 x i32> %gid, <4 x float> %sum,"
+   " i32 0, i32 2)\n"
+   "ret void\n}\n";
+
+static const char *array_metadata =
+   "!air.kernel = !{!2}\n"
+   "!air.version = !{!20}\n!air.language_version = !{!21}\n"
+   "!2 = !{ptr @kernel, !3, !4}\n!3 = !{}\n!4 = !{!5, !6, !7, !8, !9}\n"
+   "!5 = !{i32 0, !\"air.texture\", !\"air.location_index\", i32 0, i32 4, !\"air.sample\","
+   " !\"air.arg_type_name\", !\"array<texture2d<float, sample>, 4>\", !\"air.arg_name\", !\"inputs\"}\n"
+   "!6 = !{i32 1, !\"air.texture\", !\"air.location_index\", i32 4, i32 2, !\"air.write\","
+   " !\"air.arg_type_name\", !\"array<texture2d<float, write>, 2>\", !\"air.arg_name\", !\"outputs\"}\n"
+   "!7 = !{i32 2, !\"air.sampler\", !\"air.location_index\", i32 0, i32 2,"
+   " !\"air.arg_type_name\", !\"array<sampler, 2>\", !\"air.arg_name\", !\"samplers\"}\n"
+   "!8 = !{i32 3, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read\","
+   " !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
+   " !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"which\"}\n"
+   "!9 = !{i32 4, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint2\","
+   " !\"air.arg_name\", !\"gid\"}\n"
+   "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n";
+
 /* A fragment function that samples with implicit derivatives, compares
  * against a depth texture and gathers. */
 static const char *fragment_body =
@@ -141,19 +192,28 @@ options(struct stela_metal_stage *stage, bool compute)
       .workgroup_size = {compute ? 64u : 0u, compute ? 1u : 0u, compute ? 1u : 0u},
       .max_instructions = 10000, .bind_buffer = stela_metal_bind_buffer, .binding_data = stage,
       .bind_texture = stela_metal_bind_texture, .bind_sampler = stela_metal_bind_sampler,
-      .texture_levels = stela_metal_texture_levels, .max_private_bytes = 64,
+      .bind_texture_id = stela_metal_bind_texture_id, .bind_sampler_id = stela_metal_bind_sampler_id,
+      .resource_id = stela_metal_resource_id, .texture_levels = stela_metal_texture_levels,
+      .max_private_bytes = 64,
    };
+}
+
+static nir_shader *
+kernel_with(const char *body, const char *metadata, const struct stela_air_options *o,
+            struct stela_air_error *error)
+{
+   LLVMMemoryBufferRef input = bitcode(body, metadata);
+   nir_shader *shader = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                         "kernel", &nir_options, o, error);
+   LLVMDisposeMemoryBuffer(input);
+   return shader;
 }
 
 static nir_shader *
 kernel(const char *body, const char *metadata, struct stela_air_error *error)
 {
-   LLVMMemoryBufferRef input = bitcode(body, metadata);
    const struct stela_air_options o = options(&primary, true);
-   nir_shader *shader = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
-                                         "kernel", &nir_options, &o, error);
-   LLVMDisposeMemoryBuffer(input);
-   return shader;
+   return kernel_with(body, metadata, &o, error);
 }
 
 struct census {
@@ -297,6 +357,45 @@ refuse(const char *body, const char *metadata, enum stela_air_error_kind kind, c
    assert(!shader && error.kind == kind && strstr(error.detail, detail));
 }
 
+/* The resource ID a sampled texture call's source indexes the heap with. */
+static nir_alu_instr *
+sampled_id(nir_tex_instr *tex, nir_tex_src_type type)
+{
+   int source = nir_tex_instr_src_index(tex, type);
+   assert(source >= 0);
+   nir_deref_instr *deref = nir_def_as_deref(tex->src[source].src.ssa);
+   nir_alu_instr *half = nir_def_as_alu(deref->arr.index.ssa);
+   assert(half->op == nir_op_unpack_64_2x32_split_x);
+   return nir_def_as_alu(half->src[0].src.ssa);
+}
+
+/* Each element a texture or sampler array access names is the resource its
+ * slot's ID identifies. */
+static void
+array_arguments_bind_their_elements(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = kernel(array_body, array_metadata, &error);
+   if (!shader)
+      fprintf(stderr, "arrays: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "texture array kernel");
+   struct census census = count(shader);
+   nir_tex_instr *sample = census.first[nir_texop_txl];
+   assert(sample && census.tex[nir_texop_txf] == 1 && census.store);
+   /* Elements past an array select the null descriptors. */
+   assert(sampled_id(sample, nir_tex_src_texture_deref)->op == nir_op_bcsel);
+   assert(sampled_id(sample, nir_tex_src_sampler_deref)->op == nir_op_bcsel);
+   assert(sampled_id(census.first[nir_texop_txf], nir_tex_src_texture_deref)->op == nir_op_bcsel);
+   ralloc_free(shader);
+
+   /* A target without resource IDs refuses them. */
+   struct stela_air_options o = options(&primary, true);
+   o.resource_id = NULL;
+   assert(!kernel_with(array_body, array_metadata, &o, &error) && error.kind == STELA_AIR_ARGUMENT &&
+          strstr(error.detail, "array"));
+}
+
 /* A storage texture's level selects its descriptor, which an access whose
  * level varies between threads indexes non-uniformly. */
 static void
@@ -380,10 +479,24 @@ unsupported_texture_uses_are_refused(void)
    refuse(replace(kernel_body, "@air.get_width_texture_2d(ptr addrspace(1) %src",
                   "@air.get_width_texture_2d(ptr addrspace(1) %layers"),
           kernel_metadata, STELA_AIR_INSTRUCTION, "unsupported texture function");
-   /* Texture arrays. */
+   /* A texture with an array's locations. */
    refuse(kernel_body,
           replace(kernel_metadata, "i32 2, i32 1, !\"air.sample\"", "i32 2, i32 4, !\"air.sample\""),
-          STELA_AIR_ARGUMENT, "arrays");
+          STELA_AIR_ARGUMENT, "texture or sampler 1");
+   /* An array whose type name disagrees with its locations. */
+   refuse(array_body, replace(array_metadata, "array<sampler, 2>", "array<sampler, 3>"),
+          STELA_AIR_ARGUMENT, "texture or sampler 2");
+   /* Arrays overlapping in their locations. */
+   refuse(array_body,
+          replace(array_metadata, "i32 4, i32 2, !\"air.write\"", "i32 3, i32 2, !\"air.write\""),
+          STELA_AIR_METADATA, "duplicate");
+   /* An array's handles read as data. */
+   refuse(replace(array_body, "ret void", "%raw = load i64, ptr %cp, align 8\nret void"),
+          array_metadata, STELA_AIR_MEMORY, "by element");
+   /* A load between an array's handles. */
+   refuse(replace(array_body, "i64 0, i64 2\n", "i64 0, i64 2\n%mid = getelementptr i8, ptr %cp, i64 4\n"
+                  "%m = load ptr addrspace(1), ptr %mid, align 4\n"),
+          array_metadata, STELA_AIR_MEMORY, "names no handle");
    /* An unknown texture type. */
    refuse(kernel_body,
           replace(kernel_metadata, "texture2d<float, sample>", "texture4d<float, sample>"),
@@ -497,11 +610,12 @@ main(void)
    fragments_sample_with_derivatives_compare_and_gather();
    storage_levels_select_their_descriptor();
    sparse_texels_report_their_residency();
+   array_arguments_bind_their_elements();
    unsupported_texture_uses_are_refused();
    kernels_take_texture_atomics();
    glsl_type_singleton_decref();
    puts("AIR textures: sample/level/offset, write, read_write array read, size queries, "
-        "implicit-derivative fragment sampling, depth compare, gather, storage levels, atomics and "
+        "implicit-derivative fragment sampling, depth compare, gather, storage levels, arrays, atomics and "
         "refusals passed");
    return 0;
 }

@@ -51,10 +51,13 @@ struct value {
    unsigned components, bits, aggregate_count;
    struct value **elements;
    /* Texture and sampler arguments, used only as texture call operands, and
-    * the MTLResourceID of one an argument buffer holds. */
+    * the MTLResourceID of one an argument buffer or array holds. A texture or
+    * sampler array argument, and each pointer into it, is instead an array:
+    * def is the pointer's byte offset among the array's handles. */
    const struct stela_air_texture *texture;
    const struct stela_air_sampler *sampler;
    nir_def *id;
+   bool array;
    /* A two-member result: a texture call's {texel, residency} or cmpxchg's
     * {old value, exchanged}. A member is NULL when nothing reads it. */
    nir_def *members[2];
@@ -342,6 +345,9 @@ pointer_authority(struct value *target, const struct value *root, bool view_root
    target->constant_view = root->constant_view;
    target->view_root = view_root;
    target->fields = root->fields;
+   target->array = root->array;
+   target->texture = root->texture;
+   target->sampler = root->sampler;
 }
 
 static uint64_t
@@ -433,14 +439,24 @@ pointer_value(struct translator *t, LLVMValueRef pointer)
    return find_value(t, pointer);
 }
 
-/* A texture or sampler argument's value, which only texture calls use. */
+/* A texture or sampler argument's value, which only texture calls use, or an
+ * array argument's, which only its element loads do. */
 static bool
 put_resource(struct translator *t, LLVMValueRef param, const struct stela_air_texture *texture,
              const struct stela_air_sampler *sampler)
 {
+   unsigned length = texture ? texture->length : sampler->length;
+   bool bound = texture ? t->options->bind_texture_id != NULL : t->options->bind_sampler_id != NULL;
+   if (length && (!t->options->resource_id || !bound))
+      return fail(t, STELA_AIR_ARGUMENT, "unbound texture or sampler array %u",
+                  texture ? texture->argument : sampler->argument);
    struct value *value = rzalloc(t->values, struct value);
    if (!value)
       return fail(t, STELA_AIR_ALLOCATION, "AIR resource value allocation failed");
+   if (length) {
+      *value = (struct value){.def = nir_imm_int64(&t->b, 0), .access = STELA_AIR_READ,
+         .pointer_root = param, .offset_known = true, .array = true, .components = 1, .bits = 64};
+   }
    if (texture) {
       struct stela_air_texture *copy = ralloc(t->values, struct stela_air_texture);
       if (!copy)
@@ -1298,6 +1314,10 @@ memory_access(struct translator *t, const struct value *address, nir_def *stored
               const struct atomic *atomic, enum gl_access_qualifier access,
               unsigned components, unsigned bits, unsigned alignment)
 {
+   if (address->array) {
+      fail(t, STELA_AIR_MEMORY, "texture and sampler arrays are only read by element");
+      return NULL;
+   }
    if (address->storage)
       return variable_access(t, address, stored, atomic, access, components, bits, alignment);
    if (address->constant_data)
@@ -2339,7 +2359,7 @@ texture_argument(void *translator, LLVMValueRef value, nir_def **id)
 {
    const struct value *v = find_value(translator, value);
    *id = v ? v->id : NULL;
-   return v ? v->texture : NULL;
+   return v && !v->array ? v->texture : NULL;
 }
 
 static bool
@@ -2391,7 +2411,7 @@ sampler_argument(void *translator, LLVMValueRef value, nir_def **id)
 {
    const struct value *v = find_value(translator, value);
    *id = v ? v->id : NULL;
-   return v ? v->sampler : NULL;
+   return v && !v->array ? v->sampler : NULL;
 }
 
 /* A call of one of AIR's texture functions; false with no error when the
@@ -2712,13 +2732,51 @@ argument_field(struct translator *t, const struct value *address)
    return NULL;
 }
 
-/* A load of an address or resource ID from an argument buffer. An address
- * roots the pointers derived from it, with its field's access; an ID names
- * its texture or sampler for texture calls. */
+/* A resource ID's value, which names its texture or sampler for texture
+ * calls. */
+static bool
+put_id(struct translator *t, LLVMValueRef inst, const struct stela_air_texture *texture,
+       const struct stela_air_sampler *sampler, nir_def *id)
+{
+   struct value *value = rzalloc(t->values, struct value);
+   if (!value || !_mesa_hash_table_insert(t->values, inst, value))
+      return fail(t, STELA_AIR_ALLOCATION, "AIR resource value allocation failed");
+   value->texture = texture;
+   value->sampler = sampler;
+   value->id = id;
+   return true;
+}
+
+/* A load of a texture or sampler array's handle: the resource ID of the
+ * element its offset selects. */
+static bool
+array_load(struct translator *t, LLVMValueRef inst, const struct value *address)
+{
+   unsigned space = address->texture ? 1 : 2;
+   LLVMTypeRef type = LLVMTypeOf(inst);
+   if (LLVMGetPointerAddressSpace(type) != space || LLVMPointerSizeForAS(t->layout, space) != 8 ||
+       LLVMGetVolatile(inst) || LLVMGetOrdering(inst) != LLVMAtomicOrderingNotAtomic)
+      return fail(t, STELA_AIR_TYPE, "load differs from its texture or sampler array's handles");
+   if (!address->offset_known || address->offset % 8 || address->steps % 8)
+      return fail(t, STELA_AIR_MEMORY, "texture or sampler array load names no handle");
+   nir_def *element = nir_ushr_imm(&t->b, address->def, 3);
+   nir_def *id = t->options->resource_id(&t->b, address->texture, address->sampler, element,
+                                         t->options->binding_data);
+   if (!id || id->num_components != 1 || id->bit_size != 64)
+      return fail(t, STELA_AIR_ARGUMENT, "resource ID callback refused a texture or sampler array");
+   return put_id(t, inst, address->texture, address->sampler, id);
+}
+
+/* A load of an address or resource ID from an argument buffer, or of a
+ * texture or sampler array's handle. An address roots the pointers derived
+ * from it, with its field's access; an ID names its texture or sampler for
+ * texture calls. */
 static bool
 argument_load(struct translator *t, LLVMValueRef inst)
 {
    const struct value *address = pointer_value(t, LLVMGetOperand(inst, 0));
+   if (address && address->array)
+      return array_load(t, inst, address);
    if (!address || !address->fields.count || !(address->access & STELA_AIR_READ) ||
        LLVMGetVolatile(inst) || LLVMGetOrdering(inst) != LLVMAtomicOrderingNotAtomic ||
        !LLVMGetAlignment(inst))
@@ -2736,17 +2794,10 @@ argument_load(struct translator *t, LLVMValueRef inst)
    nir_def *loaded = memory_access(t, address, NULL, NULL, 0, 1, 64, LLVMGetAlignment(inst));
    if (!loaded)
       return false;
-   if (field->kind == STELA_AIR_FIELD_TEXTURE || field->kind == STELA_AIR_FIELD_SAMPLER) {
-      struct value *value = rzalloc(t->values, struct value);
-      if (!value || !_mesa_hash_table_insert(t->values, inst, value))
-         return fail(t, STELA_AIR_ALLOCATION, "AIR resource value allocation failed");
-      if (field->kind == STELA_AIR_FIELD_TEXTURE)
-         value->texture = &field->texture;
-      else
-         value->sampler = &field->sampler;
-      value->id = loaded;
-      return true;
-   }
+   if (field->kind == STELA_AIR_FIELD_TEXTURE)
+      return put_id(t, inst, &field->texture, NULL, loaded);
+   if (field->kind == STELA_AIR_FIELD_SAMPLER)
+      return put_id(t, inst, NULL, &field->sampler, loaded);
    if (!put_value(t, inst, loaded, field->buffer.access))
       return false;
    struct value *value = find_value(t, inst);
