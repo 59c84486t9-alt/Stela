@@ -41,6 +41,7 @@ mod sha3;
 mod sha32;
 mod sha512;
 pub(crate) mod shifts;
+mod sm3;
 mod sqrt;
 mod structure_checked;
 mod structure_memory;
@@ -352,6 +353,7 @@ pub(super) fn emit_after(
         Operand::Sha256(ref operand) => sha256::emit(code, operand, target),
         Operand::Sha3(ref operand) => sha3::emit(code, operand),
         Operand::Sha512(ref operand) => sha512::emit(code, operand, target),
+        Operand::Sm3(ref operand) => sm3::emit(code, operand),
         Operand::Floating(ref operand) => floating::emit(code, operand, target),
         Operand::MemoryRegisterOffset(ref operand) => {
             memory::emit_register_offset(code, operand, checks, xmm0 == Some(operand.vector))

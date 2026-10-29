@@ -478,6 +478,7 @@ fn checked_register_asimd(operation: &Operation) -> bool {
                 | Operand::Sha256(_)
                 | Operand::Sha3(_)
                 | Operand::Sha512(_)
+                | Operand::Sm3(_)
                 | Operand::Floating(_)
                 | Operand::Immediate(_)
                 | Operand::Halving(_)

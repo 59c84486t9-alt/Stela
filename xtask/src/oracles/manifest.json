@@ -4789,5 +4789,17 @@
     "kind": "manual",
     "inputs": [],
     "reason": "opt-in hardware comparison of compiled GFNI SVE RBIT.B predicate merges; requires actual GFNI, AVX2 and AVX-512 F/VL support and preserves dependent/independent emitted binaries for each vector length"
+  },
+  {
+    "package": "stela-compiler",
+    "test": "baseline_sm3_matches_stock_aarch64_qemu",
+    "source": "crates/stela-compiler/src/x86_64/simd/sm3/tests/oracle.rs",
+    "kind": "oracle",
+    "inputs": [
+      "STELA_TEST_SM3_QEMU",
+      "STELA_TEST_LLVM_MC",
+      "STELA_TEST_LLD"
+    ],
+    "reason": "Independent stock AArch64 Linux-user QEMU semantics against actual x86 baseline and Arm lane model; LLVM assembler and linker generate bounded no-libc input ELF. No host-SM3 timing claim."
   }
 ]

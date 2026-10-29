@@ -30,6 +30,7 @@ pub mod sha256;
 pub mod sha3;
 pub mod sha512;
 pub mod shifts;
+pub mod sm3;
 pub mod sqrt;
 pub mod structure_memory;
 pub mod widening;
@@ -70,6 +71,7 @@ pub enum Operand {
     Sha256(sha256::Operand),
     Sha3(sha3::Operand),
     Sha512(sha512::Operand),
+    Sm3(sm3::Operand),
     Floating(floating::Operand),
     MemoryRegisterOffset(memory::Operand),
     StructureMemory(structure_memory::Operand),
@@ -148,6 +150,9 @@ pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     }
     if let Some(decoded) = sha3::decode(word) {
         return Some(decoded.map(Operand::Sha3));
+    }
+    if let Some(decoded) = sm3::decode(word) {
+        return Some(decoded.map(Operand::Sm3));
     }
     if let Some(decoded) = sha512::decode(word) {
         return Some(decoded.map(Operand::Sha512));
