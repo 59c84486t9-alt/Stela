@@ -55,6 +55,9 @@ bool stela_linux_lease_resume(const struct stela_linux_lease *lease);
  * Attach/leave/arrive/complete/detach are bounded IF=0 Runtime switch hooks.
  * Return failure before mutation; corruption after a committed switch traps. */
 unsigned int stela_linux_task_catalog_capacity(void);
+size_t stela_linux_task_stack_bytes(void);
+size_t stela_linux_task_stack_alignment(void);
+size_t stela_linux_task_stack_guard(void);
 struct stela_linux_task *stela_linux_task_allocate(void);
 int stela_linux_task_attach(struct stela_linux_task *task,
 	const struct stela_linux_task_context *context,

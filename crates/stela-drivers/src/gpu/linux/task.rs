@@ -35,6 +35,9 @@ struct CTask {
 }
 unsafe extern "C" {
     fn stela_linux_task_catalog_capacity() -> u32;
+    fn stela_linux_task_stack_bytes() -> usize;
+    fn stela_linux_task_stack_alignment() -> usize;
+    fn stela_linux_task_stack_guard() -> usize;
     fn stela_linux_task_allocate() -> *mut CTask;
     fn stela_linux_task_attach(
         task: *mut CTask,
@@ -56,6 +59,21 @@ unsafe extern "C" {
     ) -> i32;
     fn stela_linux_task_scope_end(task: *mut CTask) -> i32;
     fn stela_linux_task_signal(task: *mut CTask, expected_sequence: u64, kind: u32) -> i32;
+}
+
+/// Geometry from the actual compiled Linux configuration, for resource planning.
+/// It does not attest mappings, CPU/current authority or a native provider.
+pub fn stack_requirement() -> Result<crate::platform::work::StackRequirement, WorkError> {
+    // SAFETY: these three C functions return immutable compiled constants only;
+    // they inspect no task, entered owner, mutable catalog or native pointer.
+    let (bytes, alignment, guard) = unsafe {
+        (
+            stela_linux_task_stack_bytes(),
+            stela_linux_task_stack_alignment(),
+            stela_linux_task_stack_guard(),
+        )
+    };
+    crate::platform::work::StackRequirement::exact(bytes, alignment, guard)
 }
 
 static QUARANTINED: AtomicU64 = AtomicU64::new(0);
@@ -930,6 +948,10 @@ pub(crate) mod tests {
     /// Invoked in its own current unit-test executable, so actual C globals and
     /// permanent canonical registry cannot race parallel parent unit fixtures.
     pub(crate) fn run_trees_child() {
+        assert_eq!(
+            super::stack_requirement(),
+            crate::platform::work::StackRequirement::exact(16 * 1024, 16 * 1024, 4096)
+        );
         let executable = std::env::current_exe().unwrap();
         let output = std::process::Command::new(executable)
             .args([

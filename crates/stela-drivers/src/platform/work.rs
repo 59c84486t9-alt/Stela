@@ -37,6 +37,8 @@ pub mod scheduling;
 pub mod service;
 
 mod reservation;
+mod stack_requirement;
+pub use stack_requirement::{StackProfile, StackRequirement};
 #[cfg(all(test, unix, target_arch = "x86_64"))]
 pub(crate) mod test_support;
 use reservation::Layout;
@@ -177,10 +179,13 @@ struct Job {
     lane: Lane,
     sequence: u64,
     running: bool,
+    requirement: Option<StackRequirement>,
 }
 struct State<const N: usize> {
     jobs: [Option<Job>; N],
     layout: Layout,
+    stack_profile: Option<StackProfile>,
+    stack_catalog: stack_requirement::Catalog,
     next: u64,
     closed: bool,
     poisoned: bool,
@@ -290,6 +295,8 @@ impl<const N: usize> Queue<N> {
             state: ManuallyDrop::new(UnsafeCell::new(State {
                 jobs: [None; N],
                 layout: Layout::Ordinary,
+                stack_profile: None,
+                stack_catalog: stack_requirement::Catalog::empty(),
                 next: 1,
                 closed: false,
                 poisoned: false,
@@ -351,11 +358,31 @@ impl<const N: usize> Queue<N> {
         callback: Callback,
         context: *mut c_void,
     ) -> Result<Ticket, WorkError> {
+        self.enqueue_requirement(lane, callback, context, None)
+    }
+    fn enqueue_requirement(
+        &self,
+        lane: Lane,
+        callback: Callback,
+        context: *mut c_void,
+        requested: Option<StackRequirement>,
+    ) -> Result<Ticket, WorkError> {
         let mut guard = self.lock()?;
         let state = guard.state();
         if state.closed || state.poisoned || self.abandoned.load(Ordering::Acquire) {
             return Err(WorkError::Closed);
         }
+        let requirement = match (state.stack_profile, requested) {
+            (None, Some(_)) => return Err(WorkError::Unavailable),
+            (None, None) => None,
+            (Some(profile), requested) => {
+                let requirement = requested.unwrap_or_else(|| profile.default_for(lane));
+                if !state.stack_catalog.supports(lane, requirement) {
+                    return Err(WorkError::Unavailable);
+                }
+                Some(requirement)
+            }
+        };
         let ranges = state.layout.admission(lane, N)?;
         let slot = ranges
             .into_iter()
@@ -370,6 +397,7 @@ impl<const N: usize> Queue<N> {
             lane,
             sequence,
             running: false,
+            requirement,
         });
         Ok(Ticket {
             queue: self.id,
@@ -398,6 +426,21 @@ impl<const N: usize> Queue<N> {
             callback,
             context,
         )
+    }
+    /// Queue General work with explicit geometry in an actual mixed-stack profile.
+    /// This does not reserve an idle worker or implement thread creation.
+    ///
+    /// # Safety
+    /// As for execute: callback/code/context remain retained through genuine
+    /// completion or quarantine, and the body fits its requested usable extent.
+    /// Rejection transfers nothing; a descriptor is no native/current authority.
+    pub unsafe fn execute_general_with_requirement(
+        &self,
+        requirement: StackRequirement,
+        callback: Callback,
+        context: *mut c_void,
+    ) -> Result<Ticket, WorkError> {
+        self.enqueue_requirement(Lane::General, callback, context, Some(requirement))
     }
     /// Claim one of the named policy's two actual portal continuations before
     /// accepting the callback/context. Full means neither idle worker is free;
@@ -445,7 +488,11 @@ impl<const N: usize> Queue<N> {
             .any(|j| j.sequence == ticket.sequence))
     }
     #[cfg(target_arch = "x86_64")]
-    fn next(&self, lane: Lane) -> Result<Option<(usize, Job)>, WorkError> {
+    fn next(
+        &self,
+        lane: Lane,
+        geometry: stack_requirement::Geometry,
+    ) -> Result<Option<(usize, Job)>, WorkError> {
         let mut g = self.lock()?;
         let state = g.state();
         if state.poisoned || self.abandoned.load(Ordering::Acquire) {
@@ -455,7 +502,14 @@ impl<const N: usize> Queue<N> {
             .jobs
             .iter()
             .enumerate()
-            .filter_map(|(i, j)| j.filter(|j| j.lane == lane && !j.running).map(|j| (i, j)))
+            .filter_map(|(i, j)| {
+                j.filter(|j| {
+                    j.lane == lane
+                        && !j.running
+                        && stack_requirement::compatible(j.requirement, geometry)
+                })
+                .map(|j| (i, j))
+            })
             .min_by_key(|(_, j)| j.sequence);
         if let Some((i, _)) = next {
             state.jobs[i].as_mut().expect("selected slot").running = true;
@@ -830,7 +884,20 @@ impl<const N: usize> Runtime<N> {
         controls: context::Controls,
         layout: Layout,
     ) -> Result<Pin<Box<Self>>, WorkError> {
+        Self::with_profile_controls(queue, stacks, controls, layout, None)
+    }
+    fn with_profile_controls(
+        queue: Arc<Queue<N>>,
+        stacks: Vec<Stack>,
+        controls: context::Controls,
+        layout: Layout,
+        profile: Option<StackProfile>,
+    ) -> Result<Pin<Box<Self>>, WorkError> {
         layout.validate(stacks.len(), N)?;
+        let catalog = match profile {
+            Some(profile) => stack_requirement::Catalog::from_actual(&stacks, profile, layout)?,
+            None => stack_requirement::Catalog::empty(),
+        };
         let mut tasks = Vec::new();
         tasks
             .try_reserve_exact(stacks.len())
@@ -877,6 +944,8 @@ impl<const N: usize> Runtime<N> {
             // The real constructor atomically reserves its actual admission slots.
             // Existing queued jobs are never moved, discarded or reinterpreted.
             state.layout = layout;
+            state.stack_profile = profile;
+            state.stack_catalog = catalog;
         }
         let executor = Box::pin(Self {
             queue,
@@ -1385,7 +1454,10 @@ impl<const N: usize> Runtime<N> {
             // reference to task `i`.
             let task = unsafe { &mut (*self.task(i)) };
             if task.state == TaskState::Idle {
-                match self.queue.next(task.lane) {
+                match self
+                    .queue
+                    .next(task.lane, stack_requirement::Geometry::of(&task.stack))
+                {
                     Ok(Some(job)) => {
                         let inserted = (|| {
                             self.queue.lock()?.state().scheduling.insert(
@@ -1971,6 +2043,52 @@ impl<const N: usize> Executor<N> {
         Ok(Self {
             runtime: ManuallyDrop::new(Runtime::with_layout_controls(
                 queue, stacks, controls, layout,
+            )?),
+        })
+    }
+    /// Opt into actual mixed stack geometry for the explicit32-stack prototype.
+    /// Empty-queue validation is transactional. Descriptors supply no native
+    /// mapping/current/kernel-thread/IRQ authority.
+    pub fn new_with_profile(
+        queue: Arc<Queue<N>>,
+        stacks: Vec<Stack>,
+        policy: ReservationPolicy,
+        profile: StackProfile,
+    ) -> Result<Self, WorkError> {
+        let layout = policy.layout();
+        Runtime::<N>::validate_stack_limit(&queue, &stacks, layout.stack_limit())?;
+        layout.validate(stacks.len(), N)?;
+        // SAFETY: same qualified native construction boundary as new_with_policy.
+        let controls = unsafe { context::controls()? };
+        Ok(Self {
+            runtime: ManuallyDrop::new(Runtime::with_profile_controls(
+                queue,
+                stacks,
+                controls,
+                layout,
+                Some(profile),
+            )?),
+        })
+    }
+    #[cfg(all(test, unix))]
+    pub(crate) fn new_hosted_profile_for_test(
+        queue: Arc<Queue<N>>,
+        stacks: Vec<Stack>,
+        policy: ReservationPolicy,
+        profile: StackProfile,
+    ) -> Result<Self, WorkError> {
+        let layout = policy.layout();
+        Runtime::<N>::validate_stack_limit(&queue, &stacks, layout.stack_limit())?;
+        layout.validate(stacks.len(), N)?;
+        // SAFETY: unprivileged control snapshot and genuine owned guarded mmap stacks only.
+        let controls = unsafe { context::read_controls() };
+        Ok(Self {
+            runtime: ManuallyDrop::new(Runtime::with_profile_controls(
+                queue,
+                stacks,
+                controls,
+                layout,
+                Some(profile),
             )?),
         })
     }

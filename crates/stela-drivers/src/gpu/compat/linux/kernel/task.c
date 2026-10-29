@@ -70,6 +70,10 @@ unsigned int stela_linux_task_catalog_capacity(void)
 	return STACK_TASKS;
 }
 
+size_t stela_linux_task_stack_bytes(void) { return THREAD_SIZE; }
+size_t stela_linux_task_stack_alignment(void) { return THREAD_ALIGN; }
+size_t stela_linux_task_stack_guard(void) { return PAGE_SIZE; }
+
 static unsigned int stack_slot(const struct stela_linux_task *task)
 {
 	for (unsigned int slot = 0; slot < STACK_TASKS; slot++)

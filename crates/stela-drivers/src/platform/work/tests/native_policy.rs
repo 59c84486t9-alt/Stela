@@ -717,3 +717,5 @@ fn minimum_sixteen_slot_queue_reserves_foreground_after_general_saturation() {
 }
 
 mod protected_gpe;
+
+mod stack_profile;
