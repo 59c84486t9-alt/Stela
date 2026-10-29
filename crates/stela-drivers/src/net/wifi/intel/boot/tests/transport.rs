@@ -31,8 +31,9 @@ pub(super) fn device_write(
             bytes.len(),
         )
         .unwrap();
-    // SAFETY: serialized model requester writes only actual mapped live RAM
-    // with device-write permission, before publishing its completion status.
+    // SAFETY: the locked range is live mapped RAM with device-write rights; all
+    // fixture callers pass independent packet/scratch bytes. This synchronous
+    // model serializes the copy before publishing completion, with no real DMA.
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer.as_ptr(), bytes.len());
     }
@@ -55,6 +56,9 @@ pub(super) fn device_read(domain: &Domain, address: u64, offset: usize, n: usize
         .address((address - (0x100000 + id * 0x10000)) as usize + offset, n)
         .unwrap();
     let mut bytes = vec![0; n];
+    // SAFETY: address() checked this initialized live mapping; the domain lock
+    // retains its backing and serializes every modeled device access. The fresh
+    // output Vec is disjoint, and no real DMA user exists in this fixture.
     unsafe {
         core::ptr::copy_nonoverlapping(pointer.as_ptr(), bytes.as_mut_ptr(), n);
     }
