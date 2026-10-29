@@ -1390,36 +1390,49 @@ memory_access(struct translator *t, const struct value *address, nir_def *stored
    return global_access(t, address, stored, atomic, access, components, bits, alignment);
 }
 
-/* An atomic `op` of `operand` at `pointer`, negated first when `negate`;
- * `compare` makes it a compare-exchange whose result is {old value,
- * exchanged}. Atomics act on 32- and 64-bit integers, and exchange and add
- * also on floats. NIR's atomics are device-scope, which refines every Metal
- * scope. */
+/* The value an atomic `op` of `data` at `pointer` replaces, negated first
+ * when `negate`; `expected` makes it a compare-exchange. Atomics act on 32-
+ * and 64-bit integers, and exchange and add also on floats. NIR's atomics are
+ * device-scope, which refines every Metal scope. */
+static nir_def *
+atomic_old(struct translator *t, LLVMValueRef pointer, nir_atomic_op op, bool negate,
+           LLVMTypeRef type, nir_def *data, nir_def *expected, unsigned alignment)
+{
+   unsigned components, bits;
+   bool floating = LLVMGetTypeKind(type) == LLVMFloatTypeKind;
+   if (!value_shape(type, &components, &bits) || components != 1 ||
+       (floating ? expected || (op != nir_atomic_op_xchg && op != nir_atomic_op_fadd) :
+                   (bits != 32 && bits != 64) || op == nir_atomic_op_fadd)) {
+      fail(t, STELA_AIR_TYPE, "unsupported atomic operand type");
+      return NULL;
+   }
+   if (alignment < bits / 8) {
+      fail(t, STELA_AIR_MEMORY, "atomic access is not naturally aligned");
+      return NULL;
+   }
+   const struct value *address = pointer_value(t, pointer);
+   if (!address || (address->access & STELA_AIR_READ_WRITE) != STELA_AIR_READ_WRITE ||
+       thread_memory(address)) {
+      fail(t, STELA_AIR_MEMORY, "atomic access lacks a device or threadgroup read-write pointer");
+      return NULL;
+   }
+   if (negate)
+      data = floating ? nir_ixor(&t->b, data, nir_imm_int(&t->b, INT32_MIN)) : nir_ineg(&t->b, data);
+   const struct atomic atomic = {op, data, expected};
+   return memory_access(t, address, NULL, &atomic, 0, 1, bits, alignment);
+}
+
+/* An atomic `op` of `operand` at `pointer`, as atomic_old; `compare` makes
+ * it a compare-exchange whose result is {old value, exchanged}. */
 static bool
 atomic_access(struct translator *t, LLVMValueRef inst, LLVMValueRef pointer, nir_atomic_op op,
               bool negate, LLVMValueRef operand, LLVMValueRef compare, unsigned alignment)
 {
-   unsigned components, bits;
-   LLVMTypeRef type = LLVMTypeOf(operand);
-   bool floating = LLVMGetTypeKind(type) == LLVMFloatTypeKind;
-   if (!value_shape(type, &components, &bits) || components != 1 ||
-       (floating ? compare || (op != nir_atomic_op_xchg && op != nir_atomic_op_fadd) :
-                   (bits != 32 && bits != 64) || op == nir_atomic_op_fadd))
-      return fail(t, STELA_AIR_TYPE, "unsupported atomic operand type");
-   if (alignment < bits / 8)
-      return fail(t, STELA_AIR_MEMORY, "atomic access is not naturally aligned");
-   const struct value *address = pointer_value(t, pointer);
-   if (!address || (address->access & STELA_AIR_READ_WRITE) != STELA_AIR_READ_WRITE ||
-       thread_memory(address))
-      return fail(t, STELA_AIR_MEMORY, "atomic access lacks a device or threadgroup read-write pointer");
    nir_def *data = get_value(t, operand);
    nir_def *expected = compare ? get_value(t, compare) : NULL;
    if (!data || (compare && !expected))
       return false;
-   if (negate)
-      data = floating ? nir_ixor(&t->b, data, nir_imm_int(&t->b, INT32_MIN)) : nir_ineg(&t->b, data);
-   const struct atomic atomic = {op, data, expected};
-   nir_def *old = memory_access(t, address, NULL, &atomic, 0, 1, bits, alignment);
+   nir_def *old = atomic_old(t, pointer, op, negate, LLVMTypeOf(operand), data, expected, alignment);
    if (!old)
       return false;
    return compare ? put_pair(t, inst, old, nir_ieq(&t->b, old, expected)) : put_value(t, inst, old, 0);
@@ -2672,11 +2685,22 @@ pair_member(struct translator *t, LLVMValueRef inst, const struct value *pair)
    return put_value(t, inst, pair->members[index], 0);
 }
 
-/* AIR's relaxed atomics, air.atomic.<global|local>.<operation>.<type>(pointer,
- * operand, i32 order, i32 scope, i1 volatile), as DXMT's AIR builder
- * (src/airconv/nt/air_builder.cpp) names them. Exchange takes a sign-free type
- * ("i32", "f32"); the others a signed ("s.i32"), unsigned ("u.i32") or float
- * ("f.f32") type, whose sign selects min and max. */
+/* AIR's relaxed atomics, as Apple's compiler names them:
+ *
+ *   air.atomic.<global|local>.load.<type>(pointer, order, scope, volatile)
+ *   air.atomic.<global|local>.<store|xchg>.<type>(pointer, value, order, scope,
+ *                                                 volatile)
+ *   air.atomic.<global|local>.cmpxchg.weak.<type>(pointer, expected, desired,
+ *                                                 success, failure, scope,
+ *                                                 volatile)
+ *   air.atomic.<global|local>.<add|sub|and|or|xor|min|max>.<sign><type>(
+ *       pointer, value, order, scope, volatile)
+ *
+ * A floating-point type is bare ("f32"); an integer one carries its sign
+ * ("s.i32") for arithmetic, which selects min and max. Orders are relaxed;
+ * scopes need no lowering, as NIR's atomics are device-scope. A
+ * compare-exchange returns the old value and writes it through expected, a
+ * thread pointer. The 64-bit min and max return nothing. */
 static bool
 air_atomic_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, const char *name,
                 size_t length, bool *lowered)
@@ -2689,32 +2713,106 @@ air_atomic_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, co
    *lowered = space < ARRAY_SIZE(spaces);
    if (!*lowered)
       return true;
+   enum form { LOAD, STORE, EXCHANGE, COMPARE, ARITHMETIC };
+   /* Each form's name and value operands. */
+   static const struct {
+      const char *name;
+      unsigned operands;
+   } forms[] = {
+      [LOAD] = {"load.", 1}, [STORE] = {"store.", 2}, [EXCHANGE] = {"xchg.", 2},
+      [COMPARE] = {"cmpxchg.weak.", 3}, [ARITHMETIC] = {"", 2},
+   };
+   const char *operation = name + strlen(spaces[space]);
+   size_t operation_length = length - strlen(spaces[space]);
+   enum form form = ARITHMETIC;
+   for (unsigned i = 0; i < ARITHMETIC; i++) {
+      if (operation_length > strlen(forms[i].name) &&
+          !memcmp(operation, forms[i].name, strlen(forms[i].name)))
+         form = i;
+   }
+   /* Then the orders, a compare-exchange's success and failure, the scope
+    * and the volatility. */
+   unsigned operands = forms[form].operands, count = operands + (form == COMPARE ? 4 : 3);
    if (!LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee) ||
        LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
-       LLVMGetInstructionCallConv(inst) != LLVMCCallConv || LLVMGetNumArgOperands(inst) != 5 ||
-       LLVMCountParams(callee) != 5 || LLVMIsFunctionVarArg(LLVMGlobalGetValueType(callee)) ||
+       LLVMGetInstructionCallConv(inst) != LLVMCCallConv || LLVMGetNumArgOperands(inst) != count ||
+       LLVMCountParams(callee) != count || LLVMIsFunctionVarArg(LLVMGlobalGetValueType(callee)) ||
        LLVMGetCalledFunctionType(inst) != LLVMGlobalGetValueType(callee) ||
        LLVMGetNumOperandBundles(inst))
       return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR atomic call signature");
-   LLVMValueRef pointer = LLVMGetOperand(inst, 0), operand = LLVMGetOperand(inst, 1);
-   LLVMTypeRef type = LLVMTypeOf(operand);
+   LLVMValueRef pointer = LLVMGetOperand(inst, 0);
+   LLVMValueRef operand = form == LOAD ? NULL : LLVMGetOperand(inst, operands - 1);
+   LLVMTypeRef type = operand ? LLVMTypeOf(operand) : LLVMTypeOf(inst);
+   bool returns = LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMVoidTypeKind;
+   bool typed = form == STORE ? !returns :
+                form == ARITHMETIC ? !returns || LLVMTypeOf(inst) == type : LLVMTypeOf(inst) == type;
    if (LLVMGetTypeKind(LLVMTypeOf(pointer)) != LLVMPointerTypeKind ||
-       LLVMGetPointerAddressSpace(LLVMTypeOf(pointer)) != (space ? 3u : 1u) ||
-       LLVMTypeOf(inst) != type)
+       LLVMGetPointerAddressSpace(LLVMTypeOf(pointer)) != (space ? 3u : 1u) || !typed)
       return fail(t, STELA_AIR_INSTRUCTION, "AIR atomic types disagree with its name");
-   for (unsigned i = 2; i < 5; i++) {
+   for (unsigned i = operands; i < count; i++) {
       LLVMValueRef value = LLVMGetOperand(inst, i);
-      if (!LLVMIsAConstantInt(value) || LLVMGetIntTypeWidth(LLVMTypeOf(value)) != (i == 4 ? 1u : 32u))
+      if (!LLVMIsAConstantInt(value) ||
+          LLVMGetIntTypeWidth(LLVMTypeOf(value)) != (i == count - 1 ? 1u : 32u))
          return fail(t, STELA_AIR_INSTRUCTION, "AIR atomic order, scope and volatility must be constants");
+      if (i < count - 2 && LLVMConstIntGetZExtValue(value))
+         return fail(t, STELA_AIR_MEMORY, "only relaxed AIR atomics are supported");
    }
-   if (LLVMConstIntGetZExtValue(LLVMGetOperand(inst, 2)))
-      return fail(t, STELA_AIR_MEMORY, "only relaxed AIR atomics are supported");
+   char overload[16], expected[64];
+   stela_air_call_overload(type, overload, sizeof(overload));
+   bool floating = LLVMGetTypeKind(type) == LLVMFloatTypeKind;
+   unsigned alignment = LLVMABIAlignmentOfType(t->layout, type);
+   unsigned components, bits;
+   if (form != ARITHMETIC) {
+      snprintf(expected, sizeof(expected), "%s%s%s", spaces[space], forms[form].name, overload);
+      if (!stela_air_call_named(name, length, expected))
+         return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR atomic function");
+      if (!value_shape(type, &components, &bits) || components != 1 ||
+          (!floating && bits != 32 && bits != 64))
+         return fail(t, STELA_AIR_TYPE, "unsupported atomic operand type");
+   }
+   switch (form) {
+   case LOAD:
+   case STORE: {
+      const struct value *address = pointer_value(t, pointer);
+      if (!address || !(address->access & (form == LOAD ? STELA_AIR_READ : STELA_AIR_WRITE)) ||
+          thread_memory(address))
+         return fail(t, STELA_AIR_MEMORY, "atomic access lacks a device or threadgroup pointer");
+      nir_def *stored = operand ? get_value(t, operand) : NULL;
+      if (operand && !stored)
+         return false;
+      /* Relaxed atomic loads and stores are single, coherent accesses. */
+      nir_def *loaded = memory_access(t, address, stored, NULL, ACCESS_ATOMIC | ACCESS_COHERENT,
+                                      1, bits, alignment);
+      return form == STORE ? t->error->kind == STELA_AIR_OK : put_value(t, inst, loaded, 0);
+   }
+   case EXCHANGE:
+      return atomic_access(t, inst, pointer, nir_atomic_op_xchg, false, operand, NULL, alignment);
+   case COMPARE: {
+      /* expected holds the value compared, and receives the old one. */
+      const struct value *slot = pointer_value(t, LLVMGetOperand(inst, 1));
+      if (!slot || !thread_memory(slot) ||
+          (slot->access & STELA_AIR_READ_WRITE) != STELA_AIR_READ_WRITE)
+         return fail(t, STELA_AIR_MEMORY, "compare-exchange expects a thread pointer");
+      nir_def *compared = memory_access(t, slot, NULL, NULL, 0, 1, bits, alignment);
+      nir_def *desired = compared ? get_value(t, operand) : NULL;
+      if (!desired)
+         return false;
+      nir_def *old = atomic_old(t, pointer, nir_atomic_op_cmpxchg, false, type, desired, compared,
+                                alignment);
+      if (!old)
+         return false;
+      memory_access(t, slot, old, NULL, 0, 1, bits, alignment);
+      return t->error->kind == STELA_AIR_OK && put_value(t, inst, old, 0);
+   }
+   case ARITHMETIC:
+      break;
+   }
    /* Float atomics add and subtract; the integer forms are unsigned, signed. */
    static const struct {
       const char *name;
       nir_atomic_op integer[2];
       bool floating, negate;
-   } operations[] = {
+   } arithmetic[] = {
       {"add", {nir_atomic_op_iadd, nir_atomic_op_iadd}, true, false},
       {"sub", {nir_atomic_op_iadd, nir_atomic_op_iadd}, true, true},
       {"and", {nir_atomic_op_iand, nir_atomic_op_iand}, false, false},
@@ -2723,23 +2821,19 @@ air_atomic_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, co
       {"min", {nir_atomic_op_umin, nir_atomic_op_imin}, false, false},
       {"max", {nir_atomic_op_umax, nir_atomic_op_imax}, false, false},
    };
-   char overload[16], expected[64];
-   stela_air_call_overload(type, overload, sizeof(overload));
-   bool floating = LLVMGetTypeKind(type) == LLVMFloatTypeKind;
-   unsigned alignment = LLVMABIAlignmentOfType(t->layout, type);
-   snprintf(expected, sizeof(expected), "%sxchg.%s", spaces[space], overload);
-   if (stela_air_call_named(name, length, expected))
-      return atomic_access(t, inst, pointer, nir_atomic_op_xchg, false, operand, NULL, alignment);
-   for (unsigned i = 0; i < ARRAY_SIZE(operations); i++) {
-      if (floating && !operations[i].floating)
+   for (unsigned i = 0; i < ARRAY_SIZE(arithmetic); i++) {
+      if (floating && !arithmetic[i].floating)
          continue;
       for (unsigned sign = 0; sign < (floating ? 1u : 2u); sign++) {
-         snprintf(expected, sizeof(expected), "%s%s.%s.%s", spaces[space], operations[i].name,
-                  floating ? "f" : sign ? "s" : "u", overload);
-         if (stela_air_call_named(name, length, expected))
-            return atomic_access(t, inst, pointer,
-                                 floating ? nir_atomic_op_fadd : operations[i].integer[sign],
-                                 operations[i].negate, operand, NULL, alignment);
+         snprintf(expected, sizeof(expected), "%s%s.%s%s", spaces[space], arithmetic[i].name,
+                  floating ? "" : sign ? "s." : "u.", overload);
+         if (!stela_air_call_named(name, length, expected))
+            continue;
+         nir_atomic_op op = floating ? nir_atomic_op_fadd : arithmetic[i].integer[sign];
+         if (returns)
+            return atomic_access(t, inst, pointer, op, arithmetic[i].negate, operand, NULL, alignment);
+         nir_def *data = get_value(t, operand);
+         return data && atomic_old(t, pointer, op, arithmetic[i].negate, type, data, NULL, alignment);
       }
    }
    return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR atomic function");
