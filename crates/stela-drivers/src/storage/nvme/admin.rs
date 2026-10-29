@@ -1,0 +1,301 @@
+//! The admin queue: enabling the controller and running Identify, queue-
+//! creation and log commands.
+
+use super::*;
+
+impl Controller {
+    /// Point the controller at the admin queue, empty, with every interrupt
+    /// masked.
+    pub(super) fn configure_admin(&mut self) -> Result<(), BlockError> {
+        self.admin.restart();
+        self.admin.completions.give()?;
+        self.io.completions.give()?;
+        // Empty SQs are CPU-owned until their first command publication. The
+        // controller cannot consume any SQE before the corresponding doorbell.
+        let entries = u32::from(self.admin.entries - 1);
+        self.registers
+            .write32(ADMIN_ATTRIBUTES, entries << 16 | entries)?;
+        self.registers
+            .write64(ADMIN_SUBMISSION, self.admin.submissions.address()?)?;
+        self.admin.submissions.publish();
+        self.registers
+            .write64(ADMIN_COMPLETION, self.admin.completions.address()?)?;
+        self.registers.write32(INTERRUPT_MASK_SET, u32::MAX)
+    }
+
+    /// Linux `nvme_enable_ctrl`: set CC.EN, returning how long CSTS.RDY may
+    /// take, CAP.TO or a longer CRTO.CRWMT. CRIME stays clear, as in Linux.
+    pub(super) fn enable(&mut self) -> Result<u64, BlockError> {
+        let capabilities = self.registers.read64(CAPABILITIES)?;
+        let mut timeout = capabilities >> 24 & 0xff;
+        if capabilities & CAPABILITY_READY_WITH_MEDIA != 0 {
+            let media = self.registers.read32(READY_TIMEOUTS)? & 0xffff;
+            timeout = timeout.max(u64::from(media));
+        }
+        self.independent_identify = capabilities & CAPABILITY_READY_INDEPENDENT != 0;
+        self.registers
+            .write32(CONFIGURATION, self.configuration | ENABLE)?;
+        Ok(ready_wait_us(timeout))
+    }
+
+    pub(super) fn initialize(&mut self) -> Result<(), BlockError> {
+        if let Some(owner) = self.owned.as_mut() {
+            // An attempted prepare may have effects without establishing D0.
+            // Only success authorizes NVMe MMIO; uncertain failure quarantines.
+            self.teardown = owned::Teardown::Preparing;
+            owner.lifecycle.prepare()?;
+            self.teardown = owned::Teardown::Active;
+        }
+        let capabilities = self.registers.read64(CAPABILITIES)?;
+        self.doorbell_stride = 4usize << (capabilities >> 32 & 0xf);
+        self.ready_timeout_us = ready_wait_us(capabilities >> 24 & 0xff);
+        if capabilities >> 37 & 1 == 0 {
+            return Err(BlockError::Unsupported(
+                "NVMe controller without the NVM command set",
+            ));
+        }
+        if capabilities >> 48 & 0xf != 0 {
+            return Err(BlockError::Unsupported(
+                "NVMe controller without 4 KiB pages",
+            ));
+        }
+        // CAP.MQES is zero-based; both queues must fit.
+        let longest = (capabilities & 0xffff) + 1;
+        if longest < u64::from(ADMIN_ENTRIES) {
+            return Err(BlockError::Unsupported(
+                "NVMe queues shorter than 16 entries",
+            ));
+        }
+        self.io.entries = self
+            .io
+            .entries
+            .min(u16::try_from(longest).unwrap_or(u16::MAX));
+        let depth = self.tags.len().min(usize::from(self.io.entries) - 1);
+        self.tags.truncate(depth);
+        if 4 * self.doorbell_stride + DOORBELLS > 0x2000 {
+            return Err(BlockError::Unsupported("NVMe doorbell stride"));
+        }
+        self.configuration = CONFIGURATION_VALUE & !ENABLE;
+        if capabilities & CAPABILITY_COMMAND_SETS != 0 {
+            self.configuration |= COMMAND_SETS_ALL;
+        }
+        self.registers.write32(CONFIGURATION, 0)?;
+        self.wait_status(self.ready_timeout_us, |status| status & READY == 0)?;
+        self.configure_admin()?;
+        if let Some(owner) = self.owned.as_mut() {
+            owner.lifecycle.enable_dma()?;
+        }
+        let timeout = self.enable()?;
+        self.wait_status(timeout, |status| status & (READY | FATAL) != 0)?;
+        self.check_fatal()
+    }
+
+    /// The admin command creating the I/O completion queue, or with
+    /// `submission` the submission queue, polled.
+    pub(super) fn create_queue(&self, submission: bool) -> Result<[u32; 16], BlockError> {
+        let entries = u32::from(self.io.entries - 1);
+        let mut command = [0u32; 16];
+        let address = if submission {
+            command[0] = u32::from(ADMIN_CREATE_SUBMISSION);
+            command[11] = 1 << 16 | 1; // completion queue 1, contiguous
+            self.io.submissions.address()?
+        } else {
+            command[0] = u32::from(ADMIN_CREATE_COMPLETION);
+            // Physically contiguous; with interrupts enabled, vector 0.
+            command[11] = 1 | u32::from(self.signalled) << 1;
+            self.io.completions.address()?
+        };
+        command[6] = address as u32;
+        command[7] = (address >> 32) as u32;
+        command[10] = entries << 16 | 1;
+        Ok(command)
+    }
+
+    pub(super) fn identify_command(
+        &self,
+        cns: u32,
+        namespace: u32,
+    ) -> Result<[u32; 16], BlockError> {
+        let mut command = [0u32; 16];
+        command[0] = u32::from(ADMIN_IDENTIFY);
+        command[1] = namespace;
+        let page = self.bounce.address()?;
+        command[6] = page as u32;
+        command[7] = (page >> 32) as u32;
+        command[10] = cns;
+        Ok(command)
+    }
+
+    /// Run admin `command` through tag 0's memory once every queued command
+    /// ended, as Linux runs its own admin commands: never retried. One past
+    /// its deadline, or a fatal controller, resets the controller, as
+    /// `nvme_timeout` does for the admin queue; a failed reset poisons every
+    /// sibling. Only a positively identified CQE or an acknowledged reset
+    /// authorizes SQ/PRP/data CPU reuse.
+    pub(super) fn admin(&mut self, command: [u32; 16]) -> Result<u32, BlockError> {
+        self.ready()?;
+        self.settle()?;
+        match self.admin_wait(command, Some(0)) {
+            Ok((result, 0)) => Ok(result),
+            Ok((_, status)) => Err(BlockError::Device { status }),
+            Err(Lost::Reset(error)) => {
+                // The lost command leaves no admin queue to delete with.
+                self.reset_with(false);
+                self.settle()?;
+                Err(error)
+            }
+            Err(Lost::Fatal(error)) => Err(self.poison(error)),
+        }
+    }
+
+    /// Publish admin `command` with tag `tag`'s memory and wait for its
+    /// completion, taking the others posted before it.
+    pub(super) fn admin_wait(
+        &mut self,
+        command: [u32; 16],
+        tag: Option<usize>,
+    ) -> Result<(u32, u32), Lost> {
+        match self.registers.read32(STATUS).map_err(Lost::Fatal)? {
+            REMOVED => return Err(Lost::Fatal(removed())),
+            status if status & FATAL != 0 => {
+                return Err(Lost::Reset(BlockError::Device { status }));
+            }
+            _ => {}
+        }
+        let id = self.publish(false, command, tag).map_err(Lost::Fatal)?;
+        let (clock, timeout) = (self.clock, self.admin_timeout_us);
+        let data = tag.is_some();
+        let mut observed = None;
+        let mut polls = 0u32;
+        clock.wait(timeout, || {
+            // The CQE lives in RAM; CSTS is an MMIO read, which a hypervisor
+            // traps. Check for a fatal controller only every few polls.
+            polls = polls.wrapping_add(1);
+            if polls.is_multiple_of(STATUS_POLL_INTERVAL) {
+                let lost = match self.registers.read32(STATUS) {
+                    Ok(REMOVED) => Some(Lost::Fatal(removed())),
+                    Ok(status) if status & FATAL != 0 => {
+                        Some(Lost::Reset(BlockError::Device { status }))
+                    }
+                    Ok(_) => None,
+                    Err(error) => Some(Lost::Fatal(error)),
+                };
+                if let Some(lost) = lost {
+                    observed = Some(Err(lost));
+                    return true;
+                }
+            }
+            match self.admin_completion(Some((id, data))) {
+                Ok(None) => false,
+                Ok(Some(completion)) => {
+                    observed = Some(Ok(completion));
+                    true
+                }
+                Err(error) => {
+                    observed = Some(Err(Lost::Fatal(error)));
+                    true
+                }
+            }
+        });
+        observed.unwrap_or(Err(Lost::Reset(BlockError::Timeout)))
+    }
+
+    /// Take the admin completions the controller has posted, one doorbell
+    /// each: an Asynchronous Event Request's is kept for
+    /// [`Self::service_events`] and an Abort's ends it. Command `id`'s result
+    /// and status once posted, giving tag 0's memory back to the CPU when
+    /// it holds `data`; any other completion breaks the protocol.
+    pub(super) fn admin_completion(
+        &mut self,
+        expected: Option<(u16, bool)>,
+    ) -> Result<Option<(u32, u32)>, BlockError> {
+        while let Some((id, result, status, _)) = self.posted(false)? {
+            self.release(false)?;
+            if self.events.request == Some(id) {
+                self.events.request = None;
+                self.events.completed = Some((result, status));
+            } else if let Some(at) = self.aborts.iter().position(|abort| *abort == id) {
+                self.aborts.swap_remove(at);
+            } else if let Some((_, data)) = expected.filter(|(expected, _)| *expected == id) {
+                if data {
+                    self.trust_completion()?;
+                    // SAFETY: the controller completed this exact command;
+                    // no other command reaches tag 0's memory meanwhile.
+                    unsafe {
+                        self.bounce.take()?;
+                        self.prp_list.take()?;
+                    }
+                }
+                return Ok(Some((result, status)));
+            } else {
+                return Err(BlockError::Device { status: 0xffff });
+            }
+        }
+        Ok(None)
+    }
+
+    /// An admin Identify into tag 0's bounce page.
+    pub(super) fn identify(&mut self, cns: u32, namespace: u32) -> Result<&[u8], BlockError> {
+        let command = self.identify_command(cns, namespace)?;
+        self.admin(command)?;
+        Ok(&self.bounce.bytes()[..PAGE])
+    }
+
+    /// Linux `nvme_get_log` for every namespace into tag 0's bounce page. A
+    /// failure is only logged.
+    pub(super) fn read_log(&mut self, log: u32, bytes: usize) -> Result<(), BlockError> {
+        let page = self.bounce.address()?;
+        let mut command = [0u32; 16];
+        command[0] = u32::from(ADMIN_GET_LOG_PAGE);
+        command[1] = u32::MAX;
+        command[6] = page as u32;
+        command[7] = (page >> 32) as u32;
+        command[10] = ((bytes / 4 - 1) as u32) << 16 | log;
+        let _ = self.admin(command);
+        self.ready()
+    }
+
+    /// Linux `nvme_scan_ns` before it adds or validates a namespace: its
+    /// identifiers and whether the command-set-independent Identify
+    /// Namespace described it, or `None` when Linux passes it over for
+    /// refused descriptors, a command set the controller does not run, or a
+    /// namespace that is not ready.
+    pub(super) fn namespace_ids(
+        &mut self,
+        namespace: u32,
+    ) -> Result<Option<(Ids, bool)>, BlockError> {
+        let Some(ids) = self.descriptors(namespace)? else {
+            return Ok(None);
+        };
+        if ids.csi != CSI_NVM && self.configuration & COMMAND_SETS_ALL == 0 {
+            return Ok(None);
+        }
+        if self.independent_identify
+            || (ids.csi != CSI_NVM && ids.csi != CSI_ZONED)
+            || self.version >= VERSION_2_0
+        {
+            match self.identify(IDENTIFY_INDEPENDENT_NAMESPACE, namespace) {
+                Ok(data) => {
+                    let ready = data[INDEPENDENT_STATUS] & NAMESPACE_READY != 0;
+                    return Ok(ready.then_some((ids, true)));
+                }
+                Err(BlockError::Device { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(Some((ids, false)))
+    }
+
+    /// Linux `nvme_identify_ns_descs`: none before NVMe 1.3. `None` when the
+    /// controller refused the list; the scan then skips the namespace.
+    pub(super) fn descriptors(&mut self, namespace: u32) -> Result<Option<Ids>, BlockError> {
+        if self.version < VERSION_1_3 {
+            return Ok(Some(Ids::default()));
+        }
+        match self.identify(IDENTIFY_DESCRIPTORS, namespace) {
+            Ok(data) => Ok(Some(Ids::from_descriptors(data))),
+            Err(BlockError::Device { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}

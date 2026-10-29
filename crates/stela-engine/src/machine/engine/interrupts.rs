@@ -1,0 +1,350 @@
+//! Interrupt lines, monitors, event streams and WFI/WFE waits of the running
+//! PE.
+
+use super::*;
+
+impl<H: Host, D: Devices> Machine<H, D> {
+    /// The system counter's count (`clock`).
+    pub(super) fn now(&mut self) -> u64 {
+        let host = self.host.counter();
+        self.clock.read(host)
+    }
+
+    pub(super) fn lines(&mut self) -> Lines {
+        // The count is read only when an answer can change with it alone: a
+        // device answer with a deadline, a timer's or a PMI's. Every exit
+        // asks, and a raw validation PE has none of them.
+        let timed = !matches!(self.device_lines, Some((_, u64::MAX, _)))
+            || self.timer_deadline().is_some()
+            || self
+                .cpu
+                .pmu
+                .as_ref()
+                .is_some_and(|monitor| monitor.deadline().is_some());
+        let now = if timed { self.now() } else { 0 };
+        self.lines_at(now)
+    }
+
+    /// The lines the devices drive into PE `pe` at count `now`: the cached
+    /// ones, or the latched pins of another PE, until a device changes or
+    /// the devices' deadline passes; else the devices are brought up to
+    /// `now` and asked.
+    pub(super) fn device_lines_of(&mut self, pe: usize, now: u64) -> Lines {
+        match self.device_lines {
+            Some((lines, until, cached)) if now < until && cached == pe => lines,
+            Some((_, until, _))
+                if now < until
+                    && let Some(lines) = self.devices.pins(pe) =>
+            {
+                self.device_lines = Some((lines, until, pe));
+                lines
+            }
+            _ => {
+                #[cfg(feature = "native-profile")]
+                let profile_started = self
+                    .host
+                    .native_timing_work_start(NativeTimingWork::DeviceLines);
+                let lines = self.devices.lines(pe, now);
+                let until = self.devices.deadline(now).unwrap_or(u64::MAX);
+                #[cfg(feature = "native-profile")]
+                if let Some(started) = profile_started {
+                    self.host
+                        .native_timing_work_end(NativeTimingWork::DeviceLines, started);
+                }
+                self.device_lines = Some((lines, until, pe));
+                lines
+            }
+        }
+    }
+
+    /// The running PE's interrupt lines at count `now`, which no count the
+    /// devices were already given exceeds: a caller that holds a count
+    /// asks at it, so the devices never see time run backwards.
+    pub(super) fn lines_at(&mut self, now: u64) -> Lines {
+        let device = self.device_lines_of(self.current, now);
+        // A timer signals exactly when the count reaches its deadline, which
+        // only System register writes change.
+        let deadline = self.timer_deadline();
+        self.cpu.core_lines(Lines {
+            irq: device.irq,
+            // Apple cores signal the generic timers and the PMI as FIQ.
+            fiq: device.fiq
+                || deadline.is_some_and(|deadline| now >= deadline)
+                || monitor_asserted(&self.cpu, now),
+        })
+    }
+
+    /// Bring the running PE's performance monitor and activity monitors up
+    /// to now and continue counting in its current EL and wait state. Every
+    /// change of either passes here: exception entry and return through
+    /// `sync_regime`, and the start and end of a wait.
+    pub(super) fn sync_monitor(&mut self) {
+        let context = self
+            .cpu
+            .pmu_context(self.waiting.is_some() || self.processor_paused(self.current));
+        let retired = self.cpu.retired;
+        let pmu_timed = self.cpu.pmu.as_ref().map(|monitor| monitor.timed());
+        let amu_timed = self.cpu.amu.as_ref().map(|monitors| monitors.timed());
+        if pmu_timed.is_none() && amu_timed.is_none() {
+            return;
+        }
+        // Without a cycle counter nothing counts time, so the count need not
+        // be read.
+        let now = if pmu_timed == Some(true) || amu_timed == Some(true) {
+            self.now()
+        } else {
+            0
+        };
+        if let Some(monitor) = self.cpu.pmu.as_mut() {
+            monitor.sync(now, retired, context);
+        }
+        if let Some(monitors) = self.cpu.amu.as_mut() {
+            monitors.sync(now, retired, context.waiting);
+        }
+    }
+
+    /// Complete the instruction at `pc` in the engine, counting it as
+    /// retired unless it takes a synchronous exception at its own address
+    /// (`Machine::take`).
+    pub(super) fn completing(&mut self, pc: u64, complete: impl FnOnce(&mut Self) -> Step) -> Step {
+        self.cpu.retired += 1;
+        self.completing = Some(pc);
+        let step = complete(self);
+        self.completing = None;
+        step
+    }
+
+    /// Count the instructions of block `index` before `pc` as retired.
+    pub(super) fn retire_before(&mut self, index: usize, pc: u64) {
+        self.cpu.retired += (pc - self.blocks[index].pc) / INSTRUCTION;
+    }
+
+    /// Whether an interrupt routed to `target` is taken now (Arm ARM D1.3.6;
+    /// QEMU `arm_excp_unmasked`): never when it targets a lower EL. Its
+    /// PSTATE mask applies at the same EL, to EL1 from EL0, and to EL2 from
+    /// EL0 in the host (HCR_EL2.{E2H,TGE} {1,1}; E2H is RES1 on Apple
+    /// cores); EL2 from EL0 or EL1 otherwise ignores it.
+    pub(super) fn taken(&self, target: u8, mask: u8) -> bool {
+        let el = self.cpu.pstate.el;
+        let maskable = target == el || target == 1 || self.cpu.in_host();
+        target >= el && (!maskable || self.cpu.pstate.daif & mask == 0)
+    }
+
+    /// Take a pending interrupt before the next instruction: the physical
+    /// lines routed by HCR_EL2.{TGE,IMO,FMO}, then the virtual IRQ, FIQ and
+    /// SError that HCR_EL2.{VI,VF,VSE} hold for EL1 and EL0 outside the host.
+    pub(super) fn deliver_interrupts(&mut self) -> bool {
+        let lines = self.lines();
+        let virtual_pending = self.cpu.pstate.el != 2
+            && [HCR_VI, HCR_VF, HCR_VSE]
+                .into_iter()
+                .any(|bit| self.cpu.virtual_pending(bit));
+        if !lines.irq && !lines.fiq && !virtual_pending {
+            return false;
+        }
+        let mut exception = None;
+        for (vector, pending, mask) in [
+            (Vector::Fiq, lines.fiq, DAIF_F),
+            (Vector::Irq, lines.irq, DAIF_I),
+        ] {
+            let target = self.cpu.interrupt_target(vector);
+            if pending && self.taken(target, mask) {
+                exception = Some((vector, target, 0));
+                break;
+            }
+        }
+        let guest = self.cpu.pstate.el != 2 && !self.cpu.in_host();
+        if exception.is_none() && guest {
+            for (vector, routing, virtual_bit, mask) in [
+                (Vector::Fiq, HCR_FMO, HCR_VF, DAIF_F),
+                (Vector::Irq, HCR_IMO, HCR_VI, DAIF_I),
+                (Vector::SError, HCR_AMO, HCR_VSE, DAIF_A),
+            ] {
+                if self.cpu.hcr(routing)
+                    && self.cpu.virtual_pending(virtual_bit)
+                    && self.cpu.pstate.daif & mask == 0
+                {
+                    let syndrome = if vector == Vector::SError {
+                        // ESR_EL1 takes VSESR_EL2.{IDS,ISS} with EC 0x2F.
+                        super::super::exception::syndrome(
+                            Class::SError,
+                            self.cpu.read(SystemRegister::VSESR_EL2) as u32,
+                        )
+                    } else {
+                        0
+                    };
+                    exception = Some((vector, 1, syndrome));
+                    break;
+                }
+            }
+        }
+        let Some((vector, target, syndrome)) = exception else {
+            return false;
+        };
+        if vector == Vector::SError {
+            // The virtual SError is taken once: HCR_EL2.VSE clears.
+            let hcr = self.cpu.read(SystemRegister::HCR_EL2) & !(1 << HCR_VSE);
+            self.cpu.registers.set(SystemRegister::HCR_EL2, 0, hcr);
+        }
+        self.statistics.interrupts += 1;
+        self.take(Exception {
+            vector,
+            syndrome,
+            fault_address: None,
+            return_address: self.cpu.pc,
+            target: Some(target),
+        });
+        true
+    }
+
+    /// Apply Arm `GenericCounterTick`'s event-stream tests to the counts since
+    /// the last sample. Sampling before the event register is read and before
+    /// every write that changes a stream gives each tick the controls it had.
+    pub(crate) fn sample_events(&mut self, now: u64) {
+        if let Some(previous) = self.event_sample
+            && timer::event(&self.cpu, previous, now)
+        {
+            self.cpu.signal_event();
+        }
+        self.event_sample = Some(now);
+    }
+
+    pub(super) fn timer_deadline(&mut self) -> Option<u64> {
+        *self
+            .timers
+            .get_or_insert_with(|| timer::deadline(&self.cpu))
+    }
+
+    /// WFI and WFE (Arm `Hint_WFI`, `Hint_WFE` and `AArch64_CheckForWFxTrap`).
+    /// WFE with the event register set clears it and completes, and WFI with
+    /// an interrupt pending, masked or not, completes; neither then traps.
+    /// WFET and WFIT (FEAT_WFxT) also complete once their local timeout has
+    /// expired: the virtual count reaches Xt (Arm `Hint_WFET`, `Hint_WFIT`).
+    /// Otherwise SCTLR_ELx.nTWI/nTWE trap them from EL0 to EL1, or to EL2 in
+    /// the host, and HCR_EL2.TWI/TWE trap them from EL0 and EL1 outside the
+    /// host to EL2, with ISS.TI the form and, for the timeout forms, RV set
+    /// and the register in ISS[9:5] (Arm `AArch64_WFxTrap`). On a chip
+    /// without FEAT_WFxT the timeout forms are UNDEFINED. An event stream
+    /// event wakes WFE and, by this implementation's choice of Arm's
+    /// IMPLEMENTATION DEFINED option, clears the event register. A WFE that
+    /// completes at once still yields the rest of the time slice to the
+    /// other PEs (`processors`), as a spin-wait that waits for another PE
+    /// would on hardware where they run at the same time; only timing
+    /// changes.
+    pub(super) fn wait(&mut self, _word: u32, kind: WaitKind, register: Option<u8>) -> Step {
+        const HCR_TWI: u32 = 13;
+        const HCR_TWE: u32 = 14;
+        if register.is_some() {
+            match self.cpu.registers.implemented(Feature::FEAT_WFxT) {
+                Ok(true) => {}
+                Ok(false) => return self.undefined(),
+                Err(reason) => return Err(self.unsupported(RequirementKind::Native(reason))),
+            }
+        }
+        let timeout = register.map(|register| {
+            let limit = if register == 31 {
+                0
+            } else {
+                self.cpu.state.x[usize::from(register)]
+            };
+            // The virtual count of the timer bank the regime reads
+            // (`timer::agt`); a scaled bank's limit becomes a system count.
+            let bank = timer::agt::selected(&self.cpu);
+            let offset = if self.cpu.regime() == crate::machine::cpu::TranslationRegime::El20 {
+                0
+            } else {
+                timer::value(&self.cpu, bank, SystemRegister::CNTVOFF_EL2)
+            };
+            if timer::scaled(&self.cpu, bank) {
+                Timeout {
+                    limit: timer::system_count(&self.cpu, bank, limit.wrapping_add(offset)),
+                    offset: 0,
+                }
+            } else {
+                Timeout { limit, offset }
+            }
+        });
+        let el = self.cpu.pstate.el;
+        let sctlr = self.cpu.regime_sctlr();
+        let (enable_bit, hcr_trap, form) = match kind {
+            WaitKind::Interrupt => (1u64 << 16, HCR_TWI, 0b00),
+            WaitKind::Event => (1u64 << 18, HCR_TWE, 0b01),
+        };
+        let now = self.now();
+        if kind == WaitKind::Event {
+            self.sample_events(now);
+        }
+        match kind {
+            WaitKind::Event if self.cpu.consume_event() => {
+                // The WFE of a spin-wait ends the PE's time slice: the PE
+                // it waits for runs next instead of after the slice.
+                self.slice_end = self.statistics.blocks;
+                return self.next();
+            }
+            WaitKind::Interrupt if self.interrupt_pending() => return self.next(),
+            _ => {}
+        }
+        if timeout.is_some_and(|timeout| timeout.expired(now)) {
+            return self.next();
+        }
+        // ISS.TI: 0b00 WFI, 0b01 WFE, 0b10 WFIT, 0b11 WFET; RV and the
+        // register for the timeout forms.
+        let iss = TRAPPED_AARCH64
+            | form
+            | register.map_or(0, |register| 0b10 | 1 << 2 | u32::from(register) << 5);
+        if el == 0 && sctlr & enable_bit == 0 {
+            self.take(Exception::synchronous(Class::WaitTrap, iss, self.cpu.pc));
+            return Ok(());
+        }
+        if el != 2 && !self.cpu.in_host() && self.cpu.hcr(hcr_trap) {
+            self.take(Exception::synchronous(Class::WaitTrap, iss, self.cpu.pc).to(2));
+            return Ok(());
+        }
+        // CYC_OVRD's power-down mode turns the core off and loses its state
+        // (`processors`). A WFIT's local timeout is the core's own, so it
+        // could not end that wait.
+        let down = kind == WaitKind::Interrupt
+            && self.cpu.wfi_mode() == registers::CYC_OVRD_WFI_POWER_DOWN;
+        if down && self.cpu.has_canonical_memory() {
+            self.require_native_lifecycle_hold().map_err(|_| {
+                self.unsupported(RequirementKind::Native(
+                    "native power-down requires the actual held physical roster",
+                ))
+            })?;
+        }
+        if down && timeout.is_some() {
+            return Err(self.unsupported(RequirementKind::Native(
+                "WFIT with CYC_OVRD's power-down mode (a powered-down core has no local timeout)",
+            )));
+        }
+        if down && self.cpu.has_canonical_memory() {
+            self.cpu.clear_exclusive().map_err(|_| {
+                self.unsupported(RequirementKind::Native("native power-down monitor refused"))
+            })?;
+        }
+        // The PE waits until the scheduler finds it woken
+        // (`processors::Peer::ready`) and completes the instruction.
+        self.waiting = Some(Wait {
+            kind,
+            timeout,
+            down,
+        });
+        self.sync_monitor();
+        if down {
+            self.power_down();
+        }
+        Ok(())
+    }
+
+    /// Arm `AArch64_InterruptPending` for the running PE.
+    pub(super) fn interrupt_pending(&mut self) -> bool {
+        let lines = self.lines();
+        interrupt_pending(&self.cpu, lines)
+    }
+
+    /// [`Self::interrupt_pending`] at count `now` ([`Self::lines_at`]).
+    pub(super) fn interrupt_pending_at(&mut self, now: u64) -> bool {
+        let lines = self.lines_at(now);
+        interrupt_pending(&self.cpu, lines)
+    }
+}

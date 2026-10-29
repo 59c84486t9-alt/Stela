@@ -1,5 +1,6 @@
 extern crate std;
 mod polling;
+use super::shared::WINDOW_DEPTH;
 use super::*;
 use alloc::rc::Rc;
 use core::cell::Cell;
