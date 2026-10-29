@@ -1,5 +1,6 @@
 use super::super::tests::{BASE, FakeHost, board};
 use super::*;
+use stela_contracts::refuse;
 use {
     crate::machine::cpu::Reservation, crate::machine::engine::DeviceError,
     crate::machine::exception::DAIF_ALL, crate::machine::system::Register,
@@ -50,7 +51,7 @@ impl Board {
             ));
         }
         let settled = processors.apply(changes).map_err(|why| {
-            DeviceError::TransferRefused(alloc::format!("processor transaction: {why:?}"))
+            DeviceError::TransferRefused(refuse!("processor transaction: {why}", ?why))
         })?;
         // These are owners, still exclusively borrowed through ACK.
         assert_eq!(settled.paused(0), Some(true));

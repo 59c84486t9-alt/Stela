@@ -8,14 +8,16 @@
 //! No firmware executes, hardware events, samples, eligibility or ACKs arise.
 use super::super::counters::{CaptureIdentity, Captured, Frame, Frames};
 use super::{ingestion, owner::Completion};
+use crate::Result;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::{Cell, RefCell};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     crate::platform::apple::ptd::transport::notifications::LocalNotifications,
     stela_contracts::bus::Access, stela_soc_data::ptd::Range,
 };
 
-type Error = &'static str;
 /// Unique native PMP allocation claim. Dropping it never permits another cache
 /// on this source recipient or changes the PTD publication owner.
 pub struct Claim {
@@ -38,11 +40,11 @@ impl Claim {
             alive,
         }
     }
-    fn check(&self) -> Result<(), Error> {
+    fn check(&self) -> Result<()> {
         if self.alive.get() {
             Ok(())
         } else {
-            Err("native provider-frame owner abandoned")
+            Err(refuse!("native provider-frame owner abandoned"))
         }
     }
 }
@@ -65,11 +67,11 @@ impl ManagerClaim {
             alive,
         }
     }
-    fn check(&self) -> Result<(), Error> {
+    fn check(&self) -> Result<()> {
         if self.alive.get() {
             Ok(())
         } else {
-            Err("native manager-mask owner abandoned")
+            Err(refuse!("native manager-mask owner abandoned"))
         }
     }
 }
@@ -92,23 +94,24 @@ impl ReadMasks {
             bound: false,
         })))
     }
-    pub(super) fn initialized_for_native(claim: ManagerClaim) -> Result<Self, Error> {
+    pub(super) fn initialized_for_native(claim: ManagerClaim) -> Result<Self> {
         claim.check()?;
         let masks = Self::initialized();
         masks.0.borrow_mut().recipient = Some(claim);
         Ok(masks)
     }
-    fn check_recipient(&self, cache: &Claim) -> Result<(), Error> {
+    fn check_recipient(&self, cache: &Claim) -> Result<()> {
         let state = self.0.borrow();
-        let manager = state
-            .recipient
-            .as_ref()
-            .ok_or("provider cache requires a native-bound manager G540")?;
+        let manager = state.recipient.as_ref().ok_or(refuse!(
+            "provider cache requires a native-bound manager G540"
+        ))?;
         manager.check()?;
         if !Rc::ptr_eq(&manager.recipient, &cache.recipient)
             || !manager.local.owns(cache.local.bank())
         {
-            return Err("provider cache and manager G540 have different native recipients");
+            return Err(refuse!(
+                "provider cache and manager G540 have different native recipients"
+            ));
         }
         Ok(())
     }
@@ -118,34 +121,33 @@ impl ReadMasks {
     pub fn generation(&self) -> u64 {
         self.0.borrow().generation
     }
-    pub(super) fn preflight_reset(&self) -> Result<(), Error> {
+    pub(super) fn preflight_reset(&self) -> Result<()> {
         let state = self.0.borrow();
         if let Some(recipient) = &state.recipient {
             recipient.check()?;
         }
-        state
-            .generation
-            .checked_add(1)
-            .map(|_| ())
-            .ok_or("native provider-mask generation exhausted before effects")
+        state.generation.checked_add(1).map(|_| ()).ok_or(refuse!(
+            "native provider-mask generation exhausted before effects"
+        ))
     }
-    pub(super) fn reset(&self) -> Result<(), Error> {
+    pub(super) fn reset(&self) -> Result<()> {
         let mut state = self.0.borrow_mut();
         if let Some(recipient) = &state.recipient {
             recipient.check()?;
         }
-        let next = state
-            .generation
-            .checked_add(1)
-            .ok_or("native provider-mask generation exhausted before reset")?;
+        let next = state.generation.checked_add(1).ok_or(refuse!(
+            "native provider-mask generation exhausted before reset"
+        ))?;
         state.bytes.fill(0);
         state.generation = next;
         Ok(())
     }
-    fn claim(&self) -> Result<(), Error> {
+    fn claim(&self) -> Result<()> {
         let mut s = self.0.borrow_mut();
         if s.bound {
-            return Err("native G540 storage already has its provider cache");
+            return Err(refuse!(
+                "native G540 storage already has its provider cache"
+            ));
         }
         s.bound = true;
         Ok(())
@@ -178,7 +180,7 @@ pub struct Cache {
     capture: Option<CaptureIdentity>,
     generation: u64,
     consumed: u64,
-    fault: Option<Error>,
+    fault: Option<Refusal>,
 }
 impl Cache {
     pub fn initialized(
@@ -186,7 +188,7 @@ impl Cache {
         source_block_rows: &[[u32; 4]],
         masks: ReadMasks,
         preserved_top_bytes: [Vec<u8>; 4],
-    ) -> Result<Self, Error> {
+    ) -> Result<Self> {
         claim.check()?;
         masks.check_recipient(&claim)?;
         let mut banks: [Option<Bank>; 4] = core::array::from_fn(|_| None);
@@ -195,25 +197,27 @@ impl Cache {
             for row in source_block_rows {
                 blocks = blocks
                     .checked_add(row[i])
-                    .ok_or("native provider source block sum overflows")?;
+                    .ok_or(refuse!("native provider source block sum overflows"))?;
             }
             let allocated = claim.ranges[i]
                 .as_ref()
                 .filter(|r| r.start != 0 && blocks != 0 && !source_block_rows.is_empty());
             let Some(range) = allocated else {
                 if !top.is_empty() {
-                    return Err("native absent provider bank has invented storage");
+                    return Err(refuse!("native absent provider bank has invented storage"));
                 }
                 continue;
             };
             let count = blocks
                 .checked_mul(8)
-                .ok_or("native provider source entry count overflows")?;
+                .ok_or(refuse!("native provider source entry count overflows"))?;
             if count > range.count
                 || range.start.checked_add(count).is_none()
                 || top.len() != count as usize
             {
-                return Err("native provider source count/image exceeds actual selected PTD range");
+                return Err(refuse!(
+                    "native provider source count/image exceeds actual selected PTD range"
+                ));
             }
             banks[i] = Some(Bank {
                 layout: Layout {
@@ -249,23 +253,25 @@ impl Cache {
     /// Join one latest manager capture to a source G540 reset.
     /// This neither resets the mask nor manufactures a capture/cycle. Rebinding
     /// another capture without the source reset refuses, even on the same bank.
-    pub fn bind_capture(&mut self, frames: &Frames, captured: &Captured) -> Result<(), Error> {
+    pub fn bind_capture(&mut self, frames: &Frames, captured: &Captured) -> Result<()> {
         self.claim.check()?;
         self.masks.check_recipient(&self.claim)?;
-        if let Some(e) = self.fault {
+        if let Some(e) = self.fault.clone() {
             return Err(e);
         }
         frames.validate_native_recipient(&self.claim.local, &self.claim.alive)?;
         frames.validate_capture(captured)?;
         let generation = self.masks.generation();
         if generation == 0 {
-            return Err("provider cache requires actual manager BeforeCapture mask reset");
+            return Err(refuse!(
+                "provider cache requires actual manager BeforeCapture mask reset"
+            ));
         }
         if generation == self.generation {
             return frames.validate_capture_identity(
                 self.capture
                     .as_ref()
-                    .ok_or("provider cache lost actual capture identity")?,
+                    .ok_or(refuse!("provider cache lost actual capture identity"))?,
             );
         }
         let identity = frames.capture_identity(captured)?;
@@ -273,20 +279,22 @@ impl Cache {
         self.generation = generation;
         Ok(())
     }
-    fn check_bound(&self, frames: &Frames) -> Result<(), Error> {
+    fn check_bound(&self, frames: &Frames) -> Result<()> {
         self.claim.check()?;
         self.masks.check_recipient(&self.claim)?;
-        if let Some(e) = self.fault {
+        if let Some(e) = self.fault.clone() {
             return Err(e);
         }
         frames.validate_native_recipient(&self.claim.local, &self.claim.alive)?;
         frames.validate_capture_identity(
             self.capture
                 .as_ref()
-                .ok_or("provider cache has no manager capture")?,
+                .ok_or(refuse!("provider cache has no manager capture"))?,
         )?;
         if self.generation == 0 || self.masks.generation() != self.generation {
-            return Err("provider cache is not bound to current actual G540 reset");
+            return Err(refuse!(
+                "provider cache is not bound to current actual G540 reset"
+            ));
         }
         Ok(())
     }
@@ -317,10 +325,14 @@ impl Cache {
             return Completion::Refused(e);
         }
         let Some(source) = self.banks.get_mut(bank as usize).and_then(Option::as_mut) else {
-            return Completion::Refused("native source provider bank has no actual allocation");
+            return Completion::Refused(refuse!(
+                "native source provider bank has no actual allocation"
+            ));
         };
         let Some(cell) = source.cells.get_mut(index as usize) else {
-            return Completion::Refused("native source provider index exceeds initialized bank");
+            return Completion::Refused(refuse!(
+                "native source provider index exceeds initialized bank"
+            ));
         };
         // Exact A64 LSL X index semantics: indices64+ alias the mask bit. The
         // source then returns that index's cell without a consume.
@@ -338,9 +350,9 @@ impl Cache {
             };
         }
         let Some(next) = self.consumed.checked_add(1) else {
-            return Completion::Refused(
-                "native provider consume count exhausted before PTD effect",
-            );
+            return Completion::Refused(refuse!(
+                "native provider consume count exhausted before PTD effect"
+            ));
         };
         let entry = match self
             .claim
@@ -359,10 +371,10 @@ impl Cache {
         let mut state = self.masks.0.borrow_mut();
         if state.generation != self.generation {
             let e = "native G540 reset changed during actual provider consumption";
-            self.fault = Some(e);
+            self.fault = Some(e.into());
             return Completion::Retired {
                 value: *cell,
-                refusal: Some(e),
+                refusal: Some(e.into()),
             };
         }
         state.bytes[offset..offset + 8].copy_from_slice(&(mask | bit).to_le_bytes());
@@ -371,12 +383,14 @@ impl Cache {
             refusal: None,
         }
     }
-    pub fn count(&self, bank: u32) -> Result<u32, Error> {
+    pub fn count(&self, bank: u32) -> Result<u32> {
         self.claim.check()?;
         self.banks
             .get(bank as usize)
             .map(|b| b.as_ref().map_or(0, |b| b.layout.count))
-            .ok_or("native provider bank selector exceeds source four-bank table")
+            .ok_or(refuse!(
+                "native provider bank selector exceeds source four-bank table"
+            ))
     }
     /// Shared routing for generic ingestion. Other provider classes require
     /// their owners; this is not a successful catch-all Backend.
@@ -403,7 +417,9 @@ impl Cache {
                     })
                 })
             }
-            _ => Completion::Refused("generic call requires another actual native provider owner"),
+            _ => Completion::Refused(refuse!(
+                "generic call requires another actual native provider owner"
+            )),
         }
     }
     /// Auxiliary bank2 reads MUST borrow this same instance as ingestion.
@@ -423,9 +439,9 @@ impl Cache {
                     })
                 })
             }
-            _ => {
-                Completion::Refused("auxiliary call requires another actual native resource owner")
-            }
+            _ => Completion::Refused(refuse!(
+                "auxiliary call requires another actual native resource owner"
+            )),
         }
     }
 }

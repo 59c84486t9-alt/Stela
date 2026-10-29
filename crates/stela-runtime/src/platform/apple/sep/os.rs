@@ -45,7 +45,9 @@ use super::{
     transaction::{Payload, Refusal},
     xart::{self, Xart},
 };
+use crate::Result;
 use alloc::{boxed::Box, collections::VecDeque, format, string::String, vec::Vec};
+use stela_contracts::refuse;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 /// The SEP's power state as the control endpoint drives it.
@@ -117,11 +119,7 @@ impl SepOs {
     /// also advertised so its kernel client binds; its requests are
     /// recorded and never answered (a diagnostic mode: it checks nothing
     /// beyond its log).
-    pub fn with_services(
-        mut self,
-        store: Nonces<Box<dyn Backend>>,
-        observe: bool,
-    ) -> Result<Self, &'static str> {
+    pub fn with_services(mut self, store: Nonces<Box<dyn Backend>>, observe: bool) -> Result<Self> {
         let mut services = xart::services().to_vec();
         services.extend([keystore::service(), boot_policy::service()]);
         if observe {
@@ -178,7 +176,7 @@ impl SepOs {
         port: &mut Port<'_, '_>,
         entropy: &mut dyn Entropy,
         outbox: &mut Vec<Message>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if let Some(region) = self.pending_region {
             let layout =
                 Layout::read(port, region, u64::from(SEP_PAGE_BYTES)).map_err(dma_refusal)?;
@@ -219,7 +217,7 @@ impl SepOs {
         let services = self
             .services
             .as_mut()
-            .ok_or("SEP application service has no native handler")?;
+            .ok_or(refuse!("SEP application service has no native handler"))?;
         let mut payload = Ool {
             buffers: self.buffers.iter().find(|b| b.service() == frame.service),
             port: &mut *port,
@@ -340,45 +338,55 @@ impl SepOs {
         frame: Frame,
         entropy: &mut dyn Entropy,
         outbox: &mut Vec<Message>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         match frame.service {
             message::BOOT => {
                 if self.pending_region.is_some() || !self.pending.is_empty() {
-                    return Err("SEP shared-memory remap while DMA work is pending");
+                    return Err(refuse!("SEP shared-memory remap while DMA work is pending"));
                 }
                 let region = Region::from_message(frame.mailbox())?;
                 self.pending_region = Some(region);
                 Ok(())
             }
             message::CONTROL => self.control(frame, entropy, outbox),
-            message::DISCOVERY => {
-                Err("SEP discovery is advertised by the SEP, not received from the AP")
-            }
-            message::ROM => Err("SEPROM commands are not valid once sepOS is active"),
+            message::DISCOVERY => Err(refuse!(
+                "SEP discovery is advertised by the SEP, not received from the AP"
+            )),
+            message::ROM => Err(refuse!(
+                "SEPROM commands are not valid once sepOS is active"
+            )),
             service if self.services.is_some() && self.catalog.service(service).is_ok() => {
                 if !self.os_active_sent {
-                    return Err("SEP service request before sepOS reported OS active");
+                    return Err(refuse!(
+                        "SEP service request before sepOS reported OS active"
+                    ));
                 }
                 if self.pending_region.is_some() {
-                    return Err("SEP service request while shared-memory remap is pending");
+                    return Err(refuse!(
+                        "SEP service request while shared-memory remap is pending"
+                    ));
                 }
                 if self.power != Power::Awake {
-                    return Err("SEP service request while the SEP sleeps or naps");
+                    return Err(refuse!("SEP service request while the SEP sleeps or naps"));
                 }
                 if self.pending.len() == MAX_PENDING_REQUESTS {
-                    return Err("SEP application request queue exceeds the resource bound");
+                    return Err(refuse!(
+                        "SEP application request queue exceeds the resource bound"
+                    ));
                 }
                 if self
                     .pending
                     .iter()
                     .any(|pending| pending.service == frame.service && pending.tag == frame.tag)
                 {
-                    return Err("SEP application request repeats an outstanding service/tag");
+                    return Err(refuse!(
+                        "SEP application request repeats an outstanding service/tag"
+                    ));
                 }
                 self.pending.push_back(frame);
                 Ok(())
             }
-            _ => Err("SEP application service is not modeled"),
+            _ => Err(refuse!("SEP application service is not modeled")),
         }
     }
 
@@ -387,16 +395,20 @@ impl SepOs {
         frame: Frame,
         entropy: &mut dyn Entropy,
         outbox: &mut Vec<Message>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if !self.os_active_sent {
-            return Err("SEP control request before sepOS mapped its shared memory");
+            return Err(refuse!(
+                "SEP control request before sepOS mapped its shared memory"
+            ));
         }
         if self.pending_region.is_some() {
-            return Err("SEP control request while shared-memory remap is pending");
+            return Err(refuse!(
+                "SEP control request while shared-memory remap is pending"
+            ));
         }
         let request = Request::decode(frame)?;
         if self.power != Power::Awake && !matches!(request, Request::Wake | Request::WakeFromNap) {
-            return Err("SEP control request while the SEP sleeps or naps");
+            return Err(refuse!("SEP control request while the SEP sleeps or naps"));
         }
         let data = match request {
             Request::Nop => Some(0),
@@ -406,7 +418,9 @@ impl SepOs {
                     .iter()
                     .any(|pending| pending.service == frame.parameter)
                 {
-                    return Err("SEP OOL registration while its service has pending requests");
+                    return Err(refuse!(
+                        "SEP OOL registration while its service has pending requests"
+                    ));
                 }
                 let service = self.catalog.service(frame.parameter)?;
                 let input = matches!(
@@ -418,7 +432,9 @@ impl SepOs {
                     control::SET_OOL_IN_LENGTH | control::SET_OOL_OUT_LENGTH
                 );
                 if length && !service.accepts(input, frame.data, SEP_PAGE_BYTES) {
-                    return Err("SEP OOL length is outside the service's advertised pages");
+                    return Err(refuse!(
+                        "SEP OOL length is outside the service's advertised pages"
+                    ));
                 }
                 let index = match self
                     .buffers
@@ -436,14 +452,16 @@ impl SepOs {
             }
             Request::Sleep(kind) => {
                 if !self.pending.is_empty() {
-                    return Err("SEP sleep while application requests are pending is not modeled");
+                    return Err(refuse!(
+                        "SEP sleep while application requests are pending is not modeled"
+                    ));
                 }
                 self.power = Power::Asleep(kind);
                 Some(0)
             }
             Request::Wake => {
                 if !matches!(self.power, Power::Asleep(_)) {
-                    return Err("SEP wake without a preceding sleep");
+                    return Err(refuse!("SEP wake without a preceding sleep"));
                 }
                 self.power = Power::Awake;
                 self.ap_sleep_ready = false;
@@ -451,30 +469,30 @@ impl SepOs {
             }
             Request::Nap => {
                 if !self.pending.is_empty() {
-                    return Err("SEP nap while application requests are pending is not modeled");
+                    return Err(refuse!(
+                        "SEP nap while application requests are pending is not modeled"
+                    ));
                 }
                 self.power = Power::Napping;
                 None
             }
             Request::WakeFromNap => {
                 if self.power != Power::Napping {
-                    return Err("SEP nap wake while the SEP is not napping");
+                    return Err(refuse!("SEP nap wake while the SEP is not napping"));
                 }
                 self.power = Power::Awake;
                 outbox.push(control::notification(control::NAP_AWAKE, 0).mailbox());
                 None
             }
             Request::NapOk => {
-                return Err("SEP nap acknowledgement without a SEP nap request");
+                return Err(refuse!("SEP nap acknowledgement without a SEP nap request"));
             }
             Request::ApSleepReady => {
                 self.ap_sleep_ready = true;
                 None
             }
             Request::SecurityMode => {
-                let mode = self.security.ok_or(
-                    "SEP security mode is unknown: /chosen lacks the AP's effective production status and security mode",
-                )?;
+                let mode = self.security.ok_or(refuse!("SEP security mode is unknown: /chosen lacks the AP's effective production status and security mode"))?;
                 Some(u32::from(mode.production) | u32::from(mode.secure) << 1)
             }
             Request::Entropy => {
@@ -487,24 +505,26 @@ impl SepOs {
             // state.
             Request::EraseInstall => {
                 if !self.pending.is_empty() {
-                    return Err(
-                        "SEP erase-install while application requests are pending is not modeled",
-                    );
+                    return Err(refuse!(
+                        "SEP erase-install while application requests are pending is not modeled"
+                    ));
                 }
                 self.services
                     .as_mut()
-                    .ok_or("SEP erase-install needs the xART store")?
+                    .ok_or(refuse!("SEP erase-install needs the xART store"))?
                     .xart
                     .store_mut()
                     .erase()?;
                 Some(0)
             }
-            Request::SelfTest => return Err("SEP self test is not modeled"),
-            Request::TtyIn(_) => return Err("SEP console input is not modeled"),
+            Request::SelfTest => return Err(refuse!("SEP self test is not modeled")),
+            Request::TtyIn(_) => return Err(refuse!("SEP console input is not modeled")),
             Request::RelayDma(_) => {
-                return Err("SEP relay DMA exists only on boards with pcie-up-interrupts");
+                return Err(refuse!(
+                    "SEP relay DMA exists only on boards with pcie-up-interrupts"
+                ));
             }
-            Request::Panic => return Err("the AP requested a SEP panic"),
+            Request::Panic => return Err(refuse!("the AP requested a SEP panic")),
         };
         if let Some(data) = data {
             outbox.push(control::reply(frame, Status::Success, data).mailbox());
@@ -521,19 +541,19 @@ struct Ool<'a, 'p, 'm, 'n> {
     read: u64,
 }
 
-fn dma_refusal(error: DmaError) -> &'static str {
+fn dma_refusal(error: DmaError) -> stela_contracts::Refusal {
     match error {
         DmaError::Unsupported(reason) => reason,
-        DmaError::Fault(_) => "SEP service OOL DMA fault in dart-sep",
-        DmaError::Memory => "SEP service OOL buffer is outside guest RAM",
+        DmaError::Fault(code) => refuse!("SEP service OOL DMA fault in dart-sep", code),
+        DmaError::Memory => refuse!("SEP service OOL buffer is outside guest RAM"),
     }
 }
 
 impl Payload for Ool<'_, '_, '_, '_> {
-    fn input(&mut self, bytes: &mut [u8]) -> Result<(), &'static str> {
-        let buffers = self
-            .buffers
-            .ok_or("SEP service request before its OOL buffers are registered")?;
+    fn input(&mut self, bytes: &mut [u8]) -> Result<()> {
+        let buffers = self.buffers.ok_or(refuse!(
+            "SEP service request before its OOL buffers are registered"
+        ))?;
         buffers
             .read_input(self.port, self.read, bytes)
             .map_err(dma_refusal)?;
@@ -541,10 +561,10 @@ impl Payload for Ool<'_, '_, '_, '_> {
         Ok(())
     }
 
-    fn output(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
-        let buffers = self
-            .buffers
-            .ok_or("SEP service reply before its OOL buffers are registered")?;
+    fn output(&mut self, bytes: &[u8]) -> Result<()> {
+        let buffers = self.buffers.ok_or(refuse!(
+            "SEP service reply before its OOL buffers are registered"
+        ))?;
         buffers
             .write_output(self.port, 0, bytes)
             .map_err(dma_refusal)

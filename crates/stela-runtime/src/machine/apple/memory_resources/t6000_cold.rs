@@ -11,14 +11,16 @@
 //! disable_mcc command/waiter evidence is held in t6000-mcc-backend-20261021-1.
 use super::Prepared;
 use super::mcc;
+use crate::Result;
 use crate::machine::apple::AppleDevices;
 use crate::platform::apple::pmgr;
 use crate::platform::apple::pmgr::Pmgr;
 use crate::platform::apple::ptd;
-use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use stela_contracts::Chip;
 use stela_contracts::bus::LifecycleState;
 use stela_contracts::bus::Width;
+use stela_contracts::refuse;
 use stela_engine::memory::RegisteredSystemRam;
 use stela_soc_data::board::Board;
 use stela_soc_data::board::DirectMemoryCache;
@@ -38,17 +40,12 @@ pub struct Configuration {
     image: mcc::Configuration,
 }
 impl Configuration {
-    pub fn zeroed_control_image(apertures: usize, weights: [u8; 32]) -> Result<Self, String> {
-        mcc::Configuration::zeroed_control_image(apertures, weights)
-            .map(|image| Self { image })
-            .map_err(String::from)
+    pub fn zeroed_control_image(apertures: usize, weights: [u8; 32]) -> Result<Self> {
+        mcc::Configuration::zeroed_control_image(apertures, weights).map(|image| Self { image })
     }
     /// Explicit caller-owned full initial words. No DT field is interpreted as
     /// density, and no saved word is silently replaced by an alternate mode.
-    pub fn declared_control_image(
-        controls: Vec<[u32; 4]>,
-        weights: [u8; 32],
-    ) -> Result<Self, String> {
+    pub fn declared_control_image(controls: Vec<[u32; 4]>, weights: [u8; 32]) -> Result<Self> {
         let mut result = Self::zeroed_control_image(controls.len(), weights)?;
         result.image.dram = controls;
         Ok(result)
@@ -79,23 +76,25 @@ impl Plan {
         ram: &Arc<RegisteredSystemRam>,
         programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         if board.cpus.chip != Chip::AppleM1 || board.memory_cache.is_some() {
-            return Err("cold T6000 direct memory requires its own source family".into());
+            return Err(refuse!(
+                "cold T6000 direct memory requires its own source family"
+            ));
         }
         Self::prepare_resources(
             board
                 .memory_controller
                 .as_ref()
-                .ok_or("cold T6000 has no actual AMCC descriptor")?,
+                .ok_or(refuse!("cold T6000 has no actual AMCC descriptor"))?,
             board
                 .direct_memory_cache
                 .as_ref()
-                .ok_or("cold T6000 has no direct MCC descriptor")?,
+                .ok_or(refuse!("cold T6000 has no direct MCC descriptor"))?,
             board
                 .power_states
                 .as_ref()
-                .ok_or("cold T6000 has no complete source power graph")?,
+                .ok_or(refuse!("cold T6000 has no complete source power graph"))?,
             ram,
             programmed,
             configuration,
@@ -108,17 +107,17 @@ impl Plan {
         ram: &Arc<RegisteredSystemRam>,
         programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         geometry(controller, direct, ram, programmed)?;
         if configuration.controls().len() != direct.apertures.len() {
-            return Err(
-                "cold T6000 requires all channel control words for every actual aperture".into(),
-            );
+            return Err(refuse!(
+                "cold T6000 requires all channel control words for every actual aperture"
+            ));
         }
         let domains = power_domains(power, direct)?;
         let generation = ram
             .generation()
-            .map_err(|e| format!("cold T6000 RAM is not live: {e:?}"))?;
+            .map_err(|e| refuse!("cold T6000 RAM is not live: {e}", ?e))?;
         Ok(Self {
             controller: controller.clone(),
             direct: direct.clone(),
@@ -136,15 +135,19 @@ impl Plan {
         &self,
         controller: Option<&MemoryController>,
         direct: Option<&DirectMemoryCache>,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         if controller != Some(&self.controller) || direct != Some(&self.direct) {
-            return Err("cold T6000 differs from the actual live memory descriptors".into());
+            return Err(refuse!(
+                "cold T6000 differs from the actual live memory descriptors"
+            ));
         }
         self.validate_ram()
     }
-    pub fn validate_power(&self, power: Option<&PowerStates>) -> Result<(), String> {
+    pub fn validate_power(&self, power: Option<&PowerStates>) -> Result<()> {
         if power != Some(&self.power) {
-            return Err("cold T6000 differs from the complete source power graph".into());
+            return Err(refuse!(
+                "cold T6000 differs from the complete source power graph"
+            ));
         }
         Ok(())
     }
@@ -157,33 +160,37 @@ impl Plan {
     pub const fn requires_disable_mcc(&self) -> bool {
         true
     }
-    fn validate_ram(&self) -> Result<(), String> {
+    fn validate_ram(&self) -> Result<()> {
         if self
             .ram
             .generation()
-            .map_err(|e| format!("cold T6000 RAM is not live: {e:?}"))?
+            .map_err(|e| refuse!("cold T6000 RAM is not live: {e}", ?e))?
             != self.generation
         {
-            return Err("cold T6000 RAM generation changed before publication".into());
+            return Err(refuse!(
+                "cold T6000 RAM generation changed before publication"
+            ));
         }
         Ok(())
     }
-    fn lifecycle(&self, devices: &AppleDevices) -> Result<LifecycleState, String> {
+    fn lifecycle(&self, devices: &AppleDevices) -> Result<LifecycleState> {
         self.validate_ram()?;
         let id = devices
             .pmgr
-            .ok_or("cold T6000 requires the actual placed PMGR")?;
+            .ok_or(refuse!("cold T6000 requires the actual placed PMGR"))?;
         let model = devices
             .bus
             .device::<Pmgr>(id)
-            .ok_or("cold T6000 has a foreign PMGR owner")?;
+            .ok_or(refuse!("cold T6000 has a foreign PMGR owner"))?;
         if self
             .power
             .registers
             .iter()
             .any(|&address| model.domain_state(address).is_none())
         {
-            return Err("cold T6000 PMGR omits part of the retained source graph".into());
+            return Err(refuse!(
+                "cold T6000 PMGR omits part of the retained source graph"
+            ));
         }
         if self.domains.is_empty() {
             // power_domains already proved literal input absence in every
@@ -203,13 +210,17 @@ impl Plan {
             .iter()
             .map(|&address| {
                 if devices.bus.route(address, Width::Word).ok() != Some((id, address)) {
-                    return Err(format!(
-                        "T6000 memory input {address:#x} has no actual PMGR route"
+                    return Err(refuse!(
+                        "T6000 memory input {address:#x} has no actual PMGR route",
+                        address
                     ));
                 }
-                model
-                    .domain_state(address)
-                    .ok_or_else(|| format!("T6000 memory input {address:#x} has no actual state"))
+                model.domain_state(address).ok_or_else(|| {
+                    refuse!(
+                        "T6000 memory input {address:#x} has no actual state",
+                        address
+                    )
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(LifecycleState {
@@ -224,12 +235,14 @@ impl Plan {
     /// All physical guest/native/DMA writers remain excluded during this cold
     /// construction. Later drains/clears require the real live canonical hold;
     /// a successful placement does not provide that hold or settle requests.
-    pub fn install(self, devices: &mut AppleDevices) -> Result<(), String> {
+    pub fn install(self, devices: &mut AppleDevices) -> Result<()> {
         if devices.power_configured
             || devices.memory_controller.is_some()
             || devices.memory_publication.is_some()
         {
-            return Err("cold T6000 requires an unoccupied unconnected memory mount".into());
+            return Err(refuse!(
+                "cold T6000 requires an unoccupied unconnected memory mount"
+            ));
         }
         let lifecycle = self.lifecycle(devices)?;
         let physical = self.direct.apertures[0];
@@ -239,22 +252,21 @@ impl Plan {
             self.programmed,
             self.configuration.image,
             lifecycle,
-        )
-        .map_err(String::from)?;
+        )?;
         // new_local keeps the SAME notification receiver in owner;
         // no callback/service/IRQ binding is manufactured or discarded here.
-        let owner = owner.with_registered_ram(self.ram).map_err(String::from)?;
+        let owner = owner.with_registered_ram(self.ram)?;
         devices.add_memory_resources(owner)?;
         let id = devices
             .memory_controller
-            .ok_or("cold T6000 lost the installed joint owner")?;
+            .ok_or(refuse!("cold T6000 lost the installed joint owner"))?;
         devices.register_power_device(physical, id, true)
     }
 }
 
 /// Whole ancestor/implicit closure, including every same-owner alias. Model
 /// registry sinks remain separate; computing this metadata claims no completion.
-fn power_domains(power: &PowerStates, direct: &DirectMemoryCache) -> Result<Vec<u64>, String> {
+fn power_domains(power: &PowerStates, direct: &DirectMemoryCache) -> Result<Vec<u64>> {
     let physical = direct.apertures[0];
     let resources = power
         .resources
@@ -268,7 +280,9 @@ fn power_domains(power: &PowerStates, direct: &DirectMemoryCache) -> Result<Vec<
             .iter()
             .any(|&id| power.resources[id].admission == coverage::Admission::Unavailable)
     {
-        return Err("cold T6000 MCC has no positively placed source lifecycle resource".into());
+        return Err(refuse!(
+            "cold T6000 MCC has no positively placed source lifecycle resource"
+        ));
     }
     let requirements = power.power_requirements()?;
     let consumers = power
@@ -285,13 +299,15 @@ fn power_domains(power: &PowerStates, direct: &DirectMemoryCache) -> Result<Vec<
         })
         .collect::<Vec<_>>();
     let coverage = coverage::analyze(&power.domains, &consumers)
-        .map_err(|e| format!("cold T6000 source coverage: {e:?}"))?;
+        .map_err(|e| refuse!("cold T6000 source coverage: {e}", ?e))?;
     if coverage.len() != power.registers.len()
         || coverage
             .iter()
             .any(|d| !power.registers.contains(&d.address))
     {
-        return Err("cold T6000 source coverage differs from its complete register set".into());
+        return Err(refuse!(
+            "cold T6000 source coverage differs from its complete register set"
+        ));
     }
     for &id in &resources {
         for &input in power.resources[id]
@@ -300,7 +316,9 @@ fn power_domains(power: &PowerStates, direct: &DirectMemoryCache) -> Result<Vec<
             .chain(&requirements[id])
         {
             if !resolved_input(power, input) {
-                return Err("cold T6000 requested input has an unresolved virtual ancestor".into());
+                return Err(refuse!(
+                    "cold T6000 requested input has an unresolved virtual ancestor"
+                ));
             }
         }
     }
@@ -313,9 +331,9 @@ fn power_domains(power: &PowerStates, direct: &DirectMemoryCache) -> Result<Vec<
             && contains(direct, address)
             && (!resource.activated_clocks().is_empty() || !requirements[id].is_empty())
         {
-            return Err(
-                "cold T6000 overlapping alias requires its own actual lifecycle join".into(),
-            );
+            return Err(refuse!(
+                "cold T6000 overlapping alias requires its own actual lifecycle join"
+            ));
         }
     }
     let domains = coverage
@@ -328,7 +346,9 @@ fn power_domains(power: &PowerStates, direct: &DirectMemoryCache) -> Result<Vec<
             .iter()
             .any(|&id| !power.resources[id].clocks.is_empty() || !requirements[id].is_empty())
     {
-        return Err("cold T6000 requested inputs have no physical lifecycle owner".into());
+        return Err(refuse!(
+            "cold T6000 requested inputs have no physical lifecycle owner"
+        ));
     }
     Ok(domains)
 }
@@ -391,8 +411,8 @@ fn geometry(
     direct: &DirectMemoryCache,
     ram: &RegisteredSystemRam,
     programmed: stela_soc_data::amcc::Programmed,
-) -> Result<(), String> {
-    direct.validate(controller).map_err(String::from)?;
+) -> Result<()> {
+    direct.validate(controller)?;
     if direct.ptd_entries != ptd::transport::notifications::NativeProfile::T6000.entries() as usize
         || direct.ptd_updates.1 != 0xc00
         || controller.layout.cache_status
@@ -402,14 +422,14 @@ fn geometry(
                 value: 0,
             })
     {
-        return Err(
-            "cold T6000 requires its source PTD geometry and shared way-command status".into(),
-        );
+        return Err(refuse!(
+            "cold T6000 requires its source PTD geometry and shared way-command status"
+        ));
     }
     for (source, _, bytes) in ram.placements() {
         let end = source
             .checked_add(bytes as u64)
-            .ok_or("cold T6000 RAM wraps")?;
+            .ok_or(refuse!("cold T6000 RAM wraps"))?;
         if direct
             .apertures
             .iter()
@@ -417,7 +437,7 @@ fn geometry(
             || direct.ptd.physical < end
                 && source < direct.ptd.physical + stela_soc_data::ptd::PTD_BYTES
         {
-            return Err("cold T6000 MMIO overlaps the actual canonical RAM".into());
+            return Err(refuse!("cold T6000 MMIO overlaps the actual canonical RAM"));
         }
     }
     for (group, range) in programmed.iter().enumerate() {
@@ -425,17 +445,23 @@ fn geometry(
             continue;
         };
         if controller.layout.groups[group].is_none() {
-            return Err("cold T6000 cannot discard a programmed absent lock group".into());
+            return Err(refuse!(
+                "cold T6000 cannot discard a programmed absent lock group"
+            ));
         }
-        let end = start.checked_add(bytes).ok_or("cold T6000 lock wraps")?;
+        let end = start
+            .checked_add(bytes)
+            .ok_or(refuse!("cold T6000 lock wraps"))?;
         if bytes == 0 || !start.is_multiple_of(1 << 14) || !bytes.is_multiple_of(1 << 14) {
-            return Err("cold T6000 lock is empty or not source-page aligned".into());
+            return Err(refuse!(
+                "cold T6000 lock is empty or not source-page aligned"
+            ));
         }
         let mut cursor = start;
         for (source, _, bytes) in ram.placements() {
             let top = source
                 .checked_add(bytes as u64)
-                .ok_or("cold T6000 RAM wraps")?;
+                .ok_or(refuse!("cold T6000 RAM wraps"))?;
             if source <= cursor && cursor < top {
                 cursor = end.min(top);
             }
@@ -444,7 +470,7 @@ fn geometry(
             }
         }
         if cursor != end {
-            return Err("cold T6000 lock is outside the same canonical RAM".into());
+            return Err(refuse!("cold T6000 lock is outside the same canonical RAM"));
         }
     }
     Ok(())

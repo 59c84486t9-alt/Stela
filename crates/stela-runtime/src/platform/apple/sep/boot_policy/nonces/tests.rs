@@ -1,11 +1,13 @@
 use super::super::{BootPolicy, HEADER_BYTES, REQUEST_MAGIC};
 use super::*;
+use crate::Result;
 use crate::platform::apple::sep::{
     keys::Roots,
     store::{Head, Volatile},
 };
 use alloc::{rc::Rc, vec, vec::Vec};
 use core::cell::Cell;
+use stela_contracts::refuse;
 
 struct Buffers {
     input: Vec<u8>,
@@ -15,18 +17,18 @@ struct Buffers {
 }
 
 impl Payload for Buffers {
-    fn input(&mut self, bytes: &mut [u8]) -> Result<(), &'static str> {
+    fn input(&mut self, bytes: &mut [u8]) -> Result<()> {
         let source = self
             .input
             .get(self.read..self.read + bytes.len())
-            .ok_or("short input")?;
+            .ok_or(refuse!("short input"))?;
         bytes.copy_from_slice(source);
         self.read += bytes.len();
         Ok(())
     }
-    fn output(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+    fn output(&mut self, bytes: &[u8]) -> Result<()> {
         if self.fail_output {
-            return Err("output DMA failed");
+            return Err(refuse!("output DMA failed"));
         }
         self.output = bytes.to_vec();
         Ok(())
@@ -58,7 +60,7 @@ fn store() -> Nonces<Volatile> {
     Nonces::provision(&roots(), Volatile::default()).unwrap()
 }
 
-fn entropy(bytes: &mut [u8]) -> Result<(), &'static str> {
+fn entropy(bytes: &mut [u8]) -> Result<()> {
     for (i, byte) in bytes.iter_mut().enumerate() {
         *byte = i as u8 + 1;
     }
@@ -185,7 +187,7 @@ fn entropy_and_begin_output_failures_never_publish_a_proposal() {
         parameter: 0,
         data: MUTATION_BYTES as u32,
     };
-    let mut broken_entropy = |_: &mut [u8]| Err("entropy unavailable");
+    let mut broken_entropy = |_: &mut [u8]| Err(refuse!("entropy unavailable"));
     assert!(
         policy
             .request(frame, &mut buffers, &mut store, &mut broken_entropy)
@@ -262,13 +264,13 @@ struct Uncertain {
     fail: Rc<Cell<bool>>,
 }
 impl Backend for Uncertain {
-    fn load(&mut self) -> Result<Option<Head>, &'static str> {
+    fn load(&mut self) -> Result<Option<Head>> {
         self.inner.load()
     }
-    fn commit(&mut self, expected: u64, next: Head) -> Result<(), &'static str> {
+    fn commit(&mut self, expected: u64, next: Head) -> Result<()> {
         self.inner.commit(expected, next)?;
         if self.fail.get() {
-            Err("commit acknowledgement lost")
+            Err(refuse!("commit acknowledgement lost"))
         } else {
             Ok(())
         }

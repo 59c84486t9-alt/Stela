@@ -4,6 +4,7 @@ use crate::platform::apple::pmgr::{ACTIVE, Pmgr, PowerState};
 use alloc::boxed::Box;
 use core::cell::Cell;
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Bus, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError,
@@ -133,7 +134,7 @@ fn pmgr_coverage_refusal_cannot_be_acknowledged_as_a_write() {
     // This particular PMGR coverage preflight precedes every state effect;
     // Unsupported from an arbitrary device would not establish no effect.
     assert_eq!(
-        cursor.finish_write(&claim, RouteOutcome::NoEffect(error)),
+        cursor.finish_write(&claim, RouteOutcome::NoEffect(error.clone())),
         Err(FinishError::NoEffect(error))
     );
     assert_eq!(bus.read(0x1000, Width::Word, &mut access), Ok(0xff));
@@ -344,7 +345,7 @@ fn dispatched_partial_mmio_error_quarantines_current_store_without_replay() {
                 offset,
                 width,
                 direction: Direction::Write,
-                reason: "failure after committed device effect",
+                reason: refuse!("failure after committed device effect"),
             })
         }
     }
@@ -387,7 +388,7 @@ fn dispatched_partial_mmio_error_quarantines_current_store_without_replay() {
         .unwrap_err();
     assert_eq!(effects.get(), 1);
     assert_eq!(
-        cursor.finish_write(&claim, RouteOutcome::Uncertain(error)),
+        cursor.finish_write(&claim, RouteOutcome::Uncertain(error.clone())),
         Err(FinishError::Uncertain(error))
     );
     assert_eq!(cursor.uncertain_write(), Some(write));

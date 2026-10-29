@@ -1,7 +1,10 @@
 //! Explicit removable-media fixture diagnostic through kept native USB.
 use super::CHECK_BYTES;
+use crate::Result;
 use crate::output;
 use alloc::{boxed::Box, vec, vec::Vec};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use stela_drivers::{
     Clock, Handoff,
     block::{BlockDevice, BlockError},
@@ -20,11 +23,11 @@ use stela_runtime::pc::{
 const WAIT_US: u64 = 30_000_000;
 const POLL_US: u64 = 10_000;
 
-fn failure(stage: &'static str, error: impl core::fmt::Display) -> &'static str {
+fn failure(stage: &'static str, error: impl core::fmt::Display) -> Refusal {
     output::arguments(format_args!(
         "USB MEDIA FAILED stage={stage} error={error}\n"
     ));
-    stage
+    refuse!("{stage}: {error}", stage, %error)
 }
 fn no_media(error: &BlockError) -> bool {
     matches!(error, BlockError::Device { status }
@@ -36,7 +39,7 @@ fn wait_media(
     clock: Clock,
     ready: bool,
     observed: &mut Vec<UsbDisk>,
-) -> Result<Vec<UsbDisk>, &'static str> {
+) -> Result<Vec<UsbDisk>> {
     let deadline = clock.deadline(WAIT_US);
     loop {
         let mut failures = Vec::new();
@@ -55,25 +58,29 @@ fn wait_media(
         }
         if disks.len() > 1 {
             observed.extend(disks);
-            return Err("USB media diagnostic requires exactly one logical unit");
+            return Err(refuse!(
+                "USB media diagnostic requires exactly one logical unit"
+            ));
         }
         if !ready && disks.is_empty() {
             if failures.iter().any(|(_, error)| no_media(error)) {
                 return Ok(disks);
             }
-            return Err("USB media absence lacks an actual NoMedia response");
+            return Err(refuse!(
+                "USB media absence lacks an actual NoMedia response"
+            ));
         }
         // Keep all intermediate aliases alive as well; dropping an observed
         // publication is not an acknowledgment of hardware quiescence.
         observed.extend(disks);
         if deadline.passed() {
-            return Err("USB media stage timed out");
+            return Err(refuse!("USB media stage timed out"));
         }
         clock.delay(POLL_US);
     }
 }
 
-fn retired(disk: &mut dyn BlockDevice) -> Result<(), &'static str> {
+fn retired(disk: &mut dyn BlockDevice) -> Result<()> {
     let mut buffer = vec![0xa5; disk.identity().block_size as usize];
     let read = disk.read(0, &mut buffer);
     let flush = disk.flush();
@@ -102,7 +109,7 @@ pub(super) unsafe fn probe_and_rescan(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
     target: &Target,
-) -> Result<Devices, &'static str> {
+) -> Result<Devices> {
     let mut owners = Vec::<xhci::Found>::new();
     let mut retained = Vec::<UsbStorage>::new();
     let mut original = Vec::<UsbDisk>::new();
@@ -114,7 +121,7 @@ pub(super) unsafe fn probe_and_rescan(
     let result = (|| {
         for window in &handoff.ecam {
             if !handoff.is_mapped(&window.range()) {
-                return Err("USB media check requires mapped ECAM");
+                return Err(refuse!("USB media check requires mapped ECAM"));
             }
             // SAFETY: caller owns the mapped ECAM and native devices.
             for mut function in unsafe { Function::enumerate(window) } {
@@ -133,7 +140,9 @@ pub(super) unsafe fn probe_and_rescan(
             != 1
             || owners.iter().any(|found| !found.disks.is_empty())
         {
-            return Err("USB media check requires one retained initially empty USB owner");
+            return Err(refuse!(
+                "USB media check requires one retained initially empty USB owner"
+            ));
         }
         let mut selected = None;
         for found in &owners {
@@ -150,7 +159,7 @@ pub(super) unsafe fn probe_and_rescan(
                     continue;
                 }
                 if selected.is_some() {
-                    return Err("USB media check target serial is ambiguous");
+                    return Err(refuse!("USB media check target serial is ambiguous"));
                 }
                 let prefix = alloc::format!("{} interface ", device.location);
                 selected = found
@@ -159,11 +168,13 @@ pub(super) unsafe fn probe_and_rescan(
                     .find(|owner| owner.location().starts_with(&prefix))
                     .cloned();
                 if selected.is_none() {
-                    return Err("USB media target has no retained storage interface");
+                    return Err(refuse!(
+                        "USB media target has no retained storage interface"
+                    ));
                 }
             }
         }
-        retained.push(selected.ok_or("USB media check target was not found")?);
+        retained.push(selected.ok_or(refuse!("USB media check target was not found"))?);
         let owner = &mut retained[0];
         wait_media(owner, handoff.clock, false, &mut observed)?;
         output::arguments(format_args!("USB MEDIA EMPTY stage=INITIAL nomedia=true\n"));
@@ -171,7 +182,7 @@ pub(super) unsafe fn probe_and_rescan(
         original = wait_media(owner, handoff.clock, true, &mut observed)?;
         let identity = original[0].identity().clone();
         if identity.serial != target.serial {
-            return Err("USB media insertion changed the selected serial");
+            return Err(refuse!("USB media insertion changed the selected serial"));
         }
         aliases.extend(
             original
@@ -215,7 +226,9 @@ pub(super) unsafe fn probe_and_rescan(
             || fresh.identity().block_size != identity.block_size
             || fresh.identity().blocks == identity.blocks
         {
-            return Err("USB media replacement did not provide fresh changed geometry");
+            return Err(refuse!(
+                "USB media replacement did not provide fresh changed geometry"
+            ));
         }
         for partition in &mut partitions {
             retired(partition)?;

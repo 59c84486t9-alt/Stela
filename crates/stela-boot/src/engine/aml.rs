@@ -767,7 +767,7 @@ unsafe extern "C" fn destroy(context: *mut c_void) {
 }
 
 unsafe extern "C" fn fatal(_: *mut c_void, status: Status) -> ! {
-    output::fatal(&alloc::format!(
+    output::fatal(format_args!(
         "ACPI callback completion failed: ACPICA status {status:#x}"
     ))
 }

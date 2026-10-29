@@ -1,5 +1,6 @@
 //! Real identity-keyed wait, recursive queue lease, notify and reacquisition.
 use super::*;
+use stela_contracts::refuse;
 
 #[derive(Clone)]
 pub struct Key {
@@ -81,10 +82,12 @@ impl Runtime {
             .and_then(|()| invocation.check_current())
             .is_err()
         {
-            return Completion::Refused("foreign or nonexecuting native queue acquisition");
+            return Completion::Refused(refuse!(
+                "foreign or nonexecuting native queue acquisition"
+            ));
         }
         if invocation.frame.thread.wait.borrow().is_some() {
-            return Completion::Refused("native lock acquisition before wait retirement");
+            return Completion::Refused(refuse!("native lock acquisition before wait retirement"));
         }
         let mut s = self.state.borrow_mut();
         let q = &mut s.queues[queue.id];
@@ -95,10 +98,10 @@ impl Runtime {
             return Completion::Busy { deadline: None };
         }
         let Some(depth) = q.depth.checked_add(1) else {
-            return Completion::Refused("native queue recursion exhausted");
+            return Completion::Refused(refuse!("native queue recursion exhausted"));
         };
         let Some(leases) = invocation.frame.leases.get().checked_add(1) else {
-            return Completion::Refused("native queue lease count exhausted");
+            return Completion::Refused(refuse!("native queue lease count exhausted"));
         };
         q.lock = Some(invocation.thread_id());
         q.depth = depth;
@@ -137,17 +140,17 @@ impl Runtime {
         invocation.check_current()?;
         let thread = invocation.frame.thread.clone();
         if thread.wait.borrow().is_some() || thread.mutex.get().is_some() {
-            return Err(Error::Contract(
-                "native thread already has an unfinished wait",
-            ));
+            return Err(Error::Contract(refuse!(
+                "native thread already has an unfinished wait"
+            )));
         }
         let mut s = self.state.borrow_mut();
         let released = if let Some(queue) = release {
             let q = &s.queues[queue];
             if q.lock != Some(thread.id) || q.depth == 0 {
-                return Err(Error::Contract(
-                    "native drain does not own recursive queue lock",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "native drain does not own recursive queue lock"
+                )));
             }
             Some((queue, q.depth))
         } else {
@@ -207,25 +210,25 @@ impl Wait {
     /// predicates or makes this a transferable success receipt.
     pub fn advance(&mut self) -> Completion<()> {
         let Some(state) = self.runtime.upgrade() else {
-            return Completion::Refused("native wait scheduler abandoned");
+            return Completion::Refused(refuse!("native wait scheduler abandoned"));
         };
         let Some(frame) = self.waiting.frame.upgrade() else {
-            return Completion::Refused("native waiting invocation abandoned");
+            return Completion::Refused(refuse!("native waiting invocation abandoned"));
         };
         let invocation = Invocation {
             runtime: self.runtime.clone(),
             frame,
         };
         if invocation.check_current().is_err() {
-            return Completion::Refused("native wait resumed from foreign context");
+            return Completion::Refused(refuse!("native wait resumed from foreign context"));
         }
         match self.waiting.phase.get() {
             Phase::Waiting => return Completion::Busy { deadline: None },
-            Phase::Retired => return Completion::Refused("native wait already retired"),
+            Phase::Retired => return Completion::Refused(refuse!("native wait already retired")),
             Phase::Notified => {}
         }
         let Some(thread) = self.waiting.thread.upgrade() else {
-            return Completion::Refused("native waiting thread abandoned");
+            return Completion::Refused(refuse!("native waiting thread abandoned"));
         };
         if !thread
             .wait
@@ -233,7 +236,7 @@ impl Wait {
             .as_ref()
             .is_some_and(|w| Rc::ptr_eq(w, &self.waiting))
         {
-            return Completion::Refused("native wait lost its actual thread registration");
+            return Completion::Refused(refuse!("native wait lost its actual thread registration"));
         }
         let mut s = state.borrow_mut();
         if let Some((queue, depth)) = self.waiting.released {
@@ -242,7 +245,9 @@ impl Wait {
                 return Completion::Busy { deadline: None };
             }
             if q.lock.is_some() || q.depth != 0 {
-                return Completion::Refused("native drain lock was reacquired outside its wait");
+                return Completion::Refused(refuse!(
+                    "native drain lock was reacquired outside its wait"
+                ));
             }
             q.lock = Some(thread.id);
             q.depth = depth;
@@ -259,16 +264,17 @@ impl Wait {
 impl Lease {
     pub fn release(&mut self) -> Result<()> {
         if !self.active {
-            return Err(Error::Contract("native queue lease already released"));
+            return Err(Error::Contract(refuse!(
+                "native queue lease already released"
+            )));
         }
         let state = self
             .runtime
             .upgrade()
-            .ok_or(Error::Contract("native lease scheduler abandoned"))?;
-        let frame = self
-            .frame
-            .upgrade()
-            .ok_or(Error::Contract("native lease invocation abandoned"))?;
+            .ok_or(Error::Contract(refuse!("native lease scheduler abandoned")))?;
+        let frame = self.frame.upgrade().ok_or(Error::Contract(refuse!(
+            "native lease invocation abandoned"
+        )))?;
         Invocation {
             runtime: self.runtime.clone(),
             frame: frame.clone(),
@@ -281,9 +287,9 @@ impl Lease {
             || frame.leases.get() == 0
             || frame.thread.wait.borrow().is_some()
         {
-            return Err(Error::Contract(
-                "native lease release lost its lock or unfinished wait",
-            ));
+            return Err(Error::Contract(refuse!(
+                "native lease release lost its lock or unfinished wait"
+            )));
         }
         q.depth -= 1;
         if q.depth == 0 {

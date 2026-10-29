@@ -6,16 +6,19 @@
 //! the next, page-aligned list page while more than one data page remains.
 //! Every list entry consumes data or chains to a whole list page, so the
 //! transfer limit bounds traversal even if a guest supplies a cyclic list.
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 pub(super) const MAX_TRANSFER: usize = 1024 * 1024;
 
-pub(super) fn dma_error(error: DmaError) -> &'static str {
+pub(super) fn dma_error(error: DmaError) -> Refusal {
     match error {
         DmaError::Unsupported(reason) => reason,
-        DmaError::Fault(_) => "ANS DMA translation fault",
-        DmaError::Memory => "ANS DMA target is not guest RAM",
+        DmaError::Fault(code) => refuse!("ANS DMA translation fault", code),
+        DmaError::Memory => refuse!("ANS DMA target is not guest RAM"),
     }
 }
 
@@ -28,18 +31,18 @@ impl Prps {
         second: u64,
         bytes: usize,
         page: u64,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         if bytes == 0 || bytes > MAX_TRANSFER || !matches!(page, 4096 | 16384) {
-            return Err("ANS PRP transfer size or page size is not modeled");
+            return Err(refuse!("ANS PRP transfer size or page size is not modeled"));
         }
         if first == 0 || !first.is_multiple_of(4) {
-            return Err("ANS PRP1 is null or not dword-aligned");
+            return Err(refuse!("ANS PRP1 is null or not dword-aligned"));
         }
         let mut ranges = Vec::new();
         let first_bytes = bytes.min((page - first % page) as usize);
         first
             .checked_add(first_bytes as u64 - 1)
-            .ok_or("ANS PRP1 wraps")?;
+            .ok_or(refuse!("ANS PRP1 wraps"))?;
         ranges.push((first, first_bytes));
         let mut remaining = bytes - first_bytes;
         if remaining == 0 {
@@ -47,16 +50,16 @@ impl Prps {
         }
         if remaining <= page as usize {
             if second == 0 || !second.is_multiple_of(page) {
-                return Err("ANS PRP2 is null or not page-aligned");
+                return Err(refuse!("ANS PRP2 is null or not page-aligned"));
             }
             second
                 .checked_add(remaining as u64 - 1)
-                .ok_or("ANS PRP2 wraps")?;
+                .ok_or(refuse!("ANS PRP2 wraps"))?;
             ranges.push((second, remaining));
             return Ok(Self(ranges));
         }
         if second == 0 || !second.is_multiple_of(8) {
-            return Err("ANS PRP list pointer is null or not qword-aligned");
+            return Err(refuse!("ANS PRP list pointer is null or not qword-aligned"));
         }
         let mut entry = second;
         while remaining != 0 {
@@ -64,7 +67,7 @@ impl Prps {
             port.read(entry, &mut pointer).map_err(dma_error)?;
             let pointer = u64::from_le_bytes(pointer);
             if pointer == 0 || !pointer.is_multiple_of(page) {
-                return Err("ANS PRP list contains a null or unaligned page");
+                return Err(refuse!("ANS PRP list contains a null or unaligned page"));
             }
             let last_in_page = (entry + 8).is_multiple_of(page);
             if last_in_page && remaining > page as usize {
@@ -74,15 +77,17 @@ impl Prps {
             let chunk = remaining.min(page as usize);
             pointer
                 .checked_add(chunk as u64 - 1)
-                .ok_or("ANS PRP data address wraps")?;
+                .ok_or(refuse!("ANS PRP data address wraps"))?;
             ranges.push((pointer, chunk));
             remaining -= chunk;
-            entry = entry.checked_add(8).ok_or("ANS PRP list address wraps")?;
+            entry = entry
+                .checked_add(8)
+                .ok_or(refuse!("ANS PRP list address wraps"))?;
         }
         Ok(Self(ranges))
     }
 
-    pub fn read(&self, port: &mut Port<'_, '_>, buffer: &mut [u8]) -> Result<(), &'static str> {
+    pub fn read(&self, port: &mut Port<'_, '_>, buffer: &mut [u8]) -> Result<()> {
         let mut at = 0;
         for &(address, bytes) in &self.0 {
             port.read(address, &mut buffer[at..at + bytes])
@@ -92,7 +97,7 @@ impl Prps {
         Ok(())
     }
 
-    pub fn write(&self, port: &mut Port<'_, '_>, data: &[u8]) -> Result<(), &'static str> {
+    pub fn write(&self, port: &mut Port<'_, '_>, data: &[u8]) -> Result<()> {
         let mut at = 0;
         for &(address, bytes) in &self.0 {
             port.write(address, &data[at..at + bytes])

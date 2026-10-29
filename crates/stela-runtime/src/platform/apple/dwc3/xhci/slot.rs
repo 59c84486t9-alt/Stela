@@ -37,7 +37,9 @@ use super::{
     CONTEXT_STATE_ERROR, CYCLE, Event, LINK, MAX_SLOTS, MICROFRAME, PARAMETER_ERROR,
     SLOT_NOT_ENABLED, SUCCESS, TOGGLE, TRANSACTION_ERROR, TRB_BYTES, TRB_ERROR, Xhci,
 };
+use crate::Result;
 use alloc::{boxed::Box, format, vec::Vec};
+use stela_contracts::refuse;
 use {
     crate::platform::usb, crate::platform::usb::Function, crate::platform::usb::Reply,
     crate::platform::usb::Token, stela_contracts::dma::Port,
@@ -290,35 +292,27 @@ enum Step {
 }
 
 impl Xhci {
-    fn read_context(port: &mut Port<'_, '_>, at: u64) -> Result<[u32; 8], &'static str> {
+    fn read_context(port: &mut Port<'_, '_>, at: u64) -> Result<[u32; 8]> {
         let mut bytes = [0u8; 32];
         port.read(at, &mut bytes)
-            .map_err(|_| "xHCI context DMA fault")?;
+            .map_err(|_| refuse!("xHCI context DMA fault"))?;
         Ok(words(&bytes))
     }
 
-    fn write_context(
-        port: &mut Port<'_, '_>,
-        at: u64,
-        context: [u32; 8],
-    ) -> Result<(), &'static str> {
+    fn write_context(port: &mut Port<'_, '_>, at: u64, context: [u32; 8]) -> Result<()> {
         let mut bytes = [0u8; 32];
         for (chunk, word) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(context) {
             chunk.copy_from_slice(&word.to_le_bytes());
         }
         port.write(at, &bytes)
-            .map_err(|_| "xHCI output context DMA fault")
+            .map_err(|_| refuse!("xHCI output context DMA fault"))
     }
 
-    fn write_slot_context(port: &mut Port<'_, '_>, slot: &Slot) -> Result<(), &'static str> {
+    fn write_slot_context(port: &mut Port<'_, '_>, slot: &Slot) -> Result<()> {
         Self::write_context(port, slot.output, slot.output_context())
     }
 
-    fn write_endpoint_context(
-        port: &mut Port<'_, '_>,
-        slot: &Slot,
-        dci: usize,
-    ) -> Result<(), &'static str> {
+    fn write_endpoint_context(port: &mut Port<'_, '_>, slot: &Slot, dci: usize) -> Result<()> {
         let at = slot.output + CONTEXT * dci as u64;
         Self::write_context(port, at, slot.endpoints[dci - 1].output())
     }
@@ -344,7 +338,7 @@ impl Xhci {
         id: usize,
         input: u64,
         bsr: bool,
-    ) -> Result<u32, &'static str> {
+    ) -> Result<u32> {
         let Some(slot) = self.slot_mut(id) else {
             return Ok(SLOT_NOT_ENABLED);
         };
@@ -370,10 +364,12 @@ impl Xhci {
         let device = function.and_then(|f| usb::route(f, context[0]));
         let mut entry = [0u8; 8];
         port.read(self.dcbaap + 8 * id as u64, &mut entry)
-            .map_err(|_| "xHCI DCBAA DMA fault")?;
+            .map_err(|_| refuse!("xHCI DCBAA DMA fault"))?;
         let output = u64::from_le_bytes(entry);
         if output == 0 || output & 0x3f != 0 {
-            return Err("xHCI Address Device: DCBAA names no aligned output Device Context");
+            return Err(refuse!(
+                "xHCI Address Device: DCBAA names no aligned output Device Context"
+            ));
         }
         if !bsr && !Self::set_address(device, id as u8)? {
             return Ok(TRANSACTION_ERROR);
@@ -402,10 +398,7 @@ impl Xhci {
 
     /// SET_ADDRESS to the device on its port's default address: a
     /// no-data control transfer.
-    fn set_address(
-        function: Option<&mut (dyn Function + '_)>,
-        address: u8,
-    ) -> Result<bool, &'static str> {
+    fn set_address(function: Option<&mut (dyn Function + '_)>, address: u8) -> Result<bool> {
         let Some(function) = function else {
             return Ok(false);
         };
@@ -430,7 +423,7 @@ impl Xhci {
         id: usize,
         input: u64,
         deconfigure: bool,
-    ) -> Result<u32, &'static str> {
+    ) -> Result<u32> {
         let Some(slot) = self.slot_mut(id) else {
             return Ok(SLOT_NOT_ENABLED);
         };
@@ -523,7 +516,7 @@ impl Xhci {
         port: &mut Port<'_, '_>,
         id: usize,
         input: u64,
-    ) -> Result<u32, &'static str> {
+    ) -> Result<u32> {
         let Some(slot) = self.slot_mut(id) else {
             return Ok(SLOT_NOT_ENABLED);
         };
@@ -556,7 +549,7 @@ impl Xhci {
         port: &mut Port<'_, '_>,
         id: usize,
         dci: usize,
-    ) -> Result<u32, &'static str> {
+    ) -> Result<u32> {
         self.endpoint_command(port, id, dci, |endpoint| {
             if endpoint.state != EpState::Halted {
                 return CONTEXT_STATE_ERROR;
@@ -573,7 +566,7 @@ impl Xhci {
         port: &mut Port<'_, '_>,
         id: usize,
         dci: usize,
-    ) -> Result<u32, &'static str> {
+    ) -> Result<u32> {
         let mut stopped = None;
         let code = self.endpoint_command(port, id, dci, |endpoint| {
             if endpoint.state != EpState::Running {
@@ -609,7 +602,7 @@ impl Xhci {
         dci: usize,
         pointer: u64,
         stream: u32,
-    ) -> Result<u32, &'static str> {
+    ) -> Result<u32> {
         if stream != 0 {
             return Ok(TRB_ERROR);
         }
@@ -633,7 +626,7 @@ impl Xhci {
         id: usize,
         dci: usize,
         command: impl FnOnce(&mut Endpoint) -> u32,
-    ) -> Result<u32, &'static str> {
+    ) -> Result<u32> {
         let Some(slot) = self.slot_mut(id) else {
             return Ok(SLOT_NOT_ENABLED);
         };
@@ -648,11 +641,7 @@ impl Xhci {
     }
 
     /// Reset Device (4.6.11): back to Default, address 0, EP0 only.
-    pub(super) fn reset_device(
-        &mut self,
-        port: &mut Port<'_, '_>,
-        id: usize,
-    ) -> Result<u32, &'static str> {
+    pub(super) fn reset_device(&mut self, port: &mut Port<'_, '_>, id: usize) -> Result<u32> {
         let Some(slot) = self.slot_mut(id) else {
             return Ok(SLOT_NOT_ENABLED);
         };
@@ -674,13 +663,15 @@ impl Xhci {
     /// A device slot doorbell: `target` is the endpoint's DCI. A Stopped
     /// endpoint restarts; doorbells of Halted or Disabled endpoints, and of
     /// slots below Default, do nothing (4.7).
-    pub(super) fn ring(&mut self, id: usize, value: u32) -> Result<(), &'static str> {
+    pub(super) fn ring(&mut self, id: usize, value: u32) -> Result<()> {
         let dci = (value & 0xff) as usize;
         if !(1..=ENDPOINTS).contains(&dci) {
-            return Err("xHCI doorbell target is not an endpoint");
+            return Err(refuse!("xHCI doorbell target is not an endpoint"));
         }
         if value >> 16 != 0 {
-            return Err("xHCI doorbell names a stream; streams are not supported");
+            return Err(refuse!(
+                "xHCI doorbell names a stream; streams are not supported"
+            ));
         }
         let Some(slot) = self.slot_mut(id) else {
             self.note(format!("doorbell {id} dci {dci} ignored: slot not enabled"));
@@ -747,7 +738,7 @@ impl Xhci {
         &mut self,
         port: &mut Port<'_, '_>,
         mut function: Option<&mut (dyn Function + '_)>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         let now = port.access.now;
         if let Some(f) = function.as_deref_mut() {
             f.set_time(now);
@@ -799,7 +790,7 @@ impl Xhci {
         id: usize,
         dci: usize,
         budget: &mut usize,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         let now = port.access.now;
         let slot = self.slot_mut(id).unwrap();
         let (root, route) = (slot.port(), slot.route());
@@ -838,13 +829,13 @@ impl Xhci {
     }
 
     /// The TD at `ring`, if software has handed over its first TRB.
-    fn gather(port: &mut Port<'_, '_>, ring: Ring, dci: usize) -> Result<Option<Td>, &'static str> {
+    fn gather(port: &mut Port<'_, '_>, ring: Ring, dci: usize) -> Result<Option<Td>> {
         let mut at = ring;
         let mut trbs = Vec::new();
         loop {
             let mut bytes = [0u8; 16];
             port.read(at.dequeue, &mut bytes)
-                .map_err(|_| "xHCI transfer ring DMA fault")?;
+                .map_err(|_| refuse!("xHCI transfer ring DMA fault"))?;
             let word = |n: usize| u32::from_le_bytes(bytes[n * 4..n * 4 + 4].try_into().unwrap());
             let control = word(3);
             if (control & CYCLE != 0) != at.cycle {
@@ -854,7 +845,9 @@ impl Xhci {
             let parameter = u64::from(word(0)) | u64::from(word(1)) << 32;
             if control >> 10 & 0x3f == LINK {
                 if control & IOC != 0 {
-                    return Err("xHCI Link TRB with IOC on a transfer ring is not modeled");
+                    return Err(refuse!(
+                        "xHCI Link TRB with IOC on a transfer ring is not modeled"
+                    ));
                 }
                 at = Ring {
                     dequeue: parameter & !0xf,
@@ -863,7 +856,7 @@ impl Xhci {
                 continue;
             }
             if trbs.len() == MAX_TD_TRBS {
-                return Err("xHCI TD exceeds the modeled TRB count");
+                return Err(refuse!("xHCI TD exceeds the modeled TRB count"));
             }
             trbs.push(Trb {
                 address: at.dequeue,
@@ -895,14 +888,11 @@ impl Xhci {
         }))
     }
 
-    fn post_to(
-        &mut self,
-        interrupter: usize,
-        trb: [u32; 4],
-        interrupt: bool,
-    ) -> Result<(), &'static str> {
+    fn post_to(&mut self, interrupter: usize, trb: [u32; 4], interrupt: bool) -> Result<()> {
         if interrupter >= self.interrupters.len() {
-            return Err("xHCI TRB names an interrupter the controller does not have");
+            return Err(refuse!(
+                "xHCI TRB names an interrupter the controller does not have"
+            ));
         }
         self.queue(Event {
             interrupter,
@@ -920,7 +910,7 @@ impl Xhci {
         code: u32,
         id: usize,
         dci: usize,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         let asked = trb.control & IOC != 0 || (code == SHORT_PACKET && trb.control & ISP != 0);
         let failed = !matches!(code, SUCCESS | SHORT_PACKET);
         if dci == 1 || failed {
@@ -938,13 +928,7 @@ impl Xhci {
     }
 
     /// Halts the endpoint at the current TRB with `code`.
-    fn halt(
-        &mut self,
-        port: &mut Port<'_, '_>,
-        id: usize,
-        dci: usize,
-        code: u32,
-    ) -> Result<Step, &'static str> {
+    fn halt(&mut self, port: &mut Port<'_, '_>, id: usize, dci: usize, code: u32) -> Result<Step> {
         let slot = self.slot_mut(id).unwrap();
         let endpoint = &mut slot.endpoints[dci - 1];
         let td = endpoint.td.take().unwrap();
@@ -978,7 +962,7 @@ impl Xhci {
         id: usize,
         dci: usize,
         budget: &mut usize,
-    ) -> Result<Step, &'static str> {
+    ) -> Result<Step> {
         let max_packet = self.slot_mut(id).unwrap().endpoints[dci - 1].max_packet();
         let endpoint_address = address(dci);
         loop {
@@ -1005,7 +989,7 @@ impl Xhci {
                     self.complete(&trb, 0, SUCCESS, id, dci)?;
                     continue;
                 }
-                ISOCH => return Err("xHCI isochronous transfers are not modeled"),
+                ISOCH => return Err(refuse!("xHCI isochronous transfers are not modeled")),
                 SETUP | STATUS | NORMAL | DATA => {}
                 _ => {
                     td.index += 1;
@@ -1075,7 +1059,7 @@ impl Xhci {
         id: usize,
         dci: usize,
         max_packet: usize,
-    ) -> Result<Option<Step>, &'static str> {
+    ) -> Result<Option<Step>> {
         let mut buffer = [0u8; 1024];
         let packet = &mut buffer[..max_packet.min(1024)];
         let n = match function.packet(address(dci), Token::In, packet)? {
@@ -1098,7 +1082,7 @@ impl Xhci {
                 if data.is_empty() {
                     break;
                 }
-                return Err("xHCI packet spans a non-data TRB");
+                return Err(refuse!("xHCI packet spans a non-data TRB"));
             }
             if trb.control & IDT != 0 {
                 td.index += 1;
@@ -1109,7 +1093,7 @@ impl Xhci {
             let take = room.min(data.len());
             if take > 0 {
                 port.write(trb.parameter + u64::from(td.offset), &data[..take])
-                    .map_err(|_| "xHCI transfer buffer DMA fault")?;
+                    .map_err(|_| refuse!("xHCI transfer buffer DMA fault"))?;
             }
             let td = self.td(id, dci);
             td.offset += take as u32;
@@ -1156,7 +1140,7 @@ impl Xhci {
         id: usize,
         dci: usize,
         max_packet: usize,
-    ) -> Result<Option<Step>, &'static str> {
+    ) -> Result<Option<Step>> {
         let mut buffer = [0u8; 1024];
         let want = (self.td(id, dci).remaining() as usize).min(max_packet.min(1024));
         // Gather without moving the cursor: a NAK resends the same bytes.
@@ -1167,7 +1151,7 @@ impl Xhci {
         while filled < want {
             let trb = self.td(id, dci).trbs[index];
             if !matches!(trb.kind(), NORMAL | DATA) {
-                return Err("xHCI packet spans a non-data TRB");
+                return Err(refuse!("xHCI packet spans a non-data TRB"));
             }
             let take = ((trb.length() - offset) as usize).min(want - filled);
             if trb.control & IDT != 0 {
@@ -1179,7 +1163,7 @@ impl Xhci {
                     trb.parameter + u64::from(offset),
                     &mut buffer[filled..filled + take],
                 )
-                .map_err(|_| "xHCI transfer buffer DMA fault")?;
+                .map_err(|_| refuse!("xHCI transfer buffer DMA fault"))?;
             }
             filled += take;
             offset += take as u32;
@@ -1190,7 +1174,7 @@ impl Xhci {
         }
         match function.packet(address(dci), Token::Out, &mut buffer[..want])? {
             Reply::Ack(n) if n == want => {}
-            Reply::Ack(_) => return Err("function acknowledged part of an OUT packet"),
+            Reply::Ack(_) => return Err(refuse!("function acknowledged part of an OUT packet")),
             Reply::Nak => return Ok(Some(Step::Nak)),
             Reply::Stall => return self.halt(port, id, dci, STALL_ERROR).map(Some),
         }

@@ -7,6 +7,7 @@ use super::super::super::{Auxiliary, Pair};
 use super::*;
 use alloc::{vec, vec::Vec};
 use core::cell::Cell;
+use stela_contracts::refuse;
 use {
     crate::platform::apple::ptd::Ptd,
     crate::platform::apple::ptd::transport::notifications::LocalNotifications,
@@ -198,7 +199,7 @@ impl Resources for Actual {
         Completion::Retired {
             value,
             refusal: if core::mem::take(&mut self.retired_error) {
-                Some("authored retirement with refusal")
+                Some(refuse!("authored retirement with refusal"))
             } else {
                 None
             },
@@ -519,7 +520,7 @@ fn unknown_correction_pointer_refuses_after_its_read_without_reconsumption() {
                 &mut resources,
                 &mut latch
             ),
-            Completion::Refused("auxiliary correction list requires actual paired scalar owners")
+            Completion::Refused(reason) if reason == refuse!("auxiliary correction list requires actual paired scalar owners")
         ));
     }
     assert_eq!(resources.calls.len(), 2);
@@ -555,7 +556,7 @@ fn malformed_retired_resource_result_is_latched_without_replay() {
     }
     assert_eq!(resources.calls.len(), 1);
     assert_eq!(
-        owner.refusal(),
+        owner.refusal().map(Refusal::what),
         Some("auxiliary actual resource result shape mismatch")
     );
 }

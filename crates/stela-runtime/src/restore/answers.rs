@@ -17,6 +17,7 @@ use alloc::{
     vec::Vec,
 };
 use sha2::{Digest, Sha384};
+use stela_contracts::refuse;
 use {stela_formats::payload::ReadAt, stela_formats::payload::safe_path};
 const MAX_STAGED_ANSWERS: usize = 128;
 const MAX_STAGED_BYTES: usize = 16 * 1024 * 1024;
@@ -518,7 +519,7 @@ impl<R: ReadAt> Answers<R> {
     }
     pub fn plan(&mut self, request: &Value) -> Result<Plan> {
         self.plan_inner(request)
-            .map_err(|e| super::refuse(format!("{e}"), request))
+            .map_err(|e| super::refuse(refuse!("restore plan: {e}", ?e), request))
     }
     fn plan_inner(&mut self, r: &Value) -> Result<Plan> {
         let kind = r.required("DataType")?.string()?;
@@ -811,7 +812,7 @@ impl<R: ReadAt> Answers<R> {
     /// firmware set and LLB are absent, so a reader of them fails.
     pub fn sep_firmware(&mut self, request: &Value) -> Result<Plan> {
         self.sep_firmware_inner(request)
-            .map_err(|e| super::refuse(format!("{e}"), request))
+            .map_err(|e| super::refuse(refuse!("SEP firmware plan: {e}", ?e), request))
     }
     fn sep_firmware_inner(&mut self, request: &Value) -> Result<Plan> {
         let empty = Value::dict([]);

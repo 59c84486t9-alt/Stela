@@ -1,5 +1,6 @@
 use super::*;
 use alloc::{vec, vec::Vec};
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::MmioDevice, stela_contracts::bus::Width, stela_contracts::dma::Port,
     stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::AicInput,
@@ -116,9 +117,9 @@ fn divergent_later_page_preserves_only_completed_bytes_and_read_buffer_prefix() 
             IOVA + PAGE - 2,
             &[1, 3, 5, 7],
         ),
-        Err(DmaError::Unsupported(
+        Err(DmaError::Unsupported(refuse!(
             "T6000 native USB TRAD alternatives have divergent DMA targets"
-        ))
+        )))
     );
     let mut actual = [0; 4];
     assert!(ram.read(FRAME + PAGE - 2, &mut actual));
@@ -194,9 +195,9 @@ fn changed_remaps_are_recomputed_and_an_absent_preimage_refuses() {
         .unwrap();
     assert_eq!(
         transfer(&route, &banks, &mut ram, &mut sink, IOVA + 1, &[0x5a]),
-        Err(DmaError::Unsupported(
+        Err(DmaError::Unsupported(refuse!(
             "T6000 context route has no current incoming SID preimage"
-        ))
+        )))
     );
     let mut bytes = [0; 2];
     assert!(ram.read(FRAME, &mut bytes));
@@ -211,7 +212,9 @@ fn lifecycle_unknown_tables_and_faulting_alternatives_never_create_captures() {
     banks[1].set_clock(false);
     assert_eq!(
         transfer(&route, &banks, &mut ram, &mut sink, IOVA, &[1]),
-        Err(DmaError::Unsupported("DART functional clock is gated"))
+        Err(DmaError::Unsupported(refuse!(
+            "DART functional clock is gated"
+        )))
     );
     banks[1].set_clock(true);
     banks[1].set_quiesced(true);
@@ -235,9 +238,9 @@ fn lifecycle_unknown_tables_and_faulting_alternatives_never_create_captures() {
     ram.put_u64(ROOT + 2 * PAGE + 8, pte(ROOT + 0x100000));
     assert_eq!(
         transfer(&route, &banks, &mut ram, &mut sink, IOVA + 1, &[1]),
-        Err(DmaError::Unsupported(
+        Err(DmaError::Unsupported(refuse!(
             "T6000 context route has an inaccessible table alternative"
-        ))
+        )))
     );
     {
         let mut access = Access::new(0, 0, &mut sink);
@@ -250,9 +253,9 @@ fn lifecycle_unknown_tables_and_faulting_alternatives_never_create_captures() {
     }
     assert_eq!(
         transfer(&route, &banks, &mut ram, &mut sink, IOVA + 1, &[1]),
-        Err(DmaError::Unsupported(
+        Err(DmaError::Unsupported(refuse!(
             "T6000 context route has a faulting incoming SID alternative"
-        ))
+        )))
     );
     let mut bytes = [0; 2];
     assert!(ram.read(FRAME, &mut bytes));

@@ -1,8 +1,10 @@
 use super::*;
+use crate::Result;
 use crate::platform::apple::agx::initdata::tests::{BASE, RINGS, ROOT, kext_root};
 use crate::platform::apple::agx::ring::tests::Flat;
 use crate::platform::apple::agx::ring::{READ, WRITE};
 use core::ops::Range;
+use stela_contracts::refuse;
 use stela_soc_data::agx::generation::{G13G, G13X, G14G, G14X, G15G, MAGIC_G13_G14G};
 
 fn doorbell_payload(kind: u64, low: u64) -> u64 {
@@ -75,6 +77,7 @@ fn native_power_constructor_keeps_the_concrete_family_and_callback_refusal() {
                     &mut outbox
                 )
                 .unwrap_err()
+                .to_string()
                 .contains("owned initdata")
         );
         firmware.protocol.0.borrow_mut().initdata_checked = true;
@@ -86,7 +89,9 @@ fn native_power_constructor_keeps_the_concrete_family_and_callback_refusal() {
                 },
                 &mut outbox
             ),
-            Err("GFX initialized IOP sleep requires complete config-derived native callbacks")
+            Err(refuse!(
+                "GFX initialized IOP sleep requires complete config-derived native callbacks"
+            ))
         );
         assert!(outbox.is_empty());
         if family == &G13G || family == &G14G {
@@ -98,7 +103,13 @@ fn native_power_constructor_keeps_the_concrete_family_and_callback_refusal() {
             let mut latch = InterruptLatch::new();
             let mut access = Access::new(0, 0, &mut latch);
             sgx.write(0xd04074, Width::Word, 1, &mut access).unwrap();
-            assert!(firmware.reset().unwrap_err().contains("restore ownership"));
+            assert!(
+                firmware
+                    .reset()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("restore ownership")
+            );
             assert_eq!(
                 firmware.protocol.with(|state| state.initdata_va),
                 Some(ROOT)
@@ -143,7 +154,9 @@ fn native_power_refusal_is_atomic_before_and_after_startup_for_every_modeled_fam
             ] {
                 assert_eq!(
                     firmware.receive(message, &mut outbox),
-                    Err("GFX application message while the IOP is not awake")
+                    Err(refuse!(
+                        "GFX application message while the IOP is not awake"
+                    ))
                 );
             }
             assert!(!firmware.dma_pending());
@@ -209,7 +222,7 @@ fn with_device_control(entries: &[[u8; 0x40]]) -> (State, Flat) {
 fn with_device_control_on(
     family: &'static Family,
     entries: &[[u8; 0x40]],
-) -> Result<(State, Flat), &'static str> {
+) -> Result<(State, Flat)> {
     let mut memory = Flat::new(BASE, 0x20000);
     kext_root(&mut memory);
     if let Some(magic) = family.initdata_magic {
@@ -244,13 +257,13 @@ struct StartupMemory {
 }
 
 impl Shared for StartupMemory {
-    fn read(&mut self, va: u64, data: &mut [u8]) -> Result<(), &'static str> {
+    fn read(&mut self, va: u64, data: &mut [u8]) -> Result<()> {
         self.reads += 1;
         self.flat.read(va, data)
     }
-    fn write(&mut self, va: u64, data: &[u8]) -> Result<(), &'static str> {
+    fn write(&mut self, va: u64, data: &[u8]) -> Result<()> {
         if self.fail_at == Some(self.writes.len()) {
-            return Err("startup status write fault");
+            return Err(refuse!("startup status write fault"));
         }
         self.flat.write(va, data)?;
         self.writes
@@ -301,7 +314,7 @@ fn cold_start_status_owns_each_committed_word_across_faults_for_every_modeled_fa
                 .unwrap();
             assert_eq!(
                 protocol.0.borrow_mut().dma(&mut memory, &mut outbox),
-                Err("startup status write fault")
+                Err(refuse!("startup status write fault"))
             );
             assert_eq!(memory.writes.len(), fault);
             assert!(outbox.is_empty());
@@ -350,7 +363,7 @@ fn cold_start_status_owns_each_committed_word_across_faults_for_every_modeled_fa
                 .unwrap();
             assert_eq!(
                 protocol.0.borrow_mut().dma(&mut memory, &mut outbox),
-                Err("GFX initdata root lacks its magic")
+                Err(refuse!("GFX initdata root lacks its magic"))
             );
             assert_eq!(memory.writes, expected);
             kext_root(&mut memory.flat);
@@ -527,7 +540,7 @@ fn of_type(kind: u32) -> [u8; 0x40] {
 }
 
 /// Ring the device-control doorbell and run the firmware's DMA.
-fn ring(state: &mut State, memory: &mut Flat) -> Result<(), &'static str> {
+fn ring(state: &mut State, memory: &mut Flat) -> Result<()> {
     state.doorbell(doorbell_payload(DOORBELL_FWCTL, 0x11))?;
     state.dma(memory, &mut Vec::new())
 }
@@ -690,7 +703,7 @@ fn dsid_deprioritize_clears_the_slot_and_writes_the_completion_word() {
     memory.put_u32(CONTROL_STATE + WRITE, 1);
     assert_eq!(
         ring(&mut bare, &mut memory),
-        Err("GFX ring directory names no HWDSID table")
+        Err(refuse!("GFX ring directory names no HWDSID table"))
     );
     assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(0));
 }
@@ -785,7 +798,12 @@ fn device_control_needing_a_missing_unit_refuses_by_name() {
         (0x26, "host-allocation"),
     ] {
         let (mut state, mut memory) = with_device_control(&[of_type(kind)]);
-        assert!(ring(&mut state, &mut memory).unwrap_err().contains(reason));
+        assert!(
+            ring(&mut state, &mut memory)
+                .unwrap_err()
+                .to_string()
+                .contains(reason)
+        );
         assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(0));
         assert_eq!(memory.read_u32(count()), Ok(0));
     }
@@ -793,7 +811,9 @@ fn device_control_needing_a_missing_unit_refuses_by_name() {
     for kind in [0, 1, 2, 3, 6, 0x1d, 0x20, 0x3c, 0x40] {
         assert_eq!(
             device_control_entry(&of_type(kind)),
-            Err("GFX device-control type is not one the 26A434 kext sends")
+            Err(refuse!(
+                "GFX device-control type is not one the 26A434 kext sends"
+            ))
         );
     }
 }
@@ -810,6 +830,7 @@ fn unmodeled_device_control_stays_unconsumed_and_refuses_by_name() {
         state
             .dma(&mut memory, &mut Vec::new())
             .unwrap_err()
+            .to_string()
             .contains("host-allocation")
     );
     // The power notice before it was retired; the memory event was not.
@@ -843,7 +864,7 @@ fn unexecuted_work_refuses_rather_than_completing() {
     // The entry names no channel yet.
     assert_eq!(
         state.dma(&mut memory, &mut Vec::new()),
-        Err("GFX data-master entry names no channel state")
+        Err(refuse!("GFX data-master entry names no channel state"))
     );
     // A channel whose next command is a 3D command.
     let (channel_state, command) = (BASE + 0xd000, BASE + 0x10000);
@@ -854,7 +875,7 @@ fn unexecuted_work_refuses_rather_than_completing() {
     memory.put_u32(command + 0x1000, 7);
     assert_eq!(
         state.dma(&mut memory, &mut Vec::new()),
-        Err("GFX 3D command (type 1) is not executed")
+        Err(refuse!("GFX 3D command (type 1) is not executed"))
     );
     assert_eq!(memory.read_u32(ring_state + READ), Ok(0));
     assert_eq!(memory.read_u32(channel_state + 0x1000), Ok(0));
@@ -877,11 +898,13 @@ fn each_family_reads_its_own_root_and_g13_refuses_dashboard_signals() {
         .unwrap();
     assert_eq!(
         g14x.dma(&mut memory, &mut Vec::new()),
-        Err("GFX initdata root lacks its magic")
+        Err(refuse!("GFX initdata root lacks its magic"))
     );
     assert_eq!(
         with_device_control_on(&G16X, &[]).err(),
-        Some("the GPU family's initdata root magic is not recovered")
+        Some(refuse!(
+            "the GPU family's initdata root magic is not recovered"
+        ))
     );
     let (mut state, mut memory) = with_device_control_on(&G13G, &[]).unwrap();
     assert!(state.root.is_some());
@@ -891,9 +914,9 @@ fn each_family_reads_its_own_root_and_g13_refuses_dashboard_signals() {
     state.doorbell(work(1, 0)).unwrap();
     assert_eq!(
         state.dma(&mut memory, &mut Vec::new()),
-        Err(
+        Err(refuse!(
             "GFX dashboard signal command: this GPU family's firmware has no dashboard-signal handler"
-        )
+        ))
     );
     assert_eq!(memory.read_u32(ring_state + READ), Ok(0));
     assert_eq!(memory.read_u32(channel_state + 0x1000), Ok(0));
@@ -995,17 +1018,17 @@ struct WorkMemory {
 }
 
 impl Shared for WorkMemory {
-    fn read(&mut self, va: u64, out: &mut [u8]) -> Result<(), &'static str> {
+    fn read(&mut self, va: u64, out: &mut [u8]) -> Result<()> {
         if self.fail_read == Some(va) {
             self.fail_read = None;
-            return Err("injected work input read fault");
+            return Err(refuse!("injected work input read fault"));
         }
         self.flat.read(va, out)
     }
-    fn write(&mut self, va: u64, data: &[u8]) -> Result<(), &'static str> {
+    fn write(&mut self, va: u64, data: &[u8]) -> Result<()> {
         if self.fail_write == Some(self.writes.len()) {
             self.fail_write = None;
-            return Err("injected work publication write fault");
+            return Err(refuse!("injected work publication write fault"));
         }
         self.flat.write(va, data)?;
         self.writes.push((va, data.to_vec()));
@@ -1102,7 +1125,7 @@ fn accepted_device_controls_keep_all_effects_count_and_retirement_on_every_famil
                 };
                 assert_eq!(
                     state.dma(&mut memory, &mut Vec::new()),
-                    Err("injected work publication write fault")
+                    Err(refuse!("injected work publication write fault"))
                 );
                 assert!(state.dma_pending());
                 assert_eq!(memory.writes.len(), failed_write);
@@ -1143,7 +1166,7 @@ fn dsid_priority_read_fault_preserves_the_source_ordered_store_and_accepted_iden
         };
         assert_eq!(
             state.dma(&mut memory, &mut Vec::new()),
-            Err("injected work input read fault")
+            Err(refuse!("injected work input read fault"))
         );
         assert_eq!(memory.writes, [(slot, 5u32.to_le_bytes().to_vec())]);
         assert_eq!(memory.flat.read_u32(slot), Ok(5));
@@ -1191,7 +1214,7 @@ fn dsid_control_refuses_wrapped_table_pointers_and_complete_slot_extents_without
                 assert_eq!(
                     ActiveControl::accept(&mut memory, &root, layout, descriptor, 0, &entry)
                         .unwrap_err(),
-                    "GFX HWDSID table pointer wraps"
+                    refuse!("GFX HWDSID table pointer wraps")
                 );
                 assert!(memory.writes.is_empty());
             }
@@ -1204,6 +1227,7 @@ fn dsid_control_refuses_wrapped_table_pointers_and_complete_slot_extents_without
                 assert!(
                     ActiveControl::accept(&mut memory, original, layout, descriptor, 0, &entry)
                         .unwrap_err()
+                        .to_string()
                         .contains("table slot")
                 );
                 assert!(memory.writes.is_empty());
@@ -1230,7 +1254,7 @@ fn dsid_priority_captured_match_survives_faults_with_overlapping_completion_targ
         memory.flat.put_u32(CONTROL_ENTRIES + 0xc, 0x900);
         assert_eq!(
             state.dma(&mut memory, &mut Vec::new()),
-            Err("injected work publication write fault")
+            Err(refuse!("injected work publication write fault"))
         );
         memory
             .flat
@@ -1265,7 +1289,7 @@ fn a_device_control_pre_effect_input_fault_accepts_no_entry() {
     };
     assert_eq!(
         state.dma(&mut memory, &mut Vec::new()),
-        Err("injected work input read fault")
+        Err(refuse!("injected work input read fault"))
     );
     assert!(memory.writes.is_empty() && state.active_control.is_none());
     assert!(state.device_control.is_empty());
@@ -1284,7 +1308,7 @@ fn device_control_counter_read_and_write_have_separate_kept_phases() {
     };
     assert_eq!(
         state.dma(&mut memory, &mut Vec::new()),
-        Err("injected work input read fault")
+        Err(refuse!("injected work input read fault"))
     );
     assert_eq!(memory.writes.len(), 1); // timeout effect precedes common-tail count read
     assert_eq!(memory.flat.read_u32(BASE + 0x1f038), Ok(1));
@@ -1292,13 +1316,13 @@ fn device_control_counter_read_and_write_have_separate_kept_phases() {
     memory.fail_write = Some(1); // fail the counter write after capturing its wraparound result
     assert_eq!(
         state.dma(&mut memory, &mut Vec::new()),
-        Err("injected work publication write fault")
+        Err(refuse!("injected work publication write fault"))
     );
     memory.flat.put_u32(count, 777);
     memory.fail_write = Some(2); // commit captured count, then fail final retirement
     assert_eq!(
         state.dma(&mut memory, &mut Vec::new()),
-        Err("injected work publication write fault")
+        Err(refuse!("injected work publication write fault"))
     );
     assert_eq!(memory.flat.read_u32(count), Ok(0));
     assert_eq!(state.device_control.get(&0x27), Some(&1));
@@ -1345,7 +1369,7 @@ fn accepted_signal_actions_survive_every_publication_fault_without_replay() {
             let mut outbox = Vec::new();
             assert_eq!(
                 state.dma(&mut memory, &mut outbox),
-                Err("injected work publication write fault")
+                Err(refuse!("injected work publication write fault"))
             );
             assert_eq!(memory.writes.len(), failed_write);
             assert!(state.dma_pending());
@@ -1474,7 +1498,7 @@ fn submitted_tail_stops_before_later_commands_including_wrap_and_empty_intervals
             state.doorbell(work(1, 0)).unwrap();
             assert_eq!(
                 state.dma(&mut memory, &mut outbox),
-                Err("GFX 3D command (type 1) is not executed")
+                Err(refuse!("GFX 3D command (type 1) is not executed"))
             );
             assert_eq!(memory.read_u32(master), Ok(2));
             assert_eq!(memory.read_u32(queue), Ok(u32::from(target)));
@@ -1502,7 +1526,7 @@ fn wrapped_submission_keeps_its_tail_after_final_retirement_fault_and_late_appen
     let mut outbox = Vec::new();
     assert_eq!(
         state.dma(&mut memory, &mut outbox),
-        Err("injected work publication write fault")
+        Err(refuse!("injected work publication write fault"))
     );
     assert_eq!(memory.flat.read_u32(queue), Ok(0));
     assert_eq!(memory.flat.read_u32(master), Ok(0));
@@ -1537,6 +1561,7 @@ fn submitted_tail_refuses_unpublished_or_out_of_range_pointers_before_effects() 
             state
                 .dma(&mut memory, &mut Vec::new())
                 .unwrap_err()
+                .to_string()
                 .contains("submitted command tail")
         );
         assert!(memory.writes.is_empty());
@@ -1557,7 +1582,7 @@ fn signal_scalar_crossing_a_uat_page_refuses_before_signal_effects() {
     memory.flat.put_u64(OWNED_STREAM + 0x28, BASE + 0x1bffc);
     assert_eq!(
         state.dma(&mut memory, &mut Vec::new()),
-        Err("GFX scalar publication crosses a UAT page")
+        Err(refuse!("GFX scalar publication crosses a UAT page"))
     );
     assert_eq!(memory.writes.len(), 2); // accepted master tail only
     assert_eq!((state.commands, state.events), (0, 0));
@@ -1640,7 +1665,7 @@ fn failed_signal_acceptance_keeps_only_the_accepted_master_tail() {
     let mut outbox = Vec::new();
     assert_eq!(
         state.dma(&mut memory, &mut outbox),
-        Err("injected work input read fault")
+        Err(refuse!("injected work input read fault"))
     );
     assert_eq!(memory.writes.len(), 2);
     assert!(outbox.is_empty());
@@ -1650,6 +1675,7 @@ fn failed_signal_acceptance_keeps_only_the_accepted_master_tail() {
         state
             .dma(&mut memory, &mut outbox)
             .unwrap_err()
+            .to_string()
             .contains("mask bit 3")
     );
     assert_eq!(memory.writes.len(), 2);
@@ -1720,7 +1746,7 @@ fn the_root_must_be_the_kexts_before_any_doorbell_runs() {
         .unwrap();
     assert_eq!(
         state.dma(&mut memory, &mut Vec::new()),
-        Err("GFX initdata root lacks its magic")
+        Err(refuse!("GFX initdata root lacks its magic"))
     );
     assert!(state.dma_pending());
     let mut early = State::new(&G14G);

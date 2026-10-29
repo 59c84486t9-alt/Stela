@@ -9,8 +9,10 @@
 
 mod reports;
 mod run;
+use crate::Result;
 use reports::*;
 use run::*;
+use stela_contracts::refuse;
 mod start;
 pub(crate) use start::entry;
 mod aml;
@@ -141,37 +143,49 @@ impl core::ops::DerefMut for Options {
 /// final three characters. The product model already has its own root property,
 /// so omit its duplicate from `compatible` if the new development alias needs
 /// that space. Preserve the original board and platform compatibility strings.
-fn development_restore_hardware_model(tree: &mut DeviceTree) -> Result<String, String> {
+fn development_restore_hardware_model(tree: &mut DeviceTree) -> Result<String> {
     let value = tree
         .property("/", "target-sub-type")
         .filter(|property| !property.placeholder)
-        .ok_or("the selected Apple board has no concrete target-sub-type")?
+        .ok_or(refuse!(
+            "the selected Apple board has no concrete target-sub-type"
+        ))?
         .value
         .clone();
     let compatible = tree
         .property("/", "compatible")
         .filter(|property| !property.placeholder)
-        .ok_or("the selected Apple board has no concrete compatible list")?
+        .ok_or(refuse!(
+            "the selected Apple board has no concrete compatible list"
+        ))?
         .value
         .clone();
     let product = tree
         .property("/", "model")
         .filter(|property| !property.placeholder)
         .and_then(|property| property.as_str())
-        .ok_or("the selected Apple board has no concrete product model")?
+        .ok_or(refuse!(
+            "the selected Apple board has no concrete product model"
+        ))?
         .as_bytes()
         .to_vec();
     let value = value.as_slice();
     let Some(value) = value.strip_suffix(&[0]) else {
-        return Err("the selected Apple board target-sub-type is not NUL terminated".into());
+        return Err(refuse!(
+            "the selected Apple board target-sub-type is not NUL terminated"
+        ));
     };
     if value.is_empty() || value.contains(&0) {
-        return Err("the selected Apple board target-sub-type is not one string".into());
+        return Err(refuse!(
+            "the selected Apple board target-sub-type is not one string"
+        ));
     }
     let target = core::str::from_utf8(value)
-        .map_err(|_| "the selected Apple board target-sub-type is not UTF-8")?;
+        .map_err(|_| refuse!("the selected Apple board target-sub-type is not UTF-8"))?;
     if !target.is_ascii() || target.len() < 4 {
-        return Err("the selected Apple board target-sub-type is not a hardware model".into());
+        return Err(refuse!(
+            "the selected Apple board target-sub-type is not a hardware model"
+        ));
     }
     let target = if target.ends_with("DEV") {
         String::from(target)
@@ -192,10 +206,12 @@ fn development_restore_hardware_model(tree: &mut DeviceTree) -> Result<String, S
         .filter(|entry| !entry.is_empty())
         .collect();
     let Some((hardware, rest)) = entries.split_first() else {
-        return Err("the selected Apple board compatible list is empty".into());
+        return Err(refuse!("the selected Apple board compatible list is empty"));
     };
     if *hardware != value {
-        return Err("the selected Apple board hardware model is not first in compatible".into());
+        return Err(refuse!(
+            "the selected Apple board hardware model is not first in compatible"
+        ));
     }
     let mut development_compatible = Vec::with_capacity(compatible.len());
     development_compatible.extend_from_slice(target.as_bytes());
@@ -207,20 +223,20 @@ fn development_restore_hardware_model(tree: &mut DeviceTree) -> Result<String, S
         development_compatible.push(0);
     }
     if development_compatible.len() > compatible.len() {
-        return Err(
-            "the selected Apple board compatible slot cannot hold a development alias".into(),
-        );
+        return Err(refuse!(
+            "the selected Apple board compatible slot cannot hold a development alias"
+        ));
     }
     development_compatible.resize(compatible.len(), 0);
     tree.set_property("/", "target-sub-type", encoded)
-        .map_err(|error| format!("development target-sub-type: {error}"))?;
+        .map_err(|error| refuse!("development target-sub-type: {error}", %error))?;
     tree.set_property("/", "compatible", development_compatible)
-        .map_err(|error| format!("development compatible list: {error}"))?;
+        .map_err(|error| refuse!("development compatible list: {error}", %error))?;
     Ok(target)
 }
 
 impl Options {
-    fn parse(text: &str) -> Result<Self, &'static str> {
+    fn parse(text: &str) -> Result<Self> {
         Ok(Self {
             system: System::parse_resolved(text)
                 .map_err(stela_boot_core::options::Error::message)?,
@@ -311,7 +327,7 @@ unsafe fn enable_doit() -> bool {
 /// the host's whole RAM as the Mac's, so what Stela and the firmware keep
 /// shows as memory the kernel does not manage
 /// (`docs/design/system.md#memory-sizing`).
-fn guest_ram(handoff: &Handoff, options: &mut Options) -> Result<Vec<RamRange>, &'static str> {
+fn guest_ram(handoff: &Handoff, options: &mut Options) -> Result<Vec<RamRange>> {
     let mut ranges = Vec::new();
     let mut assigned = 0;
     for region in &handoff.guest[..handoff.guest_count] {
@@ -323,7 +339,7 @@ fn guest_ram(handoff: &Handoff, options: &mut Options) -> Result<Vec<RamRange>, 
         assigned += region.bytes;
     }
     if assigned < LARGE {
-        return Err("no free host RAM is left for the guest");
+        return Err(refuse!("no free host RAM is left for the guest"));
     }
     options.ram_bytes = assigned;
     options.dram_bytes = (handoff.installed & !(LARGE - 1)).max(assigned);
@@ -430,7 +446,7 @@ fn devices(
     board: Option<&board::Board>,
     inputs: mount::Inputs<'_>,
     memory: Option<mount::MemoryResources>,
-) -> Result<(AppleDevices, Option<stela_runtime::machine::apple::UsbId>), String> {
+) -> Result<(AppleDevices, Option<stela_runtime::machine::apple::UsbId>)> {
     if let Some(board) = board {
         return mount::devices_with_memory(
             board,
@@ -441,15 +457,17 @@ fn devices(
         );
     }
     if memory.is_some() {
-        return Err(String::from(
-            "native board memory requires a live assigned DeviceTree",
+        return Err(refuse!(
+            "native board memory requires a live assigned DeviceTree"
         ));
     }
     if inputs.backing.is_some() {
-        return Err("--storage was supplied but this DeviceTree exposes no modeled ANS2".into());
+        return Err(refuse!(
+            "--storage was supplied but this DeviceTree exposes no modeled ANS2"
+        ));
     }
     if inputs.restore {
-        return Err("restore study requires a DT-placed USB device".into());
+        return Err(refuse!("restore study requires a DT-placed USB device"));
     }
     let place = |(offset, bytes, irq): (u64, u64, u32)| {
         (
@@ -464,10 +482,10 @@ fn devices(
     let mut devices = AppleDevices::new();
     devices
         .add_uart(GuestConsole::default(), &[uart.0], Some(uart.1))
-        .map_err(|error| alloc::format!("UART placement: {error:?}"))?;
+        .map_err(|error| refuse!("UART placement: {error}", ?error))?;
     devices
         .add_watchdog_with_side(wdt.0, None, Some(wdt.1), inputs.now)
-        .map_err(|error| alloc::format!("watchdog placement: {error:?}"))?;
+        .map_err(|error| refuse!("watchdog placement: {error}", ?error))?;
     devices.add_aic(
         ARM_IO + J473_AIC.0,
         J473_AIC.1,
@@ -707,7 +725,7 @@ fn run_machine<H: Host>(
         guest_network,
         host_nor,
         power::HostPowerControl::new(
-            handoff.power,
+            handoff.power.clone(),
             host_acpi,
             power::EfiReset::new(handoff.efi_reset, handoff.root),
             handoff.tsc_hz,

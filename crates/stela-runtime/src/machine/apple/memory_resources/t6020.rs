@@ -4,14 +4,17 @@
 //! their service/interrupt state is not inferred from the original ADT's
 //! physical capacity. Construction is not native PMP admission, a cache grant
 //! or a source-supported initial CPU/PMGR handoff. Root owns those joins.
+use crate::Result;
 use crate::platform::apple::amcc::Amcc;
 use crate::platform::apple::mcc::t6020::Configuration;
 use crate::platform::apple::mcc::t6020::Controller;
 use crate::platform::apple::mcc::t6020::View;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use stela_soc_data::board::MemoryController;
 use stela_soc_data::board::T6020Memory;
 
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use stela_contracts::bus::Access;
 use stela_contracts::bus::Direction;
 use stela_contracts::bus::Lifecycle;
@@ -55,9 +58,9 @@ impl Prepared {
         configuration: Configuration,
         lifecycle: LifecycleState,
         ram: Arc<RegisteredSystemRam>,
-    ) -> Result<Self, String> {
-        descriptor.validate(&source_locks).map_err(String::from)?;
-        validate_ram(&descriptor, &source_locks, programmed, &ram).map_err(String::from)?;
+    ) -> Result<Self> {
+        descriptor.validate(&source_locks)?;
+        validate_ram(&descriptor, &source_locks, programmed, &ram)?;
         if source_locks.layout.cache_status
             != Some(stela_soc_data::amcc::Register {
                 offset: stela_soc_data::mcc::t6020::CACHE_STATUS,
@@ -65,16 +68,11 @@ impl Prepared {
                 value: 0,
             })
         {
-            return Err(
-                "T602x AMCC cache-status field differs from its original source map".into(),
-            );
+            return Err(refuse!(
+                "T602x AMCC cache-status field differs from its original source map"
+            ));
         }
-        let controller = Controller::initialized(
-            descriptor.layout().map_err(String::from)?,
-            configuration,
-            lifecycle,
-        )
-        .map_err(String::from)?;
+        let controller = Controller::initialized(descriptor.layout()?, configuration, lifecycle)?;
         let registers = controller.register_offsets();
         let mut lock_layout = source_locks.layout;
         // A standalone AMCC disabled-bit image must not answer for this
@@ -96,20 +94,20 @@ impl Prepared {
                     if registers
                         .contains(&(register.offset + u64::from(plane) * lock_layout.stride))
                     {
-                        return Err("T602x controller and AMCC lock registers overlap without a shared protocol".into());
+                        return Err(refuse!(
+                            "T602x controller and AMCC lock registers overlap without a shared protocol"
+                        ));
                     }
                 }
             }
         }
-        let locks = Amcc::new(lock_layout, descriptor.apertures.len(), programmed, None)
-            .map_err(String::from)?;
+        let locks = Amcc::new(lock_layout, descriptor.apertures.len(), programmed, None)?;
         let views = (0..descriptor.apertures.len())
             .map(|index| controller.view(index))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(String::from)?;
+            .collect::<Result<Vec<_>, _>>()?;
         let generation = ram
             .generation()
-            .map_err(|_| "T602x canonical RAM generation is not live")?;
+            .map_err(|_| refuse!("T602x canonical RAM generation is not live"))?;
         Ok(Self {
             descriptor,
             source_locks,
@@ -166,31 +164,35 @@ impl Prepared {
             PTD_OFFSET,
         )
     }
-    fn live_generation(&self) -> Result<(), &'static str> {
+    fn live_generation(&self) -> Result<()> {
         if self
             .ram
             .generation()
-            .map_err(|_| "T602x canonical RAM is not live")?
+            .map_err(|_| refuse!("T602x canonical RAM is not live"))?
             != self.generation
         {
-            return Err("T602x canonical RAM generation changed");
+            return Err(refuse!("T602x canonical RAM generation changed"));
         }
         Ok(())
     }
-    fn live(&self) -> Result<(), &'static str> {
+    fn live(&self) -> Result<()> {
         self.live_generation()?;
         let state = self.controller.lifecycle_state();
         if !state.powered || !state.clocked || state.quiesced || state.reset {
-            return Err("T602x memory frontend is paused by its actual owner");
+            return Err(refuse!(
+                "T602x memory frontend is paused by its actual owner"
+            ));
         }
         Ok(())
     }
-    fn target(&self, offset: u64) -> Result<(usize, u64), &'static str> {
+    fn target(&self, offset: u64) -> Result<(usize, u64)> {
         self.live()?;
         let index = usize::try_from(offset / stela_soc_data::mcc::t6020::APERTURE_BYTES)
-            .map_err(|_| "T602x aperture index overflows")?;
+            .map_err(|_| refuse!("T602x aperture index overflows"))?;
         if index >= self.views.len() {
-            return Err("T602x access is outside its actual controller apertures");
+            return Err(refuse!(
+                "T602x access is outside its actual controller apertures"
+            ));
         }
         Ok((index, offset % stela_soc_data::mcc::t6020::APERTURE_BYTES))
     }
@@ -211,18 +213,22 @@ impl Prepared {
         offset: u64,
         width: Width,
         memory: &CanonicalRamService<'_>,
-    ) -> Result<u64, &'static str> {
+    ) -> Result<u64> {
         if !self.requires_ram_read(offset, width) {
-            return Err("T602x canonical read is not a source DCS drain word");
+            return Err(refuse!(
+                "T602x canonical read is not a source DCS drain word"
+            ));
         }
         if !memory.belongs_to(&self.ram) {
-            return Err("T602x drain borrowed a different actual canonical RAM owner");
+            return Err(refuse!(
+                "T602x drain borrowed a different actual canonical RAM owner"
+            ));
         }
         memory
             .validate_current()
-            .map_err(|_| "T602x drain lost its actual RAM/writer hold")?;
+            .map_err(|_| refuse!("T602x drain lost its actual RAM/writer hold"))?;
         if memory.generation() != self.generation {
-            return Err("T602x drain borrowed a different RAM generation");
+            return Err(refuse!("T602x drain borrowed a different RAM generation"));
         }
         let (aperture, within) = self.target(offset)?;
         self.controller
@@ -240,11 +246,13 @@ impl Prepared {
         value: u64,
         now: u64,
         memory: &CanonicalRamService<'_>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         // SAFETY: caller holds this exact canonical RAM and producer cohort.
         let expected = unsafe { self.read_ram_drain(offset, width, memory) }?;
         if value != expected {
-            return Err("T602x flush must preserve high16 and clear low16 without truncation");
+            return Err(refuse!(
+                "T602x flush must preserve high16 and clear low16 without truncation"
+            ));
         }
         let (aperture, within) = self.target(offset)?;
         self.controller
@@ -257,11 +265,13 @@ fn validate_ram(
     locks: &MemoryController,
     programmed: stela_soc_data::amcc::Programmed,
     ram: &RegisteredSystemRam,
-) -> Result<(), &'static str> {
+) -> Result<()> {
     let mut regions = ram.placements().collect::<Vec<_>>();
     regions.sort_by_key(|&(source, _, _)| source);
     if regions.is_empty() {
-        return Err("T602x memory requires actual registered RAM reservations");
+        return Err(refuse!(
+            "T602x memory requires actual registered RAM reservations"
+        ));
     }
     let mut mmio = descriptor
         .apertures
@@ -275,33 +285,34 @@ fn validate_ram(
     for &(source, _, bytes) in &regions {
         let end = source
             .checked_add(bytes as u64)
-            .ok_or("T602x canonical RAM wraps")?;
+            .ok_or(refuse!("T602x canonical RAM wraps"))?;
         if mmio.iter().any(|&(pa, size)| {
             pa.checked_add(size)
                 .is_none_or(|top| pa < end && source < top)
         }) {
-            return Err("T602x MMIO overlaps its actual canonical RAM");
+            return Err(refuse!("T602x MMIO overlaps its actual canonical RAM"));
         }
     }
     for (index, range) in programmed.into_iter().enumerate() {
         let Some((base, bytes)) = range else {
             continue;
         };
-        let group = locks.layout.groups[index].ok_or("T602x programmed an absent lock group")?;
+        let group =
+            locks.layout.groups[index].ok_or(refuse!("T602x programmed an absent lock group"))?;
         let page = 1u64
             .checked_shl(group.page_size_shift)
-            .ok_or("T602x lock page shift is invalid")?;
+            .ok_or(refuse!("T602x lock page shift is invalid"))?;
         let end = base
             .checked_add(bytes)
-            .ok_or("T602x programmed lock wraps")?;
+            .ok_or(refuse!("T602x programmed lock wraps"))?;
         if bytes == 0 || !base.is_multiple_of(page) || !bytes.is_multiple_of(page) {
-            return Err("T602x programmed lock is empty or unaligned");
+            return Err(refuse!("T602x programmed lock is empty or unaligned"));
         }
         let mut cursor = base;
         for &(source, _, bytes) in &regions {
             let top = source
                 .checked_add(bytes as u64)
-                .ok_or("T602x canonical RAM wraps")?;
+                .ok_or(refuse!("T602x canonical RAM wraps"))?;
             if source <= cursor && cursor < top {
                 cursor = end.min(top);
             }
@@ -310,14 +321,16 @@ fn validate_ram(
             }
         }
         if cursor != end {
-            return Err("T602x programmed lock is not backed by the same actual RAM");
+            return Err(refuse!(
+                "T602x programmed lock is not backed by the same actual RAM"
+            ));
         }
     }
     Ok(())
 }
 
 impl Lifecycle for Prepared {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         self.live_generation()?;
         self.views[0].check_lifecycle(proposed)
     }
@@ -339,19 +352,19 @@ impl MmioDevice for Prepared {
         width: Width,
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         self.live().map_err(fail)?;
         if offset >= PTD_OFFSET {
-            return Err(fail(
-                "T602x PTD/auxiliary register and interrupt effects require their qualified source owner",
-            ));
+            return Err(fail(refuse!(
+                "T602x PTD/auxiliary register and interrupt effects require their qualified source owner"
+            )));
         }
         let (index, within) = self.target(offset).map_err(fail)?;
         if self.registers.contains(&within) {
             return self.views[index].read(within, width, access);
         }
         if within >= self.source_locks.layout.aperture_bytes {
-            return Err(fail("T602x register effect is not qualified"));
+            return Err(fail(refuse!("T602x register effect is not qualified")));
         }
         self.locks.read(
             index as u64 * self.source_locks.layout.aperture_bytes + within,
@@ -366,19 +379,19 @@ impl MmioDevice for Prepared {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         self.live().map_err(fail)?;
         if offset >= PTD_OFFSET {
-            return Err(fail(
-                "T602x PTD/auxiliary register and interrupt effects require their qualified source owner",
-            ));
+            return Err(fail(refuse!(
+                "T602x PTD/auxiliary register and interrupt effects require their qualified source owner"
+            )));
         }
         let (index, within) = self.target(offset).map_err(fail)?;
         if self.registers.contains(&within) {
             return self.views[index].write(within, width, value, access);
         }
         if within >= self.source_locks.layout.aperture_bytes {
-            return Err(fail("T602x register effect is not qualified"));
+            return Err(fail(refuse!("T602x register effect is not qualified")));
         }
         self.locks.write(
             index as u64 * self.source_locks.layout.aperture_bytes + within,
@@ -394,16 +407,16 @@ impl crate::machine::apple::AppleDevices {
     /// bank even where its operations refuse. This is structural placement:
     /// a source power join, native topology and controller/PMP effects remain
     /// separate requirements before a production mount may adopt this owner.
-    pub fn add_t6020_memory_resources(&mut self, owner: Prepared) -> Result<(), String> {
+    pub fn add_t6020_memory_resources(&mut self, owner: Prepared) -> Result<()> {
         if self.memory_controller.is_some() || self.memory_publication.is_some() {
-            return Err("T602x memory already has an actual owner".into());
+            return Err(refuse!("T602x memory already has an actual owner"));
         }
-        owner.live_generation().map_err(String::from)?;
+        owner.live_generation()?;
         let bindings = owner.bindings();
         let id = self
             .bus
             .install(alloc::boxed::Box::new(owner), &bindings)
-            .map_err(|error| alloc::format!("T602x joint memory placement: {error:?}"))?;
+            .map_err(|error| refuse!("T602x joint memory placement: {error}", ?error))?;
         self.memory_controller = Some(id);
         // The owned bank is visible through the joint resource, but no
         // implemented PTD publication/interrupt service has been supplied.

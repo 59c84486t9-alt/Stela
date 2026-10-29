@@ -7,6 +7,7 @@ use super::{Framebuffer, encoding};
 use crate::output::{self, Global};
 use alloc::{format, string::String, vec::Vec};
 use core::cell::RefCell;
+use stela_contracts::refuse;
 use stela_runtime::pc::display;
 use uefi::{
     Handle,
@@ -104,11 +105,11 @@ fn choose(handle: Handle, gop: &mut GraphicsOutput) {
     let chosen = if choice.index == current {
         Ok(())
     } else if gop.set_mode(&mode).is_err() {
-        Err("the firmware refused it")
+        Err(refuse!("the firmware refused it"))
     } else if Framebuffer::current(gop).is_none() {
         // The mode was set; go back to the firmware's.
         let _ = firmware.map(|firmware| gop.set_mode(&firmware));
-        Err("its framebuffer is too small for it")
+        Err(refuse!("its framebuffer is too small for it"))
     } else {
         Ok(())
     };

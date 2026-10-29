@@ -4,6 +4,8 @@
 //! words at 1d68, then compares the eight bytes at 2268. Helpers 418..4ec
 //! implement two compression/four final SipHash rounds. This is the firmware's
 //! integrity check, not a certificate, silicon identity or execution receipt.
+use crate::Result;
+use stela_contracts::refuse;
 
 const INITIAL: core::ops::Range<usize> = 0x1d68..0x1d88;
 const CONFIGURATION: usize = 0x1d88;
@@ -22,15 +24,15 @@ pub(super) fn verify(
     configuration: usize,
     version: usize,
     metadata: u16,
-) -> Result<(), &'static str> {
+) -> Result<()> {
     if bytes.len() != BYTES
         || configuration != CONFIGURATION
         || version != VERSION
         || usize::from(metadata) != METADATA
     {
-        return Err(
-            "native Maverick firmware requires its complete source-qualified image ABI/load map",
-        );
+        return Err(refuse!(
+            "native Maverick firmware requires its complete source-qualified image ABI/load map"
+        ));
     }
     let initial = core::array::from_fn(|i| {
         u64::from_le_bytes(
@@ -41,7 +43,9 @@ pub(super) fn verify(
     });
     let expected = u64::from_le_bytes(bytes[TAG..BYTES].try_into().expect("image tag"));
     if configuration_tag(initial, &bytes[COVERED]) != expected {
-        return Err("native Maverick firmware configuration integrity tag mismatch");
+        return Err(refuse!(
+            "native Maverick firmware configuration integrity tag mismatch"
+        ));
     }
     Ok(())
 }

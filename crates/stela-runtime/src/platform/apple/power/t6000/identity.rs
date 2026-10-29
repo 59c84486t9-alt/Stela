@@ -8,6 +8,8 @@
 //! cache, native trigger or retirement. Those operations cannot mutate or
 //! replace it through this read interface.
 use alloc::{rc::Rc, vec::Vec};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -179,17 +181,23 @@ impl MmioDevice for Image {
         NAME
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |why| refuse(NAME, offset, width, Direction::Read, why);
+        let fail = |why: Refusal| refuse(NAME, offset, width, Direction::Read, why);
         if width != Width::Word {
-            return Err(fail("T6000 identity input reader width is not qualified"));
+            return Err(fail(refuse!(
+                "T6000 identity input reader width is not qualified"
+            )));
         }
         let register = Register::ALL
             .into_iter()
             .find(|register| register.address() == offset)
-            .ok_or_else(|| fail("T6000 physical identity input address is not qualified"))?;
+            .ok_or_else(|| {
+                fail(refuse!(
+                    "T6000 physical identity input address is not qualified"
+                ))
+            })?;
         self.raw(register)
             .map(u64::from)
-            .map_err(|error| fail(error.reason()))
+            .map_err(|error| fail(error.reason().into()))
     }
     fn write(
         &mut self,

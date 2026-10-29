@@ -19,6 +19,7 @@
 //! The detached lower halves of a few recent TTBR0s stay in their frames
 //! (`mmu::shadow::Kept`), and a switch back attaches its half again.
 use super::interrupts::{Frame, SPURIOUS_VECTOR, TIMER_VECTOR};
+use crate::Result;
 use crate::{
     apic::{self, Apic},
     layout,
@@ -27,6 +28,7 @@ use crate::{
 use alloc::{sync::Arc, vec::Vec};
 use core::arch::{asm, global_asm};
 use stela_compiler::{GuestState, block::BlockExit};
+use stela_contracts::refuse;
 use stela_engine::machine::FaultCause;
 use stela_engine::machine::Host;
 use stela_engine::machine::InstallError;
@@ -409,7 +411,7 @@ pub struct Config {
 /// physical reset/resume, microcode update or feature reconfiguration, including
 /// SMT-shared changes; reinstall and re-enumerate afterwards. ExitBootServices
 /// and CPUID do not prove that external promise or hardware validation.
-pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
+pub unsafe fn install(config: Config) -> Result<HostOwner> {
     let mut pool = Pool {
         base: config.pool_physical,
         bytes: config.pool_bytes,
@@ -424,15 +426,18 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
     }
     let (first, last) = layout::window_entries();
     if config.loader_tables.root() != config.window_root {
-        return Err("loader root descriptor differs from its original owner");
+        return Err(refuse!(
+            "loader root descriptor differs from its original owner"
+        ));
     }
-    let mut root = || -> Result<u64, &'static str> {
-        let frame = pool.permanent().ok_or("page-table pool too small")?;
+    let mut root = || -> Result<u64> {
+        let frame = pool
+            .permanent()
+            .ok_or(refuse!("page-table pool too small"))?;
         for entry in first..=last {
-            let value = config
-                .loader_tables
-                .boot_entry(entry)
-                .map_err(|_| "original loader table context changed before host installation")?;
+            let value = config.loader_tables.boot_entry(entry).map_err(|_| {
+                refuse!("original loader table context changed before host installation")
+            })?;
             // SAFETY: this processor's fresh permanent pool allocation.
             unsafe {
                 (layout::physical(frame) as *mut u64)

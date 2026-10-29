@@ -7,6 +7,7 @@
 //! four-level), leaves boot services, loads them, through the LA57
 //! trampoline when five-level, and calls the engine phase in the window. See
 //! `docs/design/system.md#host-placement`.
+use crate::Result;
 use crate::{
     console::Framebuffer,
     firmware,
@@ -23,6 +24,7 @@ use core::{
     ops::{Range, RangeInclusive},
 };
 use stela_boot_core::options::{DEFAULT_WIFI_KEY, System};
+use stela_contracts::refuse;
 use stela_engine::machine::mmu::placement::Placement;
 use stela_runtime::pc;
 use stela_runtime::pc::gpt::Guid;
@@ -102,15 +104,15 @@ pub fn take_snapshot() {
     }
 }
 
-fn low_page(kind: MemoryType) -> Result<u64, &'static str> {
+fn low_page(kind: MemoryType) -> Result<u64> {
     let page = boot::allocate_pages(AllocateType::MaxAddress(BELOW_4G), kind, 1)
-        .map_err(|_| "no page below 4 GiB for the page-table root")?;
+        .map_err(|_| refuse!("no page below 4 GiB for the page-table root"))?;
     // SAFETY: a fresh page owned by Stela.
     unsafe { page.as_ptr().write_bytes(0, PAGE as usize) };
     Ok(page.as_ptr() as u64)
 }
 
-fn allocate(bytes: u64) -> Result<Region, &'static str> {
+fn allocate(bytes: u64) -> Result<Region> {
     Ok(Region {
         physical: firmware::pages(bytes.div_ceil(PAGE) as usize)? as u64,
         bytes,
@@ -164,8 +166,8 @@ impl Sizes {
 /// The host RAM the guest and Stela's parts may take: the free and boot
 /// services ranges in whole 2 MiB pages, as the guest's ranges are found
 /// after boot services end.
-fn free_ram() -> Result<u64, &'static str> {
-    let map = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "no memory map")?;
+fn free_ram() -> Result<u64> {
+    let map = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| refuse!("no memory map"))?;
     Ok(map
         .entries()
         .filter(|entry| {
@@ -203,10 +205,10 @@ fn read32(base: usize, offset: usize) -> usize {
 }
 
 /// Apply the image's DIR64 base relocations for a move by `delta`.
-fn relocate(copy: usize, bytes: usize, delta: u64) -> Result<(), &'static str> {
+fn relocate(copy: usize, bytes: usize, delta: u64) -> Result<()> {
     let header = read32(copy, 0x3c);
     if read32(copy, header) != 0x4550 {
-        return Err("image copy is not PE");
+        return Err(refuse!("image copy is not PE"));
     }
     let optional = header + 24;
     let directory = optional + 112 + RELOCATION_DIRECTORY * 8;
@@ -215,13 +217,13 @@ fn relocate(copy: usize, bytes: usize, delta: u64) -> Result<(), &'static str> {
         read32(copy, directory) + read32(copy, directory + 4),
     );
     if end > bytes {
-        return Err("relocation directory outside the image");
+        return Err(refuse!("relocation directory outside the image"));
     }
     while block < end {
         let page = read32(copy, block);
         let size = read32(copy, block + 4);
         if size < 8 || block + size > end {
-            return Err("malformed relocation block");
+            return Err(refuse!("malformed relocation block"));
         }
         for entry in (block + 8..block + size).step_by(2) {
             // SAFETY: inside the relocation directory checked above.
@@ -234,7 +236,7 @@ fn relocate(copy: usize, bytes: usize, delta: u64) -> Result<(), &'static str> {
                     // SAFETY: a relocated pointer inside the copy.
                     unsafe { slot.write_unaligned(slot.read_unaligned().wrapping_add(delta)) };
                 }
-                _ => return Err("unsupported base relocation"),
+                _ => return Err(refuse!("unsupported base relocation")),
             }
         }
         block += size;
@@ -256,7 +258,7 @@ fn identity(
     root: u64,
     ram: &[(usize, usize)],
     special: &[(u64, u64, u64)],
-) -> Result<(), &'static str> {
+) -> Result<()> {
     let covered =
         |start: u64, end: u64| ram.iter().any(|r| r.0 as u64 <= start && end <= r.1 as u64);
     let top = ram.iter().map(|r| r.1 as u64).max().unwrap_or(0);
@@ -300,12 +302,12 @@ pub const INSTALL_PIECES_FILE: &str = "install-pieces.bin";
 /// engine builds the bundle from that disk with the host storage drivers,
 /// whose ranges are found here, as they are for every other option that
 /// opens a host controller: disks, the NOR store, input and the networks.
-fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str> {
-    let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
+fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs> {
+    let text = core::str::from_utf8(options).map_err(|_| refuse!("stela.cfg is not UTF-8"))?;
     let system = System::parse(text).map_err(stela_boot_core::options::Error::message)?;
     #[cfg(not(feature = "diagnostics"))]
     if system.diagnostic_option().is_some() {
-        return Err("diagnostic options require a diagnostics build");
+        return Err(refuse!("diagnostic options require a diagnostics build"));
     }
     // Read while the firmware's FAT driver runs; the engine reports a file
     // it cannot use.
@@ -352,7 +354,11 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
         system.restore_manifest_path.as_deref(),
         system.install.as_deref(),
     ) {
-        (Some(_), Some(_)) => return Err("--install and --restore-manifest name one inventory"),
+        (Some(_), Some(_)) => {
+            return Err(refuse!(
+                "--install and --restore-manifest name one inventory"
+            ));
+        }
         (Some(path), None) => Some(crate::engine::bundle::restore_inventory(path)?),
         // The install medium's pieces are checked through the firmware's
         // FAT driver now, while it is there; the engine reads them through
@@ -377,7 +383,9 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
             .iter()
             .any(|(name, _)| reserved.contains(&name.as_str()))
         {
-            return Err("a bundle file takes a name the restore inventory reserves");
+            return Err(refuse!(
+                "a bundle file takes a name the restore inventory reserves"
+            ));
         }
         files.push((String::from(RESTORE_INVENTORY_FILE), inventory.manifest));
         if let Some(diagnostic) = inventory.fdr_diagnostic {
@@ -391,7 +399,7 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
         }
     }
     if files.len() > MAX_FILES {
-        return Err("bundle lists too many files");
+        return Err(refuse!("bundle lists too many files"));
     }
     // The translation store, when a volume has one and a file slot is
     // left; rewriting its pack needs the storage drivers.
@@ -441,8 +449,9 @@ struct Runtime {
 impl Runtime {
     /// Read before boot services end. Without SetVirtualAddressMap the
     /// firmware's runtime services run at their physical addresses.
-    fn capture() -> Result<Self, &'static str> {
-        let map = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "no memory map")?;
+    fn capture() -> Result<Self> {
+        let map =
+            boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| refuse!("no memory map"))?;
         let regions = map
             .entries()
             .filter(|entry| entry.att.bits() & RUNTIME_ATTRIBUTE != 0)
@@ -483,7 +492,7 @@ impl Runtime {
         root: u64,
         ram: &[(usize, usize)],
         devices: &[Range<u64>],
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         for &(start, end, kind) in &self.regions {
             let overlaps = ram.iter().any(|r| (r.0 as u64) < end && start < r.1 as u64)
                 || devices
@@ -519,12 +528,12 @@ fn map_devices(
     root: u64,
     ram: &[(usize, usize)],
     ranges: &[Range<u64>],
-) -> Result<(), &'static str> {
+) -> Result<()> {
     for range in ranges {
         let start = range.start & !(PAGE - 1);
         let end = range.end.next_multiple_of(PAGE);
         if ram.iter().any(|r| (r.0 as u64) < end && start < r.1 as u64) {
-            return Err("storage registers overlap RAM");
+            return Err(refuse!("storage registers overlap RAM"));
         }
         tables::map_range(
             frames,
@@ -634,10 +643,10 @@ fn load(
     wifi_key: Vec<u8>,
     log: Option<Guid>,
     host_firmware: crate::host_firmware::Resources,
-) -> Result<core::convert::Infallible, &'static str> {
+) -> Result<core::convert::Infallible> {
     crate::status::begin("Setting up Stela's memory");
     let image = memory::prepare_image()?;
-    let text = core::str::from_utf8(&options).map_err(|_| "stela.cfg is not UTF-8")?;
+    let text = core::str::from_utf8(&options).map_err(|_| refuse!("stela.cfg is not UTF-8"))?;
     let system = System::parse(text).map_err(stela_boot_core::options::Error::message)?;
     let (native_processors, cores) =
         crate::native_smp::firmware::capture_assignment(system.native_cores)
@@ -705,7 +714,7 @@ fn load(
     } = memory;
     let loader_tables = loader_tables
         .retain()
-        .map_err(|_| "loader table ownership validation failed")?;
+        .map_err(|_| refuse!("loader table ownership validation failed"))?;
     let bounce = native_resources.bounce[0];
     let handoff_phase::RetainedFiles {
         options: options_region,

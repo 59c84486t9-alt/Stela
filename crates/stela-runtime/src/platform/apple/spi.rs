@@ -20,7 +20,10 @@
 //! guarantees, so their words are held. Only OVERRIDE_CS may change in
 //! SHIFTCFG, and only while an external GPIO drives the chip select, since
 //! the internal CS output is then disconnected from the attached device.
+use crate::Result;
 use alloc::{collections::VecDeque, vec::Vec};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     super::nor::Nor, stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState,
@@ -138,13 +141,18 @@ impl Spi {
     }
     /// Board wiring, independent of command/transfer boundaries. External
     /// GPIO's output is active low, just as PIN.CS is for internal selection.
-    pub(crate) fn check_cs(&self, high: bool) -> Result<(), &'static str> {
+    pub(crate) fn check_cs(&self, high: bool) -> Result<()> {
         self.nor.check_select(!high)
     }
-    pub fn set_cs(&mut self, high: bool) -> Result<(), &'static str> {
+    pub fn set_cs(&mut self, high: bool) -> Result<()> {
         self.nor.select(!high)
     }
-    fn error(offset: u64, width: Width, direction: Direction, reason: &'static str) -> MmioError {
+    fn error(
+        offset: u64,
+        width: Width,
+        direction: Direction,
+        reason: impl Into<Refusal>,
+    ) -> MmioError {
         refuse(NAME, offset, width, direction, reason)
     }
     fn threshold(&self) -> bool {
@@ -171,15 +179,15 @@ impl Spi {
             .set_level(Wire::Aic(self.irq), self.active() && enabled);
     }
 
-    fn mmio_ready(&self) -> Result<(), &'static str> {
+    fn mmio_ready(&self) -> Result<()> {
         if !self.lifecycle.powered {
-            return Err("SPI power domain is off");
+            return Err(refuse!("SPI power domain is off"));
         }
         if !self.lifecycle.clocked {
-            return Err("SPI clock is gated");
+            return Err(refuse!("SPI clock is gated"));
         }
         if self.lifecycle.reset {
-            return Err("SPI physical reset is asserted");
+            return Err(refuse!("SPI physical reset is asserted"));
         }
         Ok(())
     }
@@ -187,7 +195,7 @@ impl Spi {
     fn active(&self) -> bool {
         self.mmio_ready().is_ok() && !self.lifecycle.quiesced
     }
-    fn pump(&mut self) -> Result<(), &'static str> {
+    fn pump(&mut self) -> Result<()> {
         let checkpoint = self.nor.checkpoint();
         let (tx, rx, tx_count, rx_count, status) = (
             self.tx.clone(),
@@ -207,12 +215,14 @@ impl Spi {
         }
         Ok(())
     }
-    fn pump_inner(&mut self) -> Result<(), &'static str> {
+    fn pump_inner(&mut self) -> Result<()> {
         if !self.active() || self.control & RUN == 0 {
             return Ok(());
         }
         if self.configuration & TRANSFER_CONFIGURATION != TRANSFER_CONFIGURATION {
-            return Err("SPI control and transfer configuration require initialization");
+            return Err(refuse!(
+                "SPI control and transfer configuration require initialization"
+            ));
         }
         while self.tx_count != 0 || self.rx_count != 0 {
             if self.rx_count != 0 && self.rx.len() == FIFO_DEPTH {
@@ -247,7 +257,7 @@ impl Spi {
 }
 
 impl Lifecycle for Spi {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         if (self.lifecycle.powered && !proposed.powered && !proposed.retention
             || !self.lifecycle.reset && proposed.reset)
             && !self.external_cs
@@ -296,16 +306,18 @@ impl MmioDevice for Spi {
         width: Width,
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
-        let error = |reason| Self::error(offset, width, Direction::Read, reason);
+        let error = |reason: Refusal| Self::error(offset, width, Direction::Read, reason);
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(error("SPI registers require aligned 32-bit accesses"));
+            return Err(error(refuse!(
+                "SPI registers require aligned 32-bit accesses"
+            )));
         }
         self.mmio_ready().map_err(error)?;
         let bit = configuration_bit(offset);
         if bit != 0 && self.configuration & bit == 0 {
-            return Err(error(
-                "SPI configuration reset value has not been qualified",
-            ));
+            return Err(error(refuse!(
+                "SPI configuration reset value has not been qualified"
+            )));
         }
         let value = match offset {
             CTRL => self.control,
@@ -333,7 +345,7 @@ impl MmioDevice for Spi {
                 let byte = *self
                     .rx
                     .front()
-                    .ok_or_else(|| error("SPI RX FIFO underflow"))?;
+                    .ok_or_else(|| error(refuse!("SPI RX FIFO underflow")))?;
                 // Consume only after validating the next shift. The incoming
                 // command byte is validated by TXDATA, before it is queued.
                 self.rx.pop_front();
@@ -343,7 +355,7 @@ impl MmioDevice for Spi {
                 }
                 u32::from(byte)
             }
-            _ => return Err(error("unmodeled SPI register")),
+            _ => return Err(error(refuse!("unmodeled SPI register"))),
         };
         self.interrupt(access);
         Ok(u64::from(value))
@@ -355,9 +367,11 @@ impl MmioDevice for Spi {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let error = |reason| Self::error(offset, width, Direction::Write, reason);
+        let error = |reason: Refusal| Self::error(offset, width, Direction::Write, reason);
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(error("SPI registers require aligned 32-bit accesses"));
+            return Err(error(refuse!(
+                "SPI registers require aligned 32-bit accesses"
+            )));
         }
         self.mmio_ready().map_err(error)?;
         let value = value as u32;
@@ -376,7 +390,7 @@ impl MmioDevice for Spi {
         match offset {
             CTRL => {
                 if value & !(RUN | RX_RESET | TX_RESET) != 0 {
-                    return Err(error("unmodeled SPI control bits"));
+                    return Err(error(refuse!("unmodeled SPI control bits")));
                 }
                 if value & TX_RESET != 0 {
                     self.tx.clear();
@@ -388,16 +402,16 @@ impl MmioDevice for Spi {
             }
             CFG => {
                 if value & !CONFIG_MASK != 0 || !matches!(value & MODE, 0 | IRQ_MODE) {
-                    return Err(error(
-                        "SPI DMA, LSB-first, wide words or unknown configuration",
-                    ));
+                    return Err(error(refuse!(
+                        "SPI DMA, LSB-first, wide words or unknown configuration"
+                    )));
                 }
                 self.config = value;
             }
             STATUS => self.status &= !value, // v1 W1C, including inactive error flags.
             PIN => {
                 if value & !3 != 0 {
-                    return Err(error("unmodeled SPI pin bits"));
+                    return Err(error(refuse!("unmodeled SPI pin bits")));
                 }
                 if !self.external_cs {
                     self.set_cs(value & CS_HIGH != 0).map_err(error)?;
@@ -406,33 +420,33 @@ impl MmioDevice for Spi {
             }
             TXDATA => {
                 if value > 0xff {
-                    return Err(error("SPI byte FIFO write exceeds 8 bits"));
+                    return Err(error(refuse!("SPI byte FIFO write exceeds 8 bits")));
                 }
                 if self.tx.len() == FIFO_DEPTH {
-                    return Err(error("SPI TX FIFO overflow"));
+                    return Err(error(refuse!("SPI TX FIFO overflow")));
                 }
                 self.tx.push_back(value as u8);
             }
             CLKDIV => {
                 if value > 0x7ff {
-                    return Err(error("SPI divider exceeds 11 bits"));
+                    return Err(error(refuse!("SPI divider exceeds 11 bits")));
                 }
                 self.divider = value;
             }
             DELAY => {
                 if value > 0xffff {
-                    return Err(error("SPI delay exceeds 16 bits"));
+                    return Err(error(refuse!("SPI delay exceeds 16 bits")));
                 }
                 self.delay = value;
             }
             SHIFTCFG => {
                 if (value ^ self.shift) & !OVERRIDE_CS != 0 {
-                    return Err(error("SPI shifter configuration is not modeled"));
+                    return Err(error(refuse!("SPI shifter configuration is not modeled")));
                 }
                 if value & OVERRIDE_CS != 0 && !self.external_cs {
-                    return Err(error(
-                        "shifter-driven internal SPI chip select is not modeled",
-                    ));
+                    return Err(error(refuse!(
+                        "shifter-driven internal SPI chip select is not modeled"
+                    )));
                 }
                 self.shift = value;
             }
@@ -446,7 +460,7 @@ impl MmioDevice for Spi {
                 self.rx_count = value;
                 self.status &= !RX_COMPLETE;
             }
-            _ => return Err(error("unmodeled or read-only SPI register")),
+            _ => return Err(error(refuse!("unmodeled or read-only SPI register"))),
         }
         self.configuration |= configuration_bit(offset);
         if matches!(offset, CTRL | TXDATA | TXCNT | RXCNT)
@@ -567,7 +581,7 @@ mod tests {
         ] {
             assert_eq!(
                 spi.check_lifecycle(proposed),
-                Err("incomplete NOR command at CS rising")
+                Err(refuse!("incomplete NOR command at CS rising"))
             );
             assert_eq!(spi.lifecycle, active);
             assert!(spi.nor.selected());

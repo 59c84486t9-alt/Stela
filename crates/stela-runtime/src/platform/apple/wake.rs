@@ -16,6 +16,8 @@
 //! no status words are claimed. AOP/NUB/SMC/ATC physical wake generators are
 //! not emulated; this model supplies mask state for a supported generator to
 //! query, and does not invent a wake event when a mask is written.
+use crate::Result;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -42,18 +44,20 @@ impl WakeMasks {
 
     /// Whether the mask allows source n to wake the AP. Every
     /// valid source starts masked; unsupported source numbers refuse.
-    pub fn enabled(&self, source: u8) -> Result<bool, &'static str> {
+    pub fn enabled(&self, source: u8) -> Result<bool> {
         let word = usize::from(source) / u32::BITS as usize;
         let bit = 1 << (u32::from(source) % u32::BITS);
         if self.valid[word] & bit == 0 {
-            return Err("AOP wake source is not supported by this hardware");
+            return Err(refuse!("AOP wake source is not supported by this hardware"));
         }
         Ok(self.masks[word] & bit == 0)
     }
 
-    fn word(offset: u64, width: Width) -> Result<usize, &'static str> {
+    fn word(offset: u64, width: Width) -> Result<usize> {
         if width != Width::Word || offset >= BYTES || !offset.is_multiple_of(4) {
-            return Err("AOP wake mask register or width without described meaning");
+            return Err(refuse!(
+                "AOP wake mask register or width without described meaning"
+            ));
         }
         Ok((offset / 4) as usize)
     }
@@ -79,7 +83,9 @@ impl MmioDevice for WakeMasks {
     ) -> Result<(), MmioError> {
         let result = Self::word(offset, width).and_then(|word| {
             if value & !u64::from(self.valid[word]) != 0 {
-                return Err("AOP wake mask sets bits outside the hardware valid mask");
+                return Err(refuse!(
+                    "AOP wake mask sets bits outside the hardware valid mask"
+                ));
             }
             self.masks[word] = value as u32;
             Ok(())

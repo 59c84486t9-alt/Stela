@@ -38,6 +38,9 @@
 //! word; no zero marker, unlocked channel, disabled request or healthy status
 //! is inferred from firmware/DT absence. Supplied snapshots grant register
 //! observations only, not native execution, functional ownership or PS values.
+use crate::Result;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 #[cfg(test)]
 use stela_soc_data::power::{MARKER, MASK};
 pub mod t6000;
@@ -187,19 +190,23 @@ impl Power {
     pub fn pending_configuration(&self) -> impl Iterator<Item = ConfigurationRequest> + '_ {
         self.pending_configuration.iter().copied()
     }
-    fn check(&self, offset: u64, width: Width) -> Result<(), &'static str> {
+    fn check(&self, offset: u64, width: Width) -> Result<()> {
         if width != Width::Word || !self.kind.offsets().contains(&offset) {
-            return Err("SOC power register or width without described meaning");
+            return Err(refuse!(
+                "SOC power register or width without described meaning"
+            ));
         }
         Ok(())
     }
-    fn observed(&self, offset: u64) -> Result<u32, &'static str> {
+    fn observed(&self, offset: u64) -> Result<u32> {
         let word = self
             .registers
             .get(&offset)
-            .ok_or("SOC power handoff register value is unknown")?;
+            .ok_or(refuse!("SOC power handoff register value is unknown"))?;
         if word.known != u32::MAX {
-            return Err("SOC power native readiness/status progression is unqualified");
+            return Err(refuse!(
+                "SOC power native readiness/status progression is unqualified"
+            ));
         }
         Ok(word.value)
     }
@@ -214,7 +221,7 @@ impl MmioDevice for Power {
         NAME
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         self.check(offset, width).map_err(fail)?;
         self.observed(offset).map(u64::from).map_err(fail)
     }
@@ -225,7 +232,7 @@ impl MmioDevice for Power {
         value: u64,
         _: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         self.check(offset, width).map_err(fail)?;
         let value = value as u32;
         let old = self.observed(offset).map_err(fail)?;
@@ -235,20 +242,24 @@ impl MmioDevice for Power {
                 .iter()
                 .any(|request| request.offset == offset)
         {
-            return Err(fail(
-                "SOC power configuration retains an earlier native request",
-            ));
+            return Err(fail(refuse!(
+                "SOC power configuration retains an earlier native request"
+            )));
         }
         match self.kind {
-            Kind::Tvm if offset % 0x400 == 0x3e0 => return Err(fail("TVM status is read-only")),
+            Kind::Tvm if offset % 0x400 == 0x3e0 => {
+                return Err(fail(refuse!("TVM status is read-only")));
+            }
             Kind::Marker => {
-                return Err(fail("PS initialization marker is owned by the boot stage"));
+                return Err(fail(refuse!(
+                    "PS initialization marker is owned by the boot stage"
+                )));
             }
             Kind::Volman if offset == STATUS => {
                 if u64::from(value) & !ACK != 0 {
-                    return Err(fail(
-                        "VOLMAN acknowledgement outside the described low8 channels",
-                    ));
+                    return Err(fail(refuse!(
+                        "VOLMAN acknowledgement outside the described low8 channels"
+                    )));
                 }
                 self.registers.insert(offset, Word::captured(old & !value));
                 return Ok(());
@@ -256,21 +267,23 @@ impl MmioDevice for Power {
             Kind::Volman
                 if CHANNEL.contains(&offset) && u64::from(old) & LOCK != 0 && old != value =>
             {
-                return Err(fail("VOLMAN channel configuration is protected by bit24"));
+                return Err(fail(refuse!(
+                    "VOLMAN channel configuration is protected by bit24"
+                )));
             }
             Kind::Volman if offset == FINAL && value & !1 != 0 => {
-                return Err(fail(
-                    "VOLMAN finalization fields other than bit0 are undescribed",
-                ));
+                return Err(fail(refuse!(
+                    "VOLMAN finalization fields other than bit0 are undescribed"
+                )));
             }
             Kind::NubBindings => {
                 let (mask, may_clear) = nub_fields(offset);
                 // Table bases are blind source writes of an encoded fragment;
                 // captured nonfragment fields cannot silently be cleared.
                 if !may_clear && (value & !mask != old & !mask || old & mask & !value != 0) {
-                    return Err(fail(
-                        "NUB slot programming only qualifies source OR field updates",
-                    ));
+                    return Err(fail(refuse!(
+                        "NUB slot programming only qualifies source OR field updates"
+                    )));
                 }
                 if may_clear
                     && !matches!(
@@ -281,21 +294,23 @@ impl MmioDevice for Power {
                         (value ^ old) & !(0x11f << shift) == 0 && value & (0x100 << shift) != 0
                     })
                 {
-                    return Err(fail(
-                        "NUB sequence update must replace one slot, set its enable and preserve other fields",
-                    ));
+                    return Err(fail(refuse!(
+                        "NUB sequence update must replace one slot, set its enable and preserve other fields"
+                    )));
                 }
                 if matches!(
                     offset,
                     0x23d2d0200 | 0x23d2d0300 | 0x23b781000 | 0x23b78d000
                 ) {
                     if value & !mask != 0 {
-                        return Err(fail("NUB table base outside source encoded fragment"));
+                        return Err(fail(refuse!(
+                            "NUB table base outside source encoded fragment"
+                        )));
                     }
                     if old & !mask != 0 {
-                        return Err(fail(
-                            "NUB table write would alter unqualified nonfragment fields",
-                        ));
+                        return Err(fail(refuse!(
+                            "NUB table write would alter unqualified nonfragment fields"
+                        )));
                     }
                     self.registers.insert(offset, Word::captured(value));
                 } else {
@@ -310,12 +325,12 @@ impl MmioDevice for Power {
             }
             Kind::Gpce => {
                 if !matches!(u64::from(value) & REQUEST, 0 | REQUEST) {
-                    return Err(fail("unsupported partial GPCE complex request"));
+                    return Err(fail(refuse!("unsupported partial GPCE complex request")));
                 }
                 if (value ^ old) & !(REQUEST as u32) != 0 {
-                    return Err(fail(
-                        "GPCE request must preserve captured nonrequest fields",
-                    ));
+                    return Err(fail(refuse!(
+                        "GPCE request must preserve captured nonrequest fields"
+                    )));
                 }
                 self.registers.insert(
                     offset,
@@ -336,9 +351,9 @@ impl MmioDevice for Power {
                 // Its true path always writes read32 | 1, even if bit0 was
                 // already set; equal data is not evidence of no trigger.
                 if value != old | CIO_REQUEST {
-                    return Err(fail(
-                        "CIO reconfiguration only qualifies preserving fields and setting request bit0",
-                    ));
+                    return Err(fail(refuse!(
+                        "CIO reconfiguration only qualifies preserving fields and setting request bit0"
+                    )));
                 }
                 self.registers.insert(
                     offset,
@@ -356,9 +371,9 @@ impl MmioDevice for Power {
             }
             Kind::GpceFinalize => {
                 if value != old & !1 {
-                    return Err(fail(
-                        "GPCE finalization only qualifies clearing bit0 and preserving captured other fields",
-                    ));
+                    return Err(fail(refuse!(
+                        "GPCE finalization only qualifies clearing bit0 and preserving captured other fields"
+                    )));
                 }
                 self.registers.insert(offset, Word::captured(value));
                 self.pending_configuration.push(ConfigurationRequest {

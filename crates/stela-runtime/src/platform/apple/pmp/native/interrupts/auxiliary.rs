@@ -6,9 +6,11 @@ use super::super::platform::{
     owner::Completion,
 };
 use super::{Error, Event, Handler, Signals};
+use crate::Result;
 use alloc::rc::Rc;
 use core::cell::Cell;
 use stela_contracts::bus::Access;
+use stela_contracts::refuse;
 
 /// Opaque live callback receipt, minted only from the Signals context
 /// after the same source disable and registration retired. Event data
@@ -43,23 +45,24 @@ impl AuxiliaryReset {
     pub(in crate::platform::apple::pmp::native) fn validate(
         &self,
         binding: &AuxiliaryBinding,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if !self.binding.same(binding)
             || !binding.registered()
             || self.live.get() != self.event.generation
         {
-            return Err("auxiliary reset receipt is foreign, unregistered or no longer live");
+            return Err(refuse!(
+                "auxiliary reset receipt is foreign, unregistered or no longer live"
+            ));
         }
         Ok(())
     }
-    pub(in crate::platform::apple::pmp::native) fn after(
-        &self,
-        previous: &Self,
-    ) -> Result<bool, &'static str> {
+    pub(in crate::platform::apple::pmp::native) fn after(&self, previous: &Self) -> Result<bool> {
         if !Rc::ptr_eq(&self.native, &previous.native)
             || self.event.generation < previous.event.generation
         {
-            return Err("auxiliary reset native owner is foreign or event is stale");
+            return Err(refuse!(
+                "auxiliary reset native owner is foreign or event is stale"
+            ));
         }
         Ok(self.event.generation != previous.event.generation)
     }
@@ -90,15 +93,20 @@ impl<T: AuxiliaryTarget> AuxiliaryHandler<T> {
         target: T,
     ) -> Result<Self, Error> {
         let configuration = Configuration::t8112(descriptor).map_err(|_| {
-            Error::Refused("auxiliary IRQ handler requires qualified source configuration")
+            Error::Refused(refuse!(
+                "auxiliary IRQ handler requires qualified source configuration"
+            ))
         })?;
-        let row = configuration.rows().get(slot).ok_or(Error::Refused(
-            "auxiliary IRQ handler slot exceeds complete source geometry",
-        ))?;
+        let row = configuration
+            .rows()
+            .get(slot)
+            .ok_or(Error::Refused(refuse!(
+                "auxiliary IRQ handler slot exceeds complete source geometry"
+            )))?;
         if binding.slot() != slot || binding.source() != row.words[1] {
-            return Err(Error::Refused(
-                "auxiliary IRQ handler binding differs from configured same-owner slot",
-            ));
+            return Err(Error::Refused(refuse!(
+                "auxiliary IRQ handler binding differs from configured same-owner slot"
+            )));
         }
         Ok(Self {
             target,
@@ -123,16 +131,20 @@ impl<T: AuxiliaryTarget> Handler for AuxiliaryHandler<T> {
         access: &mut Access<'_>,
     ) -> Completion<()> {
         if event.source != self.source || event.word.is_none() {
-            return Completion::Refused(
-                "auxiliary IRQ callback received another source/context route",
-            );
+            return Completion::Refused(refuse!(
+                "auxiliary IRQ callback received another source/context route"
+            ));
         }
         if !self.binding.registered() {
-            return Completion::Refused("auxiliary IRQ registration producer has not retired");
+            return Completion::Refused(refuse!(
+                "auxiliary IRQ registration producer has not retired"
+            ));
         }
         if let Some((generation, stage)) = self.pending {
             if event.generation < generation || (event.generation != generation && stage != 2) {
-                return Completion::Refused("auxiliary IRQ callback retains another actual event");
+                return Completion::Refused(refuse!(
+                    "auxiliary IRQ callback retains another actual event"
+                ));
             }
             if event.generation != generation {
                 self.pending = Some((event.generation, 0));
@@ -144,7 +156,7 @@ impl<T: AuxiliaryTarget> Handler for AuxiliaryHandler<T> {
             if let Err(error) = signals.set(0, self.source, false, access) {
                 return Completion::Refused(match error {
                     Error::Refused(reason) => reason,
-                    Error::Uncertain(_) => "auxiliary IRQ disable retirement is uncertain",
+                    Error::Uncertain(_) => refuse!("auxiliary IRQ disable retirement is uncertain"),
                 });
             }
             self.pending = Some((event.generation, 1));
@@ -154,7 +166,9 @@ impl<T: AuxiliaryTarget> Handler for AuxiliaryHandler<T> {
                 Ok(reset) => reset,
                 Err(Error::Refused(reason)) => return Completion::Refused(reason),
                 Err(Error::Uncertain(_)) => {
-                    return Completion::Refused("auxiliary IRQ reset has uncertain actual owner");
+                    return Completion::Refused(refuse!(
+                        "auxiliary IRQ reset has uncertain actual owner"
+                    ));
                 }
             };
             match self.target.reset_slot(&reset, access) {

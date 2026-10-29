@@ -125,7 +125,7 @@ fn manifest_flag(manifest: &Manifest, name: &str) -> Result<bool> {
         other => Err(refuse!(
             "boot manifest {name} is {other}, expected a boolean",
             name,
-            other = alloc::format!("{other:?}")
+            ?other
         )
         .into()),
     }
@@ -137,7 +137,7 @@ fn manifest_integer(manifest: &Manifest, name: &str) -> Result<u64> {
         other => Err(refuse!(
             "boot manifest {name} is {other}, expected an integer",
             name,
-            other = alloc::format!("{other:?}")
+            ?other
         )
         .into()),
     }
@@ -555,12 +555,7 @@ const OSENVIRONMENT: &str = "osenvironment";
 pub fn os_environment(name: &str) -> Result<OsEnvironment> {
     OsEnvironment::from_name(name).ok_or_else(|| {
         let known = OsEnvironment::ALL.map(OsEnvironment::name).join(", ");
-        refuse!(
-            "{name} is not an OS environment ({known})",
-            name = format!("{name:?}"),
-            known
-        )
-        .into()
+        refuse!("{name} is not an OS environment ({known})", ?name, known).into()
     })
 }
 

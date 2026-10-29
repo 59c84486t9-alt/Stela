@@ -14,15 +14,18 @@
 //! --disk` writes, in the heap. [`upgrade_from_disk`] and
 //! [`recovery_from_disk`] build a staged update's and a recoveryOS's the
 //! same way (`stela_loader::upgrade`, `stela_loader::recovery`).
+use crate::Result;
 use crate::{
     firmware,
     handoff::{File, Region},
     layout, output,
     paging::PAGE,
 };
+use alloc::string::ToString;
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::arch::asm;
 pub(crate) use stela_boot_core::bundle::{live_tree, source};
+use stela_contracts::refuse;
 use stela_drivers::block::{BlockDevice, BlockError};
 use stela_engine::machine::Host;
 use stela_formats::boot_bundle::Framebuffer;
@@ -79,32 +82,32 @@ pub(super) fn contents(file: &File) -> &'static [u8] {
     }
 }
 
-fn open(root: &mut Directory, path: &str) -> Result<RegularFile, &'static str> {
-    let path = CString16::try_from(path).map_err(|_| "bundle path is not UCS-2")?;
+fn open(root: &mut Directory, path: &str) -> Result<RegularFile> {
+    let path = CString16::try_from(path).map_err(|_| refuse!("bundle path is not UCS-2"))?;
     root.open(&path, FileMode::Read, FileAttribute::empty())
-        .map_err(|_| "cannot open a bundle file")?
+        .map_err(|_| refuse!("cannot open a bundle file"))?
         .into_regular_file()
-        .ok_or("a bundle path is a directory")
+        .ok_or(refuse!("a bundle path is a directory"))
 }
 
 /// Read a whole file into fresh `LOADER_DATA` pages, which Stela keeps.
 /// The part of a large file read between progress updates.
 const PROGRESS_STEP: usize = 16 << 20;
 
-fn read_file(root: &mut Directory, path: &str) -> Result<Region, &'static str> {
+fn read_file(root: &mut Directory, path: &str) -> Result<Region> {
     read_bounded(root, path, u64::MAX)
 }
 
-fn read_bounded(root: &mut Directory, path: &str, limit: u64) -> Result<Region, &'static str> {
+fn read_bounded(root: &mut Directory, path: &str, limit: u64) -> Result<Region> {
     let mut file = open(root, path)?;
     let bytes = file
         .get_boxed_info::<FileInfo>()
-        .map_err(|_| "cannot read a bundle file's size")?
+        .map_err(|_| refuse!("cannot read a bundle file's size"))?
         .file_size();
     if bytes > limit {
-        return Err("file size outside configured bound");
+        return Err(refuse!("file size outside configured bound"));
     }
-    let length = usize::try_from(bytes).map_err(|_| "bundle file is too large")?;
+    let length = usize::try_from(bytes).map_err(|_| refuse!("bundle file is too large"))?;
     let physical = firmware::pages(length.div_ceil(PAGE).max(1))?;
     // SAFETY: fresh pages Stela owns for the whole boot, never freed.
     let buffer = unsafe { core::slice::from_raw_parts_mut(physical as *mut u8, length) };
@@ -121,9 +124,9 @@ fn read_bounded(root: &mut Directory, path: &str, limit: u64) -> Result<Region, 
         let end = length.min(done + PROGRESS_STEP);
         let count = file
             .read(&mut buffer[done..end])
-            .map_err(|_| "cannot read a bundle file")?;
+            .map_err(|_| refuse!("cannot read a bundle file"))?;
         if count == 0 {
-            return Err("a bundle file ended early");
+            return Err(refuse!("a bundle file ended early"));
         }
         done += count;
         if length > PROGRESS_STEP {
@@ -143,10 +146,11 @@ fn read_bounded(root: &mut Directory, path: &str, limit: u64) -> Result<Region, 
 /// Read `bundle.json` from `directory` on the first volume that has it, then
 /// every file it lists, unchanged; `bundle.json` comes first. Run before boot
 /// services end, with no other exclusive opening of the volume.
-pub fn read(directory: &str) -> Result<Vec<(String, Region)>, &'static str> {
+pub fn read(directory: &str) -> Result<Vec<(String, Region)>> {
     let directory = directory.trim_end_matches('\\');
     let manifest_path = format!("{directory}\\{MANIFEST_FILE}");
-    let handles = boot::find_handles::<SimpleFileSystem>().map_err(|_| "no file systems")?;
+    let handles =
+        boot::find_handles::<SimpleFileSystem>().map_err(|_| refuse!("no file systems"))?;
     for handle in handles {
         let Ok(mut volume) = boot::open_protocol_exclusive::<SimpleFileSystem>(handle) else {
             continue;
@@ -169,14 +173,14 @@ pub fn read(directory: &str) -> Result<Vec<(String, Region)>, &'static str> {
         for file in &manifest.files {
             output::arguments(format_args!("READ {directory}\\{}\n", file.name));
             let contents = read_file(&mut root, &format!("{directory}\\{}", file.name))
-                .inspect_err(|error| crate::status::fail(error))?;
+                .inspect_err(|error| crate::status::fail(&error.to_string()))?;
             files.push((file.name.clone(), contents));
         }
         let bytes: u64 = files.iter().map(|(_, region)| region.bytes).sum();
         crate::status::done(&format!("{} MB", bytes >> 20));
         return Ok(files);
     }
-    Err("no volume has the bundle's bundle.json")
+    Err(refuse!("no volume has the bundle's bundle.json"))
 }
 
 /// The restore inventory as it was read, and what it names beside itself.
@@ -198,7 +202,7 @@ const MAX_HASH_FILE_BYTES: u64 = payload::MAX_HASH_BLOCKS * 32;
 /// files it names from the same directory of the same volume. Reject
 /// ambiguous paths across firmware volumes rather than choosing a different
 /// inventory.
-pub fn restore_inventory(path: &str) -> Result<Inventory, &'static str> {
+pub fn restore_inventory(path: &str) -> Result<Inventory> {
     with_inventory(path, |_, _, _| Ok(()))
 }
 
@@ -206,11 +210,13 @@ pub fn restore_inventory(path: &str) -> Result<Inventory, &'static str> {
 /// while it is open, with the inventory's directory.
 pub fn with_inventory(
     path: &str,
-    mut check: impl FnMut(&mut Directory, &str, &PayloadManifest) -> Result<(), &'static str>,
-) -> Result<Inventory, &'static str> {
+    mut check: impl FnMut(&mut Directory, &str, &PayloadManifest) -> Result<()>,
+) -> Result<Inventory> {
     const LIMIT: u64 = 16 * 1024 * 1024;
     let mut found = None;
-    for handle in boot::find_handles::<SimpleFileSystem>().map_err(|_| "no file systems")? {
+    for handle in
+        boot::find_handles::<SimpleFileSystem>().map_err(|_| refuse!("no file systems"))?
+    {
         let Ok(mut volume) = boot::open_protocol_exclusive::<SimpleFileSystem>(handle) else {
             continue;
         };
@@ -221,7 +227,9 @@ pub fn with_inventory(
             continue;
         }
         if found.is_some() {
-            return Err("restore inventory path appears on multiple volumes");
+            return Err(refuse!(
+                "restore inventory path appears on multiple volumes"
+            ));
         }
         let manifest = read_bounded(&mut root, path, LIMIT)?;
         // SAFETY: just read into Stela's own pages.
@@ -240,8 +248,9 @@ pub fn with_inventory(
                 .map(|entry| {
                     let path = format!("{directory}\\{}", entry.file);
                     output::arguments(format_args!("READ {path}\n"));
-                    read_bounded(&mut root, &path, MAX_HASH_FILE_BYTES)
-                        .map_err(|_| "a hash file the restore inventory names cannot be read")
+                    read_bounded(&mut root, &path, MAX_HASH_FILE_BYTES).map_err(|_| {
+                        refuse!("a hash file the restore inventory names cannot be read")
+                    })
                 })
                 .transpose()
         };
@@ -252,7 +261,7 @@ pub fn with_inventory(
         })?;
         let diagnostic_path = format!("{directory}\\{}", stela_runtime::restore::fdr::FILE);
         let diagnostic_name = CString16::try_from(diagnostic_path.as_str())
-            .map_err(|_| "FDR diagnostic path is not UCS-2")?;
+            .map_err(|_| refuse!("FDR diagnostic path is not UCS-2"))?;
         let fdr_diagnostic =
             match root.open(&diagnostic_name, FileMode::Read, FileAttribute::empty()) {
                 Ok(file) => {
@@ -268,9 +277,9 @@ pub fn with_inventory(
                         &state_path,
                         stela_runtime::pc::fdr_store::FILE_BYTES as u64,
                     )
-                    .map_err(|_| "FDR diagnostic needs its preallocated fdrstate.bin")?;
+                    .map_err(|_| refuse!("FDR diagnostic needs its preallocated fdrstate.bin"))?;
                     let partition = super::translations::partition(handle)
-                        .ok_or("FDR storage volume needs a GPT partition identity")?;
+                        .ok_or(refuse!("FDR storage volume needs a GPT partition identity"))?;
                     // SAFETY: both regions were just read into kept loader pages.
                     let bytes = |region: Region| unsafe {
                         core::slice::from_raw_parts(
@@ -289,7 +298,7 @@ pub fn with_inventory(
                     )
                 }
                 Err(error) if error.status() == uefi::Status::NOT_FOUND => None,
-                Err(_) => return Err("cannot open the FDR diagnostic"),
+                Err(_) => return Err(refuse!("cannot open the FDR diagnostic")),
             };
         check(&mut root, directory, &parsed)?;
         found = Some(Inventory {
@@ -299,15 +308,15 @@ pub fn with_inventory(
             pieces,
         });
     }
-    found.ok_or("restore inventory file was not found")
+    found.ok_or(refuse!("restore inventory file was not found"))
 }
 
 /// The size of the file at `path` of `root`, when it is one.
-pub fn file_size(root: &mut Directory, path: &str) -> Result<u64, &'static str> {
+pub fn file_size(root: &mut Directory, path: &str) -> Result<u64> {
     let mut file = open(root, path)?;
     Ok(file
         .get_boxed_info::<FileInfo>()
-        .map_err(|_| "cannot read a file's size")?
+        .map_err(|_| refuse!("cannot read a file's size"))?
         .file_size())
 }
 
@@ -369,9 +378,9 @@ pub fn from_disk(
     partition: Box<dyn BlockDevice>,
     request: &installed::Request,
     options: &Options,
-) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let (offset, installed) = installed::prepare_disk(&mut Bytes::new(partition), request, options)
-        .map_err(|e| format!("{e:#}"))?;
+) -> Result<Vec<(String, Vec<u8>)>> {
+    let (offset, installed) =
+        installed::prepare_disk(&mut Bytes::new(partition), request, options)?;
     output::arguments(format_args!(
         "PREBOOT {} volume={:?} container={offset:#x} objects={} named-by={}\n",
         installed.set.directory(),
@@ -383,8 +392,8 @@ pub fn from_disk(
             .as_deref()
             .unwrap_or("evidence alone")
     ));
-    let manifest =
-        serde_json::to_vec(&installed.bundle.manifest).map_err(|e| format!("bundle.json: {e}"))?;
+    let manifest = serde_json::to_vec(&installed.bundle.manifest)
+        .map_err(|error| refuse!("bundle.json: {error}", %error))?;
     let mut files = vec![(String::from(MANIFEST_FILE), manifest)];
     files.extend(installed.bundle.files);
     Ok(files)
@@ -398,7 +407,7 @@ pub fn upgrade_from_disk(
     partition: Box<dyn BlockDevice>,
     volume: Option<BootVolume>,
     options: &Options,
-) -> Result<Vec<(String, Vec<u8>)>, String> {
+) -> Result<Vec<(String, Vec<u8>)>> {
     let mut options = options.clone();
     options.boot_args = upgrade_boot_args(&options.boot_args);
     options.osenvironment = Some(upgrade::ENVIRONMENT);
@@ -410,8 +419,8 @@ pub fn upgrade_from_disk(
         staged.update.root.len(),
         staged.update.other_firmware.len()
     ));
-    let manifest =
-        serde_json::to_vec(&staged.bundle.manifest).map_err(|e| format!("bundle.json: {e}"))?;
+    let manifest = serde_json::to_vec(&staged.bundle.manifest)
+        .map_err(|error| refuse!("bundle.json: {error}", %error))?;
     let mut files = vec![(String::from(MANIFEST_FILE), manifest)];
     files.extend(staged.bundle.files);
     Ok(files)
@@ -427,15 +436,14 @@ pub fn recovery_from_disk(
     kind: recovery::Kind,
     volume: Option<BootVolume>,
     options: &Options,
-) -> Result<Vec<(String, Vec<u8>)>, String> {
+) -> Result<Vec<(String, Vec<u8>)>> {
     let (offset, recovered) = recovery::prepare_disk(
         &mut Bytes::new(partition),
         kind,
         volume.as_ref(),
         None,
         options,
-    )
-    .map_err(|e| format!("{e:#}"))?;
+    )?;
     output::arguments(format_args!(
         "RECOVERY {} {} volume={:?} container={offset:#x} objects={} named-by={}\n",
         kind.label(),
@@ -448,8 +456,8 @@ pub fn recovery_from_disk(
             .as_deref()
             .unwrap_or("evidence alone")
     ));
-    let manifest =
-        serde_json::to_vec(&recovered.bundle.manifest).map_err(|e| format!("bundle.json: {e}"))?;
+    let manifest = serde_json::to_vec(&recovered.bundle.manifest)
+        .map_err(|error| refuse!("bundle.json: {error}", %error))?;
     let mut files = vec![(String::from(MANIFEST_FILE), manifest)];
     files.extend(recovered.bundle.files);
     Ok(files)
@@ -472,13 +480,13 @@ fn upgrade_boot_args(console: &str) -> String {
 }
 
 /// Fill from the boot's checked, seeded cryptographic stream.
-pub(super) fn entropy(buffer: &mut [u8]) -> Result<(), &'static str> {
-    crate::random::fill(buffer).map_err(|_| "host cryptographic entropy is unavailable")
+pub(super) fn entropy(buffer: &mut [u8]) -> Result<()> {
+    crate::random::fill(buffer).map_err(|_| refuse!("host cryptographic entropy is unavailable"))
 }
 
 /// The bundle's `bundle.json`, from the files the loader read or a bundle
 /// built in the heap.
-fn manifest(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<Manifest, String> {
+fn manifest(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<Manifest> {
     let json = match built {
         Some(built) => built
             .iter()
@@ -489,12 +497,12 @@ fn manifest(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<Manif
             .find(|file| file.name() == MANIFEST_FILE)
             .map(contents),
     }
-    .ok_or("bundle.json was not read")?;
-    Manifest::parse(json).map_err(|e| format!("{e}"))
+    .ok_or(refuse!("bundle.json was not read"))?;
+    Manifest::parse(json).map_err(|error| refuse!("bundle manifest: {error}", %error))
 }
 
 /// The guest DRAM base the bundle was prepared for (`bundle.json`).
-pub fn dram_base(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<u64, String> {
+pub fn dram_base(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<u64> {
     Ok(manifest(files, built)?.options.dram_base)
 }
 
@@ -515,7 +523,7 @@ pub fn load(
     dram: Dram,
     framebuffer: Option<Framebuffer>,
     nvram: Option<Nvram>,
-) -> Result<Entry, String> {
+) -> Result<Entry> {
     let named = |name: &str| files.iter().find(|file| file.name() == name).map(contents);
     load_named(host, &named, dram, framebuffer, nvram)
 }
@@ -527,7 +535,7 @@ pub fn load_built(
     dram: Dram,
     framebuffer: Option<Framebuffer>,
     nvram: Option<Nvram>,
-) -> Result<Entry, String> {
+) -> Result<Entry> {
     let named = |name: &str| {
         files
             .iter()
@@ -543,14 +551,16 @@ fn load_named<'a>(
     dram: Dram,
     framebuffer: Option<Framebuffer>,
     nvram: Option<Nvram>,
-) -> Result<Entry, String> {
-    let mut trace = boot_trace::Trace::new(TIMEBASE_HZ as u32).map_err(|e| format!("{e}"))?;
+) -> Result<Entry> {
+    let mut trace = boot_trace::Trace::new(TIMEBASE_HZ as u32)
+        .map_err(|error| refuse!("boot trace: {error}", %error))?;
     trace_record(host, &mut trace, *b"SVFY")?;
-    let json = named(MANIFEST_FILE).ok_or("bundle.json was not read")?;
-    let manifest = Manifest::parse(json).map_err(|e| format!("{e}"))?;
+    let json = named(MANIFEST_FILE).ok_or(refuse!("bundle.json was not read"))?;
+    let manifest =
+        Manifest::parse(json).map_err(|error| refuse!("bundle manifest: {error}", %error))?;
     let verified = manifest
         .verify(&|name| named(name))
-        .map_err(|e| format!("{e}"))?;
+        .map_err(|error| refuse!("bundle verification: {error}", %error))?;
     // The new reader contract is checked before any guest RAM load/patch.
     let source = source::Intake::from_verified(json, &verified, named)?;
     trace_record(host, &mut trace, *b"EVFY")?;
@@ -560,18 +570,23 @@ fn load_named<'a>(
         .regions
         .iter()
         .find(|region| region.name == "DeviceTree")
-        .map(|region| -> Result<_, String> {
-            let file = named(&region.file).ok_or("verified DeviceTree file disappeared")?;
-            let start =
-                usize::try_from(region.file_offset).map_err(|_| "DeviceTree offset overflows")?;
-            let length =
-                usize::try_from(region.bytes).map_err(|_| "DeviceTree length overflows")?;
-            let end = start.checked_add(length).ok_or("DeviceTree range wraps")?;
+        .map(|region| -> Result<_> {
+            let file =
+                named(&region.file).ok_or(refuse!("verified DeviceTree file disappeared"))?;
+            let start = usize::try_from(region.file_offset)
+                .map_err(|_| refuse!("DeviceTree offset overflows"))?;
+            let length = usize::try_from(region.bytes)
+                .map_err(|_| refuse!("DeviceTree length overflows"))?;
+            let end = start
+                .checked_add(length)
+                .ok_or(refuse!("DeviceTree range wraps"))?;
             let bytes = file
                 .get(start..end)
-                .ok_or("DeviceTree range is out of bounds")?;
-            let tree = DeviceTree::parse(bytes).map_err(|e| format!("boot trace tree: {e}"))?;
-            let trace = boot_trace::Region::from_tree(&tree).map_err(|e| format!("{e}"))?;
+                .ok_or(refuse!("DeviceTree range is out of bounds"))?;
+            let tree = DeviceTree::parse(bytes)
+                .map_err(|error| refuse!("boot trace tree: {error}", %error))?;
+            let trace = boot_trace::Region::from_tree(&tree)
+                .map_err(|error| refuse!("boot trace region: {error}", %error))?;
             if let Some(trace) = trace {
                 trace
                     .validate(
@@ -582,7 +597,7 @@ fn load_named<'a>(
                             .iter()
                             .map(|region| (region.guest_pa, region.memory_bytes)),
                     )
-                    .map_err(|e| format!("{e}"))?;
+                    .map_err(|error| refuse!("boot trace placement: {error}", %error))?;
             }
             Ok(trace)
         })
@@ -602,15 +617,15 @@ fn load_named<'a>(
         .load(&machine, &mut entropy, &mut |pa, data| {
             host.write_ram(pa, data)
         })
-        .map_err(|e| format!("{e}"))?;
+        .map_err(|error| refuse!("kernel load: {error}", %error))?;
     let core_locks = manifest
         .core_locks(&machine)
-        .map_err(|e| format!("{e}"))?
+        .map_err(|error| refuse!("core locks: {error}", %error))?
         .unwrap_or_default();
     trace_record(host, &mut trace, *b"ELOD")?;
     if let Some(region) = trace_region {
         if !host.write_ram(region.base, trace.bytes()) {
-            return Err("boot trace guest RAM write failed".into());
+            return Err(refuse!("boot trace guest RAM write failed"));
         }
         output::arguments(format_args!(
             "BOOTTRACE format=BTRD origin=stela-native stages=verify,load records=4 hz={TIMEBASE_HZ} pa={:#x} bytes={}\n",
@@ -649,11 +664,7 @@ fn load_named<'a>(
 /// slice has run yet, so no execution lag or idle leap has been charged.
 /// The inline native RIP explicitly identifies Stela as the record source.
 #[inline(always)]
-fn trace_record(
-    host: &mut impl Host,
-    trace: &mut boot_trace::Trace,
-    tag: [u8; 4],
-) -> Result<(), String> {
+fn trace_record(host: &mut impl Host, trace: &mut boot_trace::Trace, tag: [u8; 4]) -> Result<()> {
     let pc: u64;
     // SAFETY: obtains this native instruction address without accessing memory.
     unsafe {
@@ -661,5 +672,5 @@ fn trace_record(
     }
     trace
         .record(host.counter(), pc, tag, 0)
-        .map_err(|e| format!("{e}"))
+        .map_err(|error| refuse!("boot trace record: {error}", %error))
 }

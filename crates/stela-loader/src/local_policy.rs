@@ -20,7 +20,7 @@ use crate::im4m::{self, Property, Value};
 use crate::{Result, Within};
 use alloc::{string::String, vec::Vec};
 use serde::Serialize;
-use stela_contracts::{refuse, require};
+use stela_contracts::{Refusal, refuse, require};
 
 const POLICY_OBJECT: &str = "lpol";
 const SHA384_BYTES: usize = 48;
@@ -38,7 +38,7 @@ const UUID_BYTES: usize = 16;
 pub trait PolicyAuthority {
     /// `Ok` only when `manifest`, an `IM4M`, is a LocalPolicy this
     /// machine's SEP signed.
-    fn verify(&self, manifest: &[u8]) -> core::result::Result<(), String>;
+    fn verify(&self, manifest: &[u8]) -> Result<(), Refusal>;
 }
 
 /// The SEP keys are not yet wired, so no LocalPolicy signature can be
@@ -48,12 +48,11 @@ pub trait PolicyAuthority {
 pub struct Unverified;
 
 impl PolicyAuthority for Unverified {
-    fn verify(&self, _manifest: &[u8]) -> core::result::Result<(), String> {
-        Err(
-            "LocalPolicy signature verification needs the SEP owner's keys, which are not \
-             wired into stela_loader::local_policy::PolicyAuthority yet"
-                .into(),
-        )
+    fn verify(&self, _manifest: &[u8]) -> Result<(), Refusal> {
+        Err(refuse!(
+            "LocalPolicy signature verification needs the SEP owner's keys, which are not wired \
+             into stela_loader::local_policy::PolicyAuthority yet"
+        ))
     }
 }
 
@@ -86,12 +85,7 @@ fn data<'a>(properties: &'a [Property], name: &str, bytes: usize) -> Result<Opti
             );
             Ok(Some(value))
         }
-        Some(other) => Err(refuse!(
-            "LocalPolicy {name} is {other}, not data",
-            name,
-            other = alloc::format!("{other:?}")
-        )
-        .into()),
+        Some(other) => Err(refuse!("LocalPolicy {name} is {other}, not data", name, ?other).into()),
         None => Ok(None),
     }
 }
@@ -128,11 +122,7 @@ impl LocalPolicy {
     /// Ask `authority` to verify the signature.
     pub fn verify(&mut self, authority: &dyn PolicyAuthority) -> Result<()> {
         authority.verify(&self.manifest).map_err(|reason| {
-            refuse!(
-                "LocalPolicy {path} does not verify: {reason}",
-                path = self.path,
-                reason
-            )
+            refuse!("LocalPolicy {path} does not verify", path = self.path).because(reason)
         })?;
         self.verified = true;
         Ok(())
@@ -157,11 +147,11 @@ mod tests {
     struct Accept(bool);
 
     impl PolicyAuthority for Accept {
-        fn verify(&self, _: &[u8]) -> core::result::Result<(), String> {
+        fn verify(&self, _: &[u8]) -> Result<(), Refusal> {
             if self.0 {
                 Ok(())
             } else {
-                Err("not signed by this SEP".into())
+                Err(refuse!("not signed by this SEP"))
             }
         }
     }

@@ -7,7 +7,9 @@ use super::{
     mux::{Mux, State, StreamId, StreamState},
     plist::{self, Channel},
 };
+use crate::Result;
 use alloc::{collections::VecDeque, vec::Vec};
+use stela_contracts::refuse;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Log {
@@ -63,7 +65,7 @@ impl Session {
             due: false,
         }
     }
-    pub fn attach(&mut self, generation: u64) -> Result<(), &'static str> {
+    pub fn attach(&mut self, generation: u64) -> Result<()> {
         if self.generation == Some(generation) {
             return Ok(());
         }
@@ -72,14 +74,11 @@ impl Session {
         self.host.attach(generation);
         Ok(())
     }
-    pub fn detach(&mut self) -> Result<(), &'static str> {
+    pub fn detach(&mut self) -> Result<()> {
         self.detach_reset(Mux::reset)
     }
 
-    fn detach_reset(
-        &mut self,
-        reset_mux: impl FnOnce(&mut Mux) -> Result<(), &'static str>,
-    ) -> Result<(), &'static str> {
+    fn detach_reset(&mut self, reset_mux: impl FnOnce(&mut Mux) -> Result<()>) -> Result<()> {
         if self.generation.is_some() {
             // Failed invalidation must remain required on the next attempt;
             // an old connection can never become a successful detach retry.
@@ -98,7 +97,7 @@ impl Session {
         }
         Ok(())
     }
-    pub fn open(&mut self, port: u16) -> Result<StreamId, &'static str> {
+    pub fn open(&mut self, port: u16) -> Result<StreamId> {
         self.mux.open(port)
     }
     /// Negotiation readiness, without opening a speculative stream.
@@ -108,19 +107,19 @@ impl Session {
     pub fn control_ready(&self) -> bool {
         self.mux.control_ready()
     }
-    pub fn state(&self, stream: StreamId) -> Result<StreamState, &'static str> {
+    pub fn state(&self, stream: StreamId) -> Result<StreamState> {
         self.mux.stream_state(stream)
     }
-    pub fn write(&mut self, stream: StreamId, bytes: &[u8]) -> Result<usize, &'static str> {
+    pub fn write(&mut self, stream: StreamId, bytes: &[u8]) -> Result<usize> {
         self.mux.write(stream, bytes)
     }
-    pub fn read(&mut self, stream: StreamId, bytes: &mut [u8]) -> Result<usize, &'static str> {
+    pub fn read(&mut self, stream: StreamId, bytes: &mut [u8]) -> Result<usize> {
         self.mux.read(stream, bytes)
     }
-    pub fn close(&mut self, stream: StreamId) -> Result<(), &'static str> {
+    pub fn close(&mut self, stream: StreamId) -> Result<()> {
         self.mux.close(stream)
     }
-    pub fn release(&mut self, stream: StreamId) -> Result<(), &'static str> {
+    pub fn release(&mut self, stream: StreamId) -> Result<()> {
         self.mux.release(stream)
     }
     /// Whether a bulk transfer moved bytes since the last call.
@@ -132,9 +131,9 @@ impl Session {
     }
     /// An explicitly requested diagnostic using the same public stream path
     /// as a later restore client. It records the guest's opaque plist bytes.
-    pub fn query_type(&mut self) -> Result<(), &'static str> {
+    pub fn query_type(&mut self) -> Result<()> {
         if self.probe.is_some() {
-            return Err("QueryType probe already pending");
+            return Err(refuse!("QueryType probe already pending"));
         }
         self.probe = Some(Probe {
             stream: None,
@@ -144,7 +143,7 @@ impl Session {
         });
         Ok(())
     }
-    pub fn advance(&mut self, peer: &mut impl BusPeer, now: u64) -> Result<(), &'static str> {
+    pub fn advance(&mut self, peer: &mut impl BusPeer, now: u64) -> Result<()> {
         if self.generation.is_none() {
             return Ok(());
         }
@@ -157,7 +156,7 @@ impl Session {
             let input = self.input == Some(completion.id);
             let output = self.output == Some(completion.id);
             if !input && !output {
-                return Err("USB session received a stale completion");
+                return Err(refuse!("USB session received a stale completion"));
             }
             if input {
                 self.input = None;
@@ -175,7 +174,7 @@ impl Session {
                     self.due |= output || !completion.bytes.is_empty();
                 }
                 TransferStatus::Timeout if input && completion.transferred == 0 => {}
-                _ => return Err("USB mux bulk transfer failed"),
+                _ => return Err(refuse!("USB mux bulk transfer failed")),
             }
         }
         if !self.host.ready() {
@@ -207,7 +206,7 @@ impl Session {
         }
         Ok(())
     }
-    fn advance_probe(&mut self) -> Result<(), &'static str> {
+    fn advance_probe(&mut self) -> Result<()> {
         if self.mux.state() != State::Active {
             return Ok(());
         }
@@ -225,7 +224,7 @@ impl Session {
         match self.mux.stream_state(stream)? {
             StreamState::Connecting => return Ok(()),
             StreamState::Open => {}
-            _ => return Err("QueryType stream was refused or reset"),
+            _ => return Err(refuse!("QueryType stream was refused or reset")),
         }
         if probe.sent < probe.request.len() {
             probe.sent += self.mux.write(stream, &probe.request[probe.sent..])?;
@@ -235,7 +234,7 @@ impl Session {
         if count != 0 {
             let (consumed, reply) = probe.reply.receive(&bytes[..count])?;
             if consumed != count {
-                return Err("unexpected bytes following QueryType reply");
+                return Err(refuse!("unexpected bytes following QueryType reply"));
             }
             if let Some(reply) = reply {
                 self.mux.close(stream)?;
@@ -260,8 +259,8 @@ mod tests {
         session.attach(7).unwrap();
         assert_eq!(session.state(stream), Ok(StreamState::Open));
         assert_eq!(
-            session.detach_reset(|_| Err("injected reset refusal")),
-            Err("injected reset refusal")
+            session.detach_reset(|_| Err(refuse!("injected reset refusal"))),
+            Err(refuse!("injected reset refusal"))
         );
         assert_eq!(session.generation, Some(7));
         assert_eq!(session.state(stream), Ok(StreamState::Open));

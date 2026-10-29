@@ -24,6 +24,8 @@
 //! `cmsgGET_ENTROPY_FOR_XNU_PRNG` 0x2d85194 (54). Any other request opcode is
 //! outside the recovered ABI and refuses; it is never answered with success.
 use super::message::{self, Frame};
+use crate::Result;
+use stela_contracts::refuse;
 
 pub const NOP: u8 = 0;
 pub const SET_OOL_IN_ADDRESS: u8 = 2;
@@ -93,9 +95,9 @@ pub enum Request {
 }
 
 impl Request {
-    pub fn decode(frame: Frame) -> Result<Self, &'static str> {
+    pub fn decode(frame: Frame) -> Result<Self> {
         if frame.service != message::CONTROL {
-            return Err("SEP control request is not addressed to service 0");
+            return Err(refuse!("SEP control request is not addressed to service 0"));
         }
         let request = match frame.opcode {
             NOP => Self::Nop,
@@ -113,13 +115,17 @@ impl Request {
             L4_PANIC | SEPOS_PANIC => Self::Panic,
             AP_SLEEP_READY => Self::ApSleepReady,
             ENTROPY => Self::Entropy,
-            _ => return Err("SEP control opcode is outside the recovered AP ABI"),
+            _ => {
+                return Err(refuse!(
+                    "SEP control opcode is outside the recovered AP ABI"
+                ));
+            }
         };
         if request.tagged() != (frame.tag != 0) {
             return Err(if request.tagged() {
-                "SEP control request needs a command-pool tag"
+                refuse!("SEP control request needs a command-pool tag")
             } else {
-                "SEP control notification must use tag zero"
+                refuse!("SEP control notification must use tag zero")
             });
         }
         Ok(request)

@@ -22,7 +22,9 @@
 //! every other command refuse rather than fake a firmware effect. The bus
 //! manager's summary at address 0x6b is `Summary`.
 
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 use super::{
     gpio::OpenDrain,
@@ -117,14 +119,14 @@ pub struct Firmware {
     pub config: Vec<(u8, Vec<u8>)>,
 }
 impl Firmware {
-    pub fn from_image(image: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_image(image: &[u8]) -> Result<Self> {
         let bytes = |offset: usize, len: usize| image.get(offset..offset.checked_add(len)?);
         let word = |offset: usize| {
             bytes(offset, 4).map(|v| u32::from_le_bytes(v.try_into().expect("four-byte field")))
         };
         let field =
             |offset: Option<usize>| offset.and_then(word).and_then(|v| usize::try_from(v).ok());
-        let header = match word(0).ok_or("HPM firmware has no header pointer")? {
+        let header = match word(0).ok_or(refuse!("HPM firmware has no header pointer"))? {
             0xace0_0001 | 0xace0_0002 => Some(0),
             0 | u32::MAX => field(Some(0x1000))
                 .filter(|&region| region != 0 && region != u32::MAX as usize)
@@ -133,31 +135,35 @@ impl Firmware {
             region => field(Some(0xffc))
                 .and_then(|offset| usize::try_from(region).ok()?.checked_add(offset)),
         }
-        .ok_or("HPM firmware has no header pointer")?;
+        .ok_or(refuse!("HPM firmware has no header pointer"))?;
         if word(header) != Some(0xace0_0002) {
-            return Err("unrecognized HPM firmware header format");
+            return Err(refuse!("unrecognized HPM firmware header format"));
         }
         let device = header
             .checked_add(0x30)
             .and_then(word)
-            .ok_or("truncated HPM device identity")?;
+            .ok_or(refuse!("truncated HPM device identity"))?;
         let version = header
             .checked_add(0x34)
             .and_then(word)
-            .ok_or("truncated HPM firmware version")?;
+            .ok_or(refuse!("truncated HPM firmware version"))?;
         if !matches!(device, 0x00cd_3217 | 0x00cd_3218) || version == 0 || version == u32::MAX {
-            return Err("unqualified HPM device identity or firmware version");
+            return Err(refuse!(
+                "unqualified HPM device identity or firmware version"
+            ));
         }
         let start = field(header.checked_add(0x48))
             .and_then(|offset| header.checked_add(offset))
-            .ok_or("truncated HPM configuration offset")?;
-        let size = field(header.checked_add(0x4c)).ok_or("truncated HPM configuration size")?;
-        let config = bytes(start, size).ok_or("truncated HPM application configuration")?;
+            .ok_or(refuse!("truncated HPM configuration offset"))?;
+        let size =
+            field(header.checked_add(0x4c)).ok_or(refuse!("truncated HPM configuration size"))?;
+        let config =
+            bytes(start, size).ok_or(refuse!("truncated HPM application configuration"))?;
         if config.len() < 0x1a
             || config[..2] != [1, 0]
             || usize::from(u16::from_le_bytes([config[2], config[3]])) != size
         {
-            return Err("unrecognized HPM application configuration");
+            return Err(refuse!("unrecognized HPM application configuration"));
         }
         let mut offset = usize::from(u16::from_le_bytes([config[0x18], config[0x19]]));
         let mut records = Vec::new();
@@ -168,12 +174,16 @@ impl Firmware {
             let data = config
                 .get(offset + 2..offset + 3 + usize::from(len))
                 .filter(|data| data.len() <= MAX_DATA)
-                .ok_or("HPM configuration record exceeds its configuration")?;
+                .ok_or(refuse!(
+                    "HPM configuration record exceeds its configuration"
+                ))?;
             records.push((register, data.to_vec()));
             offset += 3 + usize::from(len);
         }
         if records.is_empty() {
-            return Err("HPM application configuration has no register records");
+            return Err(refuse!(
+                "HPM application configuration has no register records"
+            ));
         }
         Ok(Self {
             device,
@@ -280,7 +290,7 @@ impl Hpm {
             .zip(&self.masks)
             .any(|(events, masks)| events.iter().zip(masks).any(|(e, m)| e & m != 0))
     }
-    fn register(&self, register: u8) -> Result<([u8; MAX_DATA], usize), &'static str> {
+    fn register(&self, register: u8) -> Result<([u8; MAX_DATA], usize)> {
         let mut data = [0; MAX_DATA];
         let connection = self.observed.connection;
         let len = match register {
@@ -379,7 +389,9 @@ impl Hpm {
                     .config
                     .iter()
                     .find(|(r, _)| *r == register)
-                    .ok_or("unmodeled HPM register or write-only interrupt clear")?;
+                    .ok_or(refuse!(
+                        "unmodeled HPM register or write-only interrupt clear"
+                    ))?;
                 data[..record.len()].copy_from_slice(record);
                 REGISTER_WIDTHS
                     .iter()
@@ -389,11 +401,13 @@ impl Hpm {
         };
         Ok((data, len))
     }
-    fn write_register(&mut self, register: u8, data: &[u8]) -> Result<(), &'static str> {
+    fn write_register(&mut self, register: u8, data: &[u8]) -> Result<()> {
         match register {
             MASK1 | MASK2 | CLEAR1 | CLEAR2 => {
                 if data.is_empty() || data.len() > BANK_BYTES {
-                    return Err("HPM interrupt bank length is outside the public TPS6598x layout");
+                    return Err(refuse!(
+                        "HPM interrupt bank length is outside the public TPS6598x layout"
+                    ));
                 }
                 if matches!(register, MASK1 | MASK2) {
                     self.masks[(register - MASK1) as usize][..data.len()].copy_from_slice(data);
@@ -408,49 +422,46 @@ impl Hpm {
             }
             DATA => {
                 if data.is_empty() || data.len() > MAX_DATA {
-                    return Err("invalid HPM command-data length");
+                    return Err(refuse!("invalid HPM command-data length"));
                 }
                 self.data[..data.len()].copy_from_slice(data);
             }
             DATA_CONTROL => {
                 let control: [u8; 4] = data
                     .try_into()
-                    .map_err(|_| "HPM data control is four bytes")?;
+                    .map_err(|_| refuse!("HPM data control is four bytes"))?;
                 self.data_control = control;
             }
             COMMAND => {
                 let command: [u8; 4] = data
                     .try_into()
-                    .map_err(|_| "HPM 4CC command is four bytes")?;
+                    .map_err(|_| refuse!("HPM 4CC command is four bytes"))?;
                 self.execute(command)?;
             }
-            _ => return Err("unmodeled HPM write or read-only register"),
+            _ => return Err(refuse!("unmodeled HPM write or read-only register")),
         }
         Ok(())
     }
     /// Runs one 4CC with its DATA1 argument to completion.
-    fn execute(&mut self, command: [u8; 4]) -> Result<(), &'static str> {
+    fn execute(&mut self, command: [u8; 4]) -> Result<()> {
         let argument = self.data[0];
         match &command {
             b"SSPS" if ACTIVE_POWER_STATES.contains(&argument) => self.power_state = argument,
-            b"SSPS" => return Err("HPM sleep or unknown power state is not modeled"),
+            b"SSPS" => return Err(refuse!("HPM sleep or unknown power state is not modeled")),
             b"USBd" if argument <= 1 => self.usb_detection = argument == 1,
             b"USBw" if [0, 1, 9, 0x11, 0x80].contains(&argument) => self.remote_wake = argument,
             b"ABRT" => {}
-            _ => return Err("unmodeled HPM 4CC command or argument"),
+            _ => return Err(refuse!("unmodeled HPM 4CC command or argument")),
         }
         Ok(())
     }
-    fn transfer_inner(
-        &mut self,
-        write: &[u8],
-        read: &mut [u8],
-        stop: bool,
-    ) -> Result<(), &'static str> {
+    fn transfer_inner(&mut self, write: &[u8], read: &mut [u8], stop: bool) -> Result<()> {
         self.refresh();
         if write.len() > 1 {
             if !read.is_empty() || write.len() != usize::from(write[1]) + 2 {
-                return Err("HPM write length prefix does not match its transaction");
+                return Err(refuse!(
+                    "HPM write length prefix does not match its transaction"
+                ));
             }
             self.write_register(write[0], &write[2..])?;
             self.selected = false;
@@ -465,17 +476,17 @@ impl Hpm {
             self.selected = true;
         }
         if !self.selected {
-            return Err("HPM read without an established register selector");
+            return Err(refuse!("HPM read without an established register selector"));
         }
         let end = self
             .cursor
             .checked_add(read.len())
             .filter(|&end| end <= self.response.len())
-            .ok_or("HPM read exceeds the 64-byte register protocol")?;
+            .ok_or(refuse!("HPM read exceeds the 64-byte register protocol"))?;
         // Fixed-size reads may clock beyond a register's data. The
         // public protocol defines a length followed by that many bytes only.
         if end > usize::from(self.response[0]) + 1 {
-            return Err("HPM read beyond the described register payload");
+            return Err(refuse!("HPM read beyond the described register payload"));
         }
         read.copy_from_slice(&self.response[self.cursor..end]);
         self.cursor = end;
@@ -491,9 +502,11 @@ impl I2cTarget for Hpm {
         // every refusal. Port is shared read-only by preparation.
         let mut next = self.clone();
         let mut data = [0; MAX_DATA + 1];
-        let output = data.get_mut(..read.len()).ok_or(TargetError::Unsupported(
-            "HPM transfer exceeds the register protocol",
-        ))?;
+        let output = data
+            .get_mut(..read.len())
+            .ok_or(TargetError::Unsupported(refuse!(
+                "HPM transfer exceeds the register protocol"
+            )))?;
         next.transfer_inner(write, output, stop)
             .map_err(TargetError::Unsupported)?;
         read.copy_from_slice(output);
@@ -524,12 +537,12 @@ pub struct Summary {
 }
 const SUMMARY: u8 = 0x10;
 impl Summary {
-    pub fn new(dies: Vec<(u8, OpenDrain)>) -> Result<Self, &'static str> {
+    pub fn new(dies: Vec<(u8, OpenDrain)>) -> Result<Self> {
         if dies
             .iter()
             .any(|&(address, _)| !(0x38..=0x3f).contains(&address))
         {
-            return Err("HPM summary covers only dies at 0x38..=0x3f");
+            return Err(refuse!("HPM summary covers only dies at 0x38..=0x3f"));
         }
         Ok(Self {
             dies,
@@ -555,23 +568,23 @@ impl I2cTarget for Summary {
                 response = Some(([3, 0xff, high, low], 0));
             }
             _ => {
-                return Err(TargetError::Unsupported(
-                    "HPM bus manager has only its read-only summary register",
-                ));
+                return Err(TargetError::Unsupported(refuse!(
+                    "HPM bus manager has only its read-only summary register"
+                )));
             }
         }
         if read.is_empty() {
             self.response = response;
             return Ok(());
         }
-        let (bytes, cursor) = response.ok_or(TargetError::Unsupported(
-            "HPM summary read without its register selector",
-        ))?;
+        let (bytes, cursor) = response.ok_or(TargetError::Unsupported(refuse!(
+            "HPM summary read without its register selector"
+        )))?;
         let end = cursor + read.len();
         if end > bytes.len() {
-            return Err(TargetError::Unsupported(
-                "HPM summary read beyond its four bytes",
-            ));
+            return Err(TargetError::Unsupported(refuse!(
+                "HPM summary read beyond its four bytes"
+            )));
         }
         read.copy_from_slice(&bytes[cursor..end]);
         self.response = (!stop).then_some((bytes, end));

@@ -34,7 +34,9 @@
 //! always reaches the host. A nonzero SET_IDLE rate repeats the current
 //! report at that rate while nothing changes (HID 1.11 7.2.4).
 use super::{BusPeer, Function, Reply, Token, control::Stall};
+use crate::Result;
 use alloc::{collections::VecDeque, vec::Vec};
+use stela_contracts::refuse;
 use stela_drivers::input::{Input, POINTER_MAX};
 
 const EP0_PACKET: usize = 64;
@@ -323,7 +325,7 @@ impl Peripheral {
     /// Applies one input change, queuing the report it produces. Reports
     /// queue only while configured; a host that has not configured the
     /// device reads the current state with GET_REPORT.
-    pub fn input(&mut self, input: Input) -> Result<(), &'static str> {
+    pub fn input(&mut self, input: Input) -> Result<()> {
         match input {
             Input::Key { usage, pressed } => {
                 if let 0xe0..=0xe7 = usage {
@@ -337,7 +339,7 @@ impl Peripheral {
                     let position = self.held.iter().position(|&held| held == usage);
                     match (pressed, position) {
                         (true, None) if self.held.len() == MAX_HELD => {
-                            return Err("too many keys held at once");
+                            return Err(refuse!("too many keys held at once"));
                         }
                         (true, None) => self.held.push(usage),
                         (false, Some(n)) => {
@@ -346,14 +348,14 @@ impl Peripheral {
                         _ => return Ok(()),
                     }
                 } else {
-                    return Err("not a Keyboard/Keypad usage this keyboard reports");
+                    return Err(refuse!("not a Keyboard/Keypad usage this keyboard reports"));
                 }
                 let report = self.keyboard_report().to_vec();
                 self.queue(KEYBOARD, report);
             }
             Input::Move { x, y } => {
                 if x > POINTER_MAX || y > POINTER_MAX {
-                    return Err("pointer position outside its logical range");
+                    return Err(refuse!("pointer position outside its logical range"));
                 }
                 (self.x, self.y) = (x, y);
                 // Motion coalesces into a queued report of the same buttons.
@@ -368,7 +370,7 @@ impl Peripheral {
             }
             Input::Buttons(buttons) => {
                 if buttons & !7 != 0 {
-                    return Err("the pointer has three buttons");
+                    return Err(refuse!("the pointer has three buttons"));
                 }
                 self.buttons = buttons;
                 let report = self.pointer_report(0, 0).to_vec();
@@ -376,14 +378,14 @@ impl Peripheral {
             }
             Input::Wheel(detents) => {
                 if detents == i8::MIN {
-                    return Err("wheel motion outside its logical range");
+                    return Err(refuse!("wheel motion outside its logical range"));
                 }
                 let report = self.pointer_report(detents, 0).to_vec();
                 self.queue(POINTER, report);
             }
             Input::HWheel(detents) => {
                 if detents == i8::MIN {
-                    return Err("wheel motion outside its logical range");
+                    return Err(refuse!("wheel motion outside its logical range"));
                 }
                 let report = self.pointer_report(0, detents).to_vec();
                 self.queue(POINTER, report);
@@ -391,7 +393,7 @@ impl Peripheral {
             Input::Motion { dx, dy } => self.motion(dx, dy),
             Input::MouseButtons(buttons) => {
                 if buttons & !7 != 0 {
-                    return Err("the mouse has three buttons");
+                    return Err(refuse!("the mouse has three buttons"));
                 }
                 self.mouse_buttons = buttons;
                 let report = self.mouse_report(0, 0, 0, 0).to_vec();
@@ -399,14 +401,14 @@ impl Peripheral {
             }
             Input::MouseWheel(detents) => {
                 if detents == i8::MIN {
-                    return Err("wheel motion outside its logical range");
+                    return Err(refuse!("wheel motion outside its logical range"));
                 }
                 let report = self.mouse_report(0, 0, detents, 0).to_vec();
                 self.queue(MOUSE, report);
             }
             Input::MouseHWheel(detents) => {
                 if detents == i8::MIN {
-                    return Err("wheel motion outside its logical range");
+                    return Err(refuse!("wheel motion outside its logical range"));
                 }
                 let report = self.mouse_report(0, 0, 0, detents).to_vec();
                 self.queue(MOUSE, report);
@@ -724,7 +726,7 @@ enum Outcome {
 impl BusPeer for Peripheral {
     /// A bus reset returns the device to its Default state; held keys and
     /// buttons remain held.
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         self.address = 0;
         self.configuration = 0;
         self.control = Control::Idle;
@@ -732,19 +734,16 @@ impl BusPeer for Peripheral {
         Ok(())
     }
 
-    fn packet(
-        &mut self,
-        endpoint: u8,
-        token: Token,
-        data: &mut [u8],
-    ) -> Result<Reply, &'static str> {
+    fn packet(&mut self, endpoint: u8, token: Token, data: &mut [u8]) -> Result<Reply> {
         Ok(match (endpoint, token) {
             (0, Token::Setup) => {
-                let setup = data.try_into().map_err(|_| "a SETUP packet is 8 bytes")?;
+                let setup = data
+                    .try_into()
+                    .map_err(|_| refuse!("a SETUP packet is 8 bytes"))?;
                 self.setup(setup);
                 Reply::Ack(8)
             }
-            (_, Token::Setup) => return Err("SETUP to a non-control endpoint"),
+            (_, Token::Setup) => return Err(refuse!("SETUP to a non-control endpoint")),
             (0, Token::In) => self.control_in(data),
             (0, Token::Out) => self.control_out(data),
             (_, Token::In) => self.interrupt_in(endpoint, data),

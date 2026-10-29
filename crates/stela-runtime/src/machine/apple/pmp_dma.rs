@@ -11,10 +11,12 @@ use super::DeviceError;
 use super::DeviceId;
 use super::Memory;
 use super::Port;
+use crate::Result;
 use crate::platform::apple::pmp::native::dma;
 use crate::platform::apple::pmp::native::platform::owner::Completion;
 use alloc::{collections::BTreeMap, rc::Rc, string::String, sync::Arc};
 use core::sync::atomic::{Ordering, fence};
+use stela_contracts::refuse;
 use stela_engine::memory::RegisteredSystemRam;
 use stela_soc_data::board;
 
@@ -34,14 +36,16 @@ impl SourceProvenance {
         original: &[u8],
         prepared: &[u8],
         pmp: &board::PmpController,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let original_configuration = pmp.native_dma_configuration(original)?;
         let prepared_configuration = pmp.native_dma_configuration(prepared)?;
         if original_configuration != prepared_configuration
             || original_configuration.0.unwrap_or(0) != 0
             || original_configuration.1.unwrap_or(0) != 0
         {
-            return Err("PMP native DMA static configuration changed or requires an unsupported address transformation".into());
+            return Err(refuse!(
+                "PMP native DMA static configuration changed or requires an unsupported address transformation"
+            ));
         }
         Ok(Self {
             original_tree_sha256: stela_formats::sha256(original),
@@ -74,12 +78,12 @@ impl ExplicitRuntimeConfiguration {
         source: SourceProvenance,
         leaf1_ebx: u32,
         leaf1_edx: u32,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let synchronization_granule = u64::from((leaf1_ebx >> 8) & 0xff) * 8;
         if leaf1_edx & (1 << 19) == 0 || !synchronization_granule.is_power_of_two() {
-            return Err(
-                "PMP native DMA requires an actual valid CPUID CLFLUSH line observation".into(),
-            );
+            return Err(refuse!(
+                "PMP native DMA requires an actual valid CPUID CLFLUSH line observation"
+            ));
         }
         Ok(Self {
             source,
@@ -114,19 +118,21 @@ pub(super) struct PmpDma {
     _configuration: ExplicitRuntimeConfiguration,
 }
 impl PmpDma {
-    fn check_bus(&self, bus: &Bus) -> Result<(), String> {
+    fn check_bus(&self, bus: &Bus) -> Result<()> {
         bus.shared_view(self.asc, self.wrapper.0, self.wrapper.1, 0)
-            .map_err(|e| format!("PMP native DMA ASC view changed: {e:?}"))?;
+            .map_err(|e| refuse!("PMP native DMA ASC view changed: {e}", ?e))?;
         bus.shared_view(self.dart, self.aperture.0, self.aperture.1, 0)
-            .map_err(|e| format!("PMP native DMA DART view changed: {e:?}"))?;
+            .map_err(|e| refuse!("PMP native DMA DART view changed: {e}", ?e))?;
         if bus.device::<Asc>(self.asc).is_none() {
-            return Err("PMP native DMA actual ASC owner disappeared".into());
+            return Err(refuse!("PMP native DMA actual ASC owner disappeared"));
         }
         let dart = bus
             .device::<Dart>(self.dart)
-            .ok_or("PMP native DMA actual DART owner disappeared")?;
+            .ok_or(refuse!("PMP native DMA actual DART owner disappeared"))?;
         if dart.profile() != self.profile || dart.stream_capacity() != self.streams {
-            return Err("PMP native DMA actual DART profile/capacity changed".into());
+            return Err(refuse!(
+                "PMP native DMA actual DART profile/capacity changed"
+            ));
         }
         Ok(())
     }
@@ -151,28 +157,28 @@ impl AppleDevices {
         board: &board::Board,
         ram: Arc<RegisteredSystemRam>,
         configuration: ExplicitRuntimeConfiguration,
-    ) -> Result<dma::Broker, String> {
+    ) -> Result<dma::Broker> {
         if self.native_pmp_dma.is_some() {
-            return Err("PMP native DMA is already bound".into());
+            return Err(refuse!("PMP native DMA is already bound"));
         }
         let pmp = board
             .pmp
             .as_ref()
-            .ok_or("PMP native DMA has no source controller")?;
+            .ok_or(refuse!("PMP native DMA has no source controller"))?;
         if *pmp != configuration.source.pmp {
-            return Err(
-                "PMP native DMA source controller differs from the parsed configuration".into(),
-            );
+            return Err(refuse!(
+                "PMP native DMA source controller differs from the parsed configuration"
+            ));
         }
         let selected = pmp.dma_route(&board.darts)?;
         let source = board
             .darts
             .get(selected.iommu)
-            .ok_or("PMP native DMA source IOMMU index is invalid")?;
+            .ok_or(refuse!("PMP native DMA source IOMMU index is invalid"))?;
         let instance = source
             .instances
             .get(selected.instance)
-            .ok_or("PMP native DMA source DART instance is invalid")?;
+            .ok_or(refuse!("PMP native DMA source DART instance is invalid"))?;
         let streams = usize::from(source.streams);
         let stream = source.profile.mapper_input_stream(
             streams,
@@ -180,24 +186,30 @@ impl AppleDevices {
             &source.remap,
         )?;
         if stream != selected.stream as usize || stream >= streams {
-            return Err("PMP native DMA context/remap/stream source join differs".into());
+            return Err(refuse!(
+                "PMP native DMA context/remap/stream source join differs"
+            ));
         }
         let asc = self
             .bus
             .window_at(pmp.wrapper.0)
             .map(|v| v.2)
-            .ok_or("PMP native DMA has no mounted ASC wrapper")?;
+            .ok_or(refuse!("PMP native DMA has no mounted ASC wrapper"))?;
         let mut pmp_owners = self.coprocessors.iter().filter(|(role, _)| *role == "PMP");
         if pmp_owners.next().map(|(_, id)| *id) != Some(asc) || pmp_owners.next().is_some() {
-            return Err("PMP native DMA wrapper is not the unique actual PMP ASC".into());
+            return Err(refuse!(
+                "PMP native DMA wrapper is not the unique actual PMP ASC"
+            ));
         }
         let dart = self
             .bus
             .window_at(instance.physical)
             .map(|v| v.2)
-            .ok_or("PMP native DMA has no mounted source DART instance")?;
+            .ok_or(refuse!(
+                "PMP native DMA has no mounted source DART instance"
+            ))?;
         if asc == dart {
-            return Err("PMP native DMA ASC and DART owners alias".into());
+            return Err(refuse!("PMP native DMA ASC and DART owners alias"));
         }
         let route = dma::Route {
             mapper: selected.mapper,
@@ -208,7 +220,7 @@ impl AppleDevices {
         };
         let generation = ram
             .generation()
-            .map_err(|e| format!("PMP native DMA RAM domain is unavailable: {e:?}"))?;
+            .map_err(|e| refuse!("PMP native DMA RAM domain is unavailable: {e}", ?e))?;
         let owners = dma::Owners {
             dart: Rc::new(()),
             canonical_ram: Rc::new(()),
@@ -222,8 +234,7 @@ impl AppleDevices {
                 asc_dram_mask: configuration.source.asc_dram_mask_property.unwrap_or(0),
                 synchronization_granule: configuration.synchronization_granule,
             },
-        )
-        .map_err(String::from)?;
+        )?;
         let mut master = PmpDma {
             asc,
             dart,
@@ -247,13 +258,15 @@ impl AppleDevices {
         match master.coherence.ready() {
             Completion::Retired { refusal: None, .. } => (),
             Completion::Busy { .. } => {
-                return Err("PMP native DMA canonical RAM ownership is busy at binding".into());
+                return Err(refuse!(
+                    "PMP native DMA canonical RAM ownership is busy at binding"
+                ));
             }
             Completion::Refused(reason)
             | Completion::Retired {
                 refusal: Some(reason),
                 ..
-            } => return Err(reason.into()),
+            } => return Err(reason),
         }
         self.native_pmp_dma = Some(master);
         Ok(broker)
@@ -283,7 +296,7 @@ impl AppleDevices {
             .map_err(DeviceError::TransferRefused)?;
         match master.coherence.ready() {
             Completion::Busy { .. } => return Ok(()),
-            Completion::Refused(reason) => return Err(DeviceError::TransferRefused(reason.into())),
+            Completion::Refused(reason) => return Err(DeviceError::TransferRefused(reason)),
             Completion::Retired { .. } => (),
         }
         let Some((asc, dart)) = self.bus.pair_mut::<Asc, Dart>(master.asc, master.dart) else {
@@ -312,7 +325,7 @@ impl AppleDevices {
             | Completion::Retired {
                 refusal: Some(reason),
                 ..
-            } => Err(DeviceError::TransferRefused(reason.into())),
+            } => Err(DeviceError::TransferRefused(reason)),
         }
     }
     pub(super) fn native_pmp_dma_deadline(&self) -> Option<u64> {
@@ -354,14 +367,14 @@ impl WriteBackCoherence {
     // Drop before Port entry: no writer gate is held into a canonical transfer.
     fn ready(&mut self) -> Completion<()> {
         if self.terminal {
-            return Completion::Refused("PMP native DMA coherence session is retired");
+            return Completion::Refused(refuse!("PMP native DMA coherence session is retired"));
         }
         let guard = match self.ram.try_service() {
             Ok(Some(guard)) => guard,
             Ok(None) => return Completion::Busy { deadline: None },
             Err(_) => {
                 self.terminal = true;
-                return Completion::Refused("PMP native DMA canonical RAM service failed");
+                return Completion::Refused(refuse!("PMP native DMA canonical RAM service failed"));
             }
         };
         if !guard.belongs_to(&self.ram)
@@ -370,7 +383,9 @@ impl WriteBackCoherence {
         {
             guard.fail();
             self.terminal = true;
-            return Completion::Refused("PMP native DMA canonical RAM service generation differs");
+            return Completion::Refused(refuse!(
+                "PMP native DMA canonical RAM service generation differs"
+            ));
         }
         Completion::Retired {
             value: (),
@@ -388,7 +403,7 @@ impl dma::Coherence for WriteBackCoherence {
         port: &mut Port<'_, '_>,
     ) -> Completion<()> {
         if self.terminal {
-            return Completion::Refused("PMP native DMA coherence session is retired");
+            return Completion::Refused(refuse!("PMP native DMA coherence session is retired"));
         }
         if !Rc::ptr_eq(&owners.dart, &self.owners.dart)
             || !Rc::ptr_eq(&owners.canonical_ram, &self.owners.canonical_ram)
@@ -396,7 +411,9 @@ impl dma::Coherence for WriteBackCoherence {
             || descriptor.route != self.route
             || descriptor.flags != 0x202
         {
-            return Completion::Refused("PMP native DMA coherence owner/descriptor differs");
+            return Completion::Refused(refuse!(
+                "PMP native DMA coherence owner/descriptor differs"
+            ));
         }
         let expected = if effect == dma::Effect::Release {
             Life::Unmapped
@@ -409,14 +426,20 @@ impl dma::Coherence for WriteBackCoherence {
                 if effect != dma::Effect::Map
                     && view.descriptor == descriptor
                     && view.life == expected => {}
-            _ => return Completion::Refused("PMP native DMA native descriptor lifecycle differs"),
+            _ => {
+                return Completion::Refused(refuse!(
+                    "PMP native DMA native descriptor lifecycle differs"
+                ));
+            }
         }
         if let dma::Effect::ReportingSynchronize { offset, bytes } = effect
             && offset
                 .checked_add(bytes)
                 .is_none_or(|end| end > descriptor.bytes)
         {
-            return Completion::Refused("PMP native DMA synchronization exceeds native descriptor");
+            return Completion::Refused(refuse!(
+                "PMP native DMA synchronization exceeds native descriptor"
+            ));
         }
         // A Busy Map retry revalidates the live DART, even though the broker
         // already checked it before this callback. No PA translation is cached.
@@ -426,7 +449,9 @@ impl dma::Coherence for WriteBackCoherence {
                     .check(descriptor.iova, descriptor.bytes as usize, write)
                     .is_err()
                 {
-                    return Completion::Refused("PMP native DMA live map admission changed");
+                    return Completion::Refused(refuse!(
+                        "PMP native DMA live map admission changed"
+                    ));
                 }
             }
         }
@@ -438,7 +463,7 @@ impl dma::Coherence for WriteBackCoherence {
             Ok(None) => return Completion::Busy { deadline: None },
             Err(_) => {
                 self.terminal = true;
-                return Completion::Refused("PMP native DMA canonical RAM service failed");
+                return Completion::Refused(refuse!("PMP native DMA canonical RAM service failed"));
             }
         };
         if !guard.belongs_to(&self.ram)
@@ -447,7 +472,9 @@ impl dma::Coherence for WriteBackCoherence {
         {
             guard.fail();
             self.terminal = true;
-            return Completion::Refused("PMP native DMA canonical RAM service generation differs");
+            return Completion::Refused(refuse!(
+                "PMP native DMA canonical RAM service generation differs"
+            ));
         }
         // X86 coherent Normal-WB ordering of the Port's canonical stores.
         // Remote worker fences occurred in the held engine before this call.
@@ -463,7 +490,9 @@ impl dma::Coherence for WriteBackCoherence {
         let refusal = if guard.validate_current().is_err() {
             guard.fail();
             self.terminal = true;
-            Some("PMP native DMA RAM failed after actual WB visibility retirement")
+            Some(refuse!(
+                "PMP native DMA RAM failed after actual WB visibility retirement"
+            ))
         } else {
             None
         };

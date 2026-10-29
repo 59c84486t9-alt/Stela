@@ -47,7 +47,10 @@
 pub mod t6000;
 
 use super::regfile::Held;
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -95,15 +98,17 @@ pub struct Cluster {
 }
 
 impl Cluster {
-    pub fn new(dvmr: &[(u64, u64)], pstates: usize) -> Result<Self, &'static str> {
+    pub fn new(dvmr: &[(u64, u64)], pstates: usize) -> Result<Self> {
         if pstates == 0 || pstates > 32 {
-            return Err("CPU state table exceeds the five-bit state selector");
+            return Err(refuse!(
+                "CPU state table exceeds the five-bit state selector"
+            ));
         }
         let mut registers = Held::default();
         let mut offsets = Vec::new();
         for &(offset, value) in dvmr {
             if !DVMR.contains(&offset) || !offset.is_multiple_of(8) || offsets.contains(&offset) {
-                return Err("DVMR tunable outside the DVMR tables");
+                return Err(refuse!("DVMR tunable outside the DVMR tables"));
             }
             offsets.push(offset);
             registers.set(offset, value);
@@ -119,14 +124,9 @@ impl Cluster {
 
     /// Extend only the DT-selected event counters and the hardware's state
     /// counter capacity. The P mapping table is separate from either bank.
-    pub fn with_counters(
-        mut self,
-        capacity: usize,
-        mapped: bool,
-        events: &[u8],
-    ) -> Result<Self, &'static str> {
+    pub fn with_counters(mut self, capacity: usize, mapped: bool, events: &[u8]) -> Result<Self> {
         if capacity == 0 || capacity > 16 {
-            return Err("ACC counter capacity exceeds a paired bank");
+            return Err(refuse!("ACC counter capacity exceeds a paired bank"));
         }
         self.mapped = mapped;
         for index in 0..capacity {
@@ -138,7 +138,7 @@ impl Cluster {
         }
         for &index in events {
             if index >= 27 {
-                return Err("ACC special event selector is out of range");
+                return Err(refuse!("ACC special event selector is out of range"));
             }
             let offset = EVENT_BASE + u64::from(index) * COUNTER_BYTES;
             self.counters.extend([offset, offset + COUNTER_BYTES]);
@@ -205,18 +205,20 @@ impl MmioDevice for Cluster {
             ));
         }
         if offset == COMMAND {
-            let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+            let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
             if value & !COMMAND_FIELDS != 0 {
-                return Err(fail(
-                    "CPU command contains undescribed or read-only status fields",
-                ));
+                return Err(fail(refuse!(
+                    "CPU command contains undescribed or read-only status fields"
+                )));
             }
             let state = value & STATE;
             if state >= self.pstates {
-                return Err(fail("CPU command selects a state outside its table"));
+                return Err(fail(refuse!(
+                    "CPU command selects a state outside its table"
+                )));
             }
             if value & SET == 0 && state != self.registers.get(COMMAND) & STATE {
-                return Err(fail("CPU state change requires a SET request"));
+                return Err(fail(refuse!("CPU state change requires a SET request")));
             }
             self.registers.set(offset, value & !SET);
         } else {

@@ -14,7 +14,9 @@ mod selected;
 mod t6000;
 mod t8112;
 use super::*;
-use alloc::{format, string::String, vec, vec::Vec};
+use crate::Result;
+use alloc::{string::String, vec, vec::Vec};
+use stela_contracts::refuse;
 use stela_crypto::{Sha256, digest::Digest};
 use {crate::board, crate::board::PowerStates, stela_contracts::adt::Node};
 
@@ -47,40 +49,41 @@ pub struct BspSource<'a> {
     cluster_address: u64,
     provenance: &'static str,
 }
-fn property<'a>(node: &Node<'a>, key: &str) -> Result<&'a [u8], String> {
+fn property<'a>(node: &Node<'a>, key: &str) -> Result<&'a [u8]> {
     let props = node
         .properties()
-        .ok_or("assigned source has malformed properties")?;
+        .ok_or(refuse!("assigned source has malformed properties"))?;
     let mut found = props.iter().filter(|(name, _)| *name == key.as_bytes());
     let value = found
         .next()
-        .ok_or_else(|| format!("assigned source lacks {key}"))?
+        .ok_or_else(|| refuse!("assigned source lacks {key}", key))?
         .1;
     if found.next().is_some() {
-        return Err(format!("assigned source repeats {key}"));
+        return Err(refuse!("assigned source repeats {key}", key));
     }
     Ok(value)
 }
-fn word(node: &Node<'_>, key: &str) -> Result<u32, String> {
+fn word(node: &Node<'_>, key: &str) -> Result<u32> {
     Ok(u32::from_le_bytes(
         property(node, key)?
             .try_into()
-            .map_err(|_| format!("assigned source {key} is not a u32"))?,
+            .map_err(|_| refuse!("assigned source {key} is not a u32", key))?,
     ))
 }
-fn text<'a>(node: &Node<'a>, key: &str) -> Result<&'a str, String> {
+fn text<'a>(node: &Node<'a>, key: &str) -> Result<&'a str> {
     core::str::from_utf8(
         property(node, key)?
             .strip_suffix(&[0])
             .unwrap_or(property(node, key)?),
     )
-    .map_err(|_| format!("assigned source {key} is not text"))
+    .map_err(|_| refuse!("assigned source {key} is not text", key))
 }
-fn region(node: &Node<'_>, key: &str) -> Result<RegisterRange, String> {
+fn region(node: &Node<'_>, key: &str) -> Result<RegisterRange> {
     let raw = property(node, key)?;
     if raw.len() != 16 {
-        return Err(format!(
-            "assigned source {key} is not one implementation range"
+        return Err(refuse!(
+            "assigned source {key} is not one implementation range",
+            key
         ));
     }
     let range = RegisterRange {
@@ -88,7 +91,7 @@ fn region(node: &Node<'_>, key: &str) -> Result<RegisterRange, String> {
         bytes: u64::from_le_bytes(raw[8..].try_into().unwrap()),
     };
     if range.end().is_none() {
-        return Err(format!("assigned source {key} extent is invalid"));
+        return Err(refuse!("assigned source {key} extent is invalid", key));
     }
     Ok(range)
 }
@@ -99,36 +102,40 @@ fn starts(name: &str, prefixes: &[&str]) -> bool {
 // Compare source-owned structural properties before deriving any resource. A
 // hidden compatible is permitted only by explicit caller selection of this
 // source family; it is never restored or used to admit public PMGR hardware.
-fn retained(original: &Node<'_>, prepared: &Node<'_>, mutable: &[&str]) -> Result<(), String> {
+fn retained(original: &Node<'_>, prepared: &Node<'_>, mutable: &[&str]) -> Result<()> {
     let props = original
         .properties()
-        .ok_or("malformed original source properties")?;
+        .ok_or(refuse!("malformed original source properties"))?;
     let mut names = BTreeSet::new();
     for (name, value) in props {
-        let key = core::str::from_utf8(name).map_err(|_| "nontext source property name")?;
+        let key =
+            core::str::from_utf8(name).map_err(|_| refuse!("nontext source property name"))?;
         if !names.insert(name) {
-            return Err(format!("assigned original source repeats {key}"));
+            return Err(refuse!("assigned original source repeats {key}", key));
         }
         if mutable.contains(&key) {
             continue;
         }
         if original.property_is_placeholder(key) == Some(true) {
             if prepared.property_is_placeholder(key) == Some(true) {
-                return Err(format!("assigned prepared source retains unresolved {key}"));
+                return Err(refuse!(
+                    "assigned prepared source retains unresolved {key}",
+                    key
+                ));
             }
             continue;
         }
         if property(prepared, key)? != value {
-            return Err(format!("assigned prepared source changed {key}"));
+            return Err(refuse!("assigned prepared source changed {key}", key));
         }
     }
     let mut names = BTreeSet::new();
     for (name, _) in prepared
         .properties()
-        .ok_or("malformed prepared source properties")?
+        .ok_or(refuse!("malformed prepared source properties"))?
     {
         if !names.insert(name) {
-            return Err("assigned prepared source repeats a property".into());
+            return Err(refuse!("assigned prepared source repeats a property"));
         }
     }
     Ok(())
@@ -146,66 +153,73 @@ impl<'a> BspSource<'a> {
         prepared: &[u8],
         identity: SourceIdentity,
         boot_reg: u32,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let profile = identity.profile;
         if profile.chip != Chip::AppleM1 || profile.soc != 0x6000 || boot_reg != 0 {
-            return Err(
-                "assigned source requires qualified T6000 physical-reg0 BSP geometry".into(),
-            );
+            return Err(refuse!(
+                "assigned source requires qualified T6000 physical-reg0 BSP geometry"
+            ));
         }
         if profile.input_set_sha256 == [0; 32]
             || profile.adapted_set_sha256 == Some([0; 32])
             || identity.original_tree_sha256 == [0; 32]
             || <[u8; 32]>::from(Sha256::digest(original)) != identity.original_tree_sha256
         {
-            return Err("assigned original source identity/provenance differs".into());
+            return Err(refuse!(
+                "assigned original source identity/provenance differs"
+            ));
         }
-        let root = Node::root(original).ok_or("assigned original source tree is malformed")?;
-        let adapted = Node::root(prepared).ok_or("assigned prepared source tree is malformed")?;
+        let root =
+            Node::root(original).ok_or(refuse!("assigned original source tree is malformed"))?;
+        let adapted =
+            Node::root(prepared).ok_or(refuse!("assigned prepared source tree is malformed"))?;
         let chosen = root
             .child("chosen")
-            .ok_or("assigned source has no chosen node")?;
+            .ok_or(refuse!("assigned source has no chosen node"))?;
         let actual = adapted
             .child("chosen")
-            .ok_or("assigned prepared source has no chosen node")?;
+            .ok_or(refuse!("assigned prepared source has no chosen node"))?;
         for (key, selected) in [("chip-id", profile.soc), ("board-id", profile.board)] {
             let template = word(&chosen, key)?;
             if (template != 0 && template != selected) || word(&actual, key)? != selected {
-                return Err(format!(
-                    "assigned selected restore {key} differs from source/prepared identity"
+                return Err(refuse!(
+                    "assigned selected restore {key} differs from source/prepared identity",
+                    key
                 ));
             }
         }
         let chip = profile.soc;
         let product = root
             .child("product")
-            .ok_or("assigned source has no product")?;
+            .ok_or(refuse!("assigned source has no product"))?;
         let prepared_product = adapted
             .child("product")
-            .ok_or("assigned prepared source has no product")?;
+            .ok_or(refuse!("assigned prepared source has no product"))?;
         if property(&product, "product-soc-name")?
             != property(&prepared_product, "product-soc-name")?
         {
-            return Err("assigned prepared product-soc-name differs".into());
+            return Err(refuse!("assigned prepared product-soc-name differs"));
         }
         let io = root
             .child("arm-io")
-            .ok_or("assigned source has no arm-io")?;
+            .ok_or(refuse!("assigned source has no arm-io"))?;
         let prepared_io = adapted
             .child("arm-io")
-            .ok_or("assigned prepared source has no arm-io")?;
+            .ok_or(refuse!("assigned prepared source has no arm-io"))?;
         retained(&io, &prepared_io, &[])?;
-        let pmgr = io.child("pmgr").ok_or("assigned source has no PMGR")?;
+        let pmgr = io
+            .child("pmgr")
+            .ok_or(refuse!("assigned source has no PMGR"))?;
         let prepared_pmgr = prepared_io
             .child("pmgr")
-            .ok_or("assigned prepared source has no PMGR")?;
+            .ok_or(refuse!("assigned prepared source has no PMGR"))?;
         if !io.compatible("arm-io,t6000")
             || !pmgr.compatible("pmgr1,t6000")
             || word(&pmgr, "acc-harvesting")? != 1
         {
-            return Err(
-                "assigned source requires actual T6000 normal mode1 constructor inputs".into(),
-            );
+            return Err(refuse!(
+                "assigned source requires actual T6000 normal mode1 constructor inputs"
+            ));
         }
         retained(&pmgr, &prepared_pmgr, &["compatible"])?;
         // Preserve absent as well as present dependency/function schema.
@@ -221,26 +235,33 @@ impl<'a> BspSource<'a> {
             "soc-clusters",
         ] {
             if pmgr.property(key) != prepared_pmgr.property(key) {
-                return Err(format!("assigned prepared PMGR dependency {key} differs"));
+                return Err(refuse!(
+                    "assigned prepared PMGR dependency {key} differs",
+                    key
+                ));
             }
         }
         if prepared_pmgr.property("compatible").is_some()
             && property(&pmgr, "compatible")? != property(&prepared_pmgr, "compatible")?
         {
-            return Err("assigned prepared PMGR family differs".into());
+            return Err(refuse!("assigned prepared PMGR family differs"));
         }
-        let aic = io.child("aic").ok_or("assigned source has no AIC")?;
+        let aic = io
+            .child("aic")
+            .ok_or(refuse!("assigned source has no AIC"))?;
         let prepared_aic = prepared_io
             .child("aic")
-            .ok_or("assigned prepared source has no AIC")?;
+            .ok_or(refuse!("assigned prepared source has no AIC"))?;
         retained(&aic, &prepared_aic, &["#main-cpus"])?;
-        let cpus = root.child("cpus").ok_or("assigned source has no CPUs")?;
+        let cpus = root
+            .child("cpus")
+            .ok_or(refuse!("assigned source has no CPUs"))?;
         let all = cpus
             .children()
-            .ok_or("assigned source has malformed CPUs")?;
+            .ok_or(refuse!("assigned source has malformed CPUs"))?;
         let prepared_cpus = adapted
             .child("cpus")
-            .ok_or("assigned prepared source has no CPUs")?;
+            .ok_or(refuse!("assigned prepared source has no CPUs"))?;
         retained(
             &cpus,
             &prepared_cpus,
@@ -248,9 +269,11 @@ impl<'a> BspSource<'a> {
         )?;
         let prepared_all = prepared_cpus
             .children()
-            .ok_or("assigned prepared CPUs are malformed")?;
+            .ok_or(refuse!("assigned prepared CPUs are malformed"))?;
         if all.len() != prepared_all.len() {
-            return Err("assigned source CPU enumeration changed before projection".into());
+            return Err(refuse!(
+                "assigned source CPU enumeration changed before projection"
+            ));
         }
         for (source_cpu, prepared_cpu) in all.iter().zip(&prepared_all) {
             retained(
@@ -269,7 +292,7 @@ impl<'a> BspSource<'a> {
             .filter(|cpu| word(cpu, "reg") == Ok(boot_reg))
             .collect::<Vec<_>>();
         let [node] = selected.as_slice() else {
-            return Err("assigned source has no unique physical BSP node".into());
+            return Err(refuse!("assigned source has no unique physical BSP node"));
         };
         if word(node, "cluster-id")? != 0
             || word(node, "die-id")? != 0
@@ -280,33 +303,36 @@ impl<'a> BspSource<'a> {
                 .unwrap_or(property(node, "cluster-type")?)
                 != b"E"
         {
-            return Err(
-                "assigned source BSP is outside qualified first E-complex/core geometry".into(),
-            );
+            return Err(refuse!(
+                "assigned source BSP is outside qualified first E-complex/core geometry"
+            ));
         }
         let enable = property(node, "function-enable_core")?;
         if enable.len() != 12 {
-            return Err("assigned source BSP has incomplete enable_core protocol".into());
+            return Err(refuse!(
+                "assigned source BSP has incomplete enable_core protocol"
+            ));
         }
         let cells = enable.as_chunks::<4>().0;
         if u32::from_le_bytes(cells[0]) != word(&pmgr, "AAPL,phandle")?
             || u32::from_le_bytes(cells[1]) != 0x436f7265
             || u32::from_le_bytes(cells[2]) != 1
         {
-            return Err(
+            return Err(refuse!(
                 "assigned source BSP start bitmask does not name the first actual constructor core"
-                    .into(),
-            );
+            ));
         }
         let descriptors = property(&pmgr, "perf-domains")?;
         if descriptors.is_empty() || !descriptors.len().is_multiple_of(28) {
-            return Err("assigned CPU perf-domain records are incomplete".into());
+            return Err(refuse!("assigned CPU perf-domain records are incomplete"));
         }
         let mut ids = BTreeSet::new();
         let mut cpu_domains = Vec::new();
         for row in descriptors.as_chunks::<28>().0 {
             if row[3] == 0 || !ids.insert(row[3]) {
-                return Err("assigned CPU perf-domain IDs are invalid or repeated".into());
+                return Err(refuse!(
+                    "assigned CPU perf-domain IDs are invalid or repeated"
+                ));
             }
             if row[2] == 1 {
                 cpu_domains.push(row[3]);
@@ -314,7 +340,7 @@ impl<'a> BspSource<'a> {
         }
         let perf = *cpu_domains
             .first()
-            .ok_or("assigned source has no CPU perf complex")?;
+            .ok_or(refuse!("assigned source has no CPU perf complex"))?;
         let graph = super::super::super::power_resources::source_power_states(
             &root,
             &pmgr,
@@ -324,7 +350,7 @@ impl<'a> BspSource<'a> {
         let raw = property(&pmgr, "devices")?;
         const RECORD: usize = super::super::super::power_resources::PMGR_DEVICE;
         if !raw.len().is_multiple_of(RECORD) || raw.len() / RECORD != graph.domains.len() {
-            return Err("assigned source PMGR canonical records differ".into());
+            return Err(refuse!("assigned source PMGR canonical records differ"));
         }
         let mut core = None;
         let mut cpm = None;
@@ -343,29 +369,33 @@ impl<'a> BspSource<'a> {
             let is_core = starts(&domain.name, &["CPU", "ECPU", "PCPU", "MCPU"]);
             let is_cpm = starts(&domain.name, &["CPM", "ECPM", "PCPM", "MCPM"]);
             if !is_core && !is_cpm {
-                return Err("assigned CPU perf complex has an unqualified record protocol".into());
+                return Err(refuse!(
+                    "assigned CPU perf complex has an unqualified record protocol"
+                ));
             }
             if row[0] != 0 || row[1] != 0 || row[15] != 0 || row[25] != 0 || domain.id.die != 0 {
-                return Err(
+                return Err(refuse!(
                     "assigned CPU record flags/replication require qualified constructor semantics"
-                        .into(),
-                );
+                ));
             }
-            let address = domain
-                .address
-                .ok_or("assigned physical CPU source domain has no actual PS placement")?;
+            let address = domain.address.ok_or(refuse!(
+                "assigned physical CPU source domain has no actual PS placement"
+            ))?;
             if is_core && core.is_none() {
                 core = Some((domain.id, address));
             }
             if is_cpm && cpm.replace((domain.id, address)).is_some() {
-                return Err("assigned CPU complex repeats its CPM owner".into());
+                return Err(refuse!("assigned CPU complex repeats its CPM owner"));
             }
         }
-        let (core_id, core_address) = core.ok_or("assigned source has no first CPU domain")?;
+        let (core_id, core_address) =
+            core.ok_or(refuse!("assigned source has no first CPU domain"))?;
         let (cluster_id, cluster_address) =
-            cpm.ok_or("assigned source has no actual CPM domain")?;
+            cpm.ok_or(refuse!("assigned source has no actual CPM domain"))?;
         if core_id == cluster_id || core_address == cluster_address {
-            return Err("assigned CPU/core-complex identities alias unexpectedly".into());
+            return Err(refuse!(
+                "assigned CPU/core-complex identities alias unexpectedly"
+            ));
         }
         let processors = [board::Processor {
             cluster_type: b'E',
@@ -375,10 +405,10 @@ impl<'a> BspSource<'a> {
         let cpus = board::cpus(chip, text(&product, "product-soc-name")?, &processors)?;
         let identity = cpus.processors[0];
         let (instruction, data) = board::level1_caches(chip, b'E')
-            .ok_or("assigned source E cache geometry is unqualified")?;
+            .ok_or(refuse!("assigned source E cache geometry is unqualified"))?;
         let encoded = identity
             .caches
-            .ok_or("assigned source lacks complete cache identity")?
+            .ok_or(refuse!("assigned source lacks complete cache identity"))?
             .ccsidr(2);
         let geometry = Cache {
             line: 16 << (encoded & 7),
@@ -622,6 +652,7 @@ mod tests {
                 BspSource::t6000(&wrong, &prepared, identity(&wrong), 0)
                     .err()
                     .unwrap()
+                    .to_string()
                     .contains("mode1")
             );
         }

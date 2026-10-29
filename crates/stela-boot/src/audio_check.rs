@@ -1,7 +1,9 @@
 //! Explicit native HDA validation after ExitBootServices. This exercises a
 //! finite cyclic PCM buffer, not a guest audio bridge or an OEM speaker policy.
+use crate::Result;
 use crate::output;
-use alloc::{format, string::String, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
+use stela_contracts::refuse;
 use stela_drivers::{
     Handoff,
     audio::{
@@ -35,7 +37,7 @@ const DEADLINE_US: u64 = 5_000_000;
 /// Refuse ambiguous routes. Validation never guesses an OEM output from a
 /// codec/vendor identity. This bounded mode requires one standard analog path
 /// per direction; more complex boards need explicit platform routing policy.
-fn route(graph: &CodecGraph, direction: Direction) -> Result<AnalogRoute, String> {
+fn route(graph: &CodecGraph, direction: Direction) -> Result<AnalogRoute> {
     let converter_kind = match direction {
         Direction::Playback => WidgetKind::Output,
         Direction::Capture => WidgetKind::Input,
@@ -64,10 +66,11 @@ fn route(graph: &CodecGraph, direction: Direction) -> Result<AnalogRoute, String
         }
     }
     if routes.len() != 1 {
-        return Err(format!(
-            "codec {} has {} standard {direction:?} routes; explicit unambiguous routing required",
-            graph.address,
-            routes.len()
+        return Err(refuse!(
+            "codec {address} has {routes_len} standard {direction} routes; explicit unambiguous routing required",
+            address = graph.address,
+            routes_len = routes.len(),
+            ?direction
         ));
     }
     Ok(routes.remove(0))
@@ -82,7 +85,7 @@ fn bind_transport<R: stela_drivers::audio::hda::Registers, T: Timer>(
     graph: &CodecGraph,
     route: &AnalogRoute,
     stream: StreamId,
-) -> Result<(), String> {
+) -> Result<()> {
     let group = graph
         .groups
         .iter()
@@ -92,37 +95,47 @@ fn bind_transport<R: stela_drivers::audio::hda::Registers, T: Timer>(
                 .iter()
                 .any(|widget| widget.node == route.converter())
         })
-        .ok_or("transport route has no function group")?;
+        .ok_or(refuse!("transport route has no function group"))?;
     if group.power_states != Some(0) {
-        return Err("transport-only diagnostic requires the explicit unsupported function-group power capability".into());
+        return Err(refuse!(
+            "transport-only diagnostic requires the explicit unsupported function-group power capability"
+        ));
     }
     if route.nodes().len() != 2 {
-        return Err("transport-only diagnostic requires a direct pin/converter path".into());
+        return Err(refuse!(
+            "transport-only diagnostic requires a direct pin/converter path"
+        ));
     }
     for node in route.nodes() {
-        let widget = graph.widget(*node).ok_or("transport widget is missing")?;
+        let widget = graph
+            .widget(*node)
+            .ok_or(refuse!("transport widget is missing"))?;
         if widget.power_states.is_some()
             || widget.input_amplifier.is_some_and(|caps| caps != 0)
             || widget.output_amplifier.is_some_and(|caps| caps != 0)
             || widget.channels() != FORMAT.channels
         {
-            return Err("transport-only diagnostic requires fixed-gain widgets without independent power controls".into());
+            return Err(refuse!(
+                "transport-only diagnostic requires fixed-gain widgets without independent power controls"
+            ));
         }
     }
     let pin = controller
         .verb(
             Verb::short(graph.address, route.pin(), 0xf07, 0)
-                .map_err(|error| format!("pin read verb: {error:?}"))?,
+                .map_err(|error| refuse!("pin read verb: {error}", ?error))?,
         )
-        .map_err(|error| format!("pin readback: {error:?}"))?;
+        .map_err(|error| refuse!("pin readback: {error}", ?error))?;
     let expected = match route.direction() {
         Direction::Playback => 1 << 6,
         Direction::Capture => 1 << 5,
     };
     if pin != expected {
-        return Err(format!(
-            "transport pin {} is not already enabled: {pin:#x}, expected {expected:#x}",
-            route.pin()
+        return Err(refuse!(
+            "transport pin {pin} is not already enabled: {pin2:#x}, expected {expected:#x}",
+            pin = route.pin(),
+            pin2 = pin,
+            expected
         ));
     }
     output::arguments(format_args!(
@@ -134,7 +147,7 @@ fn bind_transport<R: stela_drivers::audio::hda::Registers, T: Timer>(
     ));
     controller
         .bind_converter(graph, route.converter(), stream, 0)
-        .map_err(|error| format!("transport converter bind: {error:?}"))
+        .map_err(|error| refuse!("transport converter bind: {error}", ?error))
 }
 
 /// # Safety
@@ -143,19 +156,21 @@ fn bind_transport<R: stela_drivers::audio::hda::Registers, T: Timer>(
 /// BARs are mapped uncached at identity addresses; its final DMA_BYTES of
 /// coherent identity-mapped RAM are exclusively reserved for this check for the
 /// boot, even on failure. The loader identity root must still be active.
-pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
+pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<()> {
     let dma_start = handoff
         .dma
         .end
         .checked_sub(DMA_BYTES)
         .filter(|start| *start >= handoff.dma.start)
-        .ok_or("host DMA reservation is too small for the audio check")?;
+        .ok_or(refuse!(
+            "host DMA reservation is too small for the audio check"
+        ))?;
     // SAFETY: this tail is reserved exclusively; storage uses only the prefix.
     let mut dma = unsafe { RegionAllocator::new(dma_start..handoff.dma.end) };
     let mut functions = Vec::new();
     for window in &handoff.ecam {
         if !handoff.is_mapped(&window.range()) {
-            return Err("audio ECAM window is not mapped".into());
+            return Err(refuse!("audio ECAM window is not mapped"));
         }
         // SAFETY: mapped and exclusively owned as required by the caller.
         let all = unsafe { Function::enumerate(window) };
@@ -181,16 +196,16 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
         );
     }
     if functions.len() != 1 {
-        return Err(format!(
-            "audio qualification requires one supported conventional HDA controller, found {}",
-            functions.len()
+        return Err(refuse!(
+            "audio qualification requires one supported conventional HDA controller, found {functions_len}",
+            functions_len = functions.len()
         ));
     }
     let mut function = functions.remove(0);
-    let bar = function.bars()[0].ok_or("HDA has no BAR0")?;
-    let range = bar.memory().ok_or("HDA BAR0 is not memory")?;
+    let bar = function.bars()[0].ok_or(refuse!("HDA has no BAR0"))?;
+    let range = bar.memory().ok_or(refuse!("HDA BAR0 is not memory"))?;
     if !handoff.is_mapped(&range) {
-        return Err("HDA BAR0 was not mapped uncached".into());
+        return Err(refuse!("HDA BAR0 was not mapped uncached"));
     }
     output::arguments(format_args!(
         "AUDIO CHECK pci={} vendor={:04x} device={:04x} bar={range:x?} ownership=exclusive-legacy dma={dma_start:#x}..{:#x}\n",
@@ -205,16 +220,16 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
             pci::Ownership::ExclusiveLegacy,
         )
     }
-    .map_err(|error| format!("PCI prepare: {error:?}"))?;
+    .map_err(|error| refuse!("PCI prepare: {error}", ?error))?;
     let config = prepared.config();
     // SAFETY: the prepared PCI function and mapping remain exclusively owned.
     let registers =
-        unsafe { prepared.claim_mmio() }.map_err(|error| format!("MMIO claim: {error:?}"))?;
+        unsafe { prepared.claim_mmio() }.map_err(|error| refuse!("MMIO claim: {error}", ?error))?;
     let registers = registers::Observed::new(registers);
     let snapshot = registers.clone();
     // SAFETY: all controller, MMIO and DMA ownership prerequisites above hold.
     let mut controller = unsafe { Controller::new(registers, handoff.clock, &mut dma, config) }
-        .map_err(|error| format!("controller start: {error:?}"))?;
+        .map_err(|error| refuse!("controller start: {error}", ?error))?;
     let result = (|| {
         output::arguments(format_args!(
             "AUDIO CHECK capabilities={:?} codecs={:#x}\n",
@@ -226,20 +241,22 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
             if controller.codec_mask() & (1 << address) == 0 {
                 continue;
             }
-            let graph = controller
-                .enumerate_codec(address)
-                .map_err(|error| format!("codec {address} enumeration: {error:?}"))?;
+            let graph = controller.enumerate_codec(address).map_err(|error| {
+                refuse!("codec {address} enumeration: {error}", address, ?error)
+            })?;
             output::arguments(format_args!("AUDIO CHECK graph={graph:?}\n"));
             graphs.push(graph);
         }
         if graphs.len() != 1 {
-            return Err("audio qualification requires one unambiguous codec".into());
+            return Err(refuse!(
+                "audio qualification requires one unambiguous codec"
+            ));
         }
         let graph = &graphs[0];
         let playback_route = route(graph, Direction::Playback)?;
         let playback = controller
             .allocate_stream(Direction::Playback, FORMAT, PERIOD_BYTES, PERIODS, &mut dma)
-            .map_err(|error| format!("playback allocation: {error:?}"))?;
+            .map_err(|error| refuse!("playback allocation: {error}", ?error))?;
         if mode.transport() {
             bind_transport(&mut controller, graph, &playback_route, playback)?;
         } else {
@@ -254,13 +271,13 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
                         eapd: None,
                     },
                 )
-                .map_err(|error| format!("playback route: {error:?}"))?;
+                .map_err(|error| refuse!("playback route: {error}", ?error))?;
         }
         let capture = if mode.duplex() {
             let capture_route = route(graph, Direction::Capture)?;
             let capture = controller
                 .allocate_stream(Direction::Capture, FORMAT, PERIOD_BYTES, PERIODS, &mut dma)
-                .map_err(|error| format!("capture allocation: {error:?}"))?;
+                .map_err(|error| refuse!("capture allocation: {error}", ?error))?;
             if mode.transport() {
                 bind_transport(&mut controller, graph, &capture_route, capture)?;
             } else {
@@ -274,11 +291,11 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
                             vref: Vref::HighImpedance,
                         },
                     )
-                    .map_err(|error| format!("capture route: {error:?}"))?;
+                    .map_err(|error| refuse!("capture route: {error}", ?error))?;
             }
             controller
                 .fill_capture(capture, 0xa5)
-                .map_err(|error| format!("capture prefill: {error:?}"))?;
+                .map_err(|error| refuse!("capture prefill: {error}", ?error))?;
             output::arguments(format_args!(
                 "AUDIO CHECK capture_route={:?} capture_prefill=a5\n",
                 capture_route.nodes()
@@ -290,7 +307,7 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
         let pcm = pcm();
         controller
             .write_pcm(playback, 0, &pcm)
-            .map_err(|error| format!("PCM prefill: {error:?}"))?;
+            .map_err(|error| refuse!("PCM prefill: {error}", ?error))?;
         output::arguments(format_args!(
             "AUDIO CHECK mode={mode:?} scope={} power_gate={} playback_route={:?} rate={} bits={} channels={} ring_bytes={} playback_sha256={}\n",
             if mode.transport() {
@@ -313,11 +330,11 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
         if let Some(capture) = capture {
             controller
                 .start(capture)
-                .map_err(|error| format!("capture start: {error:?}"))?;
+                .map_err(|error| refuse!("capture start: {error}", ?error))?;
         }
         controller
             .start(playback)
-            .map_err(|error| format!("playback start: {error:?}"))?;
+            .map_err(|error| refuse!("playback start: {error}", ?error))?;
         let mut streams = vec![("playback", playback, Progress::default())];
         if let Some(capture) = capture {
             streams.push(("capture", capture, Progress::default()));
@@ -331,15 +348,15 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
             // silently be counted as uninterrupted/precisely measured DMA.
             max_poll_gap = max_poll_gap.max(now.saturating_sub(previous_poll));
             if max_poll_gap > 40_000 {
-                return Err("audio polling gap exceeds observation bound".into());
+                return Err(refuse!("audio polling gap exceeds observation bound"));
             }
             previous_poll = now;
             for (name, stream, progress) in &mut streams {
                 let status = controller
                     .status(*stream)
-                    .map_err(|error| format!("{name} DMA: {error:?}"))?;
+                    .map_err(|error| refuse!("{name} DMA: {error}", name = *name, ?error))?;
                 if !status.running {
-                    return Err(format!("{name} stream stopped unexpectedly"));
+                    return Err(refuse!("{name} stream stopped unexpectedly", name = *name));
                 }
                 progress.observe(status.position_bytes, status.period_completed);
             }
@@ -347,9 +364,9 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
                 break;
             }
             if now.saturating_sub(start) >= DEADLINE_US {
-                return Err(format!(
-                    "audio progression timed out: {:?}",
-                    streams
+                return Err(refuse!(
+                    "audio progression timed out: {streams}",
+                    streams = ?streams
                         .iter()
                         .map(|(name, _, progress)| (*name, progress.wraps, progress.completions))
                         .collect::<Vec<_>>()
@@ -360,12 +377,12 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
         for (name, stream, progress) in streams {
             controller
                 .stop(stream)
-                .map_err(|error| format!("{name} stop: {error:?}"))?;
+                .map_err(|error| refuse!("{name} stop: {error}", name, ?error))?;
             let status = controller
                 .status(stream)
-                .map_err(|error| format!("{name} final status: {error:?}"))?;
+                .map_err(|error| refuse!("{name} final status: {error}", name, ?error))?;
             if status.running {
-                return Err(format!("{name} did not stop"));
+                return Err(refuse!("{name} did not stop", name));
             }
             output::arguments(format_args!(
                 "AUDIO CHECK stream={name} changes={} wraps={} completions={} final_position={} elapsed_us={} max_poll_gap_us={} stopped=true dma_errors=0\n",
@@ -381,7 +398,7 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
             let mut capture_pcm = vec![0; RING_BYTES];
             controller
                 .read_pcm(capture, 0, &mut capture_pcm)
-                .map_err(|error| format!("capture read: {error:?}"))?;
+                .map_err(|error| refuse!("capture read: {error}", ?error))?;
             let changed = capture_pcm.iter().filter(|byte| **byte != 0xa5).count();
             output::arguments(format_args!(
                 "AUDIO CHECK capture bytes={} changed={} sha256={}\n",
@@ -390,7 +407,9 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
                 stela_formats::sha256(&capture_pcm)
             ));
             if changed != RING_BYTES {
-                return Err("capture DMA did not replace the complete prefilled ring".into());
+                return Err(refuse!(
+                    "capture DMA did not replace the complete prefilled ring"
+                ));
             }
         }
         Ok(())
@@ -400,12 +419,14 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
     }
     let shutdown = controller
         .shutdown()
-        .map_err(|error| format!("controller shutdown: {error:?}"));
+        .map_err(|error| refuse!("controller shutdown: {error}", ?error));
     if shutdown.is_ok() {
         output::arguments(format_args!("AUDIO CHECK shutdown=quiesced\n"));
     }
     match (result, shutdown) {
-        (Err(error), Err(shutdown)) => return Err(format!("{error}; also {shutdown}")),
+        (Err(error), Err(shutdown)) => {
+            return Err(refuse!("{error}; also {shutdown}", %error, %shutdown));
+        }
         (Err(error), _) | (_, Err(error)) => return Err(error),
         (Ok(()), Ok(())) => {}
     }

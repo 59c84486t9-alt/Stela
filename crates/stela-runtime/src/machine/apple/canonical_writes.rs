@@ -41,7 +41,7 @@ impl AppleDevices {
                     .device::<Spi>(wire.spi)
                     .expect("SPI wire")
                     .check_cs(high)
-                    .map_err(|e| DeviceError::Refused(e.into()))?;
+                    .map_err(DeviceError::Refused)?;
             }
             if width == Width::Word {
                 self.check_power_request(physical, value)?;
@@ -58,7 +58,7 @@ impl AppleDevices {
                 {
                     owner
                         .write_ram_flush(offset, width, value, now, &mut **memory)
-                        .map_err(|reason| DeviceError::TransferRefused(reason.into()))
+                        .map_err(DeviceError::TransferRefused)
                 } else {
                     let owner = memory_resources::resource_for(&self.bus, device)
                         .expect("exclusive board borrow retains the classified prepared owner");
@@ -66,7 +66,7 @@ impl AppleDevices {
                     // native cohort and closed synchronous RAM producer set. No RAM
                     // publication, new submission or native resume occurs here.
                     unsafe { owner.write_ram_drain(offset, width, value, now, memory.memory()) }
-                        .map_err(|reason| DeviceError::TransferRefused(reason.into()))
+                        .map_err(DeviceError::TransferRefused)
                 }
             } else {
                 self.bus
@@ -80,9 +80,11 @@ impl AppleDevices {
                     .iter()
                     .find(|(address, _)| *address == physical)
                 {
-                    DeviceError::Refused(format!(
-                        "PMGR domain {physical:#x}: {reason}; {:?}",
-                        error
+                    DeviceError::Refused(refuse!(
+                        "PMGR domain {physical:#x}: {reason}",
+                        physical,
+                        reason,
+                        ?error
                     ))
                 } else {
                     error
@@ -100,7 +102,7 @@ impl AppleDevices {
                     .set_cs(value & 1 != 0);
                 if let Err(error) = result {
                     self.capture_reached(cpu, now, reset);
-                    return Err(DeviceError::Refused(error.into()));
+                    return Err(DeviceError::Refused(error));
                 }
             }
             Ok(reset)

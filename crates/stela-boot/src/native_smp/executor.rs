@@ -2,6 +2,7 @@
 //! prove entry/ownership only; the runtime publication protocol separately
 //! requires a recovered native loan before any CPU settlement.
 use super::{bootstrap, firmware, resources, topology, tsc_sync};
+use crate::Refusal;
 use crate::{
     apic::{self, Apic},
     engine::{host, interrupts},
@@ -15,6 +16,7 @@ use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicU8, Ordering},
 };
+use stela_contracts::refuse;
 
 mod mailbox;
 
@@ -28,10 +30,10 @@ const SYNCING: u8 = 3;
 /// more, so the next AP may start from it.
 const ENTERED: u8 = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StartupFailure {
     Resources,
-    Bootstrap(&'static str),
+    Bootstrap(Refusal),
     FaultRecord {
         slot: usize,
         cause: stela_boot_core::early_fault::RecordError,
@@ -52,7 +54,7 @@ pub(crate) enum StartupFailure {
     },
     Refused {
         slot: usize,
-        reason: &'static str,
+        reason: Refusal,
     },
 }
 
@@ -72,7 +74,7 @@ struct Argument {
     observed: UnsafeCell<Option<topology::Snapshot>>,
     descriptors: UnsafeCell<Option<interrupts::Observation>>,
     doorbells: UnsafeCell<Option<&'static core::sync::atomic::AtomicU64>>,
-    refusal: UnsafeCell<Option<&'static str>>,
+    refusal: UnsafeCell<Option<Refusal>>,
     status: AtomicU8,
     tsc: tsc_sync::Sync,
     mailbox: mailbox::Mailbox,
@@ -126,7 +128,7 @@ impl Processor {
         if self.argument.status.load(Ordering::Acquire) != READY {
             return Err(StartupFailure::Refused {
                 slot: self.slot,
-                reason: "executor is not ready",
+                reason: refuse!("executor is not ready"),
             });
         }
         // SAFETY: the AP published this pinned read-only atomic reference before
@@ -186,22 +188,22 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
     let initialized = (|| {
         // SAFETY: CPL0 on the selected AP, with private descriptors.
         let observed =
-            unsafe { firmware::observe() }.map_err(|_| "AP source-control capture refused")?;
+            unsafe { firmware::observe() }.map_err(|_| refuse!("AP source-control capture refused"))?;
         if !observed.matches(argument.processor) {
-            return Err("AP physical identity changed");
+            return Err(refuse!("AP physical identity changed"));
         }
         // SAFETY: this AP alone consumes its private disjoint host resources.
         let mut config = unsafe {
             (&mut *argument.config.get())
                 .take()
-                .ok_or("AP resources absent")?
+                .ok_or(refuse!("AP resources absent"))?
         };
         observed
             .qualify_native(matches!(
                 config.placement,
                 stela_engine::machine::mmu::placement::Placement::FiveLevel
             ))
-            .map_err(|_| "AP native controls refused")?;
+            .map_err(|_| refuse!("AP native controls refused"))?;
         // The trampoline installs the BSP's already-checked effective PAT;
         // The offline trampoline installed the complete validated BSP image.
         let source = topology::Snapshot {
@@ -210,20 +212,20 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
         };
         observed
             .same_memory_types(&source)
-            .map_err(|_| "AP memory types differ")?;
+            .map_err(|_| refuse!("AP memory types differ"))?;
         config.apic_base = observed.apic_base;
         let loader_root = config.window_root;
         // SAFETY: configured pool/arena/bounce entries belong only to this AP;
         // tables/local record remain pinned through every native call and park.
         let owner =
-            unsafe { host::install(config) }.map_err(|_| "AP private host installation failed")?;
+            unsafe { host::install(config) }.map_err(|_| refuse!("AP private host installation failed"))?;
         #[cfg(feature = "diagnostics")]
         let mut owner = owner;
-        let apic = u32::try_from(argument.processor.apic_id).map_err(|_| "AP APIC ID")?;
+        let apic = u32::try_from(argument.processor.apic_id).map_err(|_| refuse!("AP APIC ID"))?;
         host::join_shootdown(
             crate::native_mmio::PROCESSORS
                 .slot(apic)
-                .ok_or("AP missing from the aperture's processors")?,
+                .ok_or(refuse!("AP missing from the aperture's processors"))?,
         );
         #[cfg(feature = "diagnostics")]
         super::context_check::check(&mut owner.host())?;
@@ -235,9 +237,9 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
         // earlier loader root observed before Host initialization.
         let installed =
             // SAFETY: CPL0 on the selected AP, after its private descriptors were installed.
-            unsafe { firmware::observe() }.map_err(|_| "AP installed-control capture refused")?;
+            unsafe { firmware::observe() }.map_err(|_| refuse!("AP installed-control capture refused"))?;
         if installed.cr3 == loader_root || !installed.matches(argument.processor) {
-            return Err("AP private root or physical identity differs");
+            return Err(refuse!("AP private root or physical identity differs"));
         }
         // SAFETY: reads this CPU's descriptor registers and RSP and changes nothing.
         let descriptors = unsafe { interrupts::observe() };
@@ -246,7 +248,7 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
                 // execution.
             || !unsafe { &*tables_pointer }.matches(descriptors)
         {
-            return Err("AP private descriptor or stack differs");
+            return Err(refuse!("AP private descriptor or stack differs"));
         }
         // SAFETY: only this AP publishes these immutable observations, before
         // Release READY. The counter lives in its permanently pinned GS record.
@@ -329,9 +331,9 @@ pub(crate) unsafe fn quiesce_firmware_aps(
     let targets = topology::enabled_unselected(source, &selected[..1])
         .map_err(StartupFailure::FirmwareTopology)?;
     if source[selected[0] as usize].apic_id != u64::from(sender.id()) {
-        return Err(StartupFailure::Bootstrap(
-            "firmware BSP differs from the live local APIC",
-        ));
+        return Err(StartupFailure::Bootstrap(refuse!(
+            "firmware BSP differs from the live local APIC"
+        )));
     }
     if tsc_hz == 0 {
         return Err(StartupFailure::Delivery(
@@ -675,6 +677,7 @@ fn serve(
 fn refused(slot: usize, argument: &Argument) -> StartupFailure {
     // SAFETY: the owner published this immutable reason before the Acquire
     // REFUSED observation; storage remains pinned.
-    let reason = unsafe { *argument.refusal.get() }.expect("refused AP publishes a reason");
+    let reason =
+        unsafe { (*argument.refusal.get()).clone() }.expect("refused AP publishes a reason");
     StartupFailure::Refused { slot, reason }
 }

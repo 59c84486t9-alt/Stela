@@ -16,7 +16,9 @@
 //! `AppleSEPManager::_sendMessageGated` 0x2d6abb8..0x2d6abc4 sends only to
 //! IDs below 0x20 (or the boot services), so application IDs are 1..=0x1f.
 use super::message::{self, Frame};
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 const ADVERTISE_NAME: u8 = 0;
 const ADVERTISE_CAPACITIES: u8 = 1;
@@ -60,20 +62,20 @@ impl Catalog {
         }
     }
 
-    pub fn new(services: Vec<Service>) -> Result<Self, &'static str> {
+    pub fn new(services: Vec<Service>) -> Result<Self> {
         for (index, service) in services.iter().enumerate() {
             if service.id == message::CONTROL || service.id > MAX_SERVICE {
-                return Err("SEP application service IDs are 1..=0x1f");
+                return Err(refuse!("SEP application service IDs are 1..=0x1f"));
             }
             let [send_min, send_max, receive_min, receive_max] = service.capacities;
             if send_min > send_max || receive_min > receive_max {
-                return Err("SEP service OOL minimum exceeds its maximum");
+                return Err(refuse!("SEP service OOL minimum exceeds its maximum"));
             }
             if services[..index]
                 .iter()
                 .any(|s| s.id == service.id || s.name == service.name)
             {
-                return Err("SEP service IDs and names must each be unique");
+                return Err(refuse!("SEP service IDs and names must each be unique"));
             }
         }
         Ok(Self { services })
@@ -105,11 +107,11 @@ impl Catalog {
             .collect()
     }
 
-    pub fn service(&self, id: u8) -> Result<&Service, &'static str> {
+    pub fn service(&self, id: u8) -> Result<&Service> {
         self.services
             .iter()
             .find(|s| s.id == id)
-            .ok_or("SEP service is not implemented")
+            .ok_or(refuse!("SEP service is not implemented"))
     }
 }
 

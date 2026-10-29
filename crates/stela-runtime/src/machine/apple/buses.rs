@@ -2,6 +2,9 @@
 //! SPMI.
 
 use super::*;
+use crate::Result;
+use stela_contracts::refusal::Within;
+use stela_contracts::refuse;
 
 impl AppleDevices {
     /// Places the AP GPIO bank before its clients: chip-select outputs, a
@@ -11,7 +14,7 @@ impl AppleDevices {
         bank: &stela_soc_data::board::GpioBank,
         selects: &[u32],
         interrupts: &[u32],
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let mut nets: Vec<(u32, Net)> = Vec::new();
         for &pin in bank.i2c_lines.iter().chain(interrupts) {
             if !nets.iter().any(|(p, _)| *p == pin) {
@@ -24,12 +27,11 @@ impl AppleDevices {
             .map(|&irq| AicInput::new(0, irq))
             .collect();
         let gpio = Gpio::with_profile(bank.profile, bank.pins, lines, selects, nets.clone())
-            .and_then(|gpio| gpio.with_groups(bank.groups as usize))
-            .map_err(String::from)?;
+            .and_then(|gpio| gpio.with_groups(bank.groups as usize))?;
         let id = self.bus.add(Box::new(gpio));
         self.bus
             .map(id, bank.physical, bank.bytes, 0)
-            .map_err(|e| format!("GPIO placement: {e:?}"))?;
+            .map_err(|e| refuse!("GPIO placement: {e}", ?e))?;
         self.register_power_device(bank.physical, id, false)?;
         self.gpio = Some((bank.physical, nets));
         Ok(())
@@ -40,13 +42,13 @@ impl AppleDevices {
     /// its pull-up; the board model that drives one, such as the HDMI
     /// converter's hot-plug output, attaches through [`Self::gpio_line`]
     /// before the guest runs.
-    pub fn add_aux_gpio(&mut self, aux: &stela_soc_data::board::AuxGpioBank) -> Result<(), String> {
+    pub fn add_aux_gpio(&mut self, aux: &stela_soc_data::board::AuxGpioBank) -> Result<()> {
         if self
             .aux_gpios
             .iter()
             .any(|(phandle, _)| *phandle == aux.bank.phandle)
         {
-            return Err(format!("GPIO bank {} placed twice", aux.name));
+            return Err(refuse!("GPIO bank {name} placed twice", name = aux.name));
         }
         let nets: Vec<(u32, Net)> = aux
             .client_pins
@@ -61,11 +63,11 @@ impl AppleDevices {
             .collect();
         let gpio = Gpio::with_profile(aux.bank.profile, aux.bank.pins, lines, &[], nets.clone())
             .and_then(|gpio| gpio.with_groups(aux.bank.groups as usize))
-            .map_err(|error| format!("{}: {error}", aux.name))?;
+            .within(|| refuse!("{name}", name = aux.name))?;
         let id = self.bus.add(Box::new(gpio));
         self.bus
             .map(id, aux.bank.physical, aux.bank.bytes, 0)
-            .map_err(|e| format!("{} placement: {e:?}", aux.name))?;
+            .map_err(|e| refuse!("{name} placement: {e}", name = aux.name, ?e))?;
         self.register_power_device(aux.bank.physical, id, false)?;
         self.aux_gpios.push((aux.bank.phandle, nets));
         Ok(())
@@ -73,31 +75,31 @@ impl AppleDevices {
 
     /// A driver on `pin` of the GPIO bank with phandle `bank`: released, the
     /// pin reads high; pulled low, it reads low.
-    pub fn gpio_line(&mut self, bank: u32, pin: u32) -> Result<OpenDrain, String> {
+    pub fn gpio_line(&mut self, bank: u32, pin: u32) -> Result<OpenDrain> {
         let (_, nets) = self
             .aux_gpios
             .iter()
             .find(|(phandle, _)| *phandle == bank)
-            .ok_or_else(|| format!("no auxiliary GPIO bank with phandle {bank:#x}"))?;
+            .ok_or_else(|| refuse!("no auxiliary GPIO bank with phandle {bank:#x}", bank))?;
         let (_, net) = nets
             .iter()
             .find(|(p, _)| *p == pin)
-            .ok_or_else(|| format!("GPIO pin {pin} has no client in bank {bank:#x}"))?;
-        net.open_drain().map_err(String::from)
+            .ok_or_else(|| refuse!("GPIO pin {pin} has no client in bank {bank:#x}", pin, bank))?;
+        net.open_drain()
     }
 
-    pub(super) fn gpio_net(&self, pin: u32) -> Result<&Net, String> {
+    pub(super) fn gpio_net(&self, pin: u32) -> Result<&Net> {
         self.gpio
             .as_ref()
             .and_then(|(_, nets)| nets.iter().find(|(p, _)| *p == pin))
             .map(|(_, net)| net)
-            .ok_or_else(|| format!("GPIO pin {pin} has no placed board net"))
+            .ok_or_else(|| refuse!("GPIO pin {pin} has no placed board net", pin))
     }
 
     /// Installs the DT-derived SPI controller, one NOR die and
     /// its external GPIO CS wire (or the internal PIN.CS connection). An
     /// external CS requires the placed GPIO bank.
-    pub fn add_spi_nor(&mut self, placement: &stela_soc_data::board::SpiNor) -> Result<(), String> {
+    pub fn add_spi_nor(&mut self, placement: &stela_soc_data::board::SpiNor) -> Result<()> {
         let device = placement.device;
         let spi = self.bus.add(Box::new(Spi::new(
             placement.image.clone(),
@@ -106,11 +108,14 @@ impl AppleDevices {
         )));
         self.bus
             .map(spi, device.physical, device.bytes, 0)
-            .map_err(|e| format!("SPI placement: {e:?}"))?;
+            .map_err(|e| refuse!("SPI placement: {e}", ?e))?;
         self.register_power_device(device.physical, spi, false)?;
         self.nor = Some(spi);
         if let Some(pin) = placement.select {
-            let (base, _) = self.gpio.as_ref().ok_or("SPI CS requires the GPIO bank")?;
+            let (base, _) = self
+                .gpio
+                .as_ref()
+                .ok_or(refuse!("SPI CS requires the GPIO bank"))?;
             self.selects.push(SelectWire {
                 spi,
                 physical: base + u64::from(pin) * 4,
@@ -125,11 +130,13 @@ impl AppleDevices {
         console: C,
         ranges: &[Range],
         irq: Option<AicInput>,
-    ) -> Result<(), String> {
-        let first = ranges.first().ok_or("UART has no canonical aperture")?;
+    ) -> Result<()> {
+        let first = ranges
+            .first()
+            .ok_or(refuse!("UART has no canonical aperture"))?;
         let device = self.bus.add(Box::new(S5lUart::new(console, irq)));
         self.map(device, ranges)
-            .map_err(|error| format!("UART placement: {error:?}"))?;
+            .map_err(|error| refuse!("UART placement: {error}", ?error))?;
         self.register_power_device(first.physical, device, false)
     }
 
@@ -142,7 +149,7 @@ impl AppleDevices {
         &mut self,
         placement: &stela_soc_data::board::I2cController,
         firmware: &dyn Fn(&str) -> Option<&'f [u8]>,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let device = placement.device;
         let mut model = I2c::new(AicInput::new(0, device.irq as u16));
         // Each die's alert output on its manager's interrupt net, which the
@@ -153,18 +160,21 @@ impl AppleDevices {
                 continue;
             }
             let name = stela_soc_data::board::hpm_firmware_file(
-                target.firmware.as_deref().ok_or("HPM names no firmware")?,
+                target
+                    .firmware
+                    .as_deref()
+                    .ok_or(refuse!("HPM names no firmware"))?,
             );
-            let image =
-                firmware(&name).ok_or_else(|| format!("board firmware {name} was not supplied"))?;
-            let die = Firmware::from_image(image).map_err(|e| format!("{name}: {e}"))?;
-            let port = self.typec_port(target.port.ok_or("HPM has no port number")?);
-            let pin = target.interrupt.ok_or("HPM has no bus-manager interrupt")?;
+            let image = firmware(&name)
+                .ok_or_else(|| refuse!("board firmware {name} was not supplied", name))?;
+            let die = Firmware::from_image(image).within(|| refuse!("{name}", name))?;
+            let port = self.typec_port(target.port.ok_or(refuse!("HPM has no port number"))?);
+            let pin = target
+                .interrupt
+                .ok_or(refuse!("HPM has no bus-manager interrupt"))?;
             let alert = self.gpio_net(pin)?.open_drain()?;
             let hpm = Hpm::new(port, die, target.address).with_interrupt(alert.clone());
-            model
-                .attach(target.address, Box::new(hpm))
-                .map_err(String::from)?;
+            model.attach(target.address, Box::new(hpm))?;
             alerts.push((pin, target.address, alert));
         }
         for target in &placement.targets {
@@ -176,23 +186,19 @@ impl AppleDevices {
                         .filter(|(pin, ..)| Some(*pin) == target.interrupt)
                         .map(|(_, address, alert)| (*address, alert.clone()))
                         .collect();
-                    let summary = Summary::new(dies).map_err(String::from)?;
-                    model
-                        .attach(target.address, Box::new(summary))
-                        .map_err(String::from)?;
+                    let summary = Summary::new(dies)?;
+                    model.attach(target.address, Box::new(summary))?;
                     continue;
                 }
                 stela_soc_data::board::RETIMER => "ATC retimer register protocol is undetermined",
                 _ => "I2C target protocol is not modeled",
             };
-            model
-                .attach(target.address, Box::new(i2c::Unmodeled(reason)))
-                .map_err(String::from)?;
+            model.attach(target.address, Box::new(i2c::Unmodeled(reason)))?;
         }
         let id = self.bus.add(Box::new(model));
         self.bus
             .map(id, device.physical, device.bytes, 0)
-            .map_err(|e| format!("I2C placement: {e:?}"))?;
+            .map_err(|e| refuse!("I2C placement: {e}", ?e))?;
         self.register_power_device(device.physical, id, false)
     }
 
@@ -204,9 +210,11 @@ impl AppleDevices {
         &mut self,
         placement: &stela_soc_data::board::SpmiController,
         wall: Option<stela_soc_data::pmu::WallClock>,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         if placement.pmus.iter().any(|pmu| pmu.rtc_helper.is_some()) {
-            return Err("SMC RTC helper requires an explicit virtual RTC epoch authority".into());
+            return Err(refuse!(
+                "SMC RTC helper requires an explicit virtual RTC epoch authority"
+            ));
         }
         self.add_spmi_with_epoch(
             placement,
@@ -225,7 +233,7 @@ impl AppleDevices {
         placement: &stela_soc_data::board::SpmiController,
         wall: Option<stela_soc_data::pmu::WallClock>,
         epoch: pmu::RtcEpoch,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         self.add_spmi_with_resources(placement, wall, epoch, &[])
     }
 
@@ -238,13 +246,13 @@ impl AppleDevices {
         wall: Option<stela_soc_data::pmu::WallClock>,
         epoch: pmu::RtcEpoch,
         history: &[(u8, stela_soc_data::pmu::Retained, Vec<u8>)],
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         for (index, (sid, kind, bytes)) in history.iter().enumerate() {
             if history[..index]
                 .iter()
                 .any(|(previous, other, _)| previous == sid && other == kind)
             {
-                return Err("duplicate PMU retained-history owner".into());
+                return Err(refuse!("duplicate PMU retained-history owner"));
             }
             let (_, window) = placement
                 .pmus
@@ -252,15 +260,19 @@ impl AppleDevices {
                 .filter(|pmu| pmu.sid == *sid)
                 .flat_map(|pmu| pmu.retained())
                 .find(|(owner, _)| owner == kind)
-                .ok_or("retained history has no matching outside-scratch PMU owner")?;
+                .ok_or(refuse!(
+                    "retained history has no matching outside-scratch PMU owner"
+                ))?;
             if bytes.len() != usize::from(window.bytes) {
-                return Err("PMU initial retained history is incomplete".into());
+                return Err(refuse!("PMU initial retained history is incomplete"));
             }
         }
         if placement.pmus.iter().flat_map(|pmu| pmu.retained()).count() != history.len() {
-            return Err("PMU outside-scratch histories require explicit initial bytes".into());
+            return Err(refuse!(
+                "PMU outside-scratch histories require explicit initial bytes"
+            ));
         }
-        let irq = u16::try_from(placement.irq).map_err(|_| "SPMI AIC line above 65535")?;
+        let irq = u16::try_from(placement.irq).map_err(|_| refuse!("SPMI AIC line above 65535"))?;
         let mut controller =
             Spmi::with_configuration(AicInput::new(0, irq), placement.configuration);
         // Construct/preflight every slave and global service before publishing any owner.
@@ -268,7 +280,9 @@ impl AppleDevices {
         let mut primary_clock = None;
         for pmu in &placement.pmus {
             if pmu.primary && pmu.rtc.is_none() {
-                return Err("PMU primary system service requires a qualified RTC owner".into());
+                return Err(refuse!(
+                    "PMU primary system service requires a qualified RTC owner"
+                ));
             }
             let configuration = pmu.configuration(|kind, _| {
                 let (_, _, bytes) = history
@@ -277,28 +291,24 @@ impl AppleDevices {
                     .expect("all retained owners preflighted");
                 Ok(bytes.clone())
             })?;
-            let clock = pmu::RtcClock::new(epoch).map_err(String::from)?;
-            let model = Pmu::with_clock(configuration, clock, wall.filter(|_| pmu.rtc.is_some()))
-                .map_err(String::from)?;
+            let clock = pmu::RtcClock::new(epoch)?;
+            let model = Pmu::with_clock(configuration, clock, wall.filter(|_| pmu.rtc.is_some()))?;
             self.pmu_clocks.extend(model.rtc_clock());
             if let Some(profile) = pmu.rtc_helper {
                 if !pmu.primary || self.rtc_clock.is_some() || primary_clock.is_some() {
-                    return Err("RTC helper has no unique primary oscillator owner".into());
+                    return Err(refuse!("RTC helper has no unique primary oscillator owner"));
                 }
-                self.smc()
-                    .map_err(String::from)?
-                    .check_bind_rtc()
-                    .map_err(String::from)?;
+                self.smc()?.check_bind_rtc()?;
                 primary_clock = Some((
                     model
                         .rtc_clock()
-                        .ok_or("RTC helper has no actual PMU oscillator")?,
+                        .ok_or(refuse!("RTC helper has no actual PMU oscillator"))?,
                     profile,
                 ));
             }
             if pmu.primary {
                 if self.sleep.pmu.is_some() || primary.is_some() {
-                    return Err("multiple primary PMU system-service owners".into());
+                    return Err(refuse!("multiple primary PMU system-service owners"));
                 }
                 primary = Some(model.interrupt());
             }
@@ -306,25 +316,21 @@ impl AppleDevices {
                 controller.attach_with_interrupt(pmu.sid, vector, Box::new(model))
             } else {
                 controller.attach(pmu.sid, Box::new(model))
-            }
-            .map_err(String::from)?;
+            }?;
         }
         let id = self.bus.add(Box::new(controller));
         for (bank, &(base, bytes)) in placement.banks.iter().enumerate() {
             self.bus
                 .map(id, base, bytes, bank as u64 * stela_soc_data::spmi::BANK_B)
-                .map_err(|e| format!("SPMI bank placement: {e:?}"))?;
+                .map_err(|e| refuse!("SPMI bank placement: {e}", ?e))?;
         }
         if let Some((base, bytes)) = placement.bank_c {
             self.bus
                 .map(id, base, bytes, stela_soc_data::spmi::BANK_C)
-                .map_err(|e| format!("SPMI reg[2] placement: {e:?}"))?;
+                .map_err(|e| refuse!("SPMI reg[2] placement: {e}", ?e))?;
         }
         if let Some((clock, profile)) = primary_clock {
-            self.smc()
-                .map_err(String::from)?
-                .bind_rtc(clock.clone(), profile)
-                .map_err(String::from)?;
+            self.smc()?.bind_rtc(clock.clone(), profile)?;
             self.rtc_clock = Some(clock);
         }
         if let Some(primary) = primary {

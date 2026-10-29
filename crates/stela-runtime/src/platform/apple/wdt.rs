@@ -43,6 +43,8 @@
 //! which the driver sets to its value under the record's mask on CPU start
 //! events (`writeCoreTriggerConfigurationStateChange`, 0x1ca5cf8). Bits
 //! outside the mask refuse; like the configuration, it acts only on expiry.
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -223,9 +225,9 @@ impl MmioDevice for AppleWdt {
         width: Width,
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         if width != Width::Word {
-            return Err(fail("watchdog registers are 32-bit"));
+            return Err(fail(refuse!("watchdog registers are 32-bit")));
         }
         if self.side {
             match offset {
@@ -240,23 +242,23 @@ impl MmioDevice for AppleWdt {
                 _ => {}
             }
             if offset == MECHANISM {
-                return Err(fail(
-                    "watchdog mechanism command readback is not established",
-                ));
+                return Err(fail(refuse!(
+                    "watchdog mechanism command readback is not established"
+                )));
             }
         }
         let (index, register) =
-            Self::decode(offset).ok_or_else(|| fail("unknown watchdog register"))?;
+            Self::decode(offset).ok_or_else(|| fail(refuse!("unknown watchdog register")))?;
         self.evaluate(access);
         let watchdog = &self.watchdogs[index];
         let value = match register {
             CUR_TIME => watchdog.current(access.now),
             BITE_TIME => watchdog
                 .bite
-                .ok_or_else(|| fail("BITE_TIME read before the guest wrote it"))?,
+                .ok_or_else(|| fail(refuse!("BITE_TIME read before the guest wrote it")))?,
             BARK_TIME => watchdog
                 .bark
-                .ok_or_else(|| fail("BARK_TIME read before the guest wrote it"))?,
+                .ok_or_else(|| fail(refuse!("BARK_TIME read before the guest wrote it")))?,
             _ => watchdog.control,
         };
         Ok(u64::from(value))
@@ -268,9 +270,9 @@ impl MmioDevice for AppleWdt {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         if width != Width::Word {
-            return Err(fail("watchdog registers are 32-bit"));
+            return Err(fail(refuse!("watchdog registers are 32-bit")));
         }
         if self.side {
             let retained = match offset {
@@ -293,7 +295,7 @@ impl MmioDevice for AppleWdt {
             }
         }
         let (index, register) =
-            Self::decode(offset).ok_or_else(|| fail("unknown watchdog register"))?;
+            Self::decode(offset).ok_or_else(|| fail(refuse!("unknown watchdog register")))?;
         self.evaluate(access);
         let value = value as u32;
         let watchdog = &mut self.watchdogs[index];
@@ -303,10 +305,10 @@ impl MmioDevice for AppleWdt {
             BARK_TIME => watchdog.bark = Some(value),
             _ => {
                 if value & !(CTRL_IRQ_EN | CTRL_IRQ_STATUS | CTRL_RESET_EN) != 0 {
-                    return Err(fail("watchdog CTRL reserved field is not modeled"));
+                    return Err(fail(refuse!("watchdog CTRL reserved field is not modeled")));
                 }
                 if index != 0 && value & CTRL_IRQ_EN != 0 {
-                    return Err(fail("only watchdog 0 has a bark interrupt"));
+                    return Err(fail(refuse!("only watchdog 0 has a bark interrupt")));
                 }
                 let status = watchdog.control & CTRL_IRQ_STATUS & !value;
                 watchdog.control = value & !CTRL_IRQ_STATUS | status;

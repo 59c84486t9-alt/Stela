@@ -658,7 +658,7 @@ pub(super) fn files(
         require!(
             name.len() <= MAX_FILE_NAME && !files.iter().any(|(file, _)| file == name),
             "board firmware name {name} is too long or already a bundle file",
-            name = alloc::format!("{name:?}")
+            ?name
         );
         files.push((name.clone(), image.bytes.to_vec()));
     }

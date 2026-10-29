@@ -1,4 +1,6 @@
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 const PRIMARY: u64 = 0x2_8800_0000;
 const WRAPPER: u64 = 0x2_89c0_0000;
 const TRAD: u64 = 0x2_8930_4000;
@@ -15,7 +17,7 @@ impl Scanout for Screen {
             format: ScanoutFormat::Bgra8888,
         }
     }
-    fn present(&mut self, _: &[u8]) -> Result<(), &'static str> {
+    fn present(&mut self, _: &[u8]) -> Result<()> {
         panic!("aperture mounting must not present a frame")
     }
 }
@@ -158,7 +160,7 @@ fn invalid_or_unrelated_owners_refuse_before_any_display_route_is_published() {
     let error = devices
         .add_display_with_darts(&views, "DCPEXT0", &owners)
         .unwrap_err();
-    assert!(error.contains(owner_name));
+    assert!(error.to_string().contains(owner_name));
     assert_eq!(devices.bus.route(PRIMARY + 0x100000, Width::Word), Ok(old));
     assert!(devices.bus.route(PRIMARY, Width::Word).is_err());
     assert!(devices.bus.route(SHARED, Width::Word).is_err());
@@ -476,7 +478,10 @@ fn refused_ptd_owner_blocks_overlapping_display_publication_before_any_alias() {
     let error = devices
         .add_display_with_darts(&views, "DCPEXT0", &owners)
         .unwrap_err();
-    assert_eq!(error, "T602x PTD publication has no qualified source owner");
+    assert_eq!(
+        error,
+        refuse!("T602x PTD publication has no qualified source owner")
+    );
     assert_eq!(devices.bus.route(SHARED, Width::Double), Ok(before));
     assert!(devices.bus.route(PRIMARY, Width::Word).is_err());
     assert!(devices.bus.route(0x2_8932_0000, Width::Word).is_err());

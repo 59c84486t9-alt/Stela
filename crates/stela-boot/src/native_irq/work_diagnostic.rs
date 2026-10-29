@@ -3,6 +3,7 @@
 //! only the existing bounded IRQ register access plus Send+Sync queue/events.
 //! No production OSL/SCI/provider capability is installed.
 use super::diagnostic::{self, Edu, EduSource};
+use crate::Result;
 use alloc::{boxed::Box, format, rc::Rc, string::String, sync::Arc, vec::Vec};
 use core::{
     alloc::{GlobalAlloc, Layout},
@@ -11,6 +12,7 @@ use core::{
     ops::Range,
     sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering},
 };
+use stela_contracts::refuse;
 use stela_drivers::{
     Clock,
     bus::{
@@ -202,12 +204,12 @@ unsafe impl Source for WorkSource {
         unsafe { self.executor.runtime().retire() }.map_err(|_| IrqError::Drain)
     }
 }
-fn deadline(clock: Clock) -> Result<u64, String> {
+fn deadline(clock: Clock) -> Result<u64> {
     clock
         .ticks_per_microsecond
         .checked_mul(TIMEOUT_US)
         .and_then(|n| crate::apic::rdtsc().checked_add(n))
-        .ok_or_else(|| String::from("IRQ work deadline overflow"))
+        .ok_or_else(|| refuse!("IRQ work deadline overflow"))
 }
 fn stack_pointer() -> usize {
     let sp;
@@ -357,7 +359,7 @@ pub(crate) fn run(
     base: u64,
     clock: Clock,
     prepared: crate::native_work_check::Prepared,
-) -> Result<String, String> {
+) -> Result<String> {
     let batch = prepared.into_irq_stacks()?;
     let parts = diagnostic::prepare_source(function, base, clock)?;
     let cpu = Arc::new(BspCpu);
@@ -379,12 +381,12 @@ pub(crate) fn run(
     // SAFETY: provider/code/root/event owner; only the owned
     // native handler and BSP callbacks can submit or execute this work.
     let queue = unsafe { Queue::<16>::new(cpu, events.clone()) }
-        .map_err(|e| format!("IRQ queue: {e:?}"))?;
+        .map_err(|e| refuse!("IRQ queue: {e}", ?e))?;
     events
         .queue
         .store(Arc::as_ptr(&queue).cast_mut(), Ordering::Release);
     let executor = Rc::new(
-        Executor::new(queue.clone(), batch.stacks).map_err(|e| format!("IRQ executor: {e:?}"))?,
+        Executor::new(queue.clone(), batch.stacks).map_err(|e| refuse!("IRQ executor: {e}", ?e))?,
     );
     let handler = Arc::new(WorkHandler {
         queue: queue.clone(),
@@ -398,7 +400,7 @@ pub(crate) fn run(
     });
     let mut registration = super::CONTROLLER
         .request_owned(*source, handler.clone())
-        .map_err(|e| format!("IRQ work request: {e:?}"))?;
+        .map_err(|e| refuse!("IRQ work request: {e}", ?e))?;
     let vector = registration.vector();
     // Dispatcher permits MSI progress. All callbacks run
     // on kept real task stacks; no resource/queue lock spans this window.
@@ -430,25 +432,29 @@ pub(crate) fn run(
         // Run the real stop attempt before reporting retention. Any uncertain
         // source/work/metadata failure keeps Source+Rc<Executor> in its slot.
         drop(registration);
-        return Err(format!(
-            "IRQ work observation failed result={result:?} errors={:#x} delivered={} worker={} quarantine={} retained_BSP_owner={} released_stack_leases={} async_result={} fcw_fsw_ftw_fop={:#x} fip={:#x} fdp={:#x}",
-            events.errors.load(Ordering::Acquire),
-            events.delivered.load(Ordering::Acquire),
-            events.worker.load(Ordering::Acquire),
-            super::CONTROLLER.quarantine_count(),
-            Rc::strong_count(&executor) >= 2,
-            batch.releases.released(),
-            events.async_observation[0].load(Ordering::Acquire),
-            events.async_observation[1].load(Ordering::Acquire),
-            events.async_observation[2].load(Ordering::Acquire),
-            events.async_observation[3].load(Ordering::Acquire)
+        return Err(refuse!(
+            "IRQ work observation failed result={result} errors={errors:#x} delivered={delivered} \
+             worker={worker} quarantine={quarantine} retained_BSP_owner={retained} \
+             released_stack_leases={released} async_result={async_result} \
+             fcw_fsw_ftw_fop={fpu_control:#x} fip={fip:#x} fdp={fdp:#x}",
+            ?result,
+            errors = events.errors.load(Ordering::Acquire),
+            delivered = events.delivered.load(Ordering::Acquire),
+            worker = events.worker.load(Ordering::Acquire),
+            quarantine = super::CONTROLLER.quarantine_count(),
+            retained = Rc::strong_count(&executor) >= 2,
+            released = batch.releases.released(),
+            async_result = events.async_observation[0].load(Ordering::Acquire),
+            fpu_control = events.async_observation[1].load(Ordering::Acquire),
+            fip = events.async_observation[2].load(Ordering::Acquire),
+            fdp = events.async_observation[3].load(Ordering::Acquire)
         ));
     }
     // This exercises the source's two real quiescence/drain phases. The queued
     // job is pending here and cannot release device/context resources early.
     let retired = registration
         .retire()
-        .map_err(|e| format!("IRQ work mask/synchronize/drain: {e:?}"))?;
+        .map_err(|e| refuse!("IRQ work mask/synchronize/drain: {e}", ?e))?;
     // SAFETY: route+callback+work drain just completed on this BSP;
     // keep returned callback while consuming its original concrete source.
     let (source, returned_handler, _route) = unsafe { retired.into_parts() };
@@ -465,7 +471,7 @@ pub(crate) fn run(
         || Arc::strong_count(&handler) != 1
         || !matches!(queue.current_id(), Err(WorkError::Closed))
     {
-        return Err(String::from("IRQ work callback/owner retirement failed"));
+        return Err(refuse!("IRQ work callback/owner retirement failed"));
     }
     // Late device cause must not submit into the now closed queue.
     parts.edu.write(0x60, 2);
@@ -481,13 +487,13 @@ pub(crate) fn run(
     }
     parts.edu.write(0x64, u32::MAX);
     if late || parts.edu.read(0x24) != 0 {
-        return Err(String::from("IRQ work survived source retirement"));
+        return Err(refuse!("IRQ work survived source retirement"));
     }
     drop(registration);
     drop(executor);
     if batch.releases.released() != 4 {
-        return Err(String::from(
-            "IRQ worker stack leases did not release after synchronization",
+        return Err(refuse!(
+            "IRQ worker stack leases did not release after synchronization"
         ));
     }
     Ok(format!(

@@ -1,5 +1,7 @@
 //! Selected PE provenance and the prepared CPU sequence kept across loading.
+use crate::Result;
 use alloc::{format, string::String, vec::Vec};
+use stela_contracts::refuse;
 use stela_loader::apple_device_tree::{DeviceTree, Node, Property};
 use {stela_formats::boot_bundle::BootCpu, stela_formats::boot_bundle::BootCpuSelection};
 
@@ -11,20 +13,21 @@ struct Cpu {
     running: bool,
 }
 
-fn property<'a>(node: &'a Node, name: &str) -> Result<&'a Property, String> {
+fn property<'a>(node: &'a Node, name: &str) -> Result<&'a Property> {
     let mut properties = node.properties.iter().filter(|p| p.name() == name);
     let property = properties
         .next()
-        .ok_or_else(|| format!("boot CPU topology lacks {name}"))?;
+        .ok_or_else(|| refuse!("boot CPU topology lacks {name}", name))?;
     if properties.next().is_some() || property.placeholder {
-        return Err(format!(
-            "boot CPU topology has ambiguous or unresolved {name}"
+        return Err(refuse!(
+            "boot CPU topology has ambiguous or unresolved {name}",
+            name
         ));
     }
     Ok(property)
 }
 
-fn cpus(tree: &DeviceTree) -> Result<Vec<Cpu>, String> {
+fn cpus(tree: &DeviceTree) -> Result<Vec<Cpu>> {
     // Node lookups select the first matching child. Refuse duplicate structural
     // containers instead of letting source and runtime choose different lists.
     if tree
@@ -35,39 +38,41 @@ fn cpus(tree: &DeviceTree) -> Result<Vec<Cpu>, String> {
         .count()
         != 1
     {
-        return Err("boot CPU topology requires exactly one /cpus".into());
+        return Err(refuse!("boot CPU topology requires exactly one /cpus"));
     }
-    let parent = tree.node("/cpus").ok_or("boot CPU topology lacks /cpus")?;
+    let parent = tree
+        .node("/cpus")
+        .ok_or(refuse!("boot CPU topology lacks /cpus"))?;
     property(parent, "name")?;
     if parent.children.is_empty() {
-        return Err("boot CPU topology is empty".into());
+        return Err(refuse!("boot CPU topology is empty"));
     }
     let mut cpus: Vec<Cpu> = Vec::new();
     for node in &parent.children {
         let name = property(node, "name")?
             .as_str()
-            .ok_or("boot CPU name is not UTF-8")?;
+            .ok_or(refuse!("boot CPU name is not UTF-8"))?;
         if name.is_empty() || name.contains('/') || matches!(name, "." | "..") {
-            return Err("boot CPU name is not one original child component".into());
+            return Err(refuse!("boot CPU name is not one original child component"));
         }
         let path = format!("/cpus/{name}");
         let cluster_type = match property(node, "cluster-type")?.value.as_slice() {
             [kind @ (b'E' | b'P' | b'M'), 0] => *kind,
-            _ => return Err(format!("{path} has no original E/P/M cluster-type")),
+            _ => return Err(refuse!("{path} has no original E/P/M cluster-type", path)),
         };
         let affinity = property(node, "reg")?
             .as_u32()
-            .ok_or_else(|| format!("{path} affinity is not one u32"))?;
+            .ok_or_else(|| refuse!("{path} affinity is not one u32", path))?;
         let running = match property(node, "state")?.value.as_slice() {
             b"running\0" => true,
             b"waiting\0" => false,
-            _ => return Err(format!("{path} state is not running or waiting")),
+            _ => return Err(refuse!("{path} state is not running or waiting", path)),
         };
         if cpus
             .iter()
             .any(|cpu| cpu.path == path || cpu.affinity == affinity)
         {
-            return Err("boot CPU topology repeats a path or raw affinity".into());
+            return Err(refuse!("boot CPU topology repeats a path or raw affinity"));
         }
         cpus.push(Cpu {
             path,
@@ -97,16 +102,16 @@ impl Prepared {
         original: &DeviceTree,
         prepared: &DeviceTree,
         selected: &BootCpu,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let source = cpus(original)?;
         let cpus = cpus(prepared)?;
         if !source
             .get(selected.original_index)
             .is_some_and(|cpu| identity(cpu, selected))
         {
-            return Err(
-                "boot_cpu differs from its original path/index/affinity/cluster-type".into(),
-            );
+            return Err(refuse!(
+                "boot_cpu differs from its original path/index/affinity/cluster-type"
+            ));
         }
         let mut previous = None;
         for cpu in &cpus {
@@ -117,18 +122,24 @@ impl Prepared {
                         && original.affinity == cpu.affinity
                         && original.cluster_type == cpu.cluster_type
                 })
-                .ok_or("prepared CPU differs from its immutable original identity")?;
+                .ok_or(refuse!(
+                    "prepared CPU differs from its immutable original identity"
+                ))?;
             if previous.is_some_and(|previous| index <= previous) {
-                return Err("prepared CPUs reorder the original topology".into());
+                return Err(refuse!("prepared CPUs reorder the original topology"));
             }
             previous = Some(index);
         }
         let processor = cpus
             .iter()
             .position(|cpu| identity(cpu, selected))
-            .ok_or("selected original CPU is absent from prepared topology")?;
+            .ok_or(refuse!(
+                "selected original CPU is absent from prepared topology"
+            ))?;
         if cpus.iter().filter(|cpu| cpu.running).count() != 1 || !cpus[processor].running {
-            return Err("prepared topology must have exactly one running selected CPU".into());
+            return Err(refuse!(
+                "prepared topology must have exactly one running selected CPU"
+            ));
         }
         let automatic = match selected.selection {
             BootCpuSelection::First => Some(0),
@@ -138,9 +149,9 @@ impl Prepared {
             BootCpuSelection::Explicit => Some(processor),
         };
         if automatic != Some(processor) {
-            return Err(
-                "automatic boot CPU is not the first retained original CPU of its policy".into(),
-            );
+            return Err(refuse!(
+                "automatic boot CPU is not the first retained original CPU of its policy"
+            ));
         }
         Ok(Self { cpus, processor })
     }
@@ -149,11 +160,11 @@ impl Prepared {
         self.processor
     }
 
-    pub fn validate_live(&self, tree: &DeviceTree) -> Result<(), String> {
+    pub fn validate_live(&self, tree: &DeviceTree) -> Result<()> {
         if cpus(tree)? != self.cpus {
-            return Err(
-                "live CPU identities/order/running state differ from verified preparation".into(),
-            );
+            return Err(refuse!(
+                "live CPU identities/order/running state differ from verified preparation"
+            ));
         }
         Ok(())
     }

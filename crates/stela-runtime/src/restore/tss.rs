@@ -17,6 +17,7 @@
 use super::{Error, Result, plist, plist::Value, store::Identity};
 use alloc::{format, string::String, vec::Vec};
 use sha2::{Digest, Sha384};
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 
 pub const HOST: &str = "gs.apple.com";
@@ -364,8 +365,10 @@ pub fn ticket(response: &[u8]) -> Result<Vec<u8>> {
     if status != "0" || !text.contains("MESSAGE=SUCCESS") {
         let message = field("MESSAGE").unwrap_or("");
         let message = message.split("&REQUEST_STRING").next().unwrap_or(message);
-        return Err(Error::Transport(format!(
-            "TSS refused: STATUS={status} MESSAGE={message}"
+        return Err(Error::Transport(refuse!(
+            "TSS refused: STATUS={status} MESSAGE={message}",
+            status,
+            message
         )));
     }
     let start = text

@@ -6,6 +6,11 @@
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 extern crate alloc;
 
+pub use stela_contracts::Refusal;
+
+/// A description that is refused names the values that decided it.
+pub type Result<T, E = Refusal> = core::result::Result<T, E>;
+
 pub mod aes;
 pub mod aic;
 pub mod amcc;

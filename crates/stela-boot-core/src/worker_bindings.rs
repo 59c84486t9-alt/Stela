@@ -1,6 +1,8 @@
 //! Effect-free validation of the guest-PE/physical-worker bijection. These
 //! records grant no execution permission; the real Hosts must still initialize
 //! their publication owners against the capture and executor roster.
+use crate::Result;
+use stela_contracts::refuse;
 use stela_engine::machine::engine::publication::WorkerBinding;
 
 pub fn validate(
@@ -8,10 +10,12 @@ pub fn validate(
     physical_workers: usize,
     boot_processor: usize,
     bindings: &[WorkerBinding],
-) -> Result<(), &'static str> {
+) -> Result<()> {
     if cores == 0 || cores > physical_workers || boot_processor >= cores || bindings.len() != cores
     {
-        return Err("canonical native assignment has an incomplete PE/worker roster");
+        return Err(refuse!(
+            "canonical native assignment has an incomplete PE/worker roster"
+        ));
     }
     for (index, binding) in bindings.iter().enumerate() {
         if binding.pe >= cores
@@ -20,10 +24,14 @@ pub fn validate(
                 .iter()
                 .any(|earlier| earlier.pe == binding.pe || earlier.worker == binding.worker)
         {
-            return Err("canonical native assignment is not a PE/worker bijection");
+            return Err(refuse!(
+                "canonical native assignment is not a PE/worker bijection"
+            ));
         }
         if (binding.pe == boot_processor) != (binding.worker.0 == 0) {
-            return Err("canonical boot PE is not assigned to the actual BSP worker");
+            return Err(refuse!(
+                "canonical boot PE is not assigned to the actual BSP worker"
+            ));
         }
     }
     Ok(())

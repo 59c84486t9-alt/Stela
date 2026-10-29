@@ -18,7 +18,9 @@
 //! MMIO availability is unchecked; quiesce permits nonmutating reads. This
 //! native-bank hook does not establish its implicit PMGR domain association.
 use super::regfile::Held;
+use crate::Result;
 use alloc::{collections::BTreeMap, vec::Vec};
+use stela_contracts::refuse;
 #[cfg(test)]
 use stela_soc_data::dpe::CONTROLS;
 #[cfg(test)]
@@ -39,7 +41,7 @@ pub struct Dpe {
     samples: BTreeMap<u64, (u64, bool)>,
 }
 impl Dpe {
-    pub fn new(samples: &[(u64, bool)]) -> Result<Self, &'static str> {
+    pub fn new(samples: &[(u64, bool)]) -> Result<Self> {
         let layout = stela_soc_data::dpe::Layout::new(samples)?;
         let controls = stela_soc_data::dpe::Layout::controls().collect();
         let counts = layout
@@ -66,32 +68,29 @@ impl Dpe {
             .chain(self.samples.keys().map(|&o| (o, 8)))
             .collect()
     }
-    fn sample(
-        &mut self,
-        offset: u64,
-        width: Width,
-        write: bool,
-    ) -> Result<(&mut u64, bool), &'static str> {
+    fn sample(&mut self, offset: u64, width: Width, write: bool) -> Result<(&mut u64, bool)> {
         let base = offset & !7;
         let (count, restore) = self
             .samples
             .get_mut(&base)
-            .ok_or("undescribed SOC DPE register")?;
+            .ok_or(refuse!("undescribed SOC DPE register"))?;
         if width == Width::Double && offset == base && *restore
             || !write && width == Width::Word && offset.is_multiple_of(4)
         {
             Ok((count, offset != base))
         } else {
-            Err("SOC DPE sample access without a described width or restore operation")
+            Err(refuse!(
+                "SOC DPE sample access without a described width or restore operation"
+            ))
         }
     }
 }
 impl Lifecycle for Dpe {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         if !proposed.powered || proposed.reset {
-            return Err(
-                "SOC DPE physical reset/supply retention and protected sample restoration are unqualified",
-            );
+            return Err(refuse!(
+                "SOC DPE physical reset/supply retention and protected sample restoration are unqualified"
+            ));
         }
         if (!proposed.clocked || proposed.quiesced)
             && self
@@ -99,7 +98,9 @@ impl Lifecycle for Dpe {
                 .iter()
                 .any(|&offset| self.values.get(offset) != 0)
         {
-            return Err("SOC DPE pause with nonzero sampling controls is unqualified");
+            return Err(refuse!(
+                "SOC DPE pause with nonzero sampling controls is unqualified"
+            ));
         }
         Ok(())
     }

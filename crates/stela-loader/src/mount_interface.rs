@@ -15,7 +15,9 @@
 //!   `stela.cfg` itself holds. `stela.efi` lists the entries, waits up to the
 //!   timeout for a digit (0 waits only when a key is already pressed) and
 //!   boots the chosen line in place of `stela.cfg`.
+use crate::Result;
 use alloc::{format, string::String, vec::Vec};
+use stela_contracts::refuse;
 
 /// The marker's first bytes.
 pub const MAGIC: [u8; 16] = *b"STELA-MOUNT-IF\x00\x01";
@@ -252,31 +254,31 @@ fn valid_name(name: &str) -> bool {
 
 impl Choices {
     /// The file's text; refuses what [`Choices::parse`] would.
-    pub fn encode(&self) -> Result<String, &'static str> {
+    pub fn encode(&self) -> Result<String> {
         self.check()?;
         let mut text = format!("{TIMEOUT} {}\n", self.timeout_seconds);
         for entry in &self.entries {
             if entry.options.contains(['\n', '\r', '\t']) || entry.options.trim().is_empty() {
-                return Err("a startup choice's options are not one line");
+                return Err(refuse!("a startup choice's options are not one line").into());
             }
             text.push_str(&format!("{}\t{}\n", entry.name, entry.options.trim()));
         }
         Ok(text)
     }
 
-    fn check(&self) -> Result<(), &'static str> {
+    fn check(&self) -> Result<()> {
         if self.entries.is_empty() || self.entries.len() > MAX_CHOICES {
-            return Err("startup choices hold one to 35 entries");
+            return Err(refuse!("startup choices hold one to 35 entries").into());
         }
         if self.timeout_seconds > MAX_TIMEOUT_SECONDS {
-            return Err("the startup choice timeout is longer than a minute");
+            return Err(refuse!("the startup choice timeout is longer than a minute").into());
         }
         for (n, entry) in self.entries.iter().enumerate() {
             if !valid_name(&entry.name) {
-                return Err("a startup choice name is not short printable ASCII");
+                return Err(refuse!("a startup choice name is not short printable ASCII").into());
             }
             if self.entries[..n].iter().any(|e| e.name == entry.name) {
-                return Err("two startup choices have the same name");
+                return Err(refuse!("two startup choices have the same name").into());
             }
         }
         Ok(())
@@ -284,7 +286,7 @@ impl Choices {
 
     /// Parse the file: `timeout N`, then `NAME<TAB>OPTIONS` lines; blank
     /// lines and lines starting with `#` are ignored.
-    pub fn parse(text: &str) -> Result<Self, &'static str> {
+    pub fn parse(text: &str) -> Result<Self> {
         let mut timeout = None;
         let mut entries = Vec::new();
         for line in text.lines() {
@@ -294,21 +296,21 @@ impl Choices {
             }
             if let Some(value) = line.strip_prefix(TIMEOUT).and_then(|v| v.strip_prefix(' ')) {
                 if timeout.is_some() {
-                    return Err("choices.cfg has two timeout lines");
+                    return Err(refuse!("choices.cfg has two timeout lines").into());
                 }
                 timeout = Some(
                     value
                         .trim()
                         .parse()
-                        .map_err(|_| "choices.cfg's timeout is not a number")?,
+                        .map_err(|_| refuse!("choices.cfg's timeout is not a number"))?,
                 );
                 continue;
             }
-            let (name, options) = line
-                .split_once('\t')
-                .ok_or("a choices.cfg entry is not NAME, a tab and options")?;
+            let (name, options) = line.split_once('\t').ok_or(refuse!(
+                "a choices.cfg entry is not NAME, a tab and options"
+            ))?;
             if options.trim().is_empty() {
-                return Err("a choices.cfg entry has no options");
+                return Err(refuse!("a choices.cfg entry has no options").into());
             }
             entries.push(Choice {
                 name: name.into(),
@@ -316,7 +318,7 @@ impl Choices {
             });
         }
         let choices = Self {
-            timeout_seconds: timeout.ok_or("choices.cfg has no timeout line")?,
+            timeout_seconds: timeout.ok_or(refuse!("choices.cfg has no timeout line"))?,
             entries,
         };
         choices.check()?;

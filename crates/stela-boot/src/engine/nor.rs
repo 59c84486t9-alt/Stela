@@ -12,6 +12,7 @@
 //! ANS2 model only the rest, so the guest never sees the machine state.
 use crate::output;
 use alloc::{boxed::Box, collections::BTreeMap, format, vec::Vec};
+use stela_contracts::refuse;
 use stela_drivers::block::{BlockDevice, BlockError, Shared, Submission};
 use {
     stela_formats::boot_bundle::Nvram, stela_runtime::machine::apple::AppleDevices,
@@ -140,7 +141,8 @@ impl HostNor {
                 .map(|(offset, sector)| persist::request(identity, offset, sector))
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(|requests| {
-                    Submission::batch(requests, identity).map_err(|error| format!("{error}"))
+                    Submission::batch(requests, identity)
+                        .map_err(|error| refuse!("NOR persistence batch: {error}", %error))
                 });
             match store {
                 Ok(store) => self.running = Some(store),

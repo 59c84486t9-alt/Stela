@@ -1,4 +1,6 @@
 //! PTD publication geometry shared by the direct-memory and DCS frontends.
+use crate::Result;
+use stela_contracts::refuse;
 use {
     crate::platform::apple::ptd::transport::IRQ_STATUS,
     crate::platform::apple::ptd::transport::status, stela_soc_data::ptd::PTD_BYTES,
@@ -19,21 +21,23 @@ impl Layout {
         (self.physical, PTD_BYTES, self.device_offset)
     }
 
-    pub fn display_view(&self, physical: u64, bytes: u64) -> Result<(u64, u64, u64), &'static str> {
+    pub fn display_view(&self, physical: u64, bytes: u64) -> Result<(u64, u64, u64)> {
         let end = physical
             .checked_add(bytes)
-            .ok_or("display PTD view overflows")?;
+            .ok_or(refuse!("display PTD view overflows"))?;
         let bank_end = self
             .physical
             .checked_add(PTD_BYTES)
-            .ok_or("prepared PTD bank overflows")?;
+            .ok_or(refuse!("prepared PTD bank overflows"))?;
         if physical != self.updates.0 || bytes < self.updates.1 || end > bank_end {
-            return Err("display PTD view must cover the complete update alias within its bank");
+            return Err(refuse!(
+                "display PTD view must cover the complete update alias within its bank"
+            ));
         }
         let offset = self
             .device_offset
             .checked_add(UPDATE_OFFSET)
-            .ok_or("PTD device offset overflows")?;
+            .ok_or(refuse!("PTD device offset overflows"))?;
         Ok((physical, bytes, offset))
     }
 

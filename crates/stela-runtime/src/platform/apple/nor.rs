@@ -19,10 +19,12 @@
 //! erase at that boundary (zero busy latency), so WIP is always clear;
 //! status WEL follows WREN/WRDI and is consumed by program/erase/WRSR.
 //! Unsupported commands refuse before their byte is accepted.
+use crate::Result;
 use alloc::collections::BTreeSet;
 #[cfg(test)]
 use alloc::vec;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 pub mod persist;
 
@@ -107,7 +109,7 @@ impl Nor {
         self.selected
     }
 
-    pub(crate) fn check_select(&self, selected: bool) -> Result<(), &'static str> {
+    pub(crate) fn check_select(&self, selected: bool) -> Result<()> {
         if !selected && let Some(t) = &self.transaction {
             let required = match t.command {
                 READ | PROGRAM | ERASE_SECTOR | ERASE_BLOCK => 3,
@@ -116,13 +118,13 @@ impl Nor {
                 _ => 0,
             };
             if t.position < required {
-                return Err("incomplete NOR command at CS rising");
+                return Err(refuse!("incomplete NOR command at CS rising"));
             }
             if t.command == PROGRAM && t.data.is_empty() {
-                return Err("empty NOR page program");
+                return Err(refuse!("empty NOR page program"));
             }
             if t.command == WRITE_STATUS && t.data != [0] {
-                return Err("NOR status protection fields are not modeled");
+                return Err(refuse!("NOR status protection fields are not modeled"));
             }
         }
         Ok(())
@@ -130,7 +132,7 @@ impl Nor {
 
     /// CS active low; a rising edge terminates the command, keeping all
     /// bytes between falling/rising edges across controller transfers.
-    pub fn select(&mut self, selected: bool) -> Result<(), &'static str> {
+    pub fn select(&mut self, selected: bool) -> Result<()> {
         if self.selected == selected {
             return Ok(());
         }
@@ -169,7 +171,7 @@ impl Nor {
     }
 
     /// One MSB-first SPI byte; an unselected die leaves MISO pulled high.
-    pub fn shift(&mut self, byte: u8) -> Result<u8, &'static str> {
+    pub fn shift(&mut self, byte: u8) -> Result<u8> {
         if !self.selected {
             return Ok(ERASED);
         }
@@ -186,9 +188,9 @@ impl Nor {
                     | WRITE_DISABLE
                     | READ_ID
             ) {
-                return Err(
-                    "unsupported NOR opcode (SFDP, quad and vendor commands are not modeled)",
-                );
+                return Err(refuse!(
+                    "unsupported NOR opcode (SFDP, quad and vendor commands are not modeled)"
+                ));
             }
             self.transaction = Some(Transaction {
                 command: byte,
@@ -202,7 +204,7 @@ impl Nor {
             READ_ID => JEDEC_ID
                 .get(t.position)
                 .copied()
-                .ok_or("NOR ID has only three modeled bytes")?,
+                .ok_or(refuse!("NOR ID has only three modeled bytes"))?,
             READ_STATUS => {
                 if self.enabled {
                     WEL
@@ -221,7 +223,7 @@ impl Nor {
             }
             PROGRAM => {
                 if t.data.len() == PAGE_SIZE {
-                    return Err("NOR program exceeds the modeled page buffer");
+                    return Err(refuse!("NOR program exceeds the modeled page buffer"));
                 }
                 t.data.push(byte);
                 ERASED
@@ -230,7 +232,7 @@ impl Nor {
                 t.data.push(byte);
                 ERASED
             }
-            _ => return Err("unsupported NOR command length or status fields"),
+            _ => return Err(refuse!("unsupported NOR command length or status fields")),
         };
         t.position += 1;
         Ok(result)

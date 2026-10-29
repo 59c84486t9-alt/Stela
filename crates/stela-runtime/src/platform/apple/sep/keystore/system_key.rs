@@ -17,9 +17,11 @@ use super::{
     Fields,
     reference_key::{self, ReferenceKey},
 };
+use crate::Result;
 use alloc::{format, string::String};
 use hmac::{Hmac, Mac};
 use p256::{SecretKey, elliptic_curve::sec1::ToEncodedPoint};
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use zeroize::Zeroizing;
 
@@ -75,7 +77,7 @@ impl SystemKeys {
         &mut self,
         operation: Operation<'_>,
         entropy: &mut dyn super::super::Entropy,
-    ) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    ) -> Result<alloc::vec::Vec<u8>> {
         match operation {
             Operation::PublicIdentity => Ok(self.public(PublicQuery::Identity)?.to_vec()),
             Operation::CreateReference { kind } => ReferenceKey::create(&self.root, kind, entropy),
@@ -98,13 +100,13 @@ impl SystemKeys {
                 // is distinct from this key-to-key signature.
                 let signature: p256::ecdsa::Signature = signing
                     .try_sign(&reference.public())
-                    .map_err(|_| "SEP SIK reference signature failed")?;
+                    .map_err(|_| refuse!("SEP SIK reference signature failed"))?;
                 Ok(signature.to_der().as_bytes().to_vec())
             }
         }
     }
 
-    pub(super) fn public(&mut self, query: PublicQuery) -> Result<&[u8], &'static str> {
+    pub(super) fn public(&mut self, query: PublicQuery) -> Result<&[u8]> {
         match query {
             PublicQuery::Identity => {
                 if self.identity.is_none() {
@@ -120,7 +122,7 @@ impl SystemKeys {
     }
 }
 
-fn identity_secret(root: &[u8; 32]) -> Result<SecretKey, &'static str> {
+fn identity_secret(root: &[u8; 32]) -> Result<SecretKey> {
     // Rejection sampling preserves the scalar distribution, unlike reducing
     // a 256-bit digest modulo the curve order. The counter changes only on
     // an out-of-range candidate, so reopen reconstructs the identical key.
@@ -135,15 +137,12 @@ fn identity_secret(root: &[u8; 32]) -> Result<SecretKey, &'static str> {
             return Ok(secret);
         }
     }
-    Err("SEP system identity scalar derivation exhausted")
+    Err(refuse!("SEP system identity scalar derivation exhausted"))
 }
 
-pub(super) fn operation<'a>(
-    variant: u32,
-    fields: &mut Fields<'a>,
-) -> Result<Operation<'a>, &'static str> {
+pub(super) fn operation<'a>(variant: u32, fields: &mut Fields<'a>) -> Result<Operation<'a>> {
     if variant != 0 {
-        return Err("SEP perform-operation variant is not implemented");
+        return Err(refuse!("SEP perform-operation variant is not implemented"));
     }
     // The session is caller context. Public queries and creation of a new
     // standalone reference grant no access to an existing credential bag.
@@ -151,7 +150,9 @@ pub(super) fn operation<'a>(
     let handle = fields.word()?;
     let transport_operation = fields.word()?;
     if handle != PUBLIC_HANDLE || !PUBLIC_OPERATIONS.contains(&transport_operation) {
-        return Err("SEP perform-operation handle or operation is not implemented");
+        return Err(refuse!(
+            "SEP perform-operation handle or operation is not implemented"
+        ));
     }
     let bytes = fields.blob()?;
     fields.end()?;
@@ -168,7 +169,9 @@ pub(super) fn operation<'a>(
         let mut entry = Cursor(pairs.take(16)?.value);
         let key = entry.take(12)?.value;
         if previous.is_some_and(|p| p >= key) {
-            return Err("SEP system-key dictionary is duplicated or not key sorted");
+            return Err(refuse!(
+                "SEP system-key dictionary is duplicated or not key sorted"
+            ));
         }
         previous = Some(key);
         match key {
@@ -178,19 +181,19 @@ pub(super) fn operation<'a>(
                     b"oc" => ParameterOperation::CreateReference,
                     b"osa" => ParameterOperation::AttestReference,
                     b"osgn" => ParameterOperation::SignReference,
-                    _ => return Err("SEP system-key operation is not implemented"),
+                    _ => return Err(refuse!("SEP system-key operation is not implemented")),
                 });
             }
             b"skt" => {
                 if key_type || der::unsigned(entry.take(2)?.value)? != [IDENTITY_TYPE as u8] {
-                    return Err("SEP system-key type is not implemented");
+                    return Err(refuse!("SEP system-key type is not implemented"));
                 }
                 key_type = true;
             }
             b"skg" => {
                 if generation || der::unsigned(entry.take(2)?.value)? != [IDENTITY_GENERATION as u8]
                 {
-                    return Err("SEP system-key generation is not implemented");
+                    return Err(refuse!("SEP system-key generation is not implemented"));
                 }
                 generation = true;
             }
@@ -199,7 +202,7 @@ pub(super) fn operation<'a>(
             b"rko" => reference_options = Some(parameter_number(&mut entry)?),
             b"rk" => reference_blob = Some(entry.take(17)?.encoded),
             b"d" => digest = Some(entry.take(4)?.value),
-            _ => return Err("SEP system-key parameter is not implemented"),
+            _ => return Err(refuse!("SEP system-key parameter is not implemented")),
         }
         entry.end()?;
     }
@@ -212,20 +215,24 @@ pub(super) fn operation<'a>(
                 || digest.is_some()
                 || reference_fields.iter().any(Option::is_none)
             {
-                return Err("SEP reference-key create dictionary is incomplete or mixed");
+                return Err(refuse!(
+                    "SEP reference-key create dictionary is incomplete or mixed"
+                ));
             }
             if transport_operation != 0 {
-                return Err("SEP reference-key create transport operation is not implemented");
+                return Err(refuse!(
+                    "SEP reference-key create transport operation is not implemented"
+                ));
             }
             if reference_class != Some(reference_key::CLASS) {
-                return Err("SEP reference-key class is not implemented");
+                return Err(refuse!("SEP reference-key class is not implemented"));
             }
             if reference_options != Some(reference_key::OPTIONS) {
-                return Err("SEP reference-key options are not implemented");
+                return Err(refuse!("SEP reference-key options are not implemented"));
             }
             let kind = reference_type.unwrap();
             if !matches!(kind, 4 | 5) {
-                return Err("SEP reference-key type is not implemented");
+                return Err(refuse!("SEP reference-key type is not implemented"));
             }
             Ok(Operation::CreateReference { kind })
         }
@@ -235,18 +242,23 @@ pub(super) fn operation<'a>(
                 || generation
                 || reference_fields.iter().any(Option::is_some)
             {
-                return Err("SEP reference-key signing parameters are not implemented");
+                return Err(refuse!(
+                    "SEP reference-key signing parameters are not implemented"
+                ));
             }
-            let blob = reference_blob.ok_or("SEP reference-key signing has no reference")?;
+            let blob =
+                reference_blob.ok_or(refuse!("SEP reference-key signing has no reference"))?;
             let digest = digest
-                .ok_or("SEP reference-key signing has no digest")?
+                .ok_or(refuse!("SEP reference-key signing has no digest"))?
                 .try_into()
-                .map_err(|_| "SEP reference-key digest must be SHA-256 sized")?;
+                .map_err(|_| refuse!("SEP reference-key digest must be SHA-256 sized"))?;
             Ok(Operation::SignReference { blob, digest })
         }
         Some(ParameterOperation::AttestReference) => {
             if digest.is_some() {
-                return Err("SEP reference-key attestation contains signing data");
+                return Err(refuse!(
+                    "SEP reference-key attestation contains signing data"
+                ));
             }
             if transport_operation != 0
                 || key_type
@@ -255,24 +267,29 @@ pub(super) fn operation<'a>(
                 || reference_type.is_some()
                 || reference_options.is_some_and(|v| v != reference_key::OPTIONS)
             {
-                return Err("SEP reference-key attestation parameters are not implemented");
+                return Err(refuse!(
+                    "SEP reference-key attestation parameters are not implemented"
+                ));
             }
-            let blob = reference_blob.ok_or("SEP reference-key attestation has no reference")?;
+            let blob =
+                reference_blob.ok_or(refuse!("SEP reference-key attestation has no reference"))?;
             Ok(Operation::AttestReference { blob })
         }
         Some(ParameterOperation::PublicIdentity) => {
             if !key_type || !generation {
-                return Err("SEP system-key dictionary is incomplete");
+                return Err(refuse!("SEP system-key dictionary is incomplete"));
             }
             if reference_fields.iter().any(Option::is_some)
                 || reference_blob.is_some()
                 || digest.is_some()
             {
-                return Err("SEP system-key public query carries reference-key parameters");
+                return Err(refuse!(
+                    "SEP system-key public query carries reference-key parameters"
+                ));
             }
             Ok(Operation::PublicIdentity)
         }
-        None => Err("SEP system-key dictionary is incomplete"),
+        None => Err(refuse!("SEP system-key dictionary is incomplete")),
     }
 }
 
@@ -289,7 +306,7 @@ pub(super) fn diagnostic(variant: u32, fields: &mut Fields<'_>) -> String {
         let bytes = fields.blob()?;
         fields.end()?;
         parameters = Some(ParameterDiagnostic::parse(bytes)?);
-        Ok::<_, &'static str>(())
+        Ok::<_, stela_contracts::Refusal>(())
     })()
     .is_ok();
     let parameters = parameters.unwrap_or_default();
@@ -332,7 +349,7 @@ impl Default for ParameterDiagnostic {
 }
 
 impl ParameterDiagnostic {
-    fn parse(bytes: &[u8]) -> Result<Self, &'static str> {
+    fn parse(bytes: &[u8]) -> Result<Self> {
         let mut outer = Cursor(bytes);
         let set = outer.take(17)?;
         outer.end()?;
@@ -364,7 +381,7 @@ impl ParameterDiagnostic {
             match key {
                 b"o" => {
                     if has_operation {
-                        return Err("SEP diagnostic operation is duplicated");
+                        return Err(refuse!("SEP diagnostic operation is duplicated"));
                     }
                     has_operation = true;
                     // Original operation names only. Unknown guest strings
@@ -396,7 +413,7 @@ impl ParameterDiagnostic {
                     result.reference_key_options = Some(parameter_number(&mut entry)?);
                 }
                 b"skt" | b"kt" | b"skg" | b"bc" | b"rko" => {
-                    return Err("SEP diagnostic number is duplicated");
+                    return Err(refuse!("SEP diagnostic number is duplicated"));
                 }
                 _ => {
                     entry.next()?;
@@ -404,14 +421,16 @@ impl ParameterDiagnostic {
             }
             entry.end()?;
         }
-        Err("SEP diagnostic dictionary exceeds the parameter bound")
+        Err(refuse!(
+            "SEP diagnostic dictionary exceeds the parameter bound"
+        ))
     }
 }
 
-fn parameter_number(entry: &mut Cursor<'_>) -> Result<u32, &'static str> {
+fn parameter_number(entry: &mut Cursor<'_>) -> Result<u32> {
     let bytes = der::unsigned(entry.take(2)?.value)?;
     if bytes.len() > 4 {
-        return Err("SEP keystore integer is oversized");
+        return Err(refuse!("SEP keystore integer is oversized"));
     }
     Ok(bytes.iter().fold(0, |n, b| (n << 8) | u32::from(*b)))
 }

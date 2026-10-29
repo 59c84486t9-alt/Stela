@@ -24,11 +24,11 @@ use super::{
 };
 use alloc::{
     collections::BTreeMap,
-    format,
     string::{String, ToString},
     vec::Vec,
 };
 use sha2::{Digest, Sha384};
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use {
     stela_formats::payload::MemberRead, stela_formats::payload::PayloadManifest,
@@ -111,8 +111,8 @@ pub struct Store<R> {
     /// replaying it from the start each block.
     cursor: Option<(String, stela_formats::payload::zip::Progress)>,
 }
-fn payload(e: impl core::fmt::Display) -> Error {
-    Error::Payload(e.to_string())
+fn payload(error: impl core::fmt::Debug) -> Error {
+    Error::Payload(refuse!("payload: {error}", ?error))
 }
 impl<R: ReadAt> Store<R> {
     /// `selected` is supplied by the inventory (20 for the acceptance input),
@@ -273,9 +273,9 @@ impl<R: ReadAt> Store<R> {
             .as_ref()
             .ok_or(Error::Invalid("the payload names no block hashes"))?;
         if stela_formats::sha256(file) != blocks.sha256 {
-            return Err(Error::Payload(format!(
-                "{}: SHA-256 differs from the payload manifest",
-                blocks.file
+            return Err(Error::Payload(refuse!(
+                "{file}: SHA-256 differs from the payload manifest",
+                file = blocks.file
             )));
         }
         let count = usize::try_from(self.manifest.hash_blocks())
@@ -349,9 +349,10 @@ impl<R: ReadAt> Store<R> {
         for (index, (block, expected)) in bytes.chunks(BLOCK_BYTES).zip(expected).enumerate() {
             let actual: [u8; 32] = Sha256::digest(block).into();
             if actual != *expected {
-                return Err(Error::Payload(format!(
-                    "{path}: source changed at block {}",
-                    blocks.start + index as u64
+                return Err(Error::Payload(refuse!(
+                    "{path}: source changed at block {block}",
+                    path,
+                    block = blocks.start + index as u64
                 )));
             }
         }
@@ -368,8 +369,9 @@ impl<R: ReadAt> Store<R> {
         }
         let verified = self.verified.get_mut(path).expect("recorded");
         if Some(<[u8; 48]>::from(hash.finalize())) != verified.sha384 {
-            return Err(Error::Payload(format!(
-                "{path}: SHA-384 differs from the payload manifest"
+            return Err(Error::Payload(refuse!(
+                "{path}: SHA-384 differs from the payload manifest",
+                path
             )));
         }
         verified.whole = None;
@@ -459,8 +461,9 @@ impl<R: ReadAt> Store<R> {
             hashes.push(Sha256::digest(&buffer[..done]).into());
         }
         if total != member.bytes || hex::encode(hash.finalize()) != sha256 {
-            return Err(Error::Payload(format!(
-                "{path}: immutable SHA-256/length mismatch"
+            return Err(Error::Payload(refuse!(
+                "{path}: immutable SHA-256/length mismatch",
+                path
             )));
         }
         self.block_count += hashes.len();
@@ -505,8 +508,9 @@ impl<R: ReadAt> Store<R> {
             if *reached == size {
                 let actual: [u8; 48] = hash.clone().finalize().into();
                 if Some(actual) != verified.sha384 {
-                    return Err(Error::Payload(format!(
-                        "{path}: SHA-384 differs from the payload manifest"
+                    return Err(Error::Payload(refuse!(
+                        "{path}: SHA-384 differs from the payload manifest",
+                        path
                     )));
                 }
                 verified.whole = None;

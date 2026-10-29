@@ -1,4 +1,5 @@
 use super::*;
+use stela_contracts::refuse;
 use {
     stela_contracts::dma::Port, stela_contracts::dma::test_support::Ram,
     stela_contracts::interrupt::InterruptLatch,
@@ -135,9 +136,9 @@ fn remapped_fault_refuses_unknown_metadata_after_preserving_completed_pages() {
     };
     assert_eq!(
         port.write(IOVA + PAGE - 2, &[1, 2, 3, 4]),
-        Err(DmaError::Unsupported(
+        Err(DmaError::Unsupported(refuse!(
             "legacy DART remapped fault source-versus-context SID provenance"
-        ))
+        )))
     );
     let mut bytes = [0; 2];
     assert!(ram.read(FRAME + PAGE - 2, &mut bytes));
@@ -185,9 +186,9 @@ fn remapped_partial_failure_and_unqualified_acknowledgements_preserve_the_first_
         };
         assert_eq!(
             port.write(IOVA + PAGE - 2, &[0x21, 0x43, 0x65, 0x87]),
-            Err(DmaError::Unsupported(
+            Err(DmaError::Unsupported(refuse!(
                 "legacy DART remapped fault source-versus-context SID provenance"
-            ))
+            )))
         );
         let mut bytes = [0; 2];
         assert!(ram.read(FRAME + PAGE - 2, &mut bytes));
@@ -603,7 +604,9 @@ fn inaccessible_tables_and_unrepresentable_roots_do_not_invent_a_translation() {
             .unwrap();
         assert_eq!(
             model.translate(&mut ram, 1, IOVA, IOVA, false, &mut a),
-            Err(DmaError::Unsupported("unaligned legacy DART root table"))
+            Err(DmaError::Unsupported(refuse!(
+                "unaligned legacy DART root table"
+            )))
         );
         assert_eq!(model.read(ERROR, Width::Word, &mut a), Ok(0));
         let pa_bits = if profile == Profile::T8020 {
@@ -621,9 +624,9 @@ fn inaccessible_tables_and_unrepresentable_roots_do_not_invent_a_translation() {
             .unwrap();
         assert_eq!(
             model.translate(&mut ram, 1, IOVA, IOVA, false, &mut a),
-            Err(DmaError::Unsupported(
+            Err(DmaError::Unsupported(refuse!(
                 "DART root address exceeds its native profile"
-            ))
+            )))
         );
         assert_eq!(model.read(ERROR, Width::Word, &mut a), Ok(0));
     }
@@ -702,8 +705,8 @@ fn unknown_contexts_and_capture_refuse_without_fabricating_effects() {
         .unwrap();
     assert_eq!(
         filtered.translate(&mut ram, 0, FRAME, FRAME, false, &mut a),
-        Err(DmaError::Unsupported(
+        Err(DmaError::Unsupported(refuse!(
             "legacy DART address permission filtering"
-        ))
+        )))
     );
 }

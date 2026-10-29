@@ -7,8 +7,11 @@
 //! DCS flush2ece46c selects200a40+channel*200000 and preserves high16.
 //! These are request/consumer facts, not evidence that a write powers a cache,
 //! programs DRAM or produces an event counter. Unknown effects stay pending.
+use crate::Result;
 use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
@@ -84,24 +87,32 @@ struct State {
     serial: u64,
 }
 impl State {
-    fn accessible(&self) -> Result<(), &'static str> {
+    fn accessible(&self) -> Result<()> {
         if self.lifecycle.reset || !self.lifecycle.retention {
-            return Err("T602x memory reset or state loss has no qualified owner");
+            return Err(refuse!(
+                "T602x memory reset or state loss has no qualified owner"
+            ));
         }
         if !self.lifecycle.powered || !self.lifecycle.clocked || self.lifecycle.quiesced {
-            return Err("T602x memory frontend is paused by its actual owner");
+            return Err(refuse!(
+                "T602x memory frontend is paused by its actual owner"
+            ));
         }
         Ok(())
     }
     fn channel(&self, aperture: u8, lane: u8) -> &ChannelImage {
         &self.configuration.channels[usize::from(aperture) * CHANNELS + usize::from(lane)]
     }
-    fn control(&self, aperture: u8, register: Register) -> Result<u32, &'static str> {
+    fn control(&self, aperture: u8, register: Register) -> Result<u32> {
         if self.pending.contains_key(&(aperture, register)) {
-            return Err("T602x control awaits an actual DRAM/clock/power backend effect");
+            return Err(refuse!(
+                "T602x control awaits an actual DRAM/clock/power backend effect"
+            ));
         }
         match register {
-            Register::CacheMode => Err("T602x cache state requires its actual PMP/cache owner"),
+            Register::CacheMode => Err(refuse!(
+                "T602x cache state requires its actual PMP/cache owner"
+            )),
             Register::MccGating => Ok(self.configuration.mcc_gating[usize::from(aperture)]),
             Register::Dram(lane) => Ok(self.channel(aperture, lane).dram),
             Register::DcsGating(lane) => Ok(self.channel(aperture, lane).gating),
@@ -118,14 +129,16 @@ impl Controller {
         layout: Layout,
         configuration: Configuration,
         lifecycle: LifecycleState,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         if configuration.channels.len() != layout.channels()
             || configuration.mcc_gating.len() != layout.apertures()
         {
-            return Err("T602x initial image must cover every actual aperture and channel");
+            return Err(refuse!(
+                "T602x initial image must cover every actual aperture and channel"
+            ));
         }
         if lifecycle.reset || !lifecycle.retention {
-            return Err("T602x initial physical reset/loss is unqualified");
+            return Err(refuse!("T602x initial physical reset/loss is unqualified"));
         }
         Ok(Self(Rc::new(RefCell::new(State {
             layout,
@@ -139,9 +152,9 @@ impl Controller {
     pub fn layout(&self) -> Layout {
         self.0.borrow().layout
     }
-    pub fn view(&self, aperture: usize) -> Result<View, &'static str> {
+    pub fn view(&self, aperture: usize) -> Result<View> {
         if aperture >= self.layout().apertures() {
-            return Err("T602x aperture is outside its actual owner");
+            return Err(refuse!("T602x aperture is outside its actual owner"));
         }
         Ok(View {
             owner: self.clone(),
@@ -175,18 +188,21 @@ impl Controller {
     pub fn requires_ram_read(&self, offset: u64, width: Width) -> bool {
         width == Width::Word && drain_lane(offset).is_some()
     }
-    pub(crate) fn drain_control(&self, aperture: usize, offset: u64) -> Result<u32, &'static str> {
-        let lane = drain_lane(offset).ok_or("T602x access is not a source DCS drain word")?;
+    pub(crate) fn drain_control(&self, aperture: usize, offset: u64) -> Result<u32> {
+        let lane =
+            drain_lane(offset).ok_or(refuse!("T602x access is not a source DCS drain word"))?;
         let state = self
             .0
             .try_borrow()
-            .map_err(|_| "T602x control owner is borrowed")?;
+            .map_err(|_| refuse!("T602x control owner is borrowed"))?;
         state.accessible()?;
         if aperture >= state.layout.apertures() {
-            return Err("T602x drain aperture is outside its actual owner");
+            return Err(refuse!("T602x drain aperture is outside its actual owner"));
         }
         if !state.pending.is_empty() {
-            return Err("canonical RAM exclusion cannot settle a pending T602x controller request");
+            return Err(refuse!(
+                "canonical RAM exclusion cannot settle a pending T602x controller request"
+            ));
         }
         Ok(u32::from(state.channel(aperture as u8, lane).drain_high) << 16)
     }
@@ -198,19 +214,21 @@ impl Controller {
         offset: u64,
         written: u32,
         at: u64,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if written != self.drain_control(aperture, offset)? {
-            return Err("T602x DCS flush must preserve high16 and clear both low bytes");
+            return Err(refuse!(
+                "T602x DCS flush must preserve high16 and clear both low bytes"
+            ));
         }
-        let lane = drain_lane(offset).ok_or("T602x drain word is absent")?;
+        let lane = drain_lane(offset).ok_or(refuse!("T602x drain word is absent"))?;
         let mut state = self
             .0
             .try_borrow_mut()
-            .map_err(|_| "T602x control owner is borrowed")?;
+            .map_err(|_| refuse!("T602x control owner is borrowed"))?;
         let serial = state
             .serial
             .checked_add(1)
-            .ok_or("T602x request serial exhausted")?;
+            .ok_or(refuse!("T602x request serial exhausted"))?;
         state.drains.insert(
             (aperture as u8, lane),
             DrainReceipt {
@@ -249,17 +267,21 @@ pub struct View {
     aperture: u8,
 }
 impl Lifecycle for View {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         let state = self
             .owner
             .0
             .try_borrow_mut()
-            .map_err(|_| "T602x control owner is borrowed")?;
+            .map_err(|_| refuse!("T602x control owner is borrowed"))?;
         if proposed.reset || !proposed.retention {
-            return Err("T602x reset, state loss and request cancellation are unqualified");
+            return Err(refuse!(
+                "T602x reset, state loss and request cancellation are unqualified"
+            ));
         }
         if proposed != state.lifecycle && !state.pending.is_empty() {
-            return Err("T602x lifecycle cannot retire an unsettled controller request");
+            return Err(refuse!(
+                "T602x lifecycle cannot retire an unsettled controller request"
+            ));
         }
         Ok(())
     }
@@ -276,15 +298,15 @@ impl MmioDevice for View {
         Some(self)
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         let state = self
             .owner
             .0
             .try_borrow()
-            .map_err(|_| fail("T602x control owner is borrowed"))?;
+            .map_err(|_| fail(refuse!("T602x control owner is borrowed")))?;
         state.accessible().map_err(fail)?;
         if width != Width::Word {
-            return Err(fail("T602x AP register requires a 32-bit access"));
+            return Err(fail(refuse!("T602x AP register requires a 32-bit access")));
         }
         if let Some(register) = control_register(offset) {
             return state
@@ -305,7 +327,7 @@ impl MmioDevice for View {
         } else {
             "T602x register, thermal, performance or quota effect is unqualified"
         };
-        Err(fail(reason))
+        Err(fail(reason.into()))
     }
     fn write(
         &mut self,
@@ -314,33 +336,37 @@ impl MmioDevice for View {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         let mut state = self
             .owner
             .0
             .try_borrow_mut()
-            .map_err(|_| fail("T602x control owner is borrowed"))?;
+            .map_err(|_| fail(refuse!("T602x control owner is borrowed")))?;
         state.accessible().map_err(fail)?;
         if width != Width::Word || value > u64::from(u32::MAX) {
-            return Err(fail(
-                "T602x AP register requires an exact 32-bit value/access",
-            ));
+            return Err(fail(refuse!(
+                "T602x AP register requires an exact 32-bit value/access"
+            )));
         }
         let register = control_register(offset).ok_or_else(|| {
-            fail("T602x write requires an unqualified effect or a live RAM drain")
+            fail(refuse!(
+                "T602x write requires an unqualified effect or a live RAM drain"
+            ))
         })?;
         let previous = if register == Register::CacheMode {
             if value > 1 {
-                return Err(fail("T602x cache mode has an unrecovered encoding"));
+                return Err(fail(refuse!(
+                    "T602x cache mode has an unrecovered encoding"
+                )));
             }
             None
         } else {
             Some(state.control(self.aperture, register).map_err(fail)?)
         };
         if state.pending.contains_key(&(self.aperture, register)) {
-            return Err(fail(
-                "T602x controller request replacement/cancellation is unqualified",
-            ));
+            return Err(fail(refuse!(
+                "T602x controller request replacement/cancellation is unqualified"
+            )));
         }
         let written = value as u32;
         let fields = match register {
@@ -351,21 +377,21 @@ impl MmioDevice for View {
         if let (Some(fields), Some(previous)) = (fields, previous)
             && written & !fields != previous & !fields
         {
-            return Err(fail(
-                "T602x gating write changes opaque source-preserved fields",
-            ));
+            return Err(fail(refuse!(
+                "T602x gating write changes opaque source-preserved fields"
+            )));
         }
         if matches!(register, Register::MccGating) && written & MCC_GATE_FIELDS == 0x20000000
             || matches!(register, Register::DcsGating(_)) && written & DCS_GATE_FIELDS == 0x1000
         {
-            return Err(fail(
-                "T602x gating request has an unrecovered two-field encoding",
-            ));
+            return Err(fail(refuse!(
+                "T602x gating request has an unrecovered two-field encoding"
+            )));
         }
         let serial = state
             .serial
             .checked_add(1)
-            .ok_or_else(|| fail("T602x request serial exhausted"))?;
+            .ok_or_else(|| fail(refuse!("T602x request serial exhausted")))?;
         state.pending.insert(
             (self.aperture, register),
             Request {

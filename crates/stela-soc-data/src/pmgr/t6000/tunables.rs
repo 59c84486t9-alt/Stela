@@ -2,26 +2,30 @@
 //! Original J314s26A434 constructor supplies chip6000, board8, revision0.
 //! These ordered masks/values describe native software's RMW operands. They
 //! establish neither physical reset values nor electrical/counter completion.
+use crate::Result;
 use alloc::{collections::BTreeMap, vec::Vec};
+use stela_contracts::refuse;
 
 /// The immutable identity facts used by native tuning guards. Other facts
 /// remain explicit requirements until their complete source paths check.
 #[derive(Debug, Clone, Copy)]
 pub struct Profile(());
 impl Profile {
-    pub fn new(chip: u32, board: u32, revision: u32) -> Result<Self, &'static str> {
+    pub fn new(chip: u32, board: u32, revision: u32) -> Result<Self> {
         if (chip, board, revision) != (0x6000, 8, 0) {
-            return Err("T6000 bridge chip/board/revision tuning guards are not qualified");
+            return Err(refuse!(
+                "T6000 bridge chip/board/revision tuning guards are not qualified"
+            ));
         }
         Ok(Self(()))
     }
-    pub fn program(self, bridge: usize) -> Result<&'static [Tuning], &'static str> {
-        let program = *SELECTED
-            .get(bridge)
-            .ok_or("T6000 bridge tuning ID is outside the native family")?;
+    pub fn program(self, bridge: usize) -> Result<&'static [Tuning]> {
+        let program = *SELECTED.get(bridge).ok_or(refuse!(
+            "T6000 bridge tuning ID is outside the native family"
+        ))?;
         Ok(PROGRAMS[usize::from(program)])
     }
-    pub fn fields(self, bridge: usize) -> Result<Vec<(u64, u32)>, &'static str> {
+    pub fn fields(self, bridge: usize) -> Result<Vec<(u64, u32)>> {
         let mut fields = BTreeMap::new();
         for row in self.program(bridge)? {
             *fields.entry(u64::from(row.offset)).or_default() |= row.mask;
@@ -34,9 +38,11 @@ impl Profile {
 /// A set bit skips `_configureBridge`'s call to the native tuning helper. It
 /// does not remove the physical bank, waive consumers or define its current
 /// contents.
-pub fn check_optional_mask(optional_mask: &[u8]) -> Result<(), &'static str> {
+pub fn check_optional_mask(optional_mask: &[u8]) -> Result<()> {
     if optional_mask.len() < super::BRIDGE_COUNT.div_ceil(8) {
-        return Err("T6000 optional bridge mask does not cover every actual bridge");
+        return Err(refuse!(
+            "T6000 optional bridge mask does not cover every actual bridge"
+        ));
     }
     Ok(())
 }

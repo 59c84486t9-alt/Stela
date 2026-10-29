@@ -2,6 +2,9 @@
 //! phases that each own what they start.
 
 use super::*;
+use crate::Result;
+use alloc::string::ToString;
+use stela_contracts::refuse;
 
 /// The boot bundle `--preboot` names, built from the installed system on
 /// `partition`: its macOS, its staged update or its recoveryOS.
@@ -142,7 +145,7 @@ fn start(handoff: u64) -> Started {
         )
     };
     let options = match core::str::from_utf8(text)
-        .map_err(|_| "stela.cfg is not UTF-8")
+        .map_err(|_| refuse!("stela.cfg is not UTF-8"))
         .and_then(Options::parse)
     {
         Ok(options) => options,
@@ -429,7 +432,7 @@ fn open_storage(handoff: &'static Handoff, options: &Options, host: &mut OpenedH
                 .rsplit_once('\\')
                 .map_or("", |(directory, _)| directory);
             let hashes = restore::inventory_file(handoff, crate::system::INSTALL_PIECES_FILE)
-                .ok_or("the install medium's piece hashes were not loaded")?;
+                .ok_or(refuse!("the install medium's piece hashes were not loaded"))?;
             crate::status::begin("Finding the macOS install files on the USB");
             let opened = install::open(partition, &manifest, directory, hashes)?;
             crate::status::done("");
@@ -972,7 +975,7 @@ fn start_machine(boot: Boot<'_>, parts: MachineParts) -> ! {
         }
         machine
             .enter_parallel(hub)
-            .unwrap_or_else(|error| output::fatal(&alloc::format!("{error}")));
+            .unwrap_or_else(|error| output::fatal(error));
         translations::share(parallel::SHARED_CODE_BYTES);
         parallel::spawn(
             &machine,
@@ -1097,7 +1100,7 @@ fn place_devices(
             firmware: &firmware,
             build: loaded_source.map(|source| {
                 stela_formats::builds::find(&source.selected().product_build)
-                    .unwrap_or_else(|error| output::fatal(&alloc::format!("{error}")))
+                    .unwrap_or_else(|error| output::fatal(error))
             }),
         },
         memory,
@@ -1323,8 +1326,8 @@ fn source_topology<'a>(
                     boot.affinity,
                     active_workers,
                 ),
-                _ => Err(String::from(
-                    "native assigned topology for this source family is not qualified",
+                _ => Err(refuse!(
+                    "native assigned topology for this source family is not qualified"
                 )),
             };
             Some(prepared.unwrap_or_else(|error| output::fatal(&error)))
@@ -1508,7 +1511,7 @@ fn prepare_restore(
     source: restore::Source,
     usb: stela_runtime::machine::apple::UsbId,
     tree: Option<&[u8]>,
-    host_network: &Option<Result<network::Shared, String>>,
+    host_network: &Option<Result<network::Shared>>,
     fdr_storage: Option<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
 ) -> restore::Experiment {
     let Boot {
@@ -1758,17 +1761,17 @@ fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -
             None
         }
     };
-    let prepared_sci = match (&native_mmio, handoff.power) {
+    let prepared_sci = match (&native_mmio, &handoff.power) {
         (Some(mmio), Some(power)) => {
             // SAFETY: firmware is stopped, APs have not started, and native
             // probing has not published any PCI/controller owner yet.
             let prepared = unsafe { mmio.mask_pci_intx() }
-                .map_err(|error| format!("PCI INTx handoff: {error:?}"))
+                .map_err(|error| refuse!("PCI INTx handoff: {error}", ?error))
                 .and_then(|()| {
                     // SAFETY: PCI INTx contributors are disabled; the boot
                     // owns the fixed/GPE sources and complete IOAPIC handoff.
-                    unsafe { aml::sci::Prepared::capture(mmio, power) }
-                        .map_err(|error| format!("SCI route: {error:?}"))
+                    unsafe { aml::sci::Prepared::capture(mmio, power.clone()) }
+                        .map_err(|error| refuse!("SCI route: {error}", ?error))
                 });
             match prepared {
                 Ok(prepared) => Some(prepared),
@@ -1867,7 +1870,7 @@ struct HostDevices {
     preboot: Option<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
     host_input: Option<input::HostInput>,
     host_usb: Option<usb::HostUsb>,
-    host_network: Option<Result<network::Shared, String>>,
+    host_network: Option<Result<network::Shared>>,
     usb_disks: Vec<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
     guest_network: Option<network::GuestNetwork>,
     host_disks: storage::HostDisks,
@@ -1995,10 +1998,12 @@ fn start_devices(
                 disks,
                 power,
             } = opened
-                .unwrap_or_else(|error| Err(format!("native probe admission failed: {error}")))
+                .unwrap_or_else(|error| {
+                    Err(refuse!("native probe admission failed: {error}", %error))
+                })
                 .unwrap_or_else(|error| {
                     output::arguments(format_args!("host storage refusal: {error}\n"));
-                    output::fatal(&format!("host storage could not be opened: {error}"))
+                    output::fatal(format_args!("host storage could not be opened: {error}"))
                 });
             if let Some(acpi) = host_acpi {
                 acpi.retain_power(power);
@@ -2036,7 +2041,7 @@ fn start_devices(
                     network::GuestNetwork::open(&mut links, wants_network)
                         .inspect_err(|error| {
                             output::arguments(format_args!("guest network refusal: {error}\n"));
-                            crate::status::warn(error);
+                            crate::status::warn(&error.to_string());
                         })
                         .ok()
                 })
@@ -2050,7 +2055,7 @@ fn start_devices(
                     .map(|network| network::Shared(Rc::new(RefCell::new(network))))
                     .inspect_err(|error| {
                         output::arguments(format_args!("host network refusal: {error}\n"));
-                        crate::status::warn(error);
+                        crate::status::warn(&error.to_string());
                     })
             });
             (

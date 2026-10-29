@@ -1,7 +1,9 @@
 //! Physical CPU-domain identities projected through one assigned Plan.
 use super::*;
+use crate::Result;
 use stela_contracts::identity::Identity;
 use stela_contracts::processor::ProcessorTarget;
+use stela_contracts::refuse;
 use stela_engine::machine::engine::ProcessorChange;
 use stela_engine::machine::engine::Processors;
 use stela_soc_data::board::ProcessorAssociation;
@@ -49,13 +51,13 @@ impl AssignedPower {
         full_profile: &[Identity],
         associations: &[ProcessorAssociation],
         pmgr: &Pmgr,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         if pes.is_empty() || original_regs.len() != full_profile.len() {
-            return Err("CPU power source/assigned roster is incomplete".into());
+            return Err(refuse!("CPU power source/assigned roster is incomplete"));
         }
         for (index, reg) in original_regs.iter().enumerate() {
             if original_regs[..index].contains(reg) {
-                return Err("CPU power source repeats a physical PE".into());
+                return Err(refuse!("CPU power source repeats a physical PE"));
             }
         }
         let source_indices = pes
@@ -65,9 +67,13 @@ impl AssignedPower {
                 let source = original_regs
                     .iter()
                     .position(|&reg| reg == pe.reg)
-                    .ok_or("assigned CPU power PE has no original physical node")?;
+                    .ok_or(refuse!(
+                        "assigned CPU power PE has no original physical node"
+                    ))?;
                 if pe.logical != logical || full_profile[source] != pe.identity {
-                    return Err("assigned CPU power identity differs from the original PE");
+                    return Err(refuse!(
+                        "assigned CPU power identity differs from the original PE"
+                    ));
                 }
                 Ok(source)
             })
@@ -79,7 +85,9 @@ impl AssignedPower {
             if domains.iter().any(|domain| {
                 domain.identity == association.domain || domain.address == association.address
             }) {
-                return Err("CPU power source repeats a domain identity or address".into());
+                return Err(refuse!(
+                    "CPU power source repeats a domain identity or address"
+                ));
             }
             let original_members = match &association.target {
                 ProcessorTarget::Core { pe } => core::slice::from_ref(pe),
@@ -91,7 +99,7 @@ impl AssignedPower {
                     .enumerate()
                     .any(|(i, &pe)| pe >= full_profile.len() || original_members[..i].contains(&pe))
             {
-                return Err("CPU power source domain membership is incomplete".into());
+                return Err(refuse!("CPU power source domain membership is incomplete"));
             }
             let mut members = Vec::new();
             for (logical, &source) in source_indices.iter().enumerate() {
@@ -105,7 +113,9 @@ impl AssignedPower {
                     }
                 };
                 if association.domain != expected {
-                    return Err("assigned CPU power domain differs from its source Plan".into());
+                    return Err(refuse!(
+                        "assigned CPU power domain differs from its source Plan"
+                    ));
                 }
                 *count += 1;
                 members.push(logical);
@@ -121,11 +131,13 @@ impl AssignedPower {
                 target,
                 state: pmgr
                     .domain_state(association.address)
-                    .ok_or("CPU power domain has no actual placed PMGR state")?,
+                    .ok_or(refuse!("CPU power domain has no actual placed PMGR state"))?,
             });
         }
         if cores.iter().chain(&complexes).any(|&count| count != 1) {
-            return Err("assigned CPU requires exactly one original core and complex owner".into());
+            return Err(refuse!(
+                "assigned CPU requires exactly one original core and complex owner"
+            ));
         }
         let assigned = Self { plan, domains };
         // Purely validate the initial state against the existing CPU boundary.
@@ -137,7 +149,7 @@ impl AssignedPower {
                     .prepare_bindings(&assigned.bindings())
                     .map(|_| ())
             })
-            .map_err(|e| format!("placed initial CPU lifecycle is unsupported: {e:?}"))?;
+            .map_err(|e| refuse!("placed initial CPU lifecycle is unsupported: {e}", ?e))?;
         Ok(assigned)
     }
 
@@ -174,10 +186,7 @@ impl AssignedPower {
             .expect("classified original CPU domain");
         let bound = &self.domains[domain];
         let transition = pmgr.preview(physical, value).map_err(|reason| {
-            DeviceError::Refused(format!(
-                "CPU PMGR {:?} at {physical:#x}: {reason}",
-                bound.identity
-            ))
+            DeviceError::Refused(refuse!("CPU PMGR {identity} at {physical:#x}", identity = ?bound.identity, physical).because(reason))
         })?;
         if transition.before != bound.state {
             return Err(DeviceError::TransferRefused(
@@ -185,10 +194,9 @@ impl AssignedPower {
             ));
         }
         if bound.target.is_none() && transition.before != transition.after {
-            return Err(DeviceError::TransferRefused(format!(
-                "CPU PMGR {:?} at {physical:#x} belongs only to unassigned physical PEs",
-                bound.identity
-            )));
+            return Err(DeviceError::TransferRefused(
+                refuse!("CPU PMGR {identity} at {physical:#x} belongs only to unassigned physical PEs", identity = ?bound.identity, physical),
+            ));
         }
         Ok(Request {
             plan: self.plan.clone(),

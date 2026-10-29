@@ -1,7 +1,9 @@
 //! Original per-PE startup registers, independent of legacy PIO lockdown.
 use super::Node;
+use crate::Result;
 use crate::lockdown;
-use alloc::{format, string::String, vec::Vec};
+use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 /// One original `cpu-impl-reg` block, with no inferred lockdown offsets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,8 +16,10 @@ pub struct ProcessorRegisters {
 /// Every PE owns exactly one original complete block. The words XNU and
 /// m1n1 use are defined by `lockdown::PE_WORDS`, independently of CTRR.
 /// This descriptor grants neither a reset address nor a legacy lock pair.
-pub(super) fn processor_registers(root: &Node<'_>) -> Result<Vec<ProcessorRegisters>, String> {
-    let cpus = root.child("cpus").ok_or("DeviceTree has no /cpus")?;
+pub(super) fn processor_registers(root: &Node<'_>) -> Result<Vec<ProcessorRegisters>> {
+    let cpus = root
+        .child("cpus")
+        .ok_or(refuse!("DeviceTree has no /cpus"))?;
     let mut result: Vec<ProcessorRegisters> = Vec::new();
     let mut failure = None;
     cpus.visit(&mut |node| {
@@ -23,18 +27,21 @@ pub(super) fn processor_registers(root: &Node<'_>) -> Result<Vec<ProcessorRegist
             return;
         }
         let cpu = result.len();
-        let parse = || -> Result<ProcessorRegisters, String> {
+        let parse = || -> Result<ProcessorRegisters> {
             let raw = node
                 .property("cpu-impl-reg")
                 .filter(|raw| raw.len() == 16)
                 .ok_or_else(|| {
-                    format!("PE {cpu} cpu-impl-reg must be one complete address/size pair")
+                    refuse!(
+                        "PE {cpu} cpu-impl-reg must be one complete address/size pair",
+                        cpu
+                    )
                 })?;
             let physical = u64::from_le_bytes(raw[..8].try_into().expect("checked address"));
             let bytes = u64::from_le_bytes(raw[8..].try_into().expect("checked size"));
             let end = physical
                 .checked_add(bytes)
-                .ok_or_else(|| format!("PE {cpu} cpu-impl-reg extent wraps"))?;
+                .ok_or_else(|| refuse!("PE {cpu} cpu-impl-reg extent wraps", cpu))?;
             if !physical.is_multiple_of(lockdown::WORD_BYTES)
                 || lockdown::PE_WORDS.iter().any(|offset| {
                     offset
@@ -45,8 +52,9 @@ pub(super) fn processor_registers(root: &Node<'_>) -> Result<Vec<ProcessorRegist
                     .iter()
                     .any(|other| physical < other.physical + other.bytes && other.physical < end)
             {
-                return Err(format!(
-                    "PE {cpu} cpu-impl-reg is unaligned, short or aliases another PE"
+                return Err(refuse!(
+                    "PE {cpu} cpu-impl-reg is unaligned, short or aliases another PE",
+                    cpu
                 ));
             }
             Ok(ProcessorRegisters {
@@ -60,7 +68,7 @@ pub(super) fn processor_registers(root: &Node<'_>) -> Result<Vec<ProcessorRegist
             Err(error) => failure = Some(error),
         }
     })
-    .ok_or("DeviceTree CPU register walk failed")?;
+    .ok_or(refuse!("DeviceTree CPU register walk failed"))?;
     match failure {
         Some(error) => Err(error),
         None => Ok(result),

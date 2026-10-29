@@ -3,7 +3,9 @@
 //! device_tcp_input. Network byte order, v1/v2 framing, v2 setup byte 07,
 //! TCP-without-IP and window scaling by eight are independent of USB packets.
 //! Like that peer, closure uses RST; FIN is not advertised as supported.
+use crate::Result;
 use alloc::{collections::VecDeque, vec::Vec};
+use stela_contracts::refuse;
 
 pub const MAX_FRAME: usize = 65536;
 // usbmuxd usb.h USB_MTU; receive MRU is independently 64 KiB.
@@ -105,11 +107,11 @@ impl Mux {
         mux
     }
     /// Invalidate every stream handle and discard all old wire work.
-    pub fn reset(&mut self) -> Result<(), &'static str> {
+    pub fn reset(&mut self) -> Result<()> {
         let generation = self
             .generation
             .checked_add(1)
-            .ok_or("usbmux connection generation exhausted")?;
+            .ok_or(refuse!("usbmux connection generation exhausted"))?;
         *self = Self::with_generation(generation);
         Ok(())
     }
@@ -150,11 +152,11 @@ impl Mux {
             && bytes <= MAX_FRAME
             && self.queued_bytes + bytes <= MAX_FRAME
     }
-    fn emit(&mut self, protocol: u32, payload: &[u8]) -> Result<(), &'static str> {
+    fn emit(&mut self, protocol: u32, payload: &[u8]) -> Result<()> {
         let header = self.header();
         let bytes = header + payload.len();
         if bytes > TX_MTU || !self.can_emit(bytes) {
-            return Err("usbmux transmit queue backpressure");
+            return Err(refuse!("usbmux transmit queue backpressure"));
         }
         let mut packet = Vec::with_capacity(bytes);
         packet.extend_from_slice(&protocol.to_be_bytes());
@@ -174,13 +176,13 @@ impl Mux {
         self.queued_bytes += bytes;
         Ok(())
     }
-    fn stream(&self, id: StreamId) -> Result<usize, &'static str> {
+    fn stream(&self, id: StreamId) -> Result<usize> {
         self.streams
             .iter()
             .position(|stream| stream.id == id)
-            .ok_or("unknown or stale usbmux stream")
+            .ok_or(refuse!("unknown or stale usbmux stream"))
     }
-    pub fn stream_state(&self, id: StreamId) -> Result<StreamState, &'static str> {
+    pub fn stream_state(&self, id: StreamId) -> Result<StreamState> {
         Ok(self.streams[self.stream(id)?].state)
     }
     /// Space for one SYN/RST/window ACK. Native poll adapters check before
@@ -188,19 +190,23 @@ impl Mux {
     pub fn control_ready(&self) -> bool {
         self.can_emit(self.header() + TCP_HEADER)
     }
-    pub fn open(&mut self, destination: u16) -> Result<StreamId, &'static str> {
+    pub fn open(&mut self, destination: u16) -> Result<StreamId> {
         if self.state != State::Active || destination == 0 {
-            return Err("usbmux is not active or port is zero");
+            return Err(refuse!("usbmux is not active or port is zero"));
         }
         if self.streams.len() == MAX_STREAMS {
-            return Err("usbmux stream capacity exhausted; release closed streams");
+            return Err(refuse!(
+                "usbmux stream capacity exhausted; release closed streams"
+            ));
         }
         let port = self.next_port;
         if port == 0 {
-            return Err("usbmux source port space exhausted; reconnect required");
+            return Err(refuse!(
+                "usbmux source port space exhausted; reconnect required"
+            ));
         }
         if !self.can_emit(self.header() + TCP_HEADER) {
-            return Err("usbmux transmit queue backpressure");
+            return Err(refuse!("usbmux transmit queue backpressure"));
         }
         let id = StreamId {
             generation: self.generation,
@@ -223,13 +229,7 @@ impl Mux {
         self.next_port = port.wrapping_add(1);
         Ok(id)
     }
-    fn send_tcp(
-        &mut self,
-        index: usize,
-        flags: u8,
-        sequence: u32,
-        data: &[u8],
-    ) -> Result<(), &'static str> {
+    fn send_tcp(&mut self, index: usize, flags: u8, sequence: u32, data: &[u8]) -> Result<()> {
         let stream = &self.streams[index];
         let mut payload = tcp_header(
             stream.id.port,
@@ -248,11 +248,11 @@ impl Mux {
     }
     /// Accepts a bounded prefix according to the peer's scaled byte window.
     /// No hidden unbounded application send queue exists.
-    pub fn write(&mut self, id: StreamId, bytes: &[u8]) -> Result<usize, &'static str> {
+    pub fn write(&mut self, id: StreamId, bytes: &[u8]) -> Result<usize> {
         let index = self.stream(id)?;
         let stream = &self.streams[index];
         if stream.state != StreamState::Open {
-            return Err("usbmux stream is not open");
+            return Err(refuse!("usbmux stream is not open"));
         }
         let outstanding = stream.next.wrapping_sub(stream.acknowledged);
         let available = stream.window.saturating_sub(outstanding) as usize;
@@ -270,7 +270,7 @@ impl Mux {
     }
     /// Reading reopens the receive window by a real TCP ACK. Backpressure
     /// refuses before draining the stream, so the caller can retry later.
-    pub fn read(&mut self, id: StreamId, output: &mut [u8]) -> Result<usize, &'static str> {
+    pub fn read(&mut self, id: StreamId, output: &mut [u8]) -> Result<usize> {
         let index = self.stream(id)?;
         let stream = &self.streams[index];
         let count = output.len().min(stream.input.len());
@@ -278,7 +278,7 @@ impl Mux {
             return Ok(0);
         }
         if !self.can_emit(self.header() + TCP_HEADER) {
-            return Err("usbmux receive-window ACK backpressure");
+            return Err(refuse!("usbmux receive-window ACK backpressure"));
         }
         for byte in &mut output[..count] {
             *byte = self.streams[index].input.pop_front().unwrap();
@@ -286,7 +286,7 @@ impl Mux {
         self.send_tcp(index, ACK, self.streams[index].next, &[])?;
         Ok(count)
     }
-    pub fn close(&mut self, id: StreamId) -> Result<(), &'static str> {
+    pub fn close(&mut self, id: StreamId) -> Result<()> {
         let index = self.stream(id)?;
         if matches!(
             self.streams[index].state,
@@ -297,13 +297,13 @@ impl Mux {
         }
         Ok(())
     }
-    pub fn release(&mut self, id: StreamId) -> Result<(), &'static str> {
+    pub fn release(&mut self, id: StreamId) -> Result<()> {
         let index = self.stream(id)?;
         if matches!(
             self.streams[index].state,
             StreamState::Connecting | StreamState::Open
         ) {
-            return Err("close usbmux stream before releasing it");
+            return Err(refuse!("close usbmux stream before releasing it"));
         }
         self.streams.remove(index);
         Ok(())
@@ -311,9 +311,9 @@ impl Mux {
     /// Consumes fragmented/coalesced bulk bytes, including empty USB ZLPs.
     /// Parsing is length-bounded before reserving space. A protocol error
     /// terminates this connection; reset is the only recovery path.
-    pub fn receive(&mut self, mut bytes: &[u8]) -> Result<(), &'static str> {
+    pub fn receive(&mut self, mut bytes: &[u8]) -> Result<()> {
         if self.state == State::Failed {
-            return Err("usbmux connection requires reset");
+            return Err(refuse!("usbmux connection requires reset"));
         }
         let result = self.receive_inner(&mut bytes);
         if result.is_err() {
@@ -322,14 +322,14 @@ impl Mux {
         self.flush_replies();
         result
     }
-    fn receive_inner(&mut self, bytes: &mut &[u8]) -> Result<(), &'static str> {
+    fn receive_inner(&mut self, bytes: &mut &[u8]) -> Result<()> {
         while !bytes.is_empty() {
             let target = if self.receive.len() < VERSION_HEADER {
                 VERSION_HEADER
             } else {
                 let length = u32::from_be_bytes(self.receive[4..8].try_into().unwrap()) as usize;
                 if length < self.header() || length > MAX_FRAME {
-                    return Err("invalid usbmux frame length");
+                    return Err(refuse!("invalid usbmux frame length"));
                 }
                 length
             };
@@ -341,7 +341,7 @@ impl Mux {
             }
             let length = u32::from_be_bytes(self.receive[4..8].try_into().unwrap()) as usize;
             if length < self.header() || length > MAX_FRAME {
-                return Err("invalid usbmux frame length");
+                return Err(refuse!("invalid usbmux frame length"));
             }
             if self.receive.len() != length {
                 continue;
@@ -351,7 +351,7 @@ impl Mux {
         }
         Ok(())
     }
-    fn input(&mut self, packet: &[u8]) -> Result<(), &'static str> {
+    fn input(&mut self, packet: &[u8]) -> Result<()> {
         let protocol = u32::from_be_bytes(packet[..4].try_into().unwrap());
         let header = self.header();
         if self.version == 2 {
@@ -365,14 +365,14 @@ impl Mux {
         match protocol {
             VERSION if self.state == State::Negotiating => {
                 if payload.len() != 12 {
-                    return Err("invalid usbmux version payload length");
+                    return Err(refuse!("invalid usbmux version payload length"));
                 }
                 // The pinned usbmuxd checks only the major version
                 // (device.c `device_version_input`): the 26A434 device mux
                 // leaves the padding word uninitialized.
                 let major = u32::from_be_bytes(payload[..4].try_into().unwrap());
                 if !matches!(major, 1 | 2) {
-                    return Err("unsupported usbmux version");
+                    return Err(refuse!("unsupported usbmux version"));
                 }
                 self.version = major;
                 if major == 2 {
@@ -382,12 +382,12 @@ impl Mux {
             }
             CONTROL if self.state == State::Active => {
                 if self.logs.len() == 8 || payload.len() > 4096 {
-                    return Err("usbmux control-log capacity exceeded");
+                    return Err(refuse!("usbmux control-log capacity exceeded"));
                 }
                 self.logs.push_back(payload.to_vec());
             }
             TCP if self.state == State::Active => self.input_tcp(payload)?,
-            _ => return Err("unexpected usbmux protocol or connection state"),
+            _ => return Err(refuse!("unexpected usbmux protocol or connection state")),
         }
         Ok(())
     }
@@ -395,7 +395,7 @@ impl Mux {
     /// it: the data follows a fixed 20-byte header whatever its data offset
     /// says, and neither the offset nor the urgent pointer is checked. A
     /// packet shorter than the header is dropped.
-    fn input_tcp(&mut self, payload: &[u8]) -> Result<(), &'static str> {
+    fn input_tcp(&mut self, payload: &[u8]) -> Result<()> {
         if payload.len() < TCP_HEADER {
             self.short_tcp += 1;
             return Ok(());
@@ -439,7 +439,7 @@ impl Mux {
         if acknowledgement.wrapping_sub(stream.acknowledged)
             > stream.next.wrapping_sub(stream.acknowledged)
         {
-            return Err("usbmux TCP ACK outside sent sequence range");
+            return Err(refuse!("usbmux TCP ACK outside sent sequence range"));
         }
         // Flags other than the state's one expected value tear the stream
         // down with an RST, as usbmuxd's connection_teardown does.
@@ -451,16 +451,16 @@ impl Mux {
         }
         if stream.state == StreamState::Connecting {
             if acknowledgement != 1 || sequence != 0 || !data.is_empty() {
-                return Err("invalid usbmux SYN-ACK");
+                return Err(refuse!("invalid usbmux SYN-ACK"));
             }
             stream.received = 1;
             stream.state = StreamState::Open;
         } else {
             if sequence != stream.received {
-                return Err("out-of-order usbmux TCP byte sequence");
+                return Err(refuse!("out-of-order usbmux TCP byte sequence"));
             }
             if data.len() > RX_WINDOW - stream.input.len() {
-                return Err("usbmux peer exceeded receive window");
+                return Err(refuse!("usbmux peer exceeded receive window"));
             }
             stream.input.extend(data.iter().copied());
             stream.received = stream.received.wrapping_add(data.len() as u32);

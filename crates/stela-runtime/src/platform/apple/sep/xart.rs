@@ -74,7 +74,9 @@ use super::{
     store::{Backend, HASH_BYTES, NONCE_BYTES, Nonces},
     transaction::{Answer, Payload, Refusal},
 };
+use crate::Result;
 use alloc::{boxed::Box, vec::Vec};
+use stela_contracts::refuse;
 
 /// The SEP's boot nonce slot outside Sandcat.
 const NONCE_SLOT: u8 = 0;
@@ -197,7 +199,7 @@ pub enum Operation {
 }
 
 impl Operation {
-    pub fn decode(op: u8) -> Result<Self, &'static str> {
+    pub fn decode(op: u8) -> Result<Self> {
         Ok(match op {
             2 => Self::EraseSessionSeeds,
             3 => Self::EraseAllSeeds,
@@ -215,7 +217,11 @@ impl Operation {
             22 => Self::CommitEpochs,
             23 => Self::GetFullEpochs,
             24..=28 => Self::ApSlot(op),
-            _ => return Err("xART request operation is outside the recovered AP senders"),
+            _ => {
+                return Err(refuse!(
+                    "xART request operation is outside the recovered AP senders"
+                ));
+            }
         })
     }
 }
@@ -240,7 +246,7 @@ pub struct Xart {
     store: Nonces<Box<dyn Backend>>,
     /// The AP unmounted the xART volume for shutdown, or disabled xART for
     /// Erase All Content and Settings: the anti-replay state is frozen.
-    frozen: Option<&'static str>,
+    frozen: Option<stela_contracts::Refusal>,
 }
 
 impl Xart {
@@ -264,16 +270,14 @@ impl Xart {
 
     /// BootPolicy shares this anti-replay owner; an AP unmount or EACS
     /// transition freezes policy nonce mutation as well as xART requests.
-    pub(super) fn policy_store_mut(
-        &mut self,
-    ) -> Result<&mut Nonces<Box<dyn Backend>>, &'static str> {
+    pub(super) fn policy_store_mut(&mut self) -> Result<&mut Nonces<Box<dyn Backend>>> {
         self.live()?;
         Ok(&mut self.store)
     }
 
-    fn live(&self) -> Result<(), &'static str> {
-        match self.frozen {
-            Some(reason) => Err(reason),
+    fn live(&self) -> Result<()> {
+        match &self.frozen {
+            Some(reason) => Err(reason.clone()),
             None => Ok(()),
         }
     }
@@ -309,20 +313,24 @@ impl Xart {
         payload: &mut dyn Payload,
         entropy: &mut dyn Entropy,
         committed: &mut bool,
-    ) -> Result<Frame, &'static str> {
+    ) -> Result<Frame> {
         let message = XartMessage::from_frame(frame);
         if message.service == MASTER_ID {
-            return Err("xART master reply has no outstanding SEP-initiated request");
+            return Err(refuse!(
+                "xART master reply has no outstanding SEP-initiated request"
+            ));
         }
         if message.service != SLAVE_ID {
-            return Err("xART request is not addressed to an xART instance");
+            return Err(refuse!("xART request is not addressed to an xART instance"));
         }
         if message.tag == 0 {
-            return Err("xART request lacks its command-pool tag");
+            return Err(refuse!("xART request lacks its command-pool tag"));
         }
         let length = usize::from(message.length);
         if length > MAX_PAYLOAD {
-            return Err("xART request payload exceeds its 0x8000-byte buffer");
+            return Err(refuse!(
+                "xART request payload exceeds its 0x8000-byte buffer"
+            ));
         }
         let operation = Operation::decode(message.op)?;
         if matches!(
@@ -340,14 +348,18 @@ impl Xart {
             if matches!(operation, Operation::NonceGenerate | Operation::NonceRead)
                 && message.slot == SANDCAT_SLOT_REQUEST
             {
-                return Err("xART nonce slots exist only on boards with a Sandcat SEP nub");
+                return Err(refuse!(
+                    "xART nonce slots exist only on boards with a Sandcat SEP nub"
+                ));
             }
-            return Err("xART request flags, slot or reserved fields are not modeled");
+            return Err(refuse!(
+                "xART request flags, slot or reserved fields are not modeled"
+            ));
         }
         let result = match operation {
             Operation::SetupOsUuid => {
                 if length != UUID_BYTES {
-                    return Err("xART OS UUID request is not one 16-byte UUID");
+                    return Err(refuse!("xART OS UUID request is not one 16-byte UUID"));
                 }
                 let mut uuid = alloc::vec![0; length];
                 payload.input(&mut uuid)?;
@@ -356,7 +368,7 @@ impl Xart {
             }
             Operation::FlushCached => {
                 if length != 1 {
-                    return Err("xART flush request is not one Boolean");
+                    return Err(refuse!("xART flush request is not one Boolean"));
                 }
                 payload.input(&mut [0])?;
                 self.store.flush()?;
@@ -364,18 +376,20 @@ impl Xart {
             }
             Operation::ShutdownUnmount | Operation::DisableForEacs => {
                 if length != 0 {
-                    return Err("xART volume request carries a payload");
+                    return Err(refuse!("xART volume request carries a payload"));
                 }
                 self.frozen.get_or_insert(if message.op == 13 {
-                    "the AP unmounted the xART volume for shutdown"
+                    refuse!("the AP unmounted the xART volume for shutdown")
                 } else {
-                    "the AP disabled xART for Erase All Content and Settings"
+                    refuse!("the AP disabled xART for Erase All Content and Settings")
                 });
                 0
             }
             Operation::NonceGenerate | Operation::NonceRead => {
                 if length != 0 {
-                    return Err("xART nonce generation or read carries an input payload");
+                    return Err(refuse!(
+                        "xART nonce generation or read carries an input payload"
+                    ));
                 }
                 self.live()?;
                 let nonce = if message.op == 15 {
@@ -389,7 +403,7 @@ impl Xart {
             }
             Operation::NonceInvalidate => {
                 if length != 0 {
-                    return Err("xART nonce invalidation carries a payload");
+                    return Err(refuse!("xART nonce invalidation carries a payload"));
                 }
                 self.live()?;
                 // Killing a nonce that was never generated leaves none,
@@ -402,27 +416,29 @@ impl Xart {
             }
             Operation::GetFullEpochs => {
                 if length != 0 {
-                    return Err("xART epoch read carries an input payload");
+                    return Err(refuse!("xART epoch read carries an input payload"));
                 }
                 payload.output(&[0; EPOCH_COUNT * EPOCH_SLOT_BYTES])?;
                 (EPOCH_COUNT * EPOCH_SLOT_BYTES) as u16
             }
             Operation::BootNonceGenerate | Operation::ApSlot(_) => {
-                return Err(
-                    "xART boot nonces and AP slots exist only on boards with a Sandcat SEP nub",
-                );
+                return Err(refuse!(
+                    "xART boot nonces and AP slots exist only on boards with a Sandcat SEP nub"
+                ));
             }
             Operation::CommitHash => {
                 if message.slot != MANIFEST_HASH_TYPE {
-                    return Err(
-                        "xART commit-hash types other than the manifest hash are not recovered",
-                    );
+                    return Err(refuse!(
+                        "xART commit-hash types other than the manifest hash are not recovered"
+                    ));
                 }
                 if message.reserved != HASH_FOLLOWS || message.flags != 0 {
-                    return Err("xART manifest commit without a hash is not recovered");
+                    return Err(refuse!(
+                        "xART manifest commit without a hash is not recovered"
+                    ));
                 }
                 if length != HASH_BYTES {
-                    return Err("xART manifest commit is not one SHA-384 hash");
+                    return Err(refuse!("xART manifest commit is not one SHA-384 hash"));
                 }
                 let mut hash = [0; HASH_BYTES];
                 payload.input(&mut hash)?;
@@ -432,15 +448,15 @@ impl Xart {
                 0
             }
             Operation::CommitEpochs => {
-                return Err("xART epoch commit without a SEP epoch proposal");
+                return Err(refuse!("xART epoch commit without a SEP epoch proposal"));
             }
             Operation::EraseSessionSeeds
             | Operation::EraseAllSeeds
             | Operation::FetchKnownSessions => {
-                return Err("xART session seeds are not recovered");
+                return Err(refuse!("xART session seeds are not recovered"));
             }
             Operation::Lynx(_) => {
-                return Err("xART Lynx operations need a Lynx secure element");
+                return Err(refuse!("xART Lynx operations need a Lynx secure element"));
             }
         };
         Ok(XartMessage {
@@ -466,12 +482,15 @@ mod tests {
     }
 
     impl Payload for Buffers {
-        fn input(&mut self, bytes: &mut [u8]) -> Result<(), &'static str> {
-            let source = self.input.get(..bytes.len()).ok_or("short input")?;
+        fn input(&mut self, bytes: &mut [u8]) -> Result<()> {
+            let source = self
+                .input
+                .get(..bytes.len())
+                .ok_or(refuse!("short input"))?;
             bytes.copy_from_slice(source);
             Ok(())
         }
-        fn output(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+        fn output(&mut self, bytes: &[u8]) -> Result<()> {
             self.output = bytes.to_vec();
             Ok(())
         }
@@ -529,12 +548,12 @@ mod tests {
         Xart::new(Nonces::provision(&roots, backend).unwrap())
     }
 
-    fn entropy(bytes: &mut [u8]) -> Result<(), &'static str> {
+    fn entropy(bytes: &mut [u8]) -> Result<()> {
         bytes.fill(0x5a);
         Ok(())
     }
 
-    fn ask(xart: &mut Xart, frame: Frame, buffers: &mut Buffers) -> Result<Frame, &'static str> {
+    fn ask(xart: &mut Xart, frame: Frame, buffers: &mut Buffers) -> Result<Frame> {
         xart.request(frame, buffers, &mut entropy)
             .map_err(|refusal| refusal.reason)
     }
@@ -714,17 +733,13 @@ mod tests {
             fail: Rc<Cell<bool>>,
         }
         impl Backend for Failing {
-            fn load(&mut self) -> Result<Option<super::super::store::Head>, &'static str> {
+            fn load(&mut self) -> Result<Option<super::super::store::Head>> {
                 self.inner.load()
             }
-            fn commit(
-                &mut self,
-                expected: u64,
-                head: super::super::store::Head,
-            ) -> Result<(), &'static str> {
+            fn commit(&mut self, expected: u64, head: super::super::store::Head) -> Result<()> {
                 self.inner.commit(expected, head)?;
                 if self.fail.get() {
-                    Err("commit acknowledgement lost")
+                    Err(refuse!("commit acknowledgement lost"))
                 } else {
                     Ok(())
                 }

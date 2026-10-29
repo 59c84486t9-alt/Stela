@@ -16,6 +16,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, cell::RefCell};
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -128,39 +129,39 @@ impl Controller {
         } = configuration;
         let placement = Placement::t8112(relocation)?;
         if placement.address & 3 != 0 {
-            return Err(Error::Refused(
-                "native controller relocated aperture must retain Word alignment",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native controller relocated aperture must retain Word alignment"
+            )));
         }
         // The selected original event path extracts only ten source bits. No
         // larger source count is advertised without a checked encoding.
         if source_count > 1024 || control & !1 != 0 {
-            return Err(Error::Refused(
-                "native controller source count or control fields are unqualified",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native controller source count or control fields are unqualified"
+            )));
         }
         let groups = (source_count as usize).div_ceil(32);
         if masks.len() != groups
             || software_pending.len() != groups
             || targets.len() != source_count as usize
         {
-            return Err(Error::Refused(
-                "native controller declared words have incomplete source geometry",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native controller declared words have incomplete source geometry"
+            )));
         }
         // Only the selected native CPU target1 is modeled. Other target/IRQ
         // configuration fields require their real routes and effects first.
         if targets.iter().any(|word| *word != 1) {
-            return Err(Error::Refused(
-                "native controller target/configuration fields outside target1 are unqualified",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native controller target/configuration fields outside target1 are unqualified"
+            )));
         }
         if source_count & 31 != 0 {
             let valid = (1u32 << (source_count & 31)) - 1;
             if masks[groups - 1] & !valid != 0 || software_pending[groups - 1] & !valid != 0 {
-                return Err(Error::Refused(
-                    "native controller declares bits outside implemented source count",
-                ));
+                return Err(Error::Refused(refuse!(
+                    "native controller declares bits outside implemented source count"
+                )));
             }
         }
         let inputs = (0..source_count).map(|_| None).collect();
@@ -202,19 +203,23 @@ impl Controller {
         actual_initial_level: bool,
     ) -> Result<HardwareLine, Error> {
         if !producer.alive() {
-            return Err(Error::Refused("native source producer owner is absent"));
+            return Err(Error::Refused(refuse!(
+                "native source producer owner is absent"
+            )));
         }
-        let mut s = self
-            .0
-            .try_borrow_mut()
-            .map_err(|_| Error::Refused("native controller storage is currently borrowed"))?;
-        let input = s.inputs.get_mut(source as usize).ok_or(Error::Refused(
-            "native source binding exceeds declared source count",
-        ))?;
+        let mut s = self.0.try_borrow_mut().map_err(|_| {
+            Error::Refused(refuse!("native controller storage is currently borrowed"))
+        })?;
+        let input = s
+            .inputs
+            .get_mut(source as usize)
+            .ok_or(Error::Refused(refuse!(
+                "native source binding exceeds declared source count"
+            )))?;
         if input.is_some() {
-            return Err(Error::Refused(
-                "native source already has a retained binding; replacement/reset is unqualified",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native source already has a retained binding; replacement/reset is unqualified"
+            )));
         }
         let lease = Rc::new(());
         *input = Some(Input {
@@ -230,10 +235,9 @@ impl Controller {
         })
     }
     pub fn snapshot(&self) -> Result<Snapshot, Error> {
-        let s = self
-            .0
-            .try_borrow()
-            .map_err(|_| Error::Refused("native controller storage is currently borrowed"))?;
+        let s = self.0.try_borrow().map_err(|_| {
+            Error::Refused(refuse!("native controller storage is currently borrowed"))
+        })?;
         Ok(Snapshot {
             placement: s.placement,
             source_count: s.count,
@@ -270,29 +274,29 @@ impl HardwareLine {
     }
     pub fn set_level(&mut self, producer: &ProducerIdentity, asserted: bool) -> Result<(), Error> {
         if !self.producer.same(producer) || !producer.alive() {
-            return Err(Error::Refused(
-                "native hardware line producer identity is foreign or abandoned",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native hardware line producer identity is foreign or abandoned"
+            )));
         }
-        let storage = self.storage.upgrade().ok_or(Error::Refused(
-            "native hardware line controller has been abandoned",
-        ))?;
-        let mut s = storage
-            .try_borrow_mut()
-            .map_err(|_| Error::Refused("native controller storage is currently borrowed"))?;
+        let storage = self.storage.upgrade().ok_or(Error::Refused(refuse!(
+            "native hardware line controller has been abandoned"
+        )))?;
+        let mut s = storage.try_borrow_mut().map_err(|_| {
+            Error::Refused(refuse!("native controller storage is currently borrowed"))
+        })?;
         let input = s
             .inputs
             .get(self.source as usize)
             .and_then(Option::as_ref)
-            .ok_or(Error::Refused(
-                "native hardware line has no retained source binding",
-            ))?;
+            .ok_or(Error::Refused(refuse!(
+                "native hardware line has no retained source binding"
+            )))?;
         if !input.producer.same(producer)
             || !Weak::ptr_eq(&input.lease, &Rc::downgrade(&self.lease))
         {
-            return Err(Error::Refused(
-                "native hardware line capability differs from retained binding",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native hardware line capability differs from retained binding"
+            )));
         }
         if input.level != asserted {
             let next = s.next_sequence()?;
@@ -304,9 +308,11 @@ impl HardwareLine {
 }
 impl Storage {
     fn next_sequence(&self) -> Result<u64, Error> {
-        self.applied_sequence.checked_add(1).ok_or(Error::Refused(
-            "native controller applied sequence exhausted",
-        ))
+        self.applied_sequence
+            .checked_add(1)
+            .ok_or(Error::Refused(refuse!(
+                "native controller applied sequence exhausted"
+            )))
     }
     fn check_word(&self, offset: u64) -> Result<(), Error> {
         if offset & 3 != 0
@@ -314,9 +320,9 @@ impl Storage {
                 .checked_add(4)
                 .is_none_or(|end| end > self.placement.bytes)
         {
-            return Err(Error::Refused(
-                "native controller word exceeds actual aperture/alignment",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native controller word exceeds actual aperture/alignment"
+            )));
         }
         Ok(())
     }
@@ -331,9 +337,9 @@ impl Storage {
             && group + 1 == self.masks.len()
             && bits & !((1u32 << (self.count & 31)) - 1) != 0
         {
-            return Err(Error::Refused(
-                "native controller write includes unimplemented source bits",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native controller write includes unimplemented source bits"
+            )));
         }
         Ok(())
     }
@@ -346,9 +352,9 @@ impl Storage {
                     .as_ref()
                     .is_some_and(Input::active_owner)
                 {
-                    return Err(Error::Refused(
-                        "native source requires its actual live peripheral owner and line",
-                    ));
+                    return Err(Error::Refused(refuse!(
+                        "native source requires its actual live peripheral owner and line"
+                    )));
                 }
             }
         }
@@ -369,9 +375,9 @@ impl Storage {
             let input = self.inputs[source as usize]
                 .as_ref()
                 .filter(|input| input.active_owner())
-                .ok_or(Error::Refused(
-                    "native unmasked source has no actual live peripheral input",
-                ))?;
+                .ok_or(Error::Refused(refuse!(
+                    "native unmasked source has no actual live peripheral input"
+                )))?;
             if input.level || self.software[group] & bit != 0 {
                 if selected.is_some() {
                     multiple = true;
@@ -393,9 +399,9 @@ impl Storage {
             0xc000 => {
                 let (source, multiple) = self.candidates()?;
                 if multiple && self.arbitration == Arbitration::RefuseAmbiguous {
-                    return Err(Error::Refused(
-                        "native IRQ priority among multiple actual pending sources is unqualified",
-                    ));
+                    return Err(Error::Refused(refuse!(
+                        "native IRQ priority among multiple actual pending sources is unqualified"
+                    )));
                 }
                 let Some(source) = source else {
                     // NEW model's explicit no-deliverable-event word. Every
@@ -422,25 +428,25 @@ impl Storage {
                 return Ok(self.masks[group]);
             }
         }
-        Err(Error::Refused(
-            "native controller read register has no qualified modeled effect",
-        ))
+        Err(Error::Refused(refuse!(
+            "native controller read register has no qualified modeled effect"
+        )))
     }
     fn write(&mut self, offset: u64, value: u32) -> Result<(), Error> {
         self.check_word(offset)?;
         let next = self.next_sequence()?;
         if offset == 0x14 {
             if value & !1 != 0 {
-                return Err(Error::Refused(
-                    "native control fields beyond enable bit0 are unqualified",
-                ));
+                return Err(Error::Refused(refuse!(
+                    "native control fields beyond enable bit0 are unqualified"
+                )));
             }
             self.control = value;
         } else if offset >= 0x2000 && offset < 0x2000 + u64::from(self.count) * 4 {
             if value != 1 {
-                return Err(Error::Refused(
-                    "native IRQ targets/configuration outside target1 are unqualified",
-                ));
+                return Err(Error::Refused(refuse!(
+                    "native IRQ targets/configuration outside target1 are unqualified"
+                )));
             }
             self.targets[((offset - 0x2000) / 4) as usize] = value;
         } else if let Some(group) = self.group(offset, 0x6000) {
@@ -456,9 +462,9 @@ impl Storage {
             self.require_inputs(group, value)?;
             self.masks[group] &= !value;
         } else {
-            return Err(Error::Refused(
-                "native controller write register has no qualified modeled effect",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native controller write register has no qualified modeled effect"
+            )));
         }
         self.applied_sequence = next;
         Ok(())
@@ -477,26 +483,34 @@ impl Device for DeviceView {
     fn read(&mut self, offset: u64, _: &mut Access<'_>) -> Result<u32, Error> {
         self.0
             .try_borrow_mut()
-            .map_err(|_| Error::Refused("native controller storage is currently borrowed"))?
+            .map_err(|_| {
+                Error::Refused(refuse!("native controller storage is currently borrowed"))
+            })?
             .read(offset)
     }
     fn write(&mut self, offset: u64, value: u32, _: &mut Access<'_>) -> Result<(), Error> {
         self.0
             .try_borrow_mut()
-            .map_err(|_| Error::Refused("native controller storage is currently borrowed"))?
+            .map_err(|_| {
+                Error::Refused(refuse!("native controller storage is currently borrowed"))
+            })?
             .write(offset, value)
     }
     fn order(&mut self, _: &mut Access<'_>) -> Result<(), Error> {
         self.0
             .try_borrow_mut()
-            .map_err(|_| Error::Refused("native controller storage is currently borrowed"))?
+            .map_err(|_| {
+                Error::Refused(refuse!("native controller storage is currently borrowed"))
+            })?
             .order();
         Ok(())
     }
     fn irq_pending(&mut self, _: &mut Access<'_>) -> Result<bool, Error> {
         self.0
             .try_borrow()
-            .map_err(|_| Error::Refused("native controller storage is currently borrowed"))?
+            .map_err(|_| {
+                Error::Refused(refuse!("native controller storage is currently borrowed"))
+            })?
             .pending()
     }
 }
@@ -504,14 +518,18 @@ impl Route for RouteView {
     fn order(&mut self, _: &mut Access<'_>) -> Result<(), Error> {
         self.0
             .try_borrow_mut()
-            .map_err(|_| Error::Refused("native controller storage is currently borrowed"))?
+            .map_err(|_| {
+                Error::Refused(refuse!("native controller storage is currently borrowed"))
+            })?
             .order();
         Ok(())
     }
     fn irq_pending(&mut self, _: &mut Access<'_>) -> Result<bool, Error> {
         self.0
             .try_borrow()
-            .map_err(|_| Error::Refused("native controller storage is currently borrowed"))?
+            .map_err(|_| {
+                Error::Refused(refuse!("native controller storage is currently borrowed"))
+            })?
             .pending()
     }
 }
@@ -542,7 +560,9 @@ impl MmioDevice for DeviceView {
                 offset,
                 width,
                 Direction::Read,
-                Error::Refused("native controller supports qualified Word accesses only"),
+                Error::Refused(refuse!(
+                    "native controller supports qualified Word accesses only"
+                )),
             ));
         }
         Device::read(self, offset, access)
@@ -561,7 +581,9 @@ impl MmioDevice for DeviceView {
                 offset,
                 width,
                 Direction::Write,
-                Error::Refused("native controller requires an exact qualified Word value"),
+                Error::Refused(refuse!(
+                    "native controller requires an exact qualified Word value"
+                )),
             ));
         }
         Device::write(self, offset, value as u32, access)

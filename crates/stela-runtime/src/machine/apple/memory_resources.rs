@@ -1,5 +1,6 @@
 //! Prepared direct MCC/AMCC/PTD resources. No native RAM/DSB permission is
 //! manufactured here and no engine mount is enabled by constructing this object.
+use crate::Result;
 use crate::platform::apple::amcc::Amcc;
 use crate::platform::apple::mcc::Configuration;
 use crate::platform::apple::mcc::Controller;
@@ -14,6 +15,7 @@ use stela_contracts::bus::MmioError;
 use stela_contracts::bus::Width;
 use stela_contracts::bus::refuse;
 use stela_contracts::interrupt::Wire;
+use stela_contracts::refuse;
 use stela_soc_data::amcc::Layout;
 use stela_soc_data::amcc::Register;
 use stela_soc_data::board::DirectMemoryCache;
@@ -55,12 +57,12 @@ impl Prepared {
         configuration: Configuration,
         lifecycle: LifecycleState,
         ptd_bindings: [Option<Wire>; 16],
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let router =
             Self::prepare_router(&descriptor, locks, programmed, configuration, lifecycle)?;
         let ptd = Ptd::initialized(
             u32::try_from(descriptor.ptd_entries)
-                .map_err(|_| "PTD entry count exceeds source width")?,
+                .map_err(|_| refuse!("PTD entry count exceeds source width"))?,
             &descriptor.ptd.ranges,
             lifecycle,
             ptd_bindings,
@@ -81,12 +83,12 @@ impl Prepared {
         programmed: stela_soc_data::amcc::Programmed,
         configuration: Configuration,
         lifecycle: LifecycleState,
-    ) -> Result<(Self, LocalNotifications), &'static str> {
+    ) -> Result<(Self, LocalNotifications)> {
         let router =
             Self::prepare_router(&descriptor, locks, programmed, configuration, lifecycle)?;
         let (ptd, local) = Ptd::initialized_local(
             u32::try_from(descriptor.ptd_entries)
-                .map_err(|_| "PTD entry count exceeds source width")?,
+                .map_err(|_| refuse!("PTD entry count exceeds source width"))?,
             &descriptor.ptd.ranges,
             lifecycle,
         )?;
@@ -107,13 +109,15 @@ impl Prepared {
         programmed: stela_soc_data::amcc::Programmed,
         configuration: Configuration,
         lifecycle: LifecycleState,
-    ) -> Result<Router, &'static str> {
+    ) -> Result<Router> {
         descriptor.validate(locks)?;
         if configuration.dram.len() != descriptor.apertures.len()
             || descriptor.apertures != locks.apertures
             || descriptor.ptd.ranges.len() != descriptor.ptd.interrupts.len()
         {
-            return Err("MCC preparation does not match actual descriptor/configuration ownership");
+            return Err(refuse!(
+                "MCC preparation does not match actual descriptor/configuration ownership"
+            ));
         }
         let controller = Controller::initialized_cacheless(configuration, lifecycle)?;
         Router::new(
@@ -170,7 +174,7 @@ impl Prepared {
         &self,
         physical: u64,
         bytes: u64,
-    ) -> Result<(u64, u64, u64), &'static str> {
+    ) -> Result<(u64, u64, u64)> {
         self.publication_layout().display_view(physical, bytes)
     }
     fn ptd_offset(&self) -> u64 {
@@ -181,11 +185,7 @@ impl Prepared {
     pub(super) fn paired_entry(&self, offset: u64, bytes: u8) -> Option<u32> {
         self.publication_layout().entry(offset, bytes)
     }
-    pub(super) fn consume_entry(
-        &self,
-        entry: u32,
-        access: &mut Access<'_>,
-    ) -> Result<[u64; 2], &'static str> {
+    pub(super) fn consume_entry(&self, entry: u32, access: &mut Access<'_>) -> Result<[u64; 2]> {
         let entry = self.ptd.consume_entry(entry, access)?;
         Ok([entry.value, entry.metadata])
     }
@@ -212,13 +212,13 @@ impl Prepared {
         offset: u64,
         bytes: u8,
         access: &mut Access<'_>,
-    ) -> Result<[u64; 2], &'static str> {
+    ) -> Result<[u64; 2]> {
         if let Some(entry) = self.paired_entry(offset, bytes) {
             return self.consume_entry(entry, access);
         }
         let (offset, width) = self
             .status_pair(offset, bytes)
-            .ok_or("unqualified PTD pair read shape")?;
+            .ok_or(refuse!("unqualified PTD pair read shape"))?;
         let value = self.ptd.interrupt_snapshot(offset, width)?;
         Ok(if bytes == 8 {
             [value.low, value.high]
@@ -228,7 +228,7 @@ impl Prepared {
     }
 }
 impl Lifecycle for Prepared {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         self.router.check_lifecycle(proposed)?;
         self.ptd.check_lifecycle(proposed)
     }
@@ -291,7 +291,7 @@ impl Router {
         programmed: stela_soc_data::amcc::Programmed,
         controller: Controller,
         apertures: usize,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         // J314s 26A434 iBoot builder0x38660 declares the plane
         // way-command word as cache-status (mask0x1f, disabled value0).
         // Builder0x3862c separately names +0x10000c as broadcast control.
@@ -302,7 +302,9 @@ impl Router {
                 value: 0,
             })
         {
-            return Err("joint MCC/AMCC cache-status descriptor is not source-qualified");
+            return Err(refuse!(
+                "joint MCC/AMCC cache-status descriptor is not source-qualified"
+            ));
         }
         if apertures == 0
             || apertures > 16
@@ -310,7 +312,9 @@ impl Router {
             || layout.stride != mcc::PLANE_STRIDE
             || layout.aperture_bytes > mcc::APERTURE_BYTES
         {
-            return Err("joint MCC/AMCC geometry has no original direct-controller contract");
+            return Err(refuse!(
+                "joint MCC/AMCC geometry has no original direct-controller contract"
+            ));
         }
         // The MCC owns every plane's way-command backing. Remove
         // Amcc's independent disabled bit: source cache-status reads must
@@ -322,7 +326,7 @@ impl Router {
             views.push(controller.view(aperture as u8)?);
         }
         if controller.view(apertures as u8).is_ok() {
-            return Err("MCC owner has extra unplaced apertures");
+            return Err(refuse!("MCC owner has extra unplaced apertures"));
         }
         let offsets = controller.register_offsets();
         // A lock word colliding with an MCC word needs one source-checked
@@ -340,7 +344,9 @@ impl Router {
         }) {
             for plane in 0..layout.planes {
                 if offsets.contains(&(register.offset + u64::from(plane) * layout.stride)) {
-                    return Err("MCC and CTRR registers overlap without a shared protocol");
+                    return Err(refuse!(
+                        "MCC and CTRR registers overlap without a shared protocol"
+                    ));
                 }
             }
         }
@@ -352,21 +358,23 @@ impl Router {
             lock_layout: layout,
         })
     }
-    fn target(&self, offset: u64) -> Result<(usize, u64), &'static str> {
+    fn target(&self, offset: u64) -> Result<(usize, u64)> {
         let lifecycle = self.controller.lifecycle_state();
         if !lifecycle.powered || !lifecycle.clocked || lifecycle.quiesced || lifecycle.reset {
-            return Err("joint MCC/AMCC resource is paused by its actual owner");
+            return Err(refuse!(
+                "joint MCC/AMCC resource is paused by its actual owner"
+            ));
         }
         let aperture = usize::try_from(offset / mcc::APERTURE_BYTES)
-            .map_err(|_| "MCC aperture index overflows")?;
+            .map_err(|_| refuse!("MCC aperture index overflows"))?;
         if aperture >= self.views.len() {
-            return Err("MCC access exceeds prepared aperture ownership");
+            return Err(refuse!("MCC access exceeds prepared aperture ownership"));
         }
         Ok((aperture, offset % mcc::APERTURE_BYTES))
     }
 }
 impl Lifecycle for Router {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         for view in &self.views {
             view.check_lifecycle(proposed)?;
         }

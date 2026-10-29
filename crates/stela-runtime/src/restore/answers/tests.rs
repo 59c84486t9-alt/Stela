@@ -255,7 +255,7 @@ fn unanswered_and_unknown_data_types_refuse_by_name() {
         else {
             panic!("{kind} must refuse")
         };
-        assert!(got.contains(reason), "{kind}: {got}");
+        assert!(got.to_string().contains(reason), "{kind}: {got}");
         assert_eq!(*kept, request);
     }
 }

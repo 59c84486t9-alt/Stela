@@ -2,8 +2,10 @@
 //! The AP drives start/receive through RTKit; the native service owns the other
 //! half. Payloads are transferred, never echoed, synthesized or interpreted.
 use super::Endpoint;
+use crate::Result;
 use alloc::{collections::VecDeque, rc::Rc, vec::Vec};
 use core::cell::RefCell;
+use stela_contracts::refuse;
 
 struct State {
     transport_alive: bool,
@@ -51,88 +53,88 @@ impl Mailbox {
 
     /// Commit one native-to-AP mailbox payload. The backend retires this exact
     /// operation after success; retries must not append it a second time.
-    pub fn send(&mut self, payload: u64) -> Result<(), &'static str> {
+    pub fn send(&mut self, payload: u64) -> Result<()> {
         let mut state = self
             .0
             .try_borrow_mut()
-            .map_err(|_| "native mailbox is borrowed")?;
+            .map_err(|_| refuse!("native mailbox is borrowed"))?;
         if !state.transport_alive {
-            return Err("native mailbox transport was abandoned");
+            return Err(refuse!("native mailbox transport was abandoned"));
         }
         state
             .outgoing
             .try_reserve(1)
-            .map_err(|_| "native mailbox output allocation failed")?;
+            .map_err(|_| refuse!("native mailbox output allocation failed"))?;
         state.outgoing.push_back(payload);
         Ok(())
     }
 
     /// Consume one payload that RTKit delivered from the AP. None is
     /// an empty inbox; it is never an invented acknowledgement or command.
-    pub fn receive(&mut self) -> Result<Option<u64>, &'static str> {
+    pub fn receive(&mut self) -> Result<Option<u64>> {
         let mut state = self
             .0
             .try_borrow_mut()
-            .map_err(|_| "native mailbox is borrowed")?;
+            .map_err(|_| refuse!("native mailbox is borrowed"))?;
         if !state.transport_alive {
-            return Err("native mailbox transport was abandoned");
+            return Err(refuse!("native mailbox transport was abandoned"));
         }
         Ok(state.incoming.pop_front())
     }
 }
 
 impl Endpoint for NativeEndpoint {
-    fn start(&mut self, _: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn start(&mut self, _: &mut Vec<u64>) -> Result<()> {
         let mut state = self
             .0
             .try_borrow_mut()
-            .map_err(|_| "native mailbox is borrowed")?;
+            .map_err(|_| refuse!("native mailbox is borrowed"))?;
         if !state.service_alive {
-            return Err("native mailbox service was abandoned");
+            return Err(refuse!("native mailbox service was abandoned"));
         }
         state.started = true;
         Ok(())
     }
 
-    fn receive(&mut self, payload: u64, _: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn receive(&mut self, payload: u64, _: &mut Vec<u64>) -> Result<()> {
         let mut state = self
             .0
             .try_borrow_mut()
-            .map_err(|_| "native mailbox is borrowed")?;
+            .map_err(|_| refuse!("native mailbox is borrowed"))?;
         if !state.service_alive {
-            return Err("native mailbox service was abandoned");
+            return Err(refuse!("native mailbox service was abandoned"));
         }
         if !state.started {
-            return Err("native mailbox input precedes endpoint start");
+            return Err(refuse!("native mailbox input precedes endpoint start"));
         }
         state
             .incoming
             .try_reserve(1)
-            .map_err(|_| "native mailbox input allocation failed")?;
+            .map_err(|_| refuse!("native mailbox input allocation failed"))?;
         state.incoming.push_back(payload);
         Ok(())
     }
 
-    fn poll(&mut self, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn poll(&mut self, outbox: &mut Vec<u64>) -> Result<()> {
         let mut state = self
             .0
             .try_borrow_mut()
-            .map_err(|_| "native mailbox is borrowed")?;
+            .map_err(|_| refuse!("native mailbox is borrowed"))?;
         if !state.started {
             return if state.service_alive {
                 Ok(())
             } else {
-                Err("native mailbox service was abandoned")
+                Err(refuse!("native mailbox service was abandoned"))
             };
         }
         outbox
             .try_reserve(state.outgoing.len())
-            .map_err(|_| "RTKit output allocation failed")?;
+            .map_err(|_| refuse!("RTKit output allocation failed"))?;
         outbox.extend(state.outgoing.drain(..));
         if state.service_alive {
             Ok(())
         } else {
-            Err("native mailbox service was abandoned")
+            Err(refuse!("native mailbox service was abandoned"))
         }
     }
 }

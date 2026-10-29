@@ -23,7 +23,9 @@
 //! length, CRC32C and SHA-256 as the loaded image's identity and leaves
 //! the medium unchanged. NVMe 1.4 section 5.11 discards an uncommitted
 //! download on a controller-level reset, and so does the model.
+use crate::Result;
 use sha2::Digest;
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 
 pub(super) const SECTIONS: usize = 3;
@@ -94,27 +96,23 @@ pub(super) struct Download {
 impl Download {
     /// Accept one chunk: sections in the order 0, 1, 2, each contiguous
     /// from offset 0, and a CRC32C that matches the transferred bytes.
-    pub fn chunk(
-        &mut self,
-        section: u32,
-        offset: u64,
-        data: &[u8],
-        crc: u32,
-    ) -> Result<(), &'static str> {
+    pub fn chunk(&mut self, section: u32, offset: u64, data: &[u8], crc: u32) -> Result<()> {
         if section as usize >= SECTIONS {
-            return Err("ANS BFH image section is not 0, 1 or 2");
+            return Err(refuse!("ANS BFH image section is not 0, 1 or 2"));
         }
         if crc32c(data) != crc {
-            return Err("ANS BFH chunk CRC32C differs from CDW15");
+            return Err(refuse!("ANS BFH chunk CRC32C differs from CDW15"));
         }
         let section = section as usize;
         let next = self.sections.len();
         if section == next && offset == 0 {
             self.sections.push(Section::new());
         } else if section + 1 != next {
-            return Err("ANS BFH sections or offsets arrive out of order");
+            return Err(refuse!("ANS BFH sections or offsets arrive out of order"));
         } else if offset != self.sections[section].bytes {
-            return Err("ANS BFH chunk offset is not contiguous with its section");
+            return Err(refuse!(
+                "ANS BFH chunk offset is not contiguous with its section"
+            ));
         }
         let staged = &mut self.sections[section];
         staged.crc = crc_update(staged.crc, data);
@@ -125,9 +123,11 @@ impl Download {
 
     /// Record the parameter block for the next image. It may only arrive
     /// between images, as the restore updater sends it.
-    pub fn params(&mut self, data: &[u8]) -> Result<(), &'static str> {
+    pub fn params(&mut self, data: &[u8]) -> Result<()> {
         if !self.sections.is_empty() {
-            return Err("ANS BFH parameters while an image download is in progress");
+            return Err(refuse!(
+                "ANS BFH parameters while an image download is in progress"
+            ));
         }
         self.params = Some(identity(data));
         Ok(())
@@ -135,9 +135,11 @@ impl Download {
 
     /// Commit the staged image: the loader alone, or with both PHY
     /// sections. The staging is consumed.
-    pub fn activate(&mut self) -> Result<BootImage, &'static str> {
+    pub fn activate(&mut self) -> Result<BootImage> {
         if !matches!(self.sections.len(), 1 | 3) {
-            return Err("ANS BFH activation without a loader, or with PHY text but no PHY data");
+            return Err(refuse!(
+                "ANS BFH activation without a loader, or with PHY text but no PHY data"
+            ));
         }
         let image = BootImage {
             sections: (0..)

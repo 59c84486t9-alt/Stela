@@ -2,6 +2,8 @@
 //! observations are copied before EBS; persistent APs use owned Stela startup
 //! and processor-local resources afterward. Production shared-memory admission
 //! is distinct from the direct `SYSTEM_MODE` profile's single-agent translation contract.
+use crate::Result;
+use stela_contracts::refuse;
 pub(crate) mod bootstrap;
 pub(crate) mod canonical;
 #[cfg(feature = "diagnostics")]
@@ -25,20 +27,22 @@ mod tsc_sync;
 pub(crate) unsafe fn validate(
     handoff: &crate::handoff::Handoff,
     requested: Option<usize>,
-) -> Result<Option<&'static firmware::Capture>, &'static str> {
+) -> Result<Option<&'static firmware::Capture>> {
     let cores = requested.unwrap_or(handoff.native_resources.cores as usize);
     if cores == 0 || cores > topology::MAX_CORES {
-        return Err("native physical-core count is outside capacity");
+        return Err(refuse!("native physical-core count is outside capacity"));
     }
     let resources = &handoff.native_resources;
     if resources.cores as usize != cores
         || resources.stacks.bytes != resources::STACK_BYTES * cores as u64
         || resources.stacks.physical == 0
     {
-        return Err("native executor reservations differ from requested cores");
+        return Err(refuse!(
+            "native executor reservations differ from requested cores"
+        ));
     }
     let invocations = resources::invocation_stacks(cores)
-        .map_err(|_| "native invocation-stack geometry exceeds capacity")?;
+        .map_err(|_| refuse!("native invocation-stack geometry exceeds capacity"))?;
     for (region, bytes) in [
         (resources.invocations, invocations.physical_bytes()),
         (resources.tasks, resources::task_stacks().physical_bytes()),
@@ -46,12 +50,14 @@ pub(crate) unsafe fn validate(
         let end = region
             .physical
             .checked_add(region.bytes)
-            .ok_or("native guarded stack physical range wraps")?;
+            .ok_or(refuse!("native guarded stack physical range wraps"))?;
         if region.physical == 0
             || !region.physical.is_multiple_of(crate::tables::PAGE)
             || region.bytes != bytes
         {
-            return Err("native guarded stack reservation differs from loader geometry");
+            return Err(refuse!(
+                "native guarded stack reservation differs from loader geometry"
+            ));
         }
         for other in [
             handoff.heap,
@@ -69,44 +75,48 @@ pub(crate) unsafe fn validate(
             let other_end = other
                 .physical
                 .checked_add(other.bytes)
-                .ok_or("native retained reservation physical range wraps")?;
+                .ok_or(refuse!("native retained reservation physical range wraps"))?;
             if region.physical < other_end && other.physical < end {
-                return Err("native guarded stacks alias another retained reservation");
+                return Err(refuse!(
+                    "native guarded stacks alias another retained reservation"
+                ));
             }
         }
         if handoff.guest_count > handoff.guest.len() {
-            return Err("native guest inventory exceeds handoff capacity");
+            return Err(refuse!("native guest inventory exceeds handoff capacity"));
         }
         for guest in &handoff.guest[..handoff.guest_count] {
             let guest_end = guest
                 .physical
                 .checked_add(guest.bytes)
-                .ok_or("native guest backing range wraps")?;
+                .ok_or(refuse!("native guest backing range wraps"))?;
             if region.physical < guest_end && guest.physical < end {
-                return Err("native guarded stacks alias guest backing");
+                return Err(refuse!("native guarded stacks alias guest backing"));
             }
         }
     }
     match resources.prototype_task_plan {
         resources::PrototypeTaskPlan::Disabled => {
             if resources.prototype_tasks.physical != 0 || resources.prototype_tasks.bytes != 0 {
-                return Err("unselected prototype task reservation is present");
+                return Err(refuse!("unselected prototype task reservation is present"));
             }
         }
         resources::PrototypeTaskPlan::FirmwarePrototype32Mixed => {
             let region = resources.prototype_tasks;
             let geometry = resources::prototype_tasks(crate::layout::prototype_task_stacks())
-                .map_err(|_| "mixed32 reservation geometry exceeds capacity")?;
+                .map_err(|_| refuse!("mixed32 reservation geometry exceeds capacity"))?;
             let end = region
                 .physical
                 .checked_add(region.bytes)
-                .ok_or("mixed32 raw reservation wraps")?;
+                .ok_or(refuse!("mixed32 raw reservation wraps"))?;
             if cores != 1
                 || region.physical == 0
                 || !region.physical.is_multiple_of(crate::tables::PAGE)
                 || region.bytes != geometry.raw_allocation_bytes()
             {
-                return Err("mixed32 diagnostic reservation differs from the actual UP plan");
+                return Err(refuse!(
+                    "mixed32 diagnostic reservation differs from the actual UP plan"
+                ));
             }
             for other in [
                 handoff.heap,
@@ -122,16 +132,18 @@ pub(crate) unsafe fn validate(
                 handoff
                     .guest
                     .get(..handoff.guest_count)
-                    .ok_or("guest inventory exceeds capacity")?
+                    .ok_or(refuse!("guest inventory exceeds capacity"))?
                     .iter()
                     .copied(),
             ) {
                 let other_end = other
                     .physical
                     .checked_add(other.bytes)
-                    .ok_or("retained reservation wraps")?;
+                    .ok_or(refuse!("retained reservation wraps"))?;
                 if region.physical < other_end && other.physical < end {
-                    return Err("mixed32 raw allocation aliases guest, DMA or retained backing");
+                    return Err(refuse!(
+                        "mixed32 raw allocation aliases guest, DMA or retained backing"
+                    ));
                 }
             }
         }
@@ -147,16 +159,20 @@ pub(crate) unsafe fn validate(
         && (!(crate::tables::PAGE..1 << 20).contains(&resources.sipi)
             || !resources.sipi.is_multiple_of(crate::tables::PAGE))
     {
-        return Err("native SIPI page is not owned low memory");
+        return Err(refuse!("native SIPI page is not owned low memory"));
     }
     // SAFETY: the caller keeps the immutable loader allocation.
     let capture = unsafe { firmware::captured(handoff.native_processors) }
         .map_err(firmware::Error::message)?;
     if requested.is_none() && cores != capture.core_count as usize {
-        return Err("default native assignment differs from the captured physical-core roster");
+        return Err(refuse!(
+            "default native assignment differs from the captured physical-core roster"
+        ));
     }
     if cores > capture.core_count as usize {
-        return Err("requested native cores exceed physical source inventory");
+        return Err(refuse!(
+            "requested native cores exceed physical source inventory"
+        ));
     }
     let five_level = matches!(
         handoff.placement,
@@ -197,7 +213,7 @@ pub(crate) unsafe fn validate(
         ));
         snapshot
             .qualify_native(five_level)
-            .map_err(|_| "a selected physical core lacks the native executor floor")?;
+            .map_err(|_| refuse!("a selected physical core lacks the native executor floor"))?;
         memory_types.compatible(snapshot)?;
         if snapshot.same_memory_types(&capture.snapshots[0]).is_err() {
             let reference = &capture.snapshots[0];

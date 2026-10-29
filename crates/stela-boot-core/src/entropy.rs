@@ -1,7 +1,9 @@
 //! A finite pool of independent entropy requests from a caller-owned source.
 //! Each captured request is consumed once and erased; failed capture erases
 //! the complete pool. Firmware protocol selection stays in the UEFI adapter.
+use crate::Result;
 use core::sync::atomic::{Ordering, compiler_fence};
+use stela_contracts::refuse;
 
 /// Selected, advertised standard algorithm. This metadata contains no seed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,17 +40,21 @@ impl<const BYTES: usize, const REQUESTS: usize> Pool<BYTES, REQUESTS> {
     pub fn capture(
         widths: [usize; REQUESTS],
         algorithm: Algorithm,
-        mut fill: impl FnMut(Algorithm, &mut [u8]) -> Result<(), &'static str>,
-    ) -> Result<Self, &'static str> {
+        mut fill: impl FnMut(Algorithm, &mut [u8]) -> Result<()>,
+    ) -> Result<Self> {
         if REQUESTS == 0 || widths.contains(&0) {
-            return Err("entropy pool requires nonempty independent requests");
+            return Err(refuse!(
+                "entropy pool requires nonempty independent requests"
+            ));
         }
         let total = widths
             .iter()
             .try_fold(0usize, |n, &width| n.checked_add(width))
-            .ok_or("entropy pool request sizes overflow")?;
+            .ok_or(refuse!("entropy pool request sizes overflow"))?;
         if total > BYTES {
-            return Err("entropy pool capacity is smaller than its complete request plan");
+            return Err(refuse!(
+                "entropy pool capacity is smaller than its complete request plan"
+            ));
         }
         let mut pool = Self {
             bytes: [0; BYTES],
@@ -78,13 +84,15 @@ impl<const BYTES: usize, const REQUESTS: usize> Pool<BYTES, REQUESTS> {
     /// Consume exactly the next independently captured native request. A width
     /// mismatch or exhausted pool leaves both destination and pool unchanged.
     /// The caller owns/clears the output when its consumer has finished.
-    pub fn fill(&mut self, destination: &mut [u8]) -> Result<(), &'static str> {
+    pub fn fill(&mut self, destination: &mut [u8]) -> Result<()> {
         let &width = self
             .widths
             .get(self.next)
-            .ok_or("pre-EBS entropy pool is exhausted")?;
+            .ok_or(refuse!("pre-EBS entropy pool is exhausted"))?;
         if destination.len() != width {
-            return Err("entropy consumer width disagrees with the next captured request");
+            return Err(refuse!(
+                "entropy consumer width disagrees with the next captured request"
+            ));
         }
         let bytes = &mut self.bytes[self.offset..self.offset + width];
         destination.copy_from_slice(bytes);
@@ -136,9 +144,8 @@ mod tests {
 
     #[test]
     fn invalid_plans_fail_before_calling_the_source() {
-        let mut source = |_, _: &mut [u8]| -> Result<(), &'static str> {
-            panic!("invalid plan must not read entropy")
-        };
+        let mut source =
+            |_, _: &mut [u8]| -> Result<()> { panic!("invalid plan must not read entropy") };
         assert!(Pool::<1, 0>::capture([], Algorithm::Raw, &mut source).is_err());
         assert!(Pool::<1, 1>::capture([0], Algorithm::Raw, &mut source).is_err());
         assert!(Pool::<1, 1>::capture([2], Algorithm::Raw, &mut source).is_err());
@@ -152,12 +159,12 @@ mod tests {
             calls += 1;
             out.fill(0x91); // A firmware may alter output before reporting failure.
             if calls == 2 {
-                Err("source failed")
+                Err(refuse!("source failed"))
             } else {
                 Ok(())
             }
         });
-        assert_eq!(pool.err(), Some("source failed"));
+        assert_eq!(pool.err(), Some(refuse!("source failed")));
         assert_eq!(calls, 2);
     }
 

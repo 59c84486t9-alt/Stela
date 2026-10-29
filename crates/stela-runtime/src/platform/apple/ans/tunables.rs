@@ -22,6 +22,8 @@
 //! `LowQD.bin`, `BDR_AF.bin`). The `_V5` and `_BCM` kinds refuse by name:
 //! J473AP's bundle carries none of them.
 use super::bfh::{Identity, identity};
+use crate::Result;
+use stela_contracts::refuse;
 
 /// Legacy request types from the dictionary's `FilenameToTunnelOpcode`.
 pub(super) const KINDS: [(u32, &str); 5] = [
@@ -38,14 +40,14 @@ const V5_KINDS: [u32; 8] = [329, 330, 331, 332, 343, 344, 345, 346];
 /// Whether a tunnel request type is a tunable table: `Some(Ok(name))` for
 /// an accepted kind, `Some(Err(..))` for a refused one and `None` for any
 /// other request.
-pub(super) fn classify(kind: u32) -> Option<Result<&'static str, &'static str>> {
+pub(super) fn classify(kind: u32) -> Option<Result<&'static str>> {
     if let Some(&(_, name)) = KINDS.iter().find(|&&(id, _)| id == kind) {
         return Some(Ok(name));
     }
-    V5_KINDS.contains(&kind).then_some(Err(
+    V5_KINDS.contains(&kind).then_some(Err(refuse!(
         "ANS V5 or BCM tunable-table tunnel kind is not modeled: J473AP's bundle carries only \
-         legacy tables",
-    ))
+         legacy tables"
+    )))
 }
 
 /// The last accepted table of each kind.

@@ -419,6 +419,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         engine::publication::{WorkerBinding, WorkerOwner, WorkerPublications},
     };
     use anyhow::Result;
+    use stela_contracts::refuse;
     pub(in crate::machine::engine::shared_memory) struct Local;
     impl Host for Local {
         fn read_native(&mut self, code: NativeCode, output: &mut [u8]) -> bool {
@@ -597,9 +598,9 @@ pub(in crate::machine::engine::shared_memory) mod tests {
             self.calls += 1;
             assert!(memory.write(0x14080, &0x12345678u64.to_le_bytes()));
             if self.fail {
-                Err(crate::machine::DeviceError::TransferRefused(
-                    "retained modeled prefix".into(),
-                ))
+                Err(crate::machine::DeviceError::TransferRefused(refuse!(
+                    "retained modeled prefix"
+                )))
             } else {
                 Ok(())
             }

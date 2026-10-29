@@ -13,6 +13,8 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
+pub use stela_contracts::Refusal;
+pub type Result<T, E = Refusal> = core::result::Result<T, E>;
 use alloc::format;
 use core::{arch::asm, panic::PanicInfo};
 use stela_boot_core::apic;
@@ -78,6 +80,7 @@ pub(crate) static ALLOCATOR: heap::Heap = heap::Heap::new().reporting_failures(|
 });
 /// The live firmware keeps its boot-service pages. Budget the first heap from
 /// the conventional pages still available after the pristine image copy.
+/// Before the heap exists, so its refusals are static.
 fn initial_heap_bytes() -> Result<usize, &'static str> {
     let map = uefi::boot::memory_map(MemoryType::LOADER_DATA)
         .map_err(|_| "firmware memory map unavailable for the boot heap")?;

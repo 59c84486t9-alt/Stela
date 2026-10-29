@@ -151,7 +151,9 @@
 //! Missing counter publication refuses before SRAM/reply effects; this path
 //! owns no second calendar offset and makes no Apple reset-epoch assumption.
 mod rtc;
+use crate::Result;
 use rtc::RtcBinding;
+use stela_contracts::refuse;
 use stela_soc_data::smc::RtcKeyProfile;
 
 use super::asc::TransitionRequest;
@@ -235,12 +237,12 @@ const WRITE_LOG_LIMIT: usize = 64;
 
 /// A diagnostic observation of a write at the key endpoint. The raw reply
 /// is held even when it is zero; an error means no reply was emitted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteLog {
     pub request: u64,
     /// The four-byte system-event command, when this write targets MBSE.
     pub system_event: Option<u32>,
-    pub reply: Result<u64, &'static str>,
+    pub reply: Result<u64>,
     /// Older observations lost to the bounded queue before this entry.
     pub dropped_before: usize,
 }
@@ -379,20 +381,20 @@ pub struct Smc {
 impl Smc {
     /// An SMC whose shared page is at physical `sram_address`, holding
     /// `keys` besides its own.
-    pub fn new(sram: Sram, sram_address: u64, keys: Vec<(u32, Key)>) -> Result<Self, &'static str> {
+    pub fn new(sram: Sram, sram_address: u64, keys: Vec<(u32, Key)>) -> Result<Self> {
         let mut table: BTreeMap<u32, Key> = own_keys().into_iter().collect();
         for (name, key) in keys {
             if name == KEY_COUNT || own_keys().iter().any(|(own, _)| *own == name) {
-                return Err("a board key duplicates one of the SMC's own keys");
+                return Err(refuse!("a board key duplicates one of the SMC's own keys"));
             }
             if key.value.is_empty() || key.value.len() > MAX_VALUE {
-                return Err("SMC key value size outside 1..=120");
+                return Err(refuse!("SMC key value size outside 1..=120"));
             }
             if table.insert(name, key).is_some() {
-                return Err("SMC key provided twice");
+                return Err(refuse!("SMC key provided twice"));
             }
         }
-        let count = u32::try_from(table.len() + 1).map_err(|_| "too many SMC keys")?;
+        let count = u32::try_from(table.len() + 1).map_err(|_| refuse!("too many SMC keys"))?;
         table.insert(
             KEY_COUNT,
             Key {
@@ -440,13 +442,9 @@ impl Smc {
 
     /// Bind the primary PMU oscillator. No key/value exists before this
     /// join, and a missing counter publication cannot return an initial zero.
-    pub fn bind_rtc(
-        &mut self,
-        clock: super::pmu::RtcClock,
-        profile: RtcKeyProfile,
-    ) -> Result<(), &'static str> {
+    pub fn bind_rtc(&mut self, clock: super::pmu::RtcClock, profile: RtcKeyProfile) -> Result<()> {
         self.check_bind_rtc()?;
-        let count = u32::try_from(self.keys.len() + 1).map_err(|_| "too many SMC keys")?;
+        let count = u32::try_from(self.keys.len() + 1).map_err(|_| refuse!("too many SMC keys"))?;
         self.keys
             .get_mut(&KEY_COUNT)
             .expect("key count owner")
@@ -456,11 +454,13 @@ impl Smc {
     }
 
     /// Board construction preflight, before publishing a PMU/controller owner.
-    pub fn check_bind_rtc(&self) -> Result<(), &'static str> {
+    pub fn check_bind_rtc(&self) -> Result<()> {
         if self.rtc.is_some() || self.keys.contains_key(&rtc::KEY) {
-            return Err("SMC RTC key has duplicate or conflicting ownership");
+            return Err(refuse!(
+                "SMC RTC key has duplicate or conflicting ownership"
+            ));
         }
-        u32::try_from(self.keys.len() + 1).map_err(|_| "too many SMC keys")?;
+        u32::try_from(self.keys.len() + 1).map_err(|_| refuse!("too many SMC keys"))?;
         Ok(())
     }
 
@@ -560,7 +560,7 @@ impl Smc {
     }
 
     /// The reply to a read of `size` bytes of `name`.
-    fn read(&self, request: u64, name: u32, size: usize) -> Result<u64, &'static str> {
+    fn read(&self, request: u64, name: u32, size: usize) -> Result<u64> {
         if name == rtc::KEY
             && let Some(rtc) = &self.rtc
         {
@@ -600,12 +600,7 @@ impl Smc {
     /// Writes `size` bytes from the shared page to `name` and carries out
     /// what the key commands; notifications the write causes go to
     /// `answers`, after the reply.
-    fn write(
-        &mut self,
-        name: u32,
-        size: usize,
-        answers: &mut Vec<u64>,
-    ) -> Result<u8, &'static str> {
+    fn write(&mut self, name: u32, size: usize, answers: &mut Vec<u64>) -> Result<u8> {
         if name == rtc::KEY && self.rtc.is_some() {
             return Ok(NOT_WRITABLE);
         }
@@ -625,9 +620,9 @@ impl Smc {
             ))?,
             NOTIFY_SMC => answers.push(Self::notification(Self::notified(&value)?)),
             PORT_CONTROLLER_LOCK if !matches!(value[..], [LOCK_RELEASED | LOCK_HELD]) => {
-                return Err(
-                    "SMC D1Vn takes 0 (release) or 1 (take) for the port controller's 4CC lock",
-                );
+                return Err(refuse!(
+                    "SMC D1Vn takes 0 (release) or 1 (take) for the port controller's 4CC lock"
+                ));
             }
             _ => {}
         }
@@ -635,7 +630,7 @@ impl Smc {
         Ok(SUCCESS)
     }
 
-    fn system_event(&mut self, command: u32) -> Result<(), &'static str> {
+    fn system_event(&mut self, command: u32) -> Result<()> {
         let transition = |transition, reason| TransitionRequest {
             device: NAME,
             transition,
@@ -665,33 +660,35 @@ impl Smc {
                 ));
             }
             LOW_POWER_EMERGENCY => {
-                return Err("SMC low-power emergency mode needs a battery the board does not have");
+                return Err(refuse!(
+                    "SMC low-power emergency mode needs a battery the board does not have"
+                ));
             }
             HIBERNATE => {
-                return Err(
-                    "SMC hibernation needs the boot stage to restore the hibernation image, which Stela's does not",
-                );
+                return Err(refuse!(
+                    "SMC hibernation needs the boot stage to restore the hibernation image, which Stela's does not"
+                ));
             }
-            _ => return Err("SMC MBSE command is not modeled"),
+            _ => return Err(refuse!("SMC MBSE command is not modeled")),
         }
         Ok(())
     }
 
     /// The SMC's answer to an AP notification written to `NESN`.
-    fn notified(value: &[u8]) -> Result<u32, &'static str> {
+    fn notified(value: &[u8]) -> Result<u32> {
         match value {
             [SYSTEM_STATE, AP_PANIC, 0, 0] => Ok(event(SYSTEM_STATE, PANIC_DONE, 0, 0)),
-            _ => Err("SMC NESN notification is not modeled"),
+            _ => Err(refuse!("SMC NESN notification is not modeled")),
         }
     }
 }
 
 impl Endpoint for Smc {
-    fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<()> {
         Ok(())
     }
 
-    fn receive(&mut self, payload: u64, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn receive(&mut self, payload: u64, outbox: &mut Vec<u64>) -> Result<()> {
         let kind = payload as u8;
         let size = usize::from((payload >> 16) as u8);
         let write_size = usize::from((payload >> 24) as u8);
@@ -729,7 +726,7 @@ impl Endpoint for Smc {
                     }
                     None => Self::reply(payload, KEY_NOT_FOUND, 0, 0),
                 },
-                _ => return Err("SMC key endpoint message type is not modeled"),
+                _ => return Err(refuse!("SMC key endpoint message type is not modeled")),
             };
             Ok(reply)
         })();
@@ -741,7 +738,7 @@ impl Endpoint for Smc {
             self.write_log.push_back(WriteLog {
                 request: payload,
                 system_event,
-                reply: result,
+                reply: result.clone(),
                 dropped_before: 0,
             });
         }
@@ -751,7 +748,7 @@ impl Endpoint for Smc {
         Ok(())
     }
 
-    fn poll(&mut self, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn poll(&mut self, outbox: &mut Vec<u64>) -> Result<()> {
         if self.notifications_enabled() {
             outbox.extend(self.events.drain(..).map(Self::notification));
         }

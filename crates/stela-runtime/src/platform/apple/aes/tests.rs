@@ -544,7 +544,7 @@ fn stopped_fifos_queue_and_unknown_commands_are_refused() {
 
 fn reason(result: Result<impl core::fmt::Debug, MmioError>) -> &'static str {
     match result {
-        Err(MmioError::Unsupported { reason, .. }) => reason,
+        Err(MmioError::Unsupported { reason, .. }) => reason.what(),
         other => panic!("not refused: {other:?}"),
     }
 }
@@ -702,7 +702,7 @@ fn configs_without_an_established_contract_refuse() {
     let with = |change: fn(&mut Config)| {
         let mut config = j773g();
         change(&mut config);
-        Aes::new(config, None, None).err()
+        Aes::new(config, None, None).err().map(|error| error.what())
     };
     assert_eq!(with(|_| {}), None);
     assert_eq!(with(|config| config.address_width = 40), None);
@@ -710,7 +710,7 @@ fn configs_without_an_established_contract_refuse() {
         let mut config = j773g();
         config.version = version;
         assert_eq!(
-            Aes::new(config, None, None).err(),
+            Aes::new(config, None, None).err().map(|error| error.what()),
             Some("AES aes-version without an established layout")
         );
     }

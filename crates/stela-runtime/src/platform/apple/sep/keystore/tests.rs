@@ -1,4 +1,6 @@
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 
 struct Buffers {
     input: Vec<u8>,
@@ -6,12 +8,15 @@ struct Buffers {
 }
 
 impl Payload for Buffers {
-    fn input(&mut self, bytes: &mut [u8]) -> Result<(), &'static str> {
-        let source = self.input.get(..bytes.len()).ok_or("short input")?;
+    fn input(&mut self, bytes: &mut [u8]) -> Result<()> {
+        let source = self
+            .input
+            .get(..bytes.len())
+            .ok_or(refuse!("short input"))?;
         bytes.copy_from_slice(source);
         Ok(())
     }
-    fn output(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+    fn output(&mut self, bytes: &[u8]) -> Result<()> {
         self.output = bytes.to_vec();
         Ok(())
     }
@@ -158,7 +163,7 @@ fn source_shaped_constructor_returns_reopenable_keys_and_advances_to_attestation
             );
             assert_eq!(
                 reply.unwrap_err().reason,
-                "SEP reference-key authentication failed"
+                refuse!("SEP reference-key authentication failed")
             );
             assert!(output.is_empty());
         }
@@ -204,7 +209,7 @@ fn reference_signing_roundtrips_original_dictionary_in_both_ipc_versions() {
         );
         assert_eq!(
             reply.unwrap_err().reason,
-            "SEP reference-key authentication failed"
+            refuse!("SEP reference-key authentication failed")
         );
         assert!(output.is_empty());
         for bad_digest in [&digest[..31], &digest[..0]] {
@@ -217,7 +222,7 @@ fn reference_signing_roundtrips_original_dictionary_in_both_ipc_versions() {
             );
             assert_eq!(
                 reply.unwrap_err().reason,
-                "SEP reference-key digest must be SHA-256 sized"
+                refuse!("SEP reference-key digest must be SHA-256 sized")
             );
             assert!(output.is_empty());
         }
@@ -238,7 +243,7 @@ fn reference_creation_requires_entropy_without_mutating_identity() {
         let sent = frame(system_key::PERFORM_OPERATION, 23, create.len());
         let (reply, output) = ask(&mut keystore, sent, create);
         let refusal = reply.unwrap_err();
-        assert_eq!(refusal.reason, "test entropy unavailable");
+        assert_eq!(refusal.reason, refuse!("test entropy unavailable"));
         assert_eq!(refusal.answer.unwrap().frame, failure(sent));
         assert!(output.is_empty());
         assert!(keystore.environment().is_none());
@@ -266,7 +271,7 @@ fn reference_creation_requires_entropy_without_mutating_identity() {
     );
     assert_eq!(
         reply.unwrap_err().reason,
-        "SEP keystore requires provisioned machine roots"
+        refuse!("SEP keystore requires provisioned machine roots")
     );
     assert!(output.is_empty());
 }
@@ -313,7 +318,7 @@ fn creation_rejects_bad_dictionary_and_public_query_transport_before_semantics()
         let sent = frame(system_key::PERFORM_OPERATION, 25, request.len());
         let (reply, output) = ask(&mut keystore, sent, request);
         let refusal = reply.unwrap_err();
-        assert_ne!(refusal.reason, "test entropy unavailable");
+        assert_ne!(refusal.reason.what(), "test entropy unavailable");
         assert_eq!(refusal.answer.unwrap().frame, failure(sent));
         assert!(output.is_empty());
         assert!(keystore.environment().is_none());
@@ -514,14 +519,14 @@ fn unsupported_or_malformed_system_queries_never_publish_success() {
     );
     assert_eq!(
         result.unwrap_err().reason,
-        "SEP keystore requires provisioned machine roots"
+        refuse!("SEP keystore requires provisioned machine roots")
     );
     assert!(output.is_empty());
 }
 
 fn ask(keystore: &mut KeyStore, frame: Frame, input: Vec<u8>) -> (Result<Frame, Refusal>, Vec<u8>) {
     ask_with_entropy(keystore, frame, input, &mut |_: &mut [u8]| {
-        Err("test entropy unavailable")
+        Err(refuse!("test entropy unavailable"))
     })
 }
 
@@ -635,7 +640,7 @@ fn decoded_keybags_and_malformed_bodies_never_publish_success_or_change_environm
                 request.clone(),
             );
             let refusal = result.unwrap_err();
-            assert_eq!(refusal.reason, keybag::UNIMPLEMENTED);
+            assert_eq!(refusal.reason, keybag::UNIMPLEMENTED.into());
             assert_eq!(
                 refusal.answer.unwrap().frame,
                 failure(frame(command, 42, request.len()))
@@ -656,7 +661,7 @@ fn decoded_keybags_and_malformed_bodies_never_publish_success_or_change_environm
                 let hash = digest(&bad);
                 bad[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&hash);
                 let (result, output) = ask(&mut keystore, frame(command, 42, bad.len()), bad);
-                assert_ne!(result.unwrap_err().reason, keybag::UNIMPLEMENTED);
+                assert_ne!(result.unwrap_err().reason.what(), keybag::UNIMPLEMENTED);
                 assert!(output.is_empty());
                 assert_eq!(keystore.environment(), before);
             }
@@ -673,7 +678,7 @@ fn decoded_keybags_and_malformed_bodies_never_publish_success_or_change_environm
     );
     assert_eq!(
         result.unwrap_err().reason,
-        "SEP keystore startup command variant is not zero"
+        refuse!("SEP keystore startup command variant is not zero")
     );
     assert!(output.is_empty());
     assert_eq!(keystore.environment(), before);

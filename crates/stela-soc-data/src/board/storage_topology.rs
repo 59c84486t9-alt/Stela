@@ -10,19 +10,20 @@ use super::NOR;
 use super::Node;
 use super::SART;
 use super::SPI;
-use super::String;
 use super::Vec;
 use super::ans;
 use super::apertures;
 use super::asc;
 use super::dma_routes::{native_dma_phandle, native_mapper_input};
-use super::format;
 use super::name_of;
 use super::power_resources;
 use super::rtbuddy_nub;
 use super::sart;
 use super::single_range;
 use super::spi;
+use crate::{Refusal, Result};
+use stela_contracts::refusal::Within;
+use stela_contracts::refuse;
 
 /// `/arm-io/ans` properties under which SPTM's `nvme_bootstrap`
 /// (0x270c8a74..8bc0, 0x270c8dac) drives banks or flows the ANS2 model
@@ -57,41 +58,41 @@ pub(super) fn spi_nor(
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     aic: u32,
     gpio: Option<&GpioBank>,
-) -> Result<Option<SpiNor>, String> {
+) -> Result<Option<SpiNor>> {
     let Some(node) = io.child("spi1").filter(|n| n.compatible(SPI)) else {
         return Ok(None);
     };
     if node.first_u32("spi-version") != Some(1) {
-        return Err("unsupported SPI version".into());
+        return Err(refuse!("unsupported SPI version"));
     }
     let (physical, bytes) = single_range(&node, translate)?;
     if bytes < spi::BYTES || node.first_u32("interrupt-parent") != Some(aic) {
-        return Err("SPI aperture or interrupt parent is unsupported".into());
+        return Err(refuse!("SPI aperture or interrupt parent is unsupported"));
     }
     let irq = node
         .first_u32("interrupts")
         .filter(|&irq| irq <= u32::from(u16::MAX))
-        .ok_or("SPI interrupt missing or too large")?;
+        .ok_or(refuse!("SPI interrupt missing or too large"))?;
     let flash = node
         .child("spinor")
         .filter(|n| n.compatible(NOR))
-        .ok_or("SPI1 has no modeled NOR child")?;
+        .ok_or(refuse!("SPI1 has no modeled NOR child"))?;
     // AppleARMSPIDevice's 32-byte AppleARMSPIConfig: CS index,
     // clock period, CPOL/CPHA/bit order/word size, then delays.
     // The byte PIO model has only one MSB-first NOR slave, at CS0.
     let config = flash
         .property("reg")
-        .ok_or("NOR SPI configuration missing")?;
+        .ok_or(refuse!("NOR SPI configuration missing"))?;
     if config.len() != 32
         || config[..4] != [0; 4]
         || config[8] > 1
         || config[9] > 1
         || config[10..12] != [1, 8]
     {
-        return Err("unsupported NOR SPI configuration or chip select".into());
+        return Err(refuse!("unsupported NOR SPI configuration or chip select"));
     }
     if flash.cells32("ranges").as_deref() != Some(&[0, 0, crate::nor::CAPACITY as u32]) {
-        return Err("unsupported NOR ranges".into());
+        return Err(refuse!("unsupported NOR ranges"));
     }
     for (name, regions) in [
         ("firmware", crate::nor::FIRMWARE.as_slice()),
@@ -103,46 +104,47 @@ pub(super) fn spi_nor(
             .flat_map(|&(offset, size)| [offset, size])
             .collect::<Vec<_>>();
         if flash.child(name).and_then(|n| n.cells32("reg")) != Some(expected) {
-            return Err(format!(
-                "NOR {name} lacks its supported boot-firmware partition"
+            return Err(refuse!(
+                "NOR {name} lacks its supported boot-firmware partition",
+                name
             ));
         }
     }
-    let chosen = root.child("chosen").ok_or("NVRAM chosen missing")?;
+    let chosen = root
+        .child("chosen")
+        .ok_or(refuse!("NVRAM chosen missing"))?;
     if chosen.first_u32("nvram-bank-size") != Some(crate::nor::nvram::BANK_SIZE as u32)
         || chosen.first_u32("nvram-bank-count") != Some(crate::nor::nvram::BANK_COUNT)
     {
-        return Err("unsupported NVRAM bank geometry".into());
+        return Err(refuse!("unsupported NVRAM bank geometry"));
     }
     let current = chosen
         .first_u32("nvram-current-bank")
-        .ok_or("NVRAM current bank missing")?;
+        .ok_or(refuse!("NVRAM current bank missing"))?;
     let proxy = chosen
         .property("nvram-proxy-data")
-        .ok_or("NVRAM proxy missing")?;
-    let image = crate::nor::Image::fresh()
-        .with_proxy(current, proxy)
-        .map_err(String::from)?;
+        .ok_or(refuse!("NVRAM proxy missing"))?;
+    let image = crate::nor::Image::fresh().with_proxy(current, proxy)?;
     let select = if node.property("internal-cs").is_some() {
         None
     } else {
         let cells = node
             .cells32("function-spi_cs0")
-            .ok_or("SPI external chip select missing")?;
+            .ok_or(refuse!("SPI external chip select missing"))?;
         let [phandle, opcode, pin, flags] = cells[..] else {
-            return Err("invalid SPI chip-select function".into());
+            return Err(refuse!("invalid SPI chip-select function"));
         };
         if opcode != GPIO_FUNCTION || flags != 0x10001 {
-            return Err("unsupported SPI chip-select function encoding".into());
+            return Err(refuse!("unsupported SPI chip-select function encoding"));
         }
         let gpio = gpio
             .filter(|gpio| gpio.phandle == phandle)
-            .ok_or("SPI CS GPIO provider is absent or unmodeled")?;
+            .ok_or(refuse!("SPI CS GPIO provider is absent or unmodeled"))?;
         if pin >= gpio.pins {
-            return Err("SPI chip select beyond the GPIO bank".into());
+            return Err(refuse!("SPI chip select beyond the GPIO bank"));
         }
         if gpio.i2c_lines.contains(&pin) {
-            return Err("SPI chip select shares an I2C line".into());
+            return Err(refuse!("SPI chip select shares an I2C line"));
         }
         Some(pin)
     };
@@ -221,40 +223,41 @@ pub(super) fn ans_controller(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     iboot_security: bool,
-) -> Result<Option<AnsController>, String> {
+) -> Result<Option<AnsController>> {
     let Some(node) = io.child("ans").filter(|n| n.compatible(ASC)) else {
         return Ok(None);
     };
     if node.property("role") != Some(b"ANS2\0".as_slice()) {
-        return Err("/arm-io/ans role is not the modeled ANS2".into());
+        return Err(refuse!("/arm-io/ans role is not the modeled ANS2"));
     }
     if !iboot_security {
-        return Err(
+        return Err(refuse!(
             "ANS2 without /defaults nvme-iboot-sptm-security selects kernel-programmed ANS2 registers the model does not carry"
-                .into(),
-        );
+        ));
     }
     if node.property("nvme-linear-sq").is_none() {
-        return Err("ANS2 requires the modeled linear submission contract".into());
+        return Err(refuse!(
+            "ANS2 requires the modeled linear submission contract"
+        ));
     }
     let geometry = QueueGeometry::linear(
         node.first_u32("nvme-queue-entries")
-            .ok_or("ANS2 has no nvme-queue-entries handoff")?,
-    )
-    .map_err(String::from)?;
+            .ok_or(refuse!("ANS2 has no nvme-queue-entries handoff"))?,
+    )?;
     if let Some(flag) = UNMODELED_ANS_SPTM
         .into_iter()
         .find(|flag| node.property(flag).is_some())
     {
-        return Err(format!(
-            "ANS2 {flag} selects an SPTM NVMe contract the model does not carry"
+        return Err(refuse!(
+            "ANS2 {flag} selects an SPTM NVMe contract the model does not carry",
+            flag
         ));
     }
     rtbuddy_nub(&node, "ANS2")?;
-    let regs = apertures::registers(&node).ok_or("ANS2 has no reg pairs")?;
+    let regs = apertures::registers(&node).ok_or(refuse!("ANS2 has no reg pairs"))?;
     let parent = node
         .first_u32("iommu-parent")
-        .ok_or("ANS2 has no iommu-parent")?;
+        .ok_or(refuse!("ANS2 has no iommu-parent"))?;
     let mut found = None;
     let mut duplicate = false;
     io.visit(&mut |candidate| {
@@ -263,40 +266,42 @@ pub(super) fn ans_controller(
             found = Some(name_of(candidate));
         }
     })
-    .ok_or("DeviceTree walk failed")?;
+    .ok_or(refuse!("DeviceTree walk failed"))?;
     if duplicate {
-        return Err("ANS2 iommu-parent is ambiguous".into());
+        return Err(refuse!("ANS2 iommu-parent is ambiguous"));
     }
     let sart_node = found
         .and_then(|name| io.child(&name))
         .filter(|n| n.compatible(SART))
-        .ok_or("ANS2 iommu-parent is not a SART")?;
+        .ok_or(refuse!("ANS2 iommu-parent is not a SART"))?;
     // SPTM's sart_bootstrap_parse_edt panics on any of these that is not
     // one word.
-    let word = |name: &str| -> Result<Option<u32>, String> {
+    let word = |name: &str| -> Result<Option<u32>> {
         match sart_node.property(name) {
             None => Ok(None),
             Some(bytes) if bytes.len() == 4 => Ok(sart_node.first_u32(name)),
-            Some(_) => Err(format!("SART {name} is not one word")),
+            Some(_) => Err(refuse!("SART {name} is not one word", name)),
         }
     };
-    let version = word("sart-version")?.ok_or("SART has no sart-version")?;
+    let version = word("sart-version")?.ok_or(refuse!("SART has no sart-version"))?;
     if sart_node.property("sart-throttle-disable").is_some() {
-        return Err("SART throttle-disable leaves throttle words the model does not carry".into());
+        return Err(refuse!(
+            "SART throttle-disable leaves throttle words the model does not carry"
+        ));
     }
     let sart_layout = sart::Layout::new(
         version,
         word("sart-throttle-version")?.unwrap_or(version),
         word("sart-throttle-offset")?.unwrap_or(0),
-    )
-    .map_err(String::from)?;
-    let sart_regs = apertures::registers(&sart_node).ok_or("SART has no reg pairs")?;
-    let place = |pairs: &[(u64, u64)], index: usize, minimum: u64| -> Result<(u64, u64), String> {
+    )?;
+    let sart_regs = apertures::registers(&sart_node).ok_or(refuse!("SART has no reg pairs"))?;
+    let place = |pairs: &[(u64, u64)], index: usize, minimum: u64| -> Result<(u64, u64)> {
         let &(offset, bytes) = pairs
             .get(index)
             .filter(|(_, bytes)| *bytes >= minimum)
-            .ok_or("ANS2/SART register bank is absent or too short")?;
-        let first = translate(offset, bytes).ok_or("ANS2/SART bank outside arm-io ranges")?;
+            .ok_or(refuse!("ANS2/SART register bank is absent or too short"))?;
+        let first =
+            translate(offset, bytes).ok_or(refuse!("ANS2/SART bank outside arm-io ranges"))?;
         Ok((first, bytes))
     };
     let wrapper = place(&regs, 0, asc::WRAPPER_BYTES)?;
@@ -310,44 +315,47 @@ pub(super) fn ans_controller(
         .map(|offset| {
             let offset = u64::from(offset);
             let bank = place(&sart_regs, 1, offset + 4)?;
-            Ok::<_, String>(bank.0 + offset)
+            Ok::<_, Refusal>(bank.0 + offset)
         })
         .transpose()?;
     let power = place(&sart_regs, 2, 4)?;
     let offset = u64::from(
         sart_node
             .first_u32("sart-power-reg-offset")
-            .ok_or("SART has no idle register offset")?,
+            .ok_or(refuse!("SART has no idle register offset"))?,
     );
     if offset + 4 > power.1 {
-        return Err("SART idle word outside reg[2]".into());
+        return Err(refuse!("SART idle word outside reg[2]"));
     }
     let sart_idle = power
         .0
         .checked_add(offset)
-        .ok_or("SART idle address wraps")?;
+        .ok_or(refuse!("SART idle address wraps"))?;
     if sart_idle < nvme.0 || sart_idle + 4 > nvme.0 + nvme.1 {
-        return Err("SART idle word is not inside the shared NVMe bank".into());
+        return Err(refuse!("SART idle word is not inside the shared NVMe bank"));
     }
-    let irqs = node.cells32("interrupts").ok_or("ANS2 has no interrupts")?;
+    let irqs = node
+        .cells32("interrupts")
+        .ok_or(refuse!("ANS2 has no interrupts"))?;
     let index = node
         .first_u32("nvme-interrupt-idx")
-        .ok_or("ANS2 has no nvme-interrupt-idx")? as usize;
+        .ok_or(refuse!("ANS2 has no nvme-interrupt-idx"))? as usize;
     if index < 4 {
-        return Err("ANS2 completion interrupt overlaps ASC mailbox lines".into());
+        return Err(refuse!(
+            "ANS2 completion interrupt overlaps ASC mailbox lines"
+        ));
     }
-    let irq = |index: usize| -> Result<u16, String> {
+    let irq = |index: usize| -> Result<u16> {
         irqs.get(index)
             .and_then(|&n| u16::try_from(n).ok())
-            .ok_or_else(|| "ANS2 interrupt index/number is invalid".into())
+            .ok_or_else(|| refuse!("ANS2 interrupt index/number is invalid"))
     };
     let interrupts = [irq(0)?, irq(1)?, irq(2)?, irq(3)?];
     let completion_irq = irq(index)?;
     let namespaces = crate::ans::Description::decode(
         node.property("namespaces")
-            .ok_or("ANS2 has no namespaces")?,
-    )
-    .map_err(String::from)?;
+            .ok_or(refuse!("ANS2 has no namespaces"))?,
+    )?;
     Ok(Some(AnsController {
         geometry,
         wrapper,
@@ -364,11 +372,11 @@ pub(super) fn ans_controller(
         clock_gates: node
             .property("clock-gates")
             .map(|_| power_resources::gate_ids(&node, "/arm-io/ans", "clock-gates"))
-            .ok_or("ANS2 has no clock-gates")??,
+            .ok_or(refuse!("ANS2 has no clock-gates"))??,
         power_gates: node
             .property("power-gates")
             .map(|_| power_resources::gate_ids(&node, "/arm-io/ans", "power-gates"))
-            .ok_or("ANS2 has no power-gates")??,
+            .ok_or(refuse!("ANS2 has no power-gates"))??,
     }))
 }
 
@@ -382,19 +390,19 @@ pub(super) fn aes_engine(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     darts: &[Iommu],
-) -> Result<Option<AesEngine>, String> {
+) -> Result<Option<AesEngine>> {
     let Some(node) = io.child("aes").filter(|node| node.compatible(AES)) else {
         return Ok(None);
     };
     const PATH: &str = "/arm-io/aes";
     let number = |name: &str| {
         node.first_u32(name)
-            .ok_or_else(|| format!("{PATH} has no {name}"))
+            .ok_or_else(|| refuse!("{PATH} has no {name}", PATH, name))
     };
     let optional = |name: &str| match node.property(name) {
         None => Ok(None),
         Some(&[a, b, c, d]) => Ok(Some(u32::from_le_bytes([a, b, c, d]))),
-        Some(_) => Err(format!("{PATH} {name} is not one 32-bit cell")),
+        Some(_) => Err(refuse!("{PATH} {name} is not one 32-bit cell", PATH, name)),
     };
     let version = number("aes-version")?;
     let reg = apertures::registers(&node).unwrap_or_default();
@@ -402,16 +410,18 @@ pub(super) fn aes_engine(
         (&[block, key_disable], false) => (block, key_disable, None),
         (&[block, key_disable, dkey], true) => (block, key_disable, Some(dkey)),
         _ => {
-            return Err(format!(
-                "{PATH} aes-version {version} has {} register ranges",
-                reg.len()
+            return Err(refuse!(
+                "{PATH} aes-version {version} has {reg_len} register ranges",
+                PATH,
+                version,
+                reg_len = reg.len()
             ));
         }
     };
     let place = |(offset, bytes): (u64, u64)| {
         translate(offset, bytes)
             .map(|physical| (physical, bytes))
-            .ok_or_else(|| format!("{PATH} lies outside /arm-io ranges"))
+            .ok_or_else(|| refuse!("{PATH} lies outside /arm-io ranges", PATH))
     };
     let config = crate::aes::Config {
         version,
@@ -426,31 +436,35 @@ pub(super) fn aes_engine(
             ],
         },
     };
-    config.validate().map_err(|why| format!("{PATH}: {why}"))?;
-    let phandle =
-        native_dma_phandle(&node, "AAPL,phandle").map_err(|why| format!("{PATH} {why}"))?;
+    config.validate().within(|| refuse!("{PATH}", PATH))?;
+    let phandle = native_dma_phandle(&node, "AAPL,phandle").within(|| refuse!("{PATH}", PATH))?;
     let parent = native_dma_phandle(&node, "iommu-parent")
-        .map_err(|why| format!("{PATH} {why}"))?
-        .ok_or_else(|| format!("{PATH} has no iommu-parent"))?;
+        .within(|| refuse!("{PATH}", PATH))?
+        .ok_or_else(|| refuse!("{PATH} has no iommu-parent", PATH))?;
     let mut matching = darts.iter().enumerate().flat_map(|(index, dart)| {
         dart.mappers
             .iter()
             .filter(move |(phandle, _)| *phandle == parent)
             .map(move |&(_, context)| (index, context))
     });
-    let (iommu, mapper_context) = matching
-        .next()
-        .ok_or_else(|| format!("{PATH} iommu-parent {parent:#x} is no modeled DART's mapper"))?;
+    let (iommu, mapper_context) = matching.next().ok_or_else(|| {
+        refuse!(
+            "{PATH} iommu-parent {parent:#x} is no modeled DART's mapper",
+            PATH,
+            parent
+        )
+    })?;
     if matching.next().is_some() {
-        return Err(format!("{PATH} mapper ownership is ambiguous"));
+        return Err(refuse!("{PATH} mapper ownership is ambiguous", PATH));
     }
     if darts[iommu].instances.len() != 1 {
-        return Err(format!(
-            "{PATH} DMA instance routing is undetermined for a multi-instance DART"
+        return Err(refuse!(
+            "{PATH} DMA instance routing is undetermined for a multi-instance DART",
+            PATH
         ));
     }
-    let stream = native_mapper_input(&darts[iommu], mapper_context)
-        .map_err(|why| format!("{PATH} {why}"))?;
+    let stream =
+        native_mapper_input(&darts[iommu], mapper_context).within(|| refuse!("{PATH}", PATH))?;
     Ok(Some(AesEngine {
         phandle,
         mapper: parent,
@@ -727,7 +741,7 @@ mod tests {
                 true,
             )
             .unwrap_err();
-            assert!(error.contains(flag), "{error}");
+            assert!(error.to_string().contains(flag), "{error}");
         }
         for bytes in [
             tree(5, 0x8e, 4),

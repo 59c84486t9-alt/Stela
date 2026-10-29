@@ -44,6 +44,7 @@
 //!
 //! Emulated-die choices, not readings of an Apple part: the DRAM identity
 //! ([`DRAM_VENDOR`]) and the chip revision ([`CHIP_REVISION`]).
+use crate::Result;
 
 /// One carveout iBoot places at build time: its region ID and its offset from
 /// the SoC's DRAM base and size.

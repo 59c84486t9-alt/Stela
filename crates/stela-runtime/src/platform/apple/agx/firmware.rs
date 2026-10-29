@@ -53,12 +53,15 @@ use super::initdata::{self, Root};
 use super::ring::{self, Kind, Shared};
 use super::signal;
 use super::uat;
+use crate::Result;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use stela_contracts::Refusal;
 use stela_contracts::dma::Port;
+use stela_contracts::refuse;
 use stela_formats::builds::Build;
 
 /// An RTKit application endpoint with its number, as [`RtKit::new`] takes them.
@@ -220,7 +223,7 @@ impl ActiveCommand {
         memory: &mut dyn Shared,
         command: channel::Command,
         retirement: channel::Retirement,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         Ok(Self {
             actions: signal::prepare(memory, &command)?,
             next: 0,
@@ -235,7 +238,7 @@ impl ActiveCommand {
         root: &Root,
         outbox: &mut Vec<Mail>,
         events: &mut u64,
-    ) -> Result<bool, &'static str> {
+    ) -> Result<bool> {
         while let Some(&action) = self.actions.get(self.next) {
             match action {
                 signal::Action::Event(event) => {
@@ -283,10 +286,10 @@ struct ControlWrite {
 }
 
 impl ControlWrite {
-    fn new(address: u64, bytes: &[u8]) -> Result<Self, &'static str> {
+    fn new(address: u64, bytes: &[u8]) -> Result<Self> {
         address
             .checked_add(bytes.len() as u64 - 1)
-            .ok_or("GFX device-control output range wraps")?;
+            .ok_or(refuse!("GFX device-control output range wraps"))?;
         if bytes.len() <= 8 {
             ring::scalar_range(address, bytes.len() as u64)?;
         }
@@ -324,7 +327,7 @@ struct ControlPriority {
     phase: u8,
 }
 impl ControlPriority {
-    fn commit(&mut self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+    fn commit(&mut self, memory: &mut dyn Shared) -> Result<()> {
         if self.phase == 0 {
             memory.write(self.slot, &self.priority.to_le_bytes())?;
             self.phase = 1;
@@ -354,7 +357,7 @@ struct ControlCount {
 }
 
 impl ControlCount {
-    fn commit(&mut self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+    fn commit(&mut self, memory: &mut dyn Shared) -> Result<()> {
         if self.committed {
             return Ok(());
         }
@@ -380,18 +383,18 @@ impl ActiveControl {
         descriptor: ring::Descriptor,
         read: u32,
         entry: &[u8],
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let kind = u32::from_le_bytes(entry[..4].try_into().unwrap());
         let mut writes = Vec::new();
         let mut power = None;
         let mut dsid_priority = None;
-        let mut put = |address: u64, bytes: &[u8]| -> Result<(), &'static str> {
+        let mut put = |address: u64, bytes: &[u8]| -> Result<()> {
             writes.push(ControlWrite::new(address, bytes)?);
             Ok(())
         };
         let address = |base: u64, offset: u64| {
             base.checked_add(offset)
-                .ok_or("GFX device-control output address wraps")
+                .ok_or(refuse!("GFX device-control output address wraps"))
         };
         match device_control_entry(entry)? {
             Command::Power(notice) => power = Some(notice),
@@ -534,38 +537,45 @@ impl State {
         }
     }
 
-    fn init(&mut self, payload: u64) -> Result<(), &'static str> {
+    fn init(&mut self, payload: u64) -> Result<()> {
         if payload >> TYPE_SHIFT != MSG_INIT {
-            return Err("AGX message endpoint models only the 0x81 initdata message");
+            return Err(refuse!(
+                "AGX message endpoint models only the 0x81 initdata message"
+            ));
         }
         if payload & !(MSG_INIT << TYPE_SHIFT | INIT_VA_BITS) != 0 {
-            return Err("AGX initdata message has bits outside its 44-bit address field");
+            return Err(refuse!(
+                "AGX initdata message has bits outside its 44-bit address field"
+            ));
         }
         if self.initdata_va.is_some() {
-            return Err("AGX initdata sent twice");
+            return Err(refuse!("AGX initdata sent twice"));
         }
         self.initdata_va = Some(payload & INIT_VA_BITS);
         Ok(())
     }
 
-    fn doorbell(&mut self, payload: u64) -> Result<(), &'static str> {
+    fn doorbell(&mut self, payload: u64) -> Result<()> {
         let hi = payload >> TYPE_SHIFT;
         if hi & DOORBELL_FLAG == 0 {
-            return Err("AGX doorbell without its 0x80 type flag");
+            return Err(refuse!("AGX doorbell without its 0x80 type flag"));
         }
         // The kext forms (0x80 | type) << 48 | (index & 7) << 2 | kind;
         // nothing else is set.
         let type_bits = (DOORBELL_FLAG | TYPE_MASK) << TYPE_SHIFT;
         if payload & !(type_bits | 0x1f) != 0 {
-            return Err("AGX doorbell has bits outside the type, index and kind");
+            return Err(refuse!(
+                "AGX doorbell has bits outside the type, index and kind"
+            ));
         }
         let low = payload & 0x1f;
         let (index, kind) = ((low >> 2) as u8, low & 3);
         match hi & TYPE_MASK {
             DOORBELL_WORK => {
-                let pipe = Pipe::from_kind(kind).ok_or("AGX work doorbell names no pipe")?;
+                let pipe =
+                    Pipe::from_kind(kind).ok_or(refuse!("AGX work doorbell names no pipe"))?;
                 if index >= initdata::WORK_INDICES {
-                    return Err("AGX work doorbell names no submission index");
+                    return Err(refuse!("AGX work doorbell names no submission index"));
                 }
                 self.work.push((pipe, index));
                 self.jobs.push_back(Job::Work(pipe, index));
@@ -576,10 +586,10 @@ impl State {
                 self.jobs.push_back(Job::DeviceControl);
                 Ok(())
             }
-            DOORBELL_FWCTL => {
-                Err("AGX firmware-control doorbell other than device control (0x11) is not modeled")
-            }
-            _ => Err("AGX doorbell type is not modeled"),
+            DOORBELL_FWCTL => Err(refuse!(
+                "AGX firmware-control doorbell other than device control (0x11) is not modeled"
+            )),
+            _ => Err(refuse!("AGX doorbell type is not modeled")),
         }
     }
 
@@ -592,13 +602,12 @@ impl State {
     }
 
     /// Read the root, then run the queued doorbells in order.
-    fn dma(&mut self, memory: &mut dyn Shared, outbox: &mut Vec<Mail>) -> Result<(), &'static str> {
+    fn dma(&mut self, memory: &mut dyn Shared, outbox: &mut Vec<Mail>) -> Result<()> {
         if let Some(va) = self.initdata_va.filter(|_| !self.initdata_checked) {
             if self.root.is_none() {
-                let magic = self
-                    .family
-                    .initdata_magic
-                    .ok_or("the GPU family's initdata root magic is not recovered")?;
+                let magic = self.family.initdata_magic.ok_or(refuse!(
+                    "the GPU family's initdata root magic is not recovered"
+                ))?;
                 self.root = Some(Root::read(memory, uat::canonical_firmware_va(va), magic)?);
             }
             let status = self
@@ -608,7 +617,7 @@ impl State {
                 .object_848;
             status
                 .checked_add(0x20)
-                .ok_or("GFX firmware status range wraps")?;
+                .ok_or(refuse!("GFX firmware status range wraps"))?;
             while let Some(&(offset, value)) = STARTUP_STATUS.get(self.startup_word) {
                 memory.write(status + offset, &value.to_le_bytes())?;
                 self.startup_word += 1;
@@ -619,7 +628,7 @@ impl State {
             let root = self
                 .root
                 .clone()
-                .ok_or("GFX doorbell before the initdata root")?;
+                .ok_or(refuse!("GFX doorbell before the initdata root"))?;
             let complete = match job {
                 Job::DeviceControl => {
                     self.device_control(memory, &root)?;
@@ -636,7 +645,7 @@ impl State {
     }
 
     /// Consume the device-control ring up to its write index.
-    fn device_control(&mut self, memory: &mut dyn Shared, root: &Root) -> Result<(), &'static str> {
+    fn device_control(&mut self, memory: &mut dyn Shared, root: &Root) -> Result<()> {
         let layout: &Layout = &self.family.model()?.layout;
         loop {
             if self.active_control.is_none() {
@@ -685,7 +694,7 @@ impl State {
         pipe: Pipe,
         index: u8,
         outbox: &mut Vec<Mail>,
-    ) -> Result<bool, &'static str> {
+    ) -> Result<bool> {
         loop {
             if self.active_work.is_none() {
                 let descriptor = root.work(memory, pipe, index)?;
@@ -696,7 +705,9 @@ impl State {
                 let entry = descriptor.entry(memory, Kind::DataMaster, read)?;
                 let command = u32::from_le_bytes(entry[0x10..0x14].try_into().unwrap());
                 if command != pipe as u32 {
-                    return Err("GFX data-master entry's command type is not its ring's pipe");
+                    return Err(refuse!(
+                        "GFX data-master entry's command type is not its ring's pipe"
+                    ));
                 }
                 let channel_state = u64::from_le_bytes(entry[0x08..0x10].try_into().unwrap());
                 let queue = channel::Queue::read(memory, channel_state)?;
@@ -735,9 +746,9 @@ impl State {
                     if command.kind == channel::Kind::DashboardSignal
                         && !self.family.dashboard_signals
                     {
-                        return Err(
-                            "GFX dashboard signal command: this GPU family's firmware has no dashboard-signal handler",
-                        );
+                        return Err(refuse!(
+                            "GFX dashboard signal command: this GPU family's firmware has no dashboard-signal handler"
+                        ));
                     }
                     let retirement = active.submission.retirement();
                     self.active_work.as_mut().unwrap().command =
@@ -761,35 +772,30 @@ impl State {
 }
 
 /// The HWDSID table slot of `dsid`, through the ring directory's table VA.
-fn dsid_slot(
-    memory: &mut dyn Shared,
-    root: &Root,
-    layout: &Layout,
-    dsid: u8,
-) -> Result<u64, &'static str> {
+fn dsid_slot(memory: &mut dyn Shared, root: &Root, layout: &Layout, dsid: u8) -> Result<u64> {
     let pointer = root
         .rings
         .checked_add(DSID_TABLE)
-        .ok_or("GFX HWDSID table pointer wraps")?;
+        .ok_or(refuse!("GFX HWDSID table pointer wraps"))?;
     pointer
         .checked_add(7)
-        .ok_or("GFX HWDSID table pointer wraps")?;
+        .ok_or(refuse!("GFX HWDSID table pointer wraps"))?;
     let table = memory.read_u64(pointer)?;
     if table == 0 {
-        return Err("GFX ring directory names no HWDSID table");
+        return Err(refuse!("GFX ring directory names no HWDSID table"));
     }
     let offset = u64::from(dsid)
         .checked_mul(layout.dsid_slot_bytes)
-        .ok_or("GFX HWDSID table slot offset wraps")?;
+        .ok_or(refuse!("GFX HWDSID table slot offset wraps"))?;
     let slot = table
         .checked_add(offset)
-        .ok_or("GFX HWDSID table slot wraps")?;
+        .ok_or(refuse!("GFX HWDSID table slot wraps"))?;
     let extent = layout
         .dsid_slot_bytes
         .checked_sub(1)
-        .ok_or("GFX HWDSID table has zero-sized slots")?;
+        .ok_or(refuse!("GFX HWDSID table has zero-sized slots"))?;
     slot.checked_add(extent)
-        .ok_or("GFX HWDSID table slot extent wraps")?;
+        .ok_or(refuse!("GFX HWDSID table slot extent wraps"))?;
     Ok(slot)
 }
 
@@ -810,19 +816,19 @@ fn only(entry: &[u8], fields: &[(usize, usize)]) -> bool {
 /// the builders zero the entry first. The firmware handlers are the 26A434
 /// dispatcher's (0xffffff8000003a1c, a jump table over types 4..0x3b at
 /// 0xffffff8000004c48); docs/research/agx.md §2 tabulates both sides.
-fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
+fn device_control_entry(entry: &[u8]) -> Result<Command> {
     let word = |at: usize| u32::from_le_bytes(entry[at..at + 4].try_into().unwrap());
     let u64_at = |at: usize| u64::from_le_bytes(entry[at..at + 8].try_into().unwrap());
     let form = |fields: &[(usize, usize)], beyond: &'static str| {
         if only(entry, fields) {
             Ok(Command::Private)
         } else {
-            Err(beyond)
+            Err(Refusal::new(beyond))
         }
     };
     let boolean = |beyond: &'static str| {
         if word(4) > 1 {
-            Err("GFX device-control flag word is not 0 or 1")
+            Err(refuse!("GFX device-control flag word is not 0 or 1"))
         } else {
             form(&[(4, 8)], beyond)
         }
@@ -830,12 +836,16 @@ fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
     match word(0) {
         DEVICE_CONTROL_POWER => {
             if entry[8..].iter().any(|&b| b != 0) {
-                return Err("GFX device-control power notice has fields beyond its word");
+                return Err(refuse!(
+                    "GFX device-control power notice has fields beyond its word"
+                ));
             }
             match word(4) {
                 0 => Ok(Command::Power(PowerNotice::PoweredOn)),
                 1 => Ok(Command::Power(PowerNotice::PoweringOff)),
-                _ => Err("GFX device-control power notice names no transition"),
+                _ => Err(refuse!(
+                    "GFX device-control power notice names no transition"
+                )),
             }
         }
         // The dispatcher has no handler for these: they go straight to its
@@ -886,7 +896,7 @@ fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
         0x16 | 0x17 => form(&[(4, 0xc)], "GFX default QoS has fields beyond its value"),
         0x18 => {
             if word(4) > 1 {
-                return Err("GFX FRG power nap flag is not 0 or 1");
+                return Err(refuse!("GFX FRG power nap flag is not 0 or 1"));
             }
             form(
                 &[(4, 0x10)],
@@ -898,7 +908,9 @@ fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
             // The firmware aborts on a data master other than 0..2
             // (0xffffff8000004c28).
             if entry[4] > 2 {
-                return Err("GFX QoS knob names no data master the firmware accepts");
+                return Err(refuse!(
+                    "GFX QoS knob names no data master the firmware accepts"
+                ));
             }
             form(&[(4, 0xa)], "GFX QoS knob has fields beyond its knobs")
         }
@@ -913,10 +925,10 @@ fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
         // Handlers with shared effects.
         0xe => {
             if !only(entry, &[(4, 0x15)]) {
-                return Err("GFX DSID priority has fields beyond its slot");
+                return Err(refuse!("GFX DSID priority has fields beyond its slot"));
             }
             if u64_at(4) == 0 {
-                return Err("GFX DSID priority names no completion word");
+                return Err(refuse!("GFX DSID priority names no completion word"));
             }
             Ok(Command::DsidPriority {
                 dsid: entry[0x14],
@@ -927,10 +939,10 @@ fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
         }
         0x14 => {
             if !only(entry, &[(4, 0x10), (0x14, 0x15)]) {
-                return Err("GFX DSID deprioritize has fields beyond its slot");
+                return Err(refuse!("GFX DSID deprioritize has fields beyond its slot"));
             }
             if u64_at(4) == 0 {
-                return Err("GFX DSID deprioritize names no completion word");
+                return Err(refuse!("GFX DSID deprioritize names no completion word"));
             }
             Ok(Command::DsidDeprioritize {
                 dsid: entry[0x14],
@@ -940,11 +952,13 @@ fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
         }
         0x1a => {
             if !only(entry, &[(4, 9)]) {
-                return Err("GFX context-switch histogram has fields beyond its operation");
+                return Err(refuse!(
+                    "GFX context-switch histogram has fields beyond its operation"
+                ));
             }
             let master = word(4);
             if master >= HISTOGRAM_MASTERS {
-                return Err("GFX context-switch histogram names no data master");
+                return Err(refuse!("GFX context-switch histogram names no data master"));
             }
             match entry[8] {
                 // 1 (get), 2 (reset) and 5 only clean the firmware's cached
@@ -959,15 +973,15 @@ fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
                     master,
                     enable: false,
                 }),
-                _ => Err("GFX context-switch histogram names no operation"),
+                _ => Err(refuse!("GFX context-switch histogram names no operation")),
             }
         }
         0x27 => {
             if !only(entry, &[(4, 0x20)]) {
-                return Err("GFX late-eval timeout has fields beyond its wait");
+                return Err(refuse!("GFX late-eval timeout has fields beyond its wait"));
             }
             match u64_at(4) {
-                0 => Err("GFX late-eval timeout names no wait"),
+                0 => Err(refuse!("GFX late-eval timeout names no wait")),
                 wait => Ok(Command::LateEvalTimeout { wait }),
             }
         }
@@ -993,31 +1007,33 @@ fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
             })
         }
         // Refused by name.
-        0x4 | 0x5 => Err(
-            "GFX device control 0x4/0x5 starts or stops performance-counter sampling, which programs counter hardware the model lacks",
-        ),
+        0x4 | 0x5 => Err(refuse!(
+            "GFX device control 0x4/0x5 starts or stops performance-counter sampling, which programs counter hardware the model lacks"
+        )),
         // AGXAccelerator::allocateMemoryEvent answers a host-allocation
         // request the firmware raised; the model raises none.
-        0x8 | 0x26 => Err(
-            "GFX device control 0x8/0x26 answers a firmware host-allocation request the model never makes",
-        ),
-        0x9 => Err(
-            "GFX device control 0x9 answers a firmware event the model never posts and wakes a firmware scheduler thread it does not run",
-        ),
-        0x1f => Err(
-            "GFX device control 0x1f updates an app role in the firmware scheduler's context registry, which the model does not keep",
-        ),
+        0x8 | 0x26 => Err(refuse!(
+            "GFX device control 0x8/0x26 answers a firmware host-allocation request the model never makes"
+        )),
+        0x9 => Err(refuse!(
+            "GFX device control 0x9 answers a firmware event the model never posts and wakes a firmware scheduler thread it does not run"
+        )),
+        0x1f => Err(refuse!(
+            "GFX device control 0x1f updates an app role in the firmware scheduler's context registry, which the model does not keep"
+        )),
         // An AFR perf-state override the 26A434 firmware lacks: its handler
         // only logs a warning, and firmware log records are excluded
         // (docs/research/agx.md §5.7), so the entry is consumed.
         0x24 => form(&[(4, 8)], "GFX AFR perf state has fields beyond its word"),
-        0x29 => Err(
-            "GFX device control 0x29 hands an exiting context to a firmware teardown thread the model does not run",
-        ),
-        0x2c => Err(
-            "GFX device control 0x2c (external CS or kill request) is a fatal unsupported command in the 26A434 firmware",
-        ),
-        _ => Err("GFX device-control type is not one the 26A434 kext sends"),
+        0x29 => Err(refuse!(
+            "GFX device control 0x29 hands an exiting context to a firmware teardown thread the model does not run"
+        )),
+        0x2c => Err(refuse!(
+            "GFX device control 0x2c (external CS or kill request) is a fatal unsupported command in the 26A434 firmware"
+        )),
+        _ => Err(refuse!(
+            "GFX device-control type is not one the 26A434 kext sends"
+        )),
     }
 }
 
@@ -1046,7 +1062,7 @@ pub struct Coprocessor {
 impl Coprocessor {
     /// `family`'s GFX coprocessor, whose RTKit manages its power ordinarily
     /// (`power-managed`), speaking `build`'s RTKit version.
-    pub fn new(family: &'static Family, build: &Build) -> Result<Self, &'static str> {
+    pub fn new(family: &'static Family, build: &Build) -> Result<Self> {
         let (endpoints, protocol) = endpoints(family);
         let rtkit = RtKit::new(endpoints, build.rtkit_version)?;
         Ok(Self {
@@ -1062,9 +1078,11 @@ impl Coprocessor {
         family: &'static Family,
         power: super::sgx::FirmwarePower,
         build: &Build,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         if family != power.family() {
-            return Err("GFX firmware power owner belongs to a different GPU family");
+            return Err(refuse!(
+                "GFX firmware power owner belongs to a different GPU family"
+            ));
         }
         let mut coprocessor = Self::new(family, build)?;
         coprocessor.power = Some(power);
@@ -1077,35 +1095,41 @@ impl Coprocessor {
 }
 
 impl Firmware for Coprocessor {
-    fn check_reset(&self) -> Result<(), &'static str> {
+    fn check_reset(&self) -> Result<()> {
         if let Some(power) = &self.power {
             power.check_reset()?;
         }
         self.rtkit.check_reset()
     }
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         self.check_reset()?;
         self.rtkit.reset()
     }
-    fn start(&mut self, outbox: &mut Vec<Mail>) -> Result<(), &'static str> {
+    fn start(&mut self, outbox: &mut Vec<Mail>) -> Result<()> {
         self.rtkit.start(outbox)
     }
-    fn receive(&mut self, message: Mail, outbox: &mut Vec<Mail>) -> Result<(), &'static str> {
+    fn receive(&mut self, message: Mail, outbox: &mut Vec<Mail>) -> Result<()> {
         if message.endpoint == 0
             && message.payload >> 52 & 0xf == 6
             && matches!(message.payload & !(0xf << 52), 0x201 | 0x202 | 0)
         {
             if self.protocol.with(State::dma_pending) {
-                return Err("GFX IOP sleep with owned initdata or queued channel work");
+                return Err(refuse!(
+                    "GFX IOP sleep with owned initdata or queued channel work"
+                ));
             }
             if self.protocol.with(|state| state.initdata_va.is_some()) {
                 // Original native power callbacks depend on the AP hardware
                 // config, update shared powered/generation words and restore
                 // GPU registers. A bare management ACK cannot stand for them.
                 return Err(if self.power.is_some() {
-                    "GFX initialized IOP sleep requires complete config-derived native callbacks"
+                    refuse!(
+                        "GFX initialized IOP sleep requires complete config-derived native callbacks"
+                    )
                 } else {
-                    "GFX initialized IOP sleep requires native power callbacks and GPU restore semantics"
+                    refuse!(
+                        "GFX initialized IOP sleep requires native power callbacks and GPU restore semantics"
+                    )
                 });
             }
         }
@@ -1115,14 +1139,16 @@ impl Firmware for Coprocessor {
                 super::super::rtkit::POWER_ON | 0x220
             )
         {
-            return Err("GFX application message while the IOP is not awake");
+            return Err(refuse!(
+                "GFX application message while the IOP is not awake"
+            ));
         }
         self.rtkit.receive(message, outbox)
     }
     fn dma_pending(&self) -> bool {
         self.protocol.with(State::dma_pending)
     }
-    fn dma(&mut self, port: &mut Port<'_, '_>, outbox: &mut Vec<Mail>) -> Result<(), &'static str> {
+    fn dma(&mut self, port: &mut Port<'_, '_>, outbox: &mut Vec<Mail>) -> Result<()> {
         self.protocol.0.borrow_mut().dma(port, outbox)
     }
 }
@@ -1133,13 +1159,15 @@ struct Message(Protocol);
 struct Doorbell(Protocol);
 
 impl Endpoint for Message {
-    fn check_reset(&self) -> Result<(), &'static str> {
+    fn check_reset(&self) -> Result<()> {
         if self.0.with(State::dma_pending) {
-            return Err("GFX physical reset with owned initdata or queued channel work");
+            return Err(refuse!(
+                "GFX physical reset with owned initdata or queued channel work"
+            ));
         }
         Ok(())
     }
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         self.check_reset()?;
         let mut state = self.0.0.borrow_mut();
         state.initdata_va = None;
@@ -1150,25 +1178,25 @@ impl Endpoint for Message {
         // addresses and validation are cold-reset session state.
         Ok(())
     }
-    fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<()> {
         Ok(())
     }
-    fn receive(&mut self, payload: u64, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn receive(&mut self, payload: u64, _outbox: &mut Vec<u64>) -> Result<()> {
         self.0.0.borrow_mut().init(payload)
     }
 }
 
 impl Endpoint for Doorbell {
-    fn check_reset(&self) -> Result<(), &'static str> {
+    fn check_reset(&self) -> Result<()> {
         Message(self.0.clone()).check_reset()
     }
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         Message(self.0.clone()).reset()
     }
-    fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<()> {
         Ok(())
     }
-    fn receive(&mut self, payload: u64, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn receive(&mut self, payload: u64, _outbox: &mut Vec<u64>) -> Result<()> {
         self.0.0.borrow_mut().doorbell(payload)
     }
 }

@@ -21,6 +21,7 @@ use crate::platform::apple::sep::{
     store::{Backend, Nonces, PolicyNonce},
     transaction::{Payload, Refusal},
 };
+use stela_contracts::refuse;
 
 const BEGIN: u32 = 8;
 const END: u32 = 9;
@@ -56,7 +57,8 @@ impl RecoveryNonce {
         store: &mut Nonces<B>,
         entropy: &mut dyn Entropy,
     ) -> Result<Frame, Refusal> {
-        let unsupported = |reason| Refusal::answered(reason, not_supported(frame));
+        let unsupported =
+            |reason: stela_contracts::Refusal| Refusal::answered(reason, not_supported(frame));
         let mutation = matches!(command, BEGIN | END | RESET);
         let expected = if mutation {
             MUTATION_BYTES
@@ -64,17 +66,17 @@ impl RecoveryNonce {
             HEADER_BYTES
         };
         if frame.data as usize != expected {
-            return Err(unsupported(
-                "SEP recovery policy nonce request has an unsupported length",
-            ));
+            return Err(unsupported(refuse!(
+                "SEP recovery policy nonce request has an unsupported length"
+            )));
         }
         if mutation {
             let mut body = [0; MUTATION_BYTES - HEADER_BYTES];
             payload.input(&mut body).map_err(unsupported)?;
             if body.iter().any(|&byte| byte != 0) {
-                return Err(unsupported(
-                    "SEP recovery policy nonce owner or authorization body is not implemented",
-                ));
+                return Err(unsupported(refuse!(
+                    "SEP recovery policy nonce owner or authorization body is not implemented"
+                )));
             }
         }
         let generation = store.generation().map_err(unsupported)?;
@@ -82,9 +84,9 @@ impl RecoveryNonce {
         match command {
             BEGIN => {
                 if self.proposal.is_some() {
-                    return Err(unsupported(
-                        "SEP recovery policy nonce update is already in progress",
-                    ));
+                    return Err(unsupported(refuse!(
+                        "SEP recovery policy nonce update is already in progress"
+                    )));
                 }
                 let update = policy::begin(PolicyNonce::Recovery, entropy).map_err(unsupported)?;
                 // Output failure does not leave an invisible new proposal.
@@ -92,14 +94,13 @@ impl RecoveryNonce {
                 self.proposal = Some(Proposal { generation, update });
             }
             END => {
-                let proposal = self
-                    .proposal
-                    .take()
-                    .ok_or_else(|| unsupported("SEP recovery policy nonce end has no proposal"))?;
+                let proposal = self.proposal.take().ok_or_else(|| {
+                    unsupported(refuse!("SEP recovery policy nonce end has no proposal"))
+                })?;
                 if proposal.generation != generation {
-                    return Err(unsupported(
-                        "SEP recovery policy nonce proposal belongs to an older store generation",
-                    ));
+                    return Err(unsupported(refuse!(
+                        "SEP recovery policy nonce proposal belongs to an older store generation"
+                    )));
                 }
                 // An error may mean the commit reached stable storage. Neither
                 // retry nor a failure answer is valid after this boundary.
@@ -115,21 +116,20 @@ impl RecoveryNonce {
             }
             PROPOSED_DIGEST | BLESSED_DIGEST => {
                 let digest = if command == PROPOSED_DIGEST {
-                    let proposal = self
-                        .proposal
-                        .as_ref()
-                        .ok_or_else(|| unsupported("SEP recovery policy nonce has no proposal"))?;
+                    let proposal = self.proposal.as_ref().ok_or_else(|| {
+                        unsupported(refuse!("SEP recovery policy nonce has no proposal"))
+                    })?;
                     if proposal.generation != generation {
-                        return Err(unsupported(
-                            "SEP recovery policy nonce proposal belongs to an older store generation",
-                        ));
+                        return Err(unsupported(refuse!(
+                            "SEP recovery policy nonce proposal belongs to an older store generation"
+                        )));
                     }
                     proposal.update.proposed_digest()
                 } else {
                     policy::committed_digest(store, PolicyNonce::Recovery)
                         .map_err(unsupported)?
                         .ok_or_else(|| {
-                            unsupported("SEP recovery policy nonce has not been committed")
+                            unsupported(refuse!("SEP recovery policy nonce has not been committed"))
                         })?
                 };
                 let mut reply = [0; DIGEST_REPLY_BYTES];

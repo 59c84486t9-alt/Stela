@@ -13,7 +13,9 @@
 //! not hardware receipts. The caller must perform programming/publication
 //! before consuming their matching clear. No PTD, IRQ, readiness, capacity,
 //! occupancy, ACK or independently required event housekeeping is supplied.
+use crate::Result;
 use alloc::{rc::Rc, vec::Vec};
+use stela_contracts::refuse;
 
 pub const GROUPS: usize = 32;
 pub const ROW_BYTES: usize = 44;
@@ -23,8 +25,6 @@ const NO_GROUP: u32 = 0xffff;
 const QUOTA_MASK: u32 = 0x1ff;
 const LANE_MASK: u32 = 0xfff;
 const RETAIN_FLAG: u32 = 1 << 1;
-type Error = &'static str;
-
 /// Exact supported source row+0x18 encodings. Lane flags do not select these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
@@ -33,12 +33,12 @@ pub enum Class {
     Class3 = 3,
 }
 impl Class {
-    fn parse(word: u32) -> Result<Self, Error> {
+    fn parse(word: u32) -> Result<Self> {
         match word {
             1 => Ok(Self::Class1),
             2 => Ok(Self::Class2),
             3 => Ok(Self::Class3),
-            _ => Err("native cache row has an unsupported source class"),
+            _ => Err(refuse!("native cache row has an unsupported source class")),
         }
     }
 }
@@ -194,14 +194,16 @@ impl Policy {
     /// Parse/check the complete source property before installing any state.
     /// Initial requested fields are zero. Runs defaults, not the
     /// allocator: their source-visible publications are separate service work.
-    pub fn new(raw_rows: &[u8], inputs: Inputs) -> Result<Self, Error> {
+    pub fn new(raw_rows: &[u8], inputs: Inputs) -> Result<Self> {
         let (records, tail) = raw_rows.as_chunks::<ROW_BYTES>();
         if !tail.is_empty() || u32::try_from(records.len()).is_err() {
-            return Err("native cache table is not complete source44-byte rows");
+            return Err(refuse!(
+                "native cache table is not complete source44-byte rows"
+            ));
         }
         let mut rows = Vec::new();
         rows.try_reserve_exact(records.len())
-            .map_err(|_| "native cache source table allocation failed")?;
+            .map_err(|_| refuse!("native cache source table allocation failed"))?;
         for record in records {
             let (fields, _) = record.as_chunks::<4>();
             let words = core::array::from_fn(|index| u32::from_le_bytes(fields[index]));
@@ -209,7 +211,7 @@ impl Policy {
             let group = match words[3] {
                 NO_GROUP => None,
                 value if value < GROUPS as u32 => Some(value as u8),
-                _ => return Err("native cache row group is neither0..31 norFFFF"),
+                _ => return Err(refuse!("native cache row group is neither0..31 norFFFF")),
             };
             let mut limit = words[7];
             let mut assigned = words[8];
@@ -260,7 +262,7 @@ impl Policy {
     pub fn group(&self, group: u8) -> Option<&Group> {
         self.groups.get(usize::from(group)).and_then(Option::as_ref)
     }
-    pub fn request_lane(&self, group: u8) -> Result<Option<u16>, Error> {
+    pub fn request_lane(&self, group: u8) -> Result<Option<u16>> {
         Ok(self.raw_lanes[group_index(group)?])
     }
     pub fn dirty_masks(&self) -> DirtyMasks {
@@ -271,7 +273,7 @@ impl Policy {
     /// lane, even for ignored groups/classes. Return true for every eligible
     /// update, including an unchanged numeric request (VA1003a38); this tells
     /// the caller to run allocation. Flags13:12 and upper bits do not pick class.
-    pub fn set_request(&mut self, group: u8, raw_lane: u16) -> Result<bool, Error> {
+    pub fn set_request(&mut self, group: u8, raw_lane: u16) -> Result<bool> {
         let index = group_index(group)?;
         self.raw_lanes[index] = Some(raw_lane);
         let Some(slot) = self.groups[index].as_mut() else {
@@ -294,7 +296,7 @@ impl Policy {
     /// VA1003ee8..1003f7c: first row/group, source W32 multiply and UDIV,
     /// seeded assigned and independent hardware ceiling. Preserve requests and
     /// flags across budget changes. Every active group dirties both outputs.
-    pub fn defaults(&mut self) -> Result<(), Error> {
+    pub fn defaults(&mut self) -> Result<()> {
         let revision = self.next_revision()?;
         let mut active = 0;
         for (row_index, row) in self.rows.iter().enumerate() {
@@ -337,7 +339,7 @@ impl Policy {
     /// zeroes are software lifecycle effects, not newly received PTD lanes.
     /// Defaults publication and metric registration remain the caller's
     /// effects before allocation. Preflight revision exhaustion before clearing.
-    pub fn start_defaults(&mut self) -> Result<(), Error> {
+    pub fn start_defaults(&mut self) -> Result<()> {
         self.next_revision()?;
         for slot in self.groups.iter_mut().flatten() {
             slot.requested = 0;
@@ -349,7 +351,7 @@ impl Policy {
     /// limits overlap; only completed higher tiers reduce remaining budget.
     /// Class1/feature-kept groups do not enter the dynamic sums. Outputs
     /// remain dirty until service explicitly completes matching work.
-    pub fn allocate(&mut self) -> Result<(), Error> {
+    pub fn allocate(&mut self) -> Result<()> {
         let revision = self.next_revision()?;
         let mut seen = 0;
         let mut higher = 0u32;
@@ -397,7 +399,7 @@ impl Policy {
         Ok(())
     }
 
-    pub fn hardware_update(&self, group: u8) -> Result<Option<HardwareUpdate>, Error> {
+    pub fn hardware_update(&self, group: u8) -> Result<Option<HardwareUpdate>> {
         let index = group_index(group)?;
         if self.dirty.hardware & (1u32 << group) == 0 {
             return Ok(None);
@@ -411,7 +413,7 @@ impl Policy {
             scaled_units: self.inputs.hardware_units(target),
         }))
     }
-    pub fn response_block(&self, block: u8) -> Result<Option<ResponseBlock>, Error> {
+    pub fn response_block(&self, block: u8) -> Result<Option<ResponseBlock>> {
         let index = block_index(block)?;
         let dirty = self.dirty.responses & block_mask(block);
         if dirty == 0 {
@@ -429,7 +431,7 @@ impl Policy {
     /// Clear only the matching completed hardware operation. A token
     /// from another policy, an overwritten phase or already consumed work
     /// refuses without changing masks. This method itself programs nothing.
-    pub fn complete_hardware(&mut self, update: HardwareUpdate) -> Result<(), Error> {
+    pub fn complete_hardware(&mut self, update: HardwareUpdate) -> Result<()> {
         let index = usize::from(update.group);
         let bit = 1u32 << update.group;
         if !Rc::ptr_eq(&self.owner, &update.owner)
@@ -438,14 +440,16 @@ impl Policy {
             || self.groups[index].is_none_or(|slot| slot.hardware_target != update.target)
             || self.inputs.hardware_units(update.target) != update.scaled_units
         {
-            return Err("native cache hardware clear is foreign, stale or already consumed");
+            return Err(refuse!(
+                "native cache hardware clear is foreign, stale or already consumed"
+            ));
         }
         self.dirty.hardware &= !bit;
         Ok(())
     }
     /// Clear exactly the dirty members of a matching four-lane PTD
     /// publication. Other blocks and pending hardware work remain unchanged.
-    pub fn complete_response(&mut self, response: ResponseBlock) -> Result<(), Error> {
+    pub fn complete_response(&mut self, response: ResponseBlock) -> Result<()> {
         let index = usize::from(response.block);
         let mask = block_mask(response.block);
         if !Rc::ptr_eq(&self.owner, &response.owner)
@@ -454,7 +458,9 @@ impl Policy {
             || response.dirty == 0
             || self.packed_block(index) != response.packed
         {
-            return Err("native cache response clear is foreign, stale or already consumed");
+            return Err(refuse!(
+                "native cache response clear is foreign, stale or already consumed"
+            ));
         }
         self.dirty.responses &= !response.dirty;
         Ok(())
@@ -465,26 +471,26 @@ impl Policy {
             packed | (u64::from(assigned & LANE_MASK) << (lane * 16))
         })
     }
-    fn next_revision(&self) -> Result<u64, Error> {
+    fn next_revision(&self) -> Result<u64> {
         self.revision
             .checked_add(1)
-            .ok_or("native cache policy dirty revision exhausted")
+            .ok_or(refuse!("native cache policy dirty revision exhausted"))
     }
 }
-fn group_index(group: u8) -> Result<usize, Error> {
+fn group_index(group: u8) -> Result<usize> {
     let index = usize::from(group);
     if index < GROUPS {
         Ok(index)
     } else {
-        Err("native cache group is outside0..31")
+        Err(refuse!("native cache group is outside0..31"))
     }
 }
-fn block_index(block: u8) -> Result<usize, Error> {
+fn block_index(block: u8) -> Result<usize> {
     let index = usize::from(block);
     if index < RESPONSE_BLOCKS {
         Ok(index)
     } else {
-        Err("native cache response block is outside0..7")
+        Err(refuse!("native cache response block is outside0..7"))
     }
 }
 fn block_mask(block: u8) -> u32 {

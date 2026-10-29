@@ -42,7 +42,9 @@
 //! memory, callback, power or readiness permission; [`duties`] models the PTD
 //! duties the drivers wait for.
 use super::rtkit::Endpoint;
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 pub mod duties;
 pub mod native;
@@ -73,21 +75,21 @@ impl Pmp {
 impl Endpoint for Pmp {
     // This endpoint owns no AP allocation, queued callback or DMA. `pings`
     // is a lifetime diagnostic counter, not volatile protocol state.
-    fn check_reset(&self) -> Result<(), &'static str> {
+    fn check_reset(&self) -> Result<()> {
         Ok(())
     }
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         Ok(())
     }
-    fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<()> {
         Ok(())
     }
 
-    fn receive(&mut self, payload: u64, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn receive(&mut self, payload: u64, outbox: &mut Vec<u64>) -> Result<()> {
         let class = payload >> CLASS_SHIFT & 0xf;
         let kind = payload >> KIND_SHIFT & 0xf;
         if payload >> 56 != 0 {
-            return Err("PMP message bits above the class are not modeled");
+            return Err(refuse!("PMP message bits above the class are not modeled"));
         }
         match (class, kind) {
             (POWER_MANAGEMENT, PING) => {
@@ -97,7 +99,9 @@ impl Endpoint for Pmp {
                 );
                 Ok(())
             }
-            _ => Err("PMP endpoint message other than the ping is not modeled"),
+            _ => Err(refuse!(
+                "PMP endpoint message other than the ping is not modeled"
+            )),
         }
     }
 }

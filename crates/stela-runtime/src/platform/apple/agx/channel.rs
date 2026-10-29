@@ -63,6 +63,8 @@
 //! [`super::signal`], every other type refuses by name.
 
 use super::ring::Shared;
+use crate::Result;
+use stela_contracts::refuse;
 
 /// `AGFIChannelState` +0x00: the command-ring state's firmware VA.
 const STATE_RING: u64 = 0x00;
@@ -84,38 +86,38 @@ pub struct Queue {
 
 impl Queue {
     /// The queue of the channel whose `AGFIChannelState` is at `state`.
-    pub fn read(memory: &mut dyn Shared, state: u64) -> Result<Self, &'static str> {
+    pub fn read(memory: &mut dyn Shared, state: u64) -> Result<Self> {
         if state == 0 {
-            return Err("GFX data-master entry names no channel state");
+            return Err(refuse!("GFX data-master entry names no channel state"));
         }
         state
             .checked_add(STATE_COMMANDS + 7)
-            .ok_or("GFX channel state range wraps")?;
+            .ok_or(refuse!("GFX channel state range wraps"))?;
         let ring = memory.read_u64(state + STATE_RING)?;
         let commands = memory.read_u64(state + STATE_COMMANDS)?;
         if ring == 0 || commands == 0 {
-            return Err("GFX channel state names no command queue");
+            return Err(refuse!("GFX channel state names no command queue"));
         }
         Ok(Self { ring, commands })
     }
 
     /// The (read, length) of the command ring, with the write index checked.
-    fn indices(&self, memory: &mut dyn Shared) -> Result<(u32, u32, u32), &'static str> {
+    fn indices(&self, memory: &mut dyn Shared) -> Result<(u32, u32, u32)> {
         self.ring
             .checked_add(RING_LENGTH + 3)
-            .ok_or("GFX command ring state range wraps")?;
+            .ok_or(refuse!("GFX command ring state range wraps"))?;
         let read = memory.read_u32(self.ring + RING_READ)?;
         let write = memory.read_u32(self.ring + RING_WRITE)?;
         let length = memory.read_u32(self.ring + RING_LENGTH)?;
         if length == 0 || read >= length || write >= length {
-            return Err("GFX channel command ring index out-of-bounds");
+            return Err(refuse!("GFX channel command ring index out-of-bounds"));
         }
         Ok((read, write, length))
     }
 
     /// The firmware VA of the next pending command, if any.
     #[cfg(test)]
-    pub fn next(&self, memory: &mut dyn Shared) -> Result<Option<u64>, &'static str> {
+    pub fn next(&self, memory: &mut dyn Shared) -> Result<Option<u64>> {
         let (read, write, _) = self.indices(memory)?;
         if read == write {
             return Ok(None);
@@ -123,13 +125,13 @@ impl Queue {
         let pointer = self
             .commands
             .checked_add(u64::from(read) * 8)
-            .ok_or("GFX command pointer array range wraps")?;
+            .ok_or(refuse!("GFX command pointer array range wraps"))?;
         pointer
             .checked_add(7)
-            .ok_or("GFX command pointer array range wraps")?;
+            .ok_or(refuse!("GFX command pointer array range wraps"))?;
         let command = memory.read_u64(pointer)?;
         if command == 0 {
-            return Err("GFX channel command pointer is empty");
+            return Err(refuse!("GFX channel command pointer is empty"));
         }
         Ok(Some(command))
     }
@@ -141,20 +143,22 @@ impl Queue {
         memory: &mut dyn Shared,
         state: u64,
         target: u16,
-    ) -> Result<Submission, &'static str> {
+    ) -> Result<Submission> {
         let (cursor, write, length) = self.indices(memory)?;
         let target = u32::from(target);
         if target >= length {
-            return Err("GFX submitted command tail is outside the ring");
+            return Err(refuse!("GFX submitted command tail is outside the ring"));
         }
         let distance =
             |end: u32| (u64::from(end) + u64::from(length) - u64::from(cursor)) % u64::from(length);
         if distance(target) > distance(write) {
-            return Err("GFX submitted command tail includes unpublished pointers");
+            return Err(refuse!(
+                "GFX submitted command tail includes unpublished pointers"
+            ));
         }
         state
             .checked_add(0x2b)
-            .ok_or("GFX submitted channel state range wraps")?;
+            .ok_or(refuse!("GFX submitted channel state range wraps"))?;
         super::ring::scalar_range(state + 0x28, 4)?;
         super::ring::scalar_range(self.ring + 0x30, 4)?;
         super::ring::scalar_range(self.ring, 4)?;
@@ -171,17 +175,17 @@ impl Queue {
     /// Retire the command at the read index: the firmware's consume, which
     /// frees the slot `writeChannelCommandPointer` waits on.
     #[cfg(test)]
-    pub fn retire(&self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+    pub fn retire(&self, memory: &mut dyn Shared) -> Result<()> {
         self.retirement(memory)?.commit(memory)
     }
 
     /// Accept the exact consumer-index update before the command can have
     /// effects; retrying a later fault must not discover the next command.
     #[cfg(test)]
-    pub fn retirement(&self, memory: &mut dyn Shared) -> Result<Retirement, &'static str> {
+    pub fn retirement(&self, memory: &mut dyn Shared) -> Result<Retirement> {
         let (read, write, length) = self.indices(memory)?;
         if read == write {
-            return Err("GFX channel command ring has no command to retire");
+            return Err(refuse!("GFX channel command ring has no command to retire"));
         }
         Ok(Retirement {
             word: self.ring + RING_READ,
@@ -205,7 +209,7 @@ pub struct Submission {
 }
 
 impl Submission {
-    pub fn publish(&mut self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+    pub fn publish(&mut self, memory: &mut dyn Shared) -> Result<()> {
         if self.published == 0 {
             memory.write(self.state + 0x28, &self.target.to_le_bytes())?;
             self.published = 1;
@@ -217,7 +221,7 @@ impl Submission {
         Ok(())
     }
 
-    pub fn next(&self, memory: &mut dyn Shared) -> Result<Option<u64>, &'static str> {
+    pub fn next(&self, memory: &mut dyn Shared) -> Result<Option<u64>> {
         if self.cursor == self.target {
             return Ok(None);
         }
@@ -225,13 +229,13 @@ impl Submission {
             .queue
             .commands
             .checked_add(u64::from(self.cursor) * 8)
-            .ok_or("GFX command pointer array range wraps")?;
+            .ok_or(refuse!("GFX command pointer array range wraps"))?;
         pointer
             .checked_add(7)
-            .ok_or("GFX command pointer array range wraps")?;
+            .ok_or(refuse!("GFX command pointer array range wraps"))?;
         let command = memory.read_u64(pointer)?;
         if command == 0 {
-            return Err("GFX channel command pointer is empty");
+            return Err(refuse!("GFX channel command pointer is empty"));
         }
         Ok(Some(command))
     }
@@ -259,7 +263,7 @@ pub struct Retirement {
 }
 
 impl Retirement {
-    pub fn commit(&mut self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+    pub fn commit(&mut self, memory: &mut dyn Shared) -> Result<()> {
         if !self.committed {
             memory.write(self.word, &self.next.to_le_bytes())?;
             self.committed = true;
@@ -283,7 +287,7 @@ pub enum Kind {
 
 impl Kind {
     /// Decode the command's type word.
-    pub fn decode(word: u32) -> Result<Self, &'static str> {
+    pub fn decode(word: u32) -> Result<Self> {
         Ok(match word {
             0 => Kind::Ta,
             1 => Kind::ThreeD,
@@ -293,7 +297,11 @@ impl Kind {
             7 => Kind::RemoteNode,
             9 => Kind::SharedEventSignal,
             0xc => Kind::DashboardSignal,
-            _ => return Err("GFX channel command type is not one the 26A434 kext writes"),
+            _ => {
+                return Err(refuse!(
+                    "GFX channel command type is not one the 26A434 kext writes"
+                ));
+            }
         })
     }
 
@@ -346,7 +354,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn read(memory: &mut dyn Shared, va: u64) -> Result<Self, &'static str> {
+    pub fn read(memory: &mut dyn Shared, va: u64) -> Result<Self> {
         Ok(Self {
             va,
             kind: Kind::decode(memory.read_u32(va)?)?,
@@ -354,23 +362,22 @@ impl Command {
     }
 
     /// The firmware VA of the command's stream.
-    pub fn stream(&self, memory: &mut dyn Shared) -> Result<u64, &'static str> {
-        let at = self
-            .kind
-            .stream()
-            .ok_or("GFX channel command's stream location is not recovered")?;
+    pub fn stream(&self, memory: &mut dyn Shared) -> Result<u64> {
+        let at = self.kind.stream().ok_or(refuse!(
+            "GFX channel command's stream location is not recovered"
+        ))?;
         match memory.read_u64(self.va + at)? {
-            0 => Err("GFX channel command names no stream"),
+            0 => Err(refuse!("GFX channel command names no stream")),
             stream => Ok(stream),
         }
     }
 
     /// The command's completion stamp.
-    pub fn stamp(&self, memory: &mut dyn Shared) -> Result<Stamp, &'static str> {
+    pub fn stamp(&self, memory: &mut dyn Shared) -> Result<Stamp> {
         let value = self
             .kind
             .stamp_value()
-            .ok_or("GFX channel command carries no stamp")?;
+            .ok_or(refuse!("GFX channel command carries no stamp"))?;
         let stamp = Stamp {
             driver: memory.read_u64(self.va + value - 0x10)?,
             firmware: memory.read_u64(self.va + value - 0x8)?,
@@ -378,7 +385,9 @@ impl Command {
             index: memory.read_u32(self.va + value + 4)?,
         };
         if stamp.index >= STAMPS {
-            return Err("GFX command stamp index is outside the firmware's 128 stamps");
+            return Err(refuse!(
+                "GFX command stamp index is outside the firmware's 128 stamps"
+            ));
         }
         Ok(stamp)
     }
@@ -426,10 +435,12 @@ pub enum Record {
 
 impl Record {
     /// Decode a record header.
-    pub fn decode(header: u32) -> Result<Self, &'static str> {
+    pub fn decode(header: u32) -> Result<Self> {
         let flags = header >> 24;
         if header & 0x00ff_0000 != 0 {
-            return Err("GFX command record header has bits between its type and flags");
+            return Err(refuse!(
+                "GFX command record header has bits between its type and flags"
+            ));
         }
         let record = match header & 0xffff {
             0x2 => Record::End,
@@ -446,7 +457,11 @@ impl Record {
             0xd => Record::RemoteNode,
             0xe => Record::SharedEventSignal,
             0xf => Record::DashboardSignal,
-            _ => return Err("GFX command record type is not one the 26A434 kext writes"),
+            _ => {
+                return Err(refuse!(
+                    "GFX command record type is not one the 26A434 kext writes"
+                ));
+            }
         };
         let allowed: &[u32] = match record {
             Record::End => &[0x40],
@@ -455,7 +470,9 @@ impl Record {
             _ => &[0],
         };
         if !allowed.contains(&flags) {
-            return Err("GFX command record carries flags its encoder does not write");
+            return Err(refuse!(
+                "GFX command record carries flags its encoder does not write"
+            ));
         }
         Ok(record)
     }
@@ -501,18 +518,18 @@ impl Record {
     /// the firmware skips it. A caller that found the sampler running would
     /// need the counter hardware, and refuses by name.
     #[cfg(test)]
-    pub fn sample_point(self, sampler_active: bool) -> Result<(), &'static str> {
+    pub fn sample_point(self, sampler_active: bool) -> Result<()> {
         match self {
             Record::SamplePoint(_) if !sampler_active => Ok(()),
-            Record::SamplePoint(_) => {
-                Err("GFX sample-point record samples counter hardware the model does not have")
-            }
-            _ => Err("GFX record is not a sample point"),
+            Record::SamplePoint(_) => Err(refuse!(
+                "GFX sample-point record samples counter hardware the model does not have"
+            )),
+            _ => Err(refuse!("GFX record is not a sample point")),
         }
     }
 
     /// Read the record header at `va`.
-    pub fn read(memory: &mut dyn Shared, va: u64) -> Result<Self, &'static str> {
+    pub fn read(memory: &mut dyn Shared, va: u64) -> Result<Self> {
         Self::decode(memory.read_u32(va)?)
     }
 }

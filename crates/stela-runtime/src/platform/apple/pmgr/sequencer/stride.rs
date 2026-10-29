@@ -167,7 +167,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, MmioError::Unmapped { .. }));
         assert_eq!(
-            cursor.finish_write(&claim, RouteOutcome::NoEffect(error)),
+            cursor.finish_write(&claim, RouteOutcome::NoEffect(error.clone())),
             Err(FinishError::NoEffect(error))
         );
         assert_eq!(cursor.committed_writes(), 1);

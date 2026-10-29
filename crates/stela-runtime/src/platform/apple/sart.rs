@@ -33,6 +33,9 @@
 //! word still holds it when the count returns to 0 (0xfffffff0270d8c9c), so
 //! a lost write shows a power loss. Here the word is plain storage at
 //! [`CANARY`]; the SART refuses non-kept power loss.
+use crate::Result;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
@@ -136,15 +139,15 @@ impl Sart {
             && !self.lifecycle.reset
     }
 
-    fn accessible(&self) -> Result<(), &'static str> {
+    fn accessible(&self) -> Result<()> {
         if !self.lifecycle.powered {
-            return Err("SART power is gated");
+            return Err(refuse!("SART power is gated"));
         }
         if !self.lifecycle.clocked {
-            return Err("SART clock is gated");
+            return Err(refuse!("SART clock is gated"));
         }
         if self.lifecycle.reset {
-            return Err("SART reset is asserted");
+            return Err(refuse!("SART reset is asserted"));
         }
         Ok(())
     }
@@ -171,37 +174,41 @@ impl Iommu for Sart {
         _access: &mut Access<'_>,
     ) -> Result<u64, DmaError> {
         if !self.executing() {
-            return Err(DmaError::Unsupported(
-                "SART DMA while PMGR inhibits execution",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "SART DMA while PMGR inhibits execution"
+            )));
         }
         if stream != 0 {
-            return Err(DmaError::Unsupported("SART has no stream selector"));
+            return Err(DmaError::Unsupported(refuse!(
+                "SART has no stream selector"
+            )));
         }
         if self.throttles[..self.layout.throttle_offsets().len()].contains(&0) {
-            return Err(DmaError::Unsupported(
-                "SART DMA while a throttle word is 0 is not modeled",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "SART DMA while a throttle word is 0 is not modeled"
+            )));
         }
         if !self.allows(iova, last) {
             // No fault syndrome/interrupt is documented for this hardware.
-            return Err(DmaError::Unsupported("DMA outside the SART allow-list"));
+            return Err(DmaError::Unsupported(refuse!(
+                "DMA outside the SART allow-list"
+            )));
         }
         Ok(iova)
     }
 }
 
 impl Lifecycle for Sart {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         // The protected SPTM mapper's allow-list and throttle restoration
         // around a physical ANS rail/reset are distinct from its documented
         // idle protocol. Do not infer their reset values from CC.EN reset.
         if proposed.reset && !self.lifecycle.reset
             || !proposed.powered && self.lifecycle.powered && !proposed.retention
         {
-            return Err(
-                "SART physical reset or nonretained power loss requires protected mapper restore semantics",
-            );
+            return Err(refuse!(
+                "SART physical reset or nonretained power loss requires protected mapper restore semantics"
+            ));
         }
         Ok(())
     }
@@ -256,21 +263,23 @@ impl MmioDevice for Sart {
     ) -> Result<(), MmioError> {
         self.accessible()
             .map_err(|reason| refuse(NAME, offset, width, Direction::Write, reason))?;
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         if width != Width::Word || value > u64::from(u32::MAX) {
-            return Err(fail("SART requires a 32-bit word"));
+            return Err(fail(refuse!("SART requires a 32-bit word")));
         }
         if let Some(channel) = self.layout.throttle(offset) {
             // 0 while SPTM changes entries, or a restore of the snapshot.
             if value > u64::from(SYNCHRONOUS_CHANNEL) {
-                return Err(fail("SART throttle configuration change is not modeled"));
+                return Err(fail(refuse!(
+                    "SART throttle configuration change is not modeled"
+                )));
             }
             self.throttles[channel] = value as u32;
             return Ok(());
         }
         if offset == IDLE {
             if value > 1 {
-                return Err(fail("SART idle request is Boolean"));
+                return Err(fail(refuse!("SART idle request is Boolean")));
             }
             self.idle = value == 1;
             return Ok(());
@@ -280,7 +289,7 @@ impl MmioDevice for Sart {
             return Ok(());
         }
         let Some((index, field)) = self.layout.entry(offset) else {
-            return Err(fail("SART register without a model"));
+            return Err(fail(refuse!("SART register without a model")));
         };
         let value = value as u32;
         let layout = self.layout;
@@ -289,14 +298,16 @@ impl MmioDevice for Sart {
             0 => {
                 let (flags, _) = layout.decode(value, entry.size);
                 if flags != 0 && flags != layout.permission_mask() {
-                    return Err(fail("SART permission bits without known semantics"));
+                    return Err(fail(refuse!(
+                        "SART permission bits without known semantics"
+                    )));
                 }
                 entry.config = value;
             }
             1 if value & !layout.base_mask() == 0 => entry.base = value,
-            1 => return Err(fail("SART address exceeds its field")),
+            1 => return Err(fail(refuse!("SART address exceeds its field"))),
             2 if value & !layout.size_mask() == 0 => entry.size = value,
-            2 => return Err(fail("SART size exceeds its field")),
+            2 => return Err(fail(refuse!("SART size exceeds its field"))),
             _ => unreachable!(),
         }
         Ok(())

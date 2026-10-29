@@ -17,7 +17,9 @@ use super::{CounterReference, Descriptor, Ordinal};
 use alloc::{collections::VecDeque, rc::Rc, vec, vec::Vec};
 pub use arithmetic::{Delta, Pair, Statistics};
 pub use model::{Auxiliary, Configuration, Frequency};
+use stela_contracts::Refusal;
 use stela_contracts::bus::Access;
+use stela_contracts::refuse;
 
 const TIME_MASK: u64 = (1 << 54) - 1;
 /// Pure original101b974 field arithmetic over supplied frame data; no copy,
@@ -134,10 +136,10 @@ pub trait Backend {
         access: &mut Access<'_>,
     ) -> Completion<Value>;
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    Contract(&'static str),
-    Refused(&'static str),
+    Contract(Refusal),
+    Refused(Refusal),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Progress {
@@ -227,7 +229,7 @@ pub struct Owner<B: Backend> {
     receipt: Option<FrameInput>,
     awaiting_post: bool,
     batch: Option<Batch>,
-    fault: Option<&'static str>,
+    fault: Option<Refusal>,
     base: [[Pair; 2]; 6],
     integer: [[Pair; 2]; 2],
     frequency: Vec<[[Pair; 2]; 2]>,
@@ -305,7 +307,9 @@ impl<B: Backend> Owner<B> {
     pub fn cells<'a>(&self, frames: &'a Frames) -> Result<&'a [Frame], Error> {
         self.receipt
             .as_ref()
-            .ok_or(Error::Contract("generic retained frame storage absent"))?
+            .ok_or(Error::Contract(refuse!(
+                "generic retained frame storage absent"
+            )))?
             .cells(frames)
     }
     pub fn metrics(&self) -> [[u32; 3]; 2] {
@@ -330,9 +334,9 @@ impl<B: Backend> Owner<B> {
     /// bounded native descriptor indices; no successful zero for invalid input.
     pub fn query(&self, evaluated: u32, selector: u32, kind: u32) -> Result<u32, Error> {
         if selector >= 2 || kind >= 3 {
-            return Err(Error::Contract(
-                "generic counter query outside2x3 rate array",
-            ));
+            return Err(Error::Contract(refuse!(
+                "generic counter query outside2x3 rate array"
+            )));
         }
         Ok(if evaluated == 1 {
             self.rates[selector as usize][kind as usize]
@@ -364,9 +368,9 @@ impl<B: Backend> Owner<B> {
     ) -> Result<(), Error> {
         self.idle()?;
         if context.activity != 0 && d.counter_slice().is_some() {
-            return Err(Error::Contract(
-                "generic retained input requires source bulk-copy skip",
-            ));
+            return Err(Error::Contract(refuse!(
+                "generic retained input requires source bulk-copy skip"
+            )));
         }
         self.begin_capture_input(
             frames,
@@ -386,24 +390,26 @@ impl<B: Backend> Owner<B> {
     ) -> Result<(), Error> {
         self.idle()?;
         if context.buffer_index != self.products().0 {
-            return Err(Error::Contract(
-                "generic Capture buffer index differs from retained owner",
-            ));
+            return Err(Error::Contract(refuse!(
+                "generic Capture buffer index differs from retained owner"
+            )));
         }
         let layout = input.layout();
         if layout.ordinal != d.ordinal().index() as u32 || d.ordinal() != self.config.ordinal {
-            return Err(Error::Contract(
-                "generic ingestion receipt/descriptor ordinal mismatch",
-            ));
+            return Err(Error::Contract(refuse!(
+                "generic ingestion receipt/descriptor ordinal mismatch"
+            )));
         }
         match d.counter_slice() {
             Some(slice) if layout.start != slice.start || layout.count != slice.count => {
-                return Err(Error::Contract("generic ingestion receipt slice mismatch"));
+                return Err(Error::Contract(refuse!(
+                    "generic ingestion receipt slice mismatch"
+                )));
             }
             None if layout.count != 0 => {
-                return Err(Error::Contract(
-                    "generic no-counter descriptor received a nonempty frame slice",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "generic no-counter descriptor received a nonempty frame slice"
+                )));
             }
             _ => {}
         }
@@ -477,12 +483,14 @@ impl<B: Backend> Owner<B> {
     ) -> Result<(), Error> {
         self.idle()?;
         if !self.awaiting_post {
-            return Err(Error::Contract(
-                "generic Postprocess has no unreplayed Capture",
-            ));
+            return Err(Error::Contract(refuse!(
+                "generic Postprocess has no unreplayed Capture"
+            )));
         }
         if d.ordinal() != self.config.ordinal {
-            return Err(Error::Contract("generic postprocess descriptor mismatch"));
+            return Err(Error::Contract(refuse!(
+                "generic postprocess descriptor mismatch"
+            )));
         }
         self.cells(frames)?;
         if self.products
@@ -492,9 +500,9 @@ impl<B: Backend> Owner<B> {
                 previous_state_index: context.previous_state_index,
             })
         {
-            return Err(Error::Contract(
-                "generic postprocess hook products differ from retained Capture",
-            ));
+            return Err(Error::Contract(refuse!(
+                "generic postprocess hook products differ from retained Capture"
+            )));
         }
         let mut ops = VecDeque::new();
         for (i, r) in self.config.references.iter().enumerate() {
@@ -525,12 +533,14 @@ impl<B: Backend> Owner<B> {
     }
     fn idle(&self) -> Result<(), Error> {
         if self.serial == u64::MAX {
-            return Err(Error::Contract("generic ingestion serial exhausted"));
+            return Err(Error::Contract(refuse!(
+                "generic ingestion serial exhausted"
+            )));
         }
         if self.batch.is_some() || self.fault.is_some() {
-            Err(Error::Contract(
-                "generic ingestion retained or faulted operation",
-            ))
+            Err(Error::Contract(refuse!(
+                "generic ingestion retained or faulted operation"
+            )))
         } else {
             Ok(())
         }
@@ -542,10 +552,9 @@ impl<B: Backend> Owner<B> {
         activation: u32,
         ordinal: Ordinal,
     ) -> Result<(), Error> {
-        self.serial = self
-            .serial
-            .checked_add(1)
-            .ok_or(Error::Contract("generic ingestion serial exhausted"))?;
+        self.serial = self.serial.checked_add(1).ok_or(Error::Contract(refuse!(
+            "generic ingestion serial exhausted"
+        )))?;
         self.batch = Some(Batch {
             serial: self.serial,
             cursor: 0,
@@ -578,26 +587,29 @@ impl<B: Backend> Owner<B> {
     fn pair(value: Option<Value>) -> Result<Pair, Error> {
         match value {
             Some(Value::Pair(pair)) => Ok(pair),
-            _ => Err(Error::Contract("generic actual provider tuple absent")),
+            _ => Err(Error::Contract(refuse!(
+                "generic actual provider tuple absent"
+            ))),
         }
     }
     fn word(value: Option<Value>) -> Result<u64, Error> {
         match value {
             Some(Value::Word(word)) => Ok(word),
-            _ => Err(Error::Contract("generic actual provider value absent")),
+            _ => Err(Error::Contract(refuse!(
+                "generic actual provider value absent"
+            ))),
         }
     }
     pub fn advance(&mut self, frames: &Frames, access: &mut Access<'_>) -> Result<Progress, Error> {
-        if let Some(reason) = self.fault {
+        if let Some(reason) = self.fault.clone() {
             return Err(Error::Contract(reason));
         }
-        let mut b = self
-            .batch
-            .take()
-            .ok_or(Error::Contract("generic ingestion operation absent"))?;
+        let mut b = self.batch.take().ok_or(Error::Contract(refuse!(
+            "generic ingestion operation absent"
+        )))?;
         let result = self.run(&mut b, frames, access);
-        if let Err(Error::Contract(reason)) = result {
-            self.fault = Some(reason)
+        if let Err(Error::Contract(reason)) = &result {
+            self.fault = Some(reason.clone())
         }
         if !b.ops.is_empty() || result.is_err() {
             self.batch = Some(b)
@@ -612,10 +624,9 @@ impl<B: Backend> Owner<B> {
     ) -> Result<Progress, Error> {
         let cells = self.cells(frames)?;
         while let Some(op) = b.ops.pop_front() {
-            let next = b
-                .cursor
-                .checked_add(1)
-                .ok_or(Error::Contract("generic ingestion cursor exhausted"))?;
+            let next = b.cursor.checked_add(1).ok_or(Error::Contract(refuse!(
+                "generic ingestion cursor exhausted"
+            )))?;
             match op {
                 Op::Call(ref call) => {
                     let request = Request {
@@ -657,9 +668,9 @@ impl<B: Backend> Owner<B> {
                                     )
                             );
                             if !shape {
-                                return Err(Error::Contract(
-                                    "generic actual callback result shape mismatch",
-                                ));
+                                return Err(Error::Contract(refuse!(
+                                    "generic actual callback result shape mismatch"
+                                )));
                             }
                             match (call, &value) {
                                 (
@@ -676,9 +687,9 @@ impl<B: Backend> Owner<B> {
                                         || inactive.len() != active.len()
                                         || extra.len() != active.len()
                                     {
-                                        return Err(Error::Contract(
-                                            "generic actual coefficient state counts differ or exceed nibble profile",
-                                        ));
+                                        return Err(Error::Contract(refuse!(
+                                            "generic actual coefficient state counts differ or exceed nibble profile"
+                                        )));
                                     }
                                     f.active = active.clone();
                                     f.inactive = inactive.clone();
@@ -687,9 +698,9 @@ impl<B: Backend> Owner<B> {
                                 }
                                 (Call::OutputLayout { .. }, Value::Layout { start, count }) => {
                                     if *count > 2 {
-                                        return Err(Error::Contract(
-                                            "generic integer output range exceeds two source descriptors",
-                                        ));
+                                        return Err(Error::Contract(refuse!(
+                                            "generic integer output range exceeds two source descriptors"
+                                        )));
                                     }
                                     self.config.output_start = *start;
                                     self.config.output_count = *count;
@@ -733,9 +744,9 @@ impl<B: Backend> Owner<B> {
                         } else {
                             cells
                                 .first()
-                                .ok_or(Error::Contract(
-                                    "inactive generic descriptor needs retained first frame",
-                                ))?
+                                .ok_or(Error::Contract(refuse!(
+                                    "inactive generic descriptor needs retained first frame"
+                                )))?
                                 .metadata
                                 & TIME_MASK
                         };
@@ -756,9 +767,9 @@ impl<B: Backend> Owner<B> {
                         });
                     }
                     _ => {
-                        return Err(Error::Contract(
-                            "generic extract descriptor kind unsupported",
-                        ));
+                        return Err(Error::Contract(refuse!(
+                            "generic extract descriptor kind unsupported"
+                        )));
                     }
                 },
                 Op::ProviderWord { target } => {
@@ -779,8 +790,9 @@ impl<B: Backend> Owner<B> {
                 } => {
                     if next != 0 {
                         let p = Self::pair(b.value.take())?;
-                        let old =
-                            pair.ok_or(Error::Contract("generic tuple partial state absent"))?;
+                        let old = pair.ok_or(Error::Contract(refuse!(
+                            "generic tuple partial state absent"
+                        )))?;
                         let sum = Pair {
                             value: old.value.wrapping_add(p.value),
                             tick: if next == 1 { p.tick } else { old.tick },
@@ -826,7 +838,9 @@ impl<B: Backend> Owner<B> {
                         if let Target::Integer(i) = target {
                             self.integer[i][parity].tick = tick
                         } else {
-                            return Err(Error::Contract("generic integer target mismatch"));
+                            return Err(Error::Contract(refuse!(
+                                "generic integer target mismatch"
+                            )));
                         }
                     } else if r.kind == 1 {
                         b.ops.push_front(Op::Decode(r, target));
@@ -837,9 +851,9 @@ impl<B: Backend> Owner<B> {
                                 0 => {
                                     let value = cells
                                         .get(index as usize)
-                                        .ok_or(Error::Contract(
-                                            "generic integer frame outside receipt",
-                                        ))?
+                                        .ok_or(Error::Contract(refuse!(
+                                            "generic integer frame outside receipt"
+                                        )))?
                                         .value;
                                     self.finish_integer(b, target, index, value, cells)?
                                 }
@@ -889,9 +903,9 @@ impl<B: Backend> Owner<B> {
                             }
                         }
                     } else {
-                        return Err(Error::Contract(
-                            "generic integer descriptor kind unsupported",
-                        ));
+                        return Err(Error::Contract(refuse!(
+                            "generic integer descriptor kind unsupported"
+                        )));
                     }
                 }
                 Op::SetState => {
@@ -924,7 +938,9 @@ impl<B: Backend> Owner<B> {
                 } => {
                     let count = Self::word(b.value.take())?;
                     if count > u64::from(u32::MAX) {
-                        return Err(Error::Contract("generic extended frame count exceeds W32"));
+                        return Err(Error::Contract(refuse!(
+                            "generic extended frame count exceeds W32"
+                        )));
                     }
                     self.config.extended_count = count as u32;
                     let index = r.start / 64;
@@ -1038,21 +1054,21 @@ impl<B: Backend> Owner<B> {
             let mut sum = 0u64;
             for (i, row) in self.config.frequencies.iter().enumerate() {
                 if !row.qualified {
-                    return Err(Error::Contract(
-                        "generic actual initialized coefficient row absent",
-                    ));
+                    return Err(Error::Contract(refuse!(
+                        "generic actual initialized coefficient row absent"
+                    )));
                 }
                 let state = previous as usize;
                 if state >= row.active.len() {
-                    return Err(Error::Contract(
-                        "generic prior controller state outside coefficient row",
-                    ));
+                    return Err(Error::Contract(refuse!(
+                        "generic prior controller state outside coefficient row"
+                    )));
                 }
                 let group = row.group as usize;
                 if group >= 2 {
-                    return Err(Error::Contract(
-                        "generic frequency group outside2x3 metric descriptors",
-                    ));
+                    return Err(Error::Contract(refuse!(
+                        "generic frequency group outside2x3 metric descriptors"
+                    )));
                 }
                 let mut extra = 0u32;
                 for k in 0..2 {
@@ -1139,9 +1155,11 @@ impl<B: Backend> Owner<B> {
     }
 }
 fn extract(cells: &[Frame], start: u32, width: u32) -> Result<u64, Error> {
-    let frame = cells.get((start / 64) as usize).ok_or(Error::Contract(
-        "generic bitfield outside actual copied slice",
-    ))?;
+    let frame = cells
+        .get((start / 64) as usize)
+        .ok_or(Error::Contract(refuse!(
+            "generic bitfield outside actual copied slice"
+        )))?;
     let mask = u64::MAX.wrapping_shr(width.wrapping_neg() & 63);
     Ok(frame.value.wrapping_shr(start & 63) & mask)
 }

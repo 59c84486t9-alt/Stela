@@ -1,6 +1,8 @@
 //! NHI's sixteen-byte DMA descriptor and programmed ring state.
 use super::{Frame, Options};
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 pub(super) const POSTED: u32 = 1 << 22;
@@ -31,16 +33,16 @@ impl Descriptor {
             time: u32::from_le_bytes(bytes[12..].try_into().unwrap()),
         })
     }
-    pub fn validate(self, direction: Direction) -> Result<(), &'static str> {
+    pub fn validate(self, direction: Direction) -> Result<()> {
         let fields = match direction {
             Direction::Transmit => 0x000f_ffff | ISOCH_OR_CRC,
             Direction::Receive => 0,
         };
         if self.metadata & POSTED == 0 || self.metadata & COMPLETED != 0 {
-            return Err("NHI descriptor is not owned by the device");
+            return Err(refuse!("NHI descriptor is not owned by the device"));
         }
         if self.metadata & !(fields | POSTED | INTERRUPT) != 0 {
-            return Err("NHI posted descriptor field without a model");
+            return Err(refuse!("NHI posted descriptor field without a model"));
         }
         Ok(())
     }
@@ -132,18 +134,22 @@ impl Ring {
     pub fn advance(&mut self) {
         self.consumed = (self.consumed + 1) % self.count;
     }
-    pub fn validate_configuration(&self) -> Result<(), &'static str> {
+    pub fn validate_configuration(&self) -> Result<()> {
         if self.base & 15 != 0 || self.count < 2 {
-            return Err("NHI ring needs aligned descriptors and at least two slots");
+            return Err(refuse!(
+                "NHI ring needs aligned descriptors and at least two slots"
+            ));
         }
         if self.base.checked_add(u64::from(self.count) * 16).is_none() {
-            return Err("NHI descriptor ring overflows the I/O address space");
+            return Err(refuse!(
+                "NHI descriptor ring overflows the I/O address space"
+            ));
         }
         if self.posted >= self.count || self.consumed >= self.count {
-            return Err("NHI descriptor index is outside the ring");
+            return Err(refuse!("NHI descriptor index is outside the ring"));
         }
         if self.capacity > MAX_FRAME as u16 {
-            return Err("NHI receive buffer exceeds the maximum frame size");
+            return Err(refuse!("NHI receive buffer exceeds the maximum frame size"));
         }
         Ok(())
     }

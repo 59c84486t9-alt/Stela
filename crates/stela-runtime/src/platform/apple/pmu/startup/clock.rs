@@ -1,5 +1,7 @@
 //! Private native-PMIC execution time, not the shared RTC oscillator.
+use crate::Result;
 use crate::platform::apple::counter::FREQUENCY_HZ;
+use stela_contracts::refuse;
 
 use stela_soc_data::pmu::PmicEpoch;
 
@@ -16,7 +18,7 @@ pub(super) struct Clock {
     hz: u64,
 }
 impl Clock {
-    pub fn new(epoch: PmicEpoch) -> Result<Self, &'static str> {
+    pub fn new(epoch: PmicEpoch) -> Result<Self> {
         epoch.validate()?;
         Ok(Self {
             time: Time {
@@ -27,23 +29,23 @@ impl Clock {
             hz: epoch.hz,
         })
     }
-    fn at(&self, now: u64) -> Result<Time, &'static str> {
+    fn at(&self, now: u64) -> Result<Time> {
         let delta = now
             .checked_sub(self.time.counter)
-            .ok_or("native PMIC execution counter went backwards")?;
+            .ok_or(refuse!("native PMIC execution counter went backwards"))?;
         let numerator = u128::from(delta)
             .checked_mul(u128::from(self.hz))
             .and_then(|value| value.checked_add(u128::from(self.time.fraction)))
-            .ok_or("native PMIC oscillator conversion overflow")?;
+            .ok_or(refuse!("native PMIC oscillator conversion overflow"))?;
         let elapsed = u64::try_from(numerator / u128::from(FREQUENCY_HZ))
-            .map_err(|_| "native PMIC elapsed cycles exceed its retained counter")?;
+            .map_err(|_| refuse!("native PMIC elapsed cycles exceed its retained counter"))?;
         Ok(Time {
             counter: now,
             cycles: self
                 .time
                 .cycles
                 .checked_add(elapsed)
-                .ok_or("native PMIC execution counter overflow")?,
+                .ok_or(refuse!("native PMIC execution counter overflow"))?,
             fraction: (numerator % u128::from(FREQUENCY_HZ)) as u64,
         })
     }
@@ -51,10 +53,10 @@ impl Clock {
     pub(super) fn state(&self) -> (u64, u64, u64) {
         (self.time.counter, self.time.cycles, self.time.fraction)
     }
-    pub fn check(&self, now: u64) -> Result<(), &'static str> {
+    pub fn check(&self, now: u64) -> Result<()> {
         self.at(now).map(|_| ())
     }
-    pub fn prepare(&mut self, now: u64) -> Result<Advance<'_>, &'static str> {
+    pub fn prepare(&mut self, now: u64) -> Result<Advance<'_>> {
         let next = self.at(now)?;
         Ok(Advance { owner: self, next })
     }
@@ -62,11 +64,11 @@ impl Clock {
     /// The first system-counter value at or after the target native
     /// cycle, preserving the fractional conversion. Due targets keep
     /// the current counter; no wrapping, zero fallback or truncated deadline.
-    pub fn deadline(&self, now: u64, cycles: u64) -> Result<u64, &'static str> {
+    pub fn deadline(&self, now: u64, cycles: u64) -> Result<u64> {
         let time = self.at(now)?;
         time.cycles
             .checked_add(cycles)
-            .ok_or("native PMIC timer cycle deadline overflow")?;
+            .ok_or(refuse!("native PMIC timer cycle deadline overflow"))?;
         if cycles == 0 {
             return Ok(time.counter);
         }
@@ -74,8 +76,12 @@ impl Clock {
         let delta = numerator.div_ceil(u128::from(self.hz));
         let deadline = time
             .counter
-            .checked_add(u64::try_from(delta).map_err(|_| "native PMIC timer deadline overflow")?)
-            .ok_or("native PMIC timer deadline exceeds the system counter")?;
+            .checked_add(
+                u64::try_from(delta).map_err(|_| refuse!("native PMIC timer deadline overflow"))?,
+            )
+            .ok_or(refuse!(
+                "native PMIC timer deadline exceeds the system counter"
+            ))?;
         // A single system-counter step can advance multiple native cycles.
         // The target may fit while the first reachable time overshoots the
         // cycle horizon; do not publish that unusable deadline.

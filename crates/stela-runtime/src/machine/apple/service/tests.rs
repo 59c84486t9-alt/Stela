@@ -1,4 +1,5 @@
 use super::*;
+use crate::Result;
 use {
     stela_contracts::bus::MmioDevice, stela_contracts::interrupt::InterruptSink,
     stela_contracts::interrupt::Wire,
@@ -216,7 +217,7 @@ struct ResettingClient {
 }
 
 impl stela_contracts::bus::Lifecycle for ResettingClient {
-    fn check_lifecycle(&self, _: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, _: LifecycleState) -> Result<()> {
         Ok(())
     }
 

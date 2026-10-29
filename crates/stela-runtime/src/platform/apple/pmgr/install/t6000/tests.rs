@@ -4,6 +4,7 @@ use alloc::{
     collections::{BTreeMap, BTreeSet},
     vec,
 };
+use stela_contracts::refuse;
 use {
     crate::platform::apple::pmgr::install::Action, crate::platform::apple::pmgr::install::Blockage,
     crate::platform::apple::pmgr::install::FinishError,
@@ -33,7 +34,7 @@ impl MmioDevice for Bank {
                 offset,
                 width,
                 direction: Direction::Read,
-                reason: "no supplied register observation",
+                reason: refuse!("no supplied register observation"),
             })
     }
     fn write(
@@ -51,7 +52,7 @@ impl MmioDevice for Bank {
                 offset,
                 width,
                 direction: Direction::Write,
-                reason: "committed physical effect followed by failure",
+                reason: refuse!("committed physical effect followed by failure"),
             });
         }
         Ok(())

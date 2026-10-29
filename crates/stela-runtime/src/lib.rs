@@ -5,6 +5,12 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #[macro_use]
 extern crate alloc;
+
+pub use stela_contracts::Refusal;
+
+/// A refused request names the values that decided it.
+pub type Result<T, E = Refusal> = core::result::Result<T, E>;
+
 mod checksum;
 pub mod machine;
 mod platform;

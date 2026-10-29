@@ -1,9 +1,11 @@
 use super::*;
+use crate::Result;
 use crate::machine::apple::memory_resources::t8112::{
     amcc::tests::{ram, source},
     tests::{configuration, descriptor},
 };
 use alloc::{vec, vec::Vec};
+use stela_contracts::refuse;
 use {
     crate::platform::apple::pmp::native::cache::policy::Inputs,
     crate::platform::apple::pmp::native::cache::publisher::Bank,
@@ -135,22 +137,17 @@ impl Bank for Fault<'_> {
     fn identity(&self) -> &publisher::Identity {
         self.view.identity()
     }
-    fn validate(&self) -> Result<(), &'static str> {
+    fn validate(&self) -> Result<()> {
         self.view.validate()
     }
-    fn read_quota(&mut self, group: u8) -> Result<u32, &'static str> {
+    fn read_quota(&mut self, group: u8) -> Result<u32> {
         self.view.read_quota(group)
     }
-    fn write_quota(
-        &mut self,
-        group: u8,
-        value: u32,
-        access: &mut Access<'_>,
-    ) -> Result<(), &'static str> {
+    fn write_quota(&mut self, group: u8, value: u32, access: &mut Access<'_>) -> Result<()> {
         self.attempts
             .push((group, self.local.bank().requests().last().unwrap().value));
         if group == 3 {
-            return Err("authored pre-store refusal");
+            return Err(refuse!("authored pre-store refusal"));
         }
         self.view.write_quota(group, value, access)
     }

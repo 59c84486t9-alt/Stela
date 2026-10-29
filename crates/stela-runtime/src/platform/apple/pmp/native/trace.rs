@@ -14,7 +14,9 @@
 //! outcome with its source code; it does not claim any record was published.
 use super::platform::owner::Completion;
 use alloc::{collections::VecDeque, rc::Rc, vec, vec::Vec};
+use stela_contracts::Refusal;
 use stela_contracts::bus::Access;
+use stela_contracts::refuse;
 
 mod protocol;
 use protocol::{Command, encode_body};
@@ -28,10 +30,10 @@ pub const OVERFLOW: u32 = 0x8000_000e;
 pub const FILTERED: u32 = 2;
 const OVERFLOW_EVENT: u32 = 0x86ff_0000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    Contract(&'static str),
-    Backend(&'static str),
+    Contract(Refusal),
+    Backend(Refusal),
 }
 /// Source configuration DATA, not allocation, arrival or readiness permission.
 /// The parent must keep its native configuration producer. The source
@@ -54,11 +56,11 @@ impl Configuration {
     pub fn from_source_capacity(capacity: u32) -> Result<Self, Error> {
         let slots = capacity
             .checked_add(1)
-            .ok_or(Error::Contract("trace slot count overflow"))?;
+            .ok_or(Error::Contract(refuse!("trace slot count overflow")))?;
         if capacity == 0 || slots > 0x00ff_ffff {
-            return Err(Error::Contract(
-                "trace source capacity exceeds endpoint3 count field",
-            ));
+            return Err(Error::Contract(refuse!(
+                "trace source capacity exceeds endpoint3 count field"
+            )));
         }
         Ok(Self {
             slots,
@@ -223,11 +225,11 @@ impl Emission {
     /// The caller may report a source-return failure once without claiming
     /// that tracing succeeded; MC itself ignores W0. Filtering is expected
     /// source selection and does not describe an unsupported destination.
-    pub fn diagnostic(self) -> Option<&'static str> {
+    pub fn diagnostic(self) -> Option<Refusal> {
         match self.source_return {
-            NO_BUFFER => Some("native trace returned80000008: no actual buffer"),
-            DISABLED => Some("native trace returned80000007: primary disabled"),
-            OVERFLOW => Some("native trace returned8000000e: ring overflow"),
+            NO_BUFFER => Some(refuse!("native trace returned80000008: no actual buffer")),
+            DISABLED => Some(refuse!("native trace returned80000007: primary disabled")),
+            OVERFLOW => Some(refuse!("native trace returned8000000e: ring overflow")),
             _ => None,
         }
     }
@@ -302,7 +304,7 @@ struct Job {
     restore_enabled: bool,
     wait_reached: bool,
     flush_context: Option<FlushContext>,
-    refusal: Option<&'static str>,
+    refusal: Option<Refusal>,
 }
 impl Job {
     fn new(serial: u64, ops: Vec<Op>, terminal: Progress) -> Self {
@@ -436,13 +438,13 @@ impl<B: Backend> Owner<B> {
     fn serial(&self) -> Result<u64, Error> {
         self.serial
             .checked_add(1)
-            .ok_or(Error::Contract("trace request serial exhausted"))
+            .ok_or(Error::Contract(refuse!("trace request serial exhausted")))
     }
     fn available(&self) -> Result<(), Error> {
         if self.foreground.is_some() || self.protocol.is_some() {
-            Err(Error::Contract(
-                "trace owner retains an unfinished operation",
-            ))
+            Err(Error::Contract(refuse!(
+                "trace owner retains an unfinished operation"
+            )))
         } else {
             Ok(())
         }
@@ -450,7 +452,7 @@ impl<B: Backend> Owner<B> {
     pub fn begin_initialize(&mut self) -> Result<(), Error> {
         self.available()?;
         if self.initialized {
-            return Err(Error::Contract("trace owner already initialized"));
+            return Err(Error::Contract(refuse!("trace owner already initialized")));
         }
         let serial = self.serial()?;
         let ops = vec![
@@ -467,7 +469,9 @@ impl<B: Backend> Owner<B> {
     pub fn begin_emit(&mut self, event: u32, args: [u64; 4]) -> Result<(), Error> {
         self.available()?;
         if !self.initialized {
-            return Err(Error::Contract("trace endpoint work not initialized"));
+            return Err(Error::Contract(refuse!(
+                "trace endpoint work not initialized"
+            )));
         }
         let serial = self.serial()?;
         let mut job = Job::new(
@@ -486,9 +490,9 @@ impl<B: Backend> Owner<B> {
     }
     pub fn begin_dispatch(&mut self) -> Result<(), Error> {
         if !self.initialized || self.protocol.is_some() {
-            return Err(Error::Contract(
-                "trace dispatcher unavailable or still retained",
-            ));
+            return Err(Error::Contract(refuse!(
+                "trace dispatcher unavailable or still retained"
+            )));
         }
         // A source pause releases the queue lock while waiting; its ACK callback
         // must be dispatched independently. Other interleavings need an owner.
@@ -497,9 +501,9 @@ impl<B: Backend> Owner<B> {
             .as_ref()
             .is_some_and(|j| j.ops.front().is_none_or(|op| !matches!(op, Op::PauseWait)))
         {
-            return Err(Error::Contract(
-                "trace producer and command execution are serialized",
-            ));
+            return Err(Error::Contract(refuse!(
+                "trace producer and command execution are serialized"
+            )));
         }
         let serial = self.serial()?;
         self.protocol = Some(Job::new(
@@ -516,9 +520,9 @@ impl<B: Backend> Owner<B> {
     pub fn begin_lifecycle(&mut self, prior: u32, next: u32) -> Result<(), Error> {
         self.available()?;
         if !self.initialized {
-            return Err(Error::Contract(
-                "trace lifecycle before actual endpoint initialization",
-            ));
+            return Err(Error::Contract(refuse!(
+                "trace lifecycle before actual endpoint initialization"
+            )));
         }
         let serial = self.serial()?;
         let (ops, terminal) = if prior <= 8 && next == 0x21 {
@@ -548,7 +552,9 @@ impl<B: Backend> Owner<B> {
                 Progress::Paused | Progress::Resumed | Progress::LifecycleUnchanged
             )
         }) {
-            return Err(Error::Contract("trace has no retained lifecycle operation"));
+            return Err(Error::Contract(refuse!(
+                "trace has no retained lifecycle operation"
+            )));
         }
         self.advance_job(false, access)
     }
@@ -561,7 +567,8 @@ impl<B: Backend> Owner<B> {
         } else {
             self.foreground.take()
         };
-        let mut job = retained.ok_or(Error::Contract("trace has no retained operation"))?;
+        let mut job =
+            retained.ok_or(Error::Contract(refuse!("trace has no retained operation")))?;
         if job.ops.is_empty() {
             return Ok(job.terminal);
         }
@@ -573,7 +580,7 @@ impl<B: Backend> Owner<B> {
                 } else {
                     self.foreground = Some(job);
                 }
-                return Err(Error::Contract("trace operation cursor exhausted"));
+                return Err(Error::Contract(refuse!("trace operation cursor exhausted")));
             }
         };
         let request = Request {
@@ -611,9 +618,9 @@ impl<B: Backend> Owner<B> {
             Buffer::Primary => self.primary.as_mut(),
             Buffer::Filter => self.filter.as_mut(),
         }
-        .ok_or(Error::Contract(
-            "trace operation has no actual mapped buffer",
-        ))
+        .ok_or(Error::Contract(refuse!(
+            "trace operation has no actual mapped buffer"
+        )))
     }
     fn step(
         &mut self,
@@ -712,7 +719,7 @@ impl<B: Backend> Owner<B> {
             Op::NotifyApply => {
                 if !job
                     .flush_context
-                    .ok_or(Error::Contract("trace flush context missing"))?
+                    .ok_or(Error::Contract(refuse!("trace flush context missing")))?
                     .blocked()
                     && !self.pending
                 {
@@ -749,9 +756,9 @@ impl<B: Backend> Owner<B> {
             Op::FlushCheck => {
                 if !self.paused && self.pending && !self.flush_busy {
                     if self.primary.is_none() {
-                        return Err(Error::Contract(
-                            "trace pending flush without actual primary mapping",
-                        ));
+                        return Err(Error::Contract(refuse!(
+                            "trace pending flush without actual primary mapping"
+                        )));
                     }
                     self.flush_busy = true;
                     return Ok(Flow::Expand(vec![
@@ -817,7 +824,9 @@ impl<B: Backend> Owner<B> {
             }
             Op::Map(buffer, geometry) => {
                 if self.mapping.is_some() {
-                    return Err(Error::Contract("trace retains an unfinished mapping"));
+                    return Err(Error::Contract(refuse!(
+                        "trace retains an unfinished mapping"
+                    )));
                 }
                 let mapping = retired!(job, self.backend.map(request, buffer, geometry, access));
                 self.mapping = Some((buffer, mapping));
@@ -826,20 +835,21 @@ impl<B: Backend> Owner<B> {
                 let (kind, mapping) = self
                     .mapping
                     .as_ref()
-                    .ok_or(Error::Contract("trace map returned no resource"))?;
+                    .ok_or(Error::Contract(refuse!("trace map returned no resource")))?;
                 if *kind != buffer || mapping.geometry() != geometry {
-                    return Err(Error::Contract(
-                        "trace map returned foreign geometry; resource retained",
-                    ));
+                    return Err(Error::Contract(refuse!(
+                        "trace map returned foreign geometry; resource retained"
+                    )));
                 }
             }
             Op::Prepare(buffer) => {
-                let (kind, mapping) = self
-                    .mapping
-                    .as_mut()
-                    .ok_or(Error::Contract("trace preparation lacks actual map"))?;
+                let (kind, mapping) = self.mapping.as_mut().ok_or(Error::Contract(refuse!(
+                    "trace preparation lacks actual map"
+                )))?;
                 if *kind != buffer {
-                    return Err(Error::Contract("trace preparation target mismatch"));
+                    return Err(Error::Contract(refuse!(
+                        "trace preparation target mismatch"
+                    )));
                 }
                 retired!(
                     job,
@@ -850,11 +860,11 @@ impl<B: Backend> Owner<B> {
                 let (kind, mapping) = self
                     .mapping
                     .take()
-                    .ok_or(Error::Contract("trace commit lacks actual map"))?;
+                    .ok_or(Error::Contract(refuse!("trace commit lacks actual map")))?;
                 // Earlier preflight guarantees empty destination and identity.
                 if kind != buffer {
                     self.mapping = Some((kind, mapping));
-                    return Err(Error::Contract("trace mapping target mismatch"));
+                    return Err(Error::Contract(refuse!("trace mapping target mismatch")));
                 }
                 match buffer {
                     Buffer::Primary => self.primary = Some(mapping),
@@ -953,9 +963,9 @@ impl<B: Backend> Owner<B> {
                     || (buffer == Buffer::Filter && self.filter.is_some())
                     || self.mapping.is_some()
                 {
-                    return Err(Error::Contract(
-                        "trace replacement mapping needs qualified release ownership",
-                    ));
+                    return Err(Error::Contract(refuse!(
+                        "trace replacement mapping needs qualified release ownership"
+                    )));
                 }
                 let geometry = Geometry {
                     address,
@@ -968,7 +978,7 @@ impl<B: Backend> Owner<B> {
                 };
                 address
                     .checked_add(geometry.bytes)
-                    .ok_or(Error::Contract("trace AP buffer range overflow"))?;
+                    .ok_or(Error::Contract(refuse!("trace AP buffer range overflow")))?;
                 vec![
                     Op::Map(buffer, geometry),
                     Op::ValidateMap(buffer, geometry),
@@ -978,9 +988,9 @@ impl<B: Backend> Owner<B> {
             }
             Command::Consumed(target) => {
                 if target >= self.configuration.slots || self.primary.is_none() {
-                    return Err(Error::Contract(
-                        "trace consumed index lacks valid actual primary slice",
-                    ));
+                    return Err(Error::Contract(refuse!(
+                        "trace consumed index lacks valid actual primary slice"
+                    )));
                 }
                 job.target = target;
                 job.clear = self.read;
@@ -988,7 +998,9 @@ impl<B: Backend> Owner<B> {
             }
             Command::Reset => {
                 if self.primary.is_none() {
-                    return Err(Error::Contract("trace reset has no actual primary buffer"));
+                    return Err(Error::Contract(refuse!(
+                        "trace reset has no actual primary buffer"
+                    )));
                 }
                 vec![Op::ResetBegin, Op::ResetClear, Op::ResetDone]
             }

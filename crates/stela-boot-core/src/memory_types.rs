@@ -1,6 +1,8 @@
 //! Initial offline-AP memory types, copied from the live BSP configuration.
 //! This is not an update protocol for an already participating processor.
+use crate::Result;
 use crate::topology::Snapshot;
+use stela_contracts::refuse;
 pub mod amd;
 mod ranges;
 
@@ -30,16 +32,18 @@ pub struct Image {
     pub amd: Option<amd::State>,
 }
 
-fn register(snapshot: &Snapshot, index: u32) -> Result<u64, &'static str> {
+fn register(snapshot: &Snapshot, index: u32) -> Result<u64> {
     let mut values = snapshot
         .msrs
         .get(..snapshot.msr_count as usize)
-        .ok_or("invalid memory-type observation")?
+        .ok_or(refuse!("invalid memory-type observation"))?
         .iter()
         .filter(|msr| msr.index == index);
-    let value = values.next().ok_or("incomplete memory-type observation")?;
+    let value = values
+        .next()
+        .ok_or(refuse!("incomplete memory-type observation"))?;
     if values.next().is_some() {
-        return Err("duplicate memory-type observation");
+        return Err(refuse!("duplicate memory-type observation"));
     }
     Ok(value.value)
 }
@@ -55,23 +59,27 @@ fn memory_type(value: u8, cap: u64) -> bool {
 }
 
 impl Image {
-    pub fn from_snapshot(snapshot: &Snapshot) -> Result<Self, &'static str> {
+    pub fn from_snapshot(snapshot: &Snapshot) -> Result<Self> {
         if snapshot.cr0 & ((1 << 29) | (1 << 30)) != 0 {
-            return Err("BSP cache-disable controls do not permit WB sharing");
+            return Err(refuse!(
+                "BSP cache-disable controls do not permit WB sharing"
+            ));
         }
         if !intel(snapshot) && !amd::architectural(snapshot) {
-            return Err("native initial MTRR recipe has no qualified vendor/capability controls");
+            return Err(refuse!(
+                "native initial MTRR recipe has no qualified vendor/capability controls"
+            ));
         }
         let cap = register(snapshot, CAP)?;
         let variables = (cap & 0xff) as usize;
         if variables > MAX_VARIABLE {
-            return Err("native MTRR capacity exceeds captured image");
+            return Err(refuse!("native MTRR capacity exceeds captured image"));
         }
         let physical_bits = snapshot
             .get(0x8000_0008, 0)
             .map(|leaf| leaf.eax as u8)
             .filter(|bits| (36..=52).contains(bits))
-            .ok_or("native MTRRs need source physical-address width")?;
+            .ok_or(refuse!("native MTRRs need source physical-address width"))?;
         let amd = if amd::architectural(snapshot) {
             Some(amd::State::from_snapshot(snapshot, physical_bits)?)
         } else {
@@ -82,10 +90,12 @@ impl Image {
             || !memory_type(default as u8, cap)
             || (default & (1 << 10) != 0 && cap & (1 << 8) == 0)
         {
-            return Err("unsupported BSP memory-type controls");
+            return Err(refuse!("unsupported BSP memory-type controls"));
         }
         if default & (1 << 11) == 0 {
-            return Err("BSP memory types must be enabled before AP admission");
+            return Err(refuse!(
+                "BSP memory types must be enabled before AP admission"
+            ));
         }
         let mut image = Self {
             cap,
@@ -118,7 +128,7 @@ impl Image {
                 value & !(physical_mask | (1 << 11)) == 0
             };
             if !supported {
-                return Err("unsupported BSP memory-type register fields");
+                return Err(refuse!("unsupported BSP memory-type register fields"));
             }
             if !FIXED.contains(&index) && (index - VARIABLE_BASE) % 2 == 1 && value & (1 << 11) != 0
             {
@@ -136,7 +146,7 @@ impl Image {
 
     /// Old contents may be uninitialized on a never-admitted AP. Hardware
     /// capacity/physical-width differences may not be normalized away.
-    pub fn compatible(&self, snapshot: &Snapshot) -> Result<(), &'static str> {
+    pub fn compatible(&self, snapshot: &Snapshot) -> Result<()> {
         match self.amd {
             Some(source) => {
                 source.compatible(amd::State::from_snapshot(snapshot, self.physical_bits)?)?;
@@ -148,17 +158,23 @@ impl Image {
                 {
                     let expected = u64::from(write.low) | u64::from(write.high) << 32;
                     if (expected ^ register(snapshot, write.index)?) & 0x1818_1818_1818_1818 != 0 {
-                        return Err("AMD initial fixed DRAM routing differs across cores");
+                        return Err(refuse!(
+                            "AMD initial fixed DRAM routing differs across cores"
+                        ));
                     }
                 }
             }
-            None if !intel(snapshot) => return Err("selected processor vendor differs from BSP"),
+            None if !intel(snapshot) => {
+                return Err(refuse!("selected processor vendor differs from BSP"));
+            }
             None => {}
         }
         if register(snapshot, CAP)? != self.cap
             || snapshot.get(0x8000_0008, 0).map(|leaf| leaf.eax as u8) != Some(self.physical_bits)
         {
-            return Err("physical cores have incompatible MTRR capabilities");
+            return Err(refuse!(
+                "physical cores have incompatible MTRR capabilities"
+            ));
         }
         Ok(())
     }

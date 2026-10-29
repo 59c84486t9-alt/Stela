@@ -66,10 +66,13 @@
 //!   Enables and dynamic gating are held as written.
 use super::generation::{Family, Gpu, MMU_ENABLE, Mmu, Model};
 use super::uat::{self, Uat};
+use crate::Result;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
@@ -112,7 +115,7 @@ const GATING_BITS: u32 = 0b110;
 
 /// Check that `banks` (`(physical base, bytes, register offset)`) cover
 /// every register the model serves for `family`, which must be modeled.
-pub fn covers(family: &Family, banks: &[(u64, u64, u64)]) -> Result<(), &'static str> {
+pub fn covers(family: &Family, banks: &[(u64, u64, u64)]) -> Result<()> {
     let gpc = family.model()?.gpc;
     let fixed = [
         gpc + GPC_PERFORMANCE_STATE,
@@ -152,7 +155,7 @@ pub fn covers(family: &Family, banks: &[(u64, u64, u64)]) -> Result<(), &'static
     if registers.all(covered) {
         Ok(())
     } else {
-        Err("the sgx banks leave a modeled register unmapped")
+        Err(refuse!("the sgx banks leave a modeled register unmapped"))
     }
 }
 
@@ -180,7 +183,7 @@ impl Default for Native {
 }
 
 impl Native {
-    fn read(&self, family: &Family, offset: u64) -> Result<u32, &'static str> {
+    fn read(&self, family: &Family, offset: u64) -> Result<u32> {
         match offset {
             GATING_CONTROL => Ok(self.gating),
             FENDER_SLEEP if fender_sleep_supported(family) => Ok(self.sleep_request),
@@ -190,16 +193,16 @@ impl Native {
             } else {
                 GIFAF_SLEEP_COMPLETE
             }),
-            _ => Err("GFX native callback register read is not modeled"),
+            _ => Err(refuse!("GFX native callback register read is not modeled")),
         }
     }
-    fn write(&mut self, family: &Family, offset: u64, value: u32) -> Result<(), &'static str> {
+    fn write(&mut self, family: &Family, offset: u64, value: u32) -> Result<()> {
         match offset {
             GATING_CONTROL if value & !GATING_BITS == 0 => self.gating = value,
-            GATING_CONTROL => return Err("GPU gating control bit is not modeled"),
+            GATING_CONTROL => return Err(refuse!("GPU gating control bit is not modeled")),
             FENDER_SLEEP if fender_sleep_supported(family) => {
                 if value > 1 {
-                    return Err("GPU Fender sleep request is not zero or one");
+                    return Err(refuse!("GPU Fender sleep request is not zero or one"));
                 }
                 self.sleep_request = value;
                 if value == 1 {
@@ -211,17 +214,17 @@ impl Native {
             }
             FENDER_WAKE if fender_sleep_supported(family) => {
                 if self.sleep_request != 0 {
-                    return Err(
-                        "GPU Fender wake while the sleep request remains asserted is not qualified",
-                    );
+                    return Err(refuse!(
+                        "GPU Fender wake while the sleep request remains asserted is not qualified"
+                    ));
                 }
                 if value != 1 {
-                    return Err("GPU Fender wake operation is not modeled");
+                    return Err(refuse!("GPU Fender wake operation is not modeled"));
                 }
                 self.wake = value;
                 self.gpu_awake.set(true);
             }
-            _ => return Err("GFX native callback register write is not modeled"),
+            _ => return Err(refuse!("GFX native callback register write is not modeled")),
         }
         Ok(())
     }
@@ -243,24 +246,28 @@ impl FirmwarePower {
     /// it into the WrAd firmware patch. A recovered family-specific callback
     /// additionally checks its private control word against the SGX banks.
     /// This checks ownership only; it does not model control-field effects.
-    pub fn with_asc_wrapper(mut self, physical: u64) -> Result<Self, &'static str> {
+    pub fn with_asc_wrapper(mut self, physical: u64) -> Result<Self> {
         physical
             .checked_add(super::super::asc::WRAPPER_BYTES)
-            .ok_or("GFX ASC wrapper physical aperture wraps")?;
+            .ok_or(refuse!("GFX ASC wrapper physical aperture wraps"))?;
         if self.asc_wrapper.is_some_and(|held| held != physical) {
-            return Err("GFX native power owner cannot be rebound to a different ASC wrapper");
+            return Err(refuse!(
+                "GFX native power owner cannot be rebound to a different ASC wrapper"
+            ));
         }
         if let Some(offset) = self.family.model()?.native_asc_control {
             let control = physical
                 .checked_add(offset)
-                .ok_or("GFX native ASC control physical address wraps")?;
+                .ok_or(refuse!("GFX native ASC control physical address wraps"))?;
             if !self.banks.iter().any(|&(base, bytes, _)| {
                 control
                     .checked_sub(base)
                     .and_then(|at| at.checked_add(8))
                     .is_some_and(|end| end <= bytes)
             }) {
-                return Err("GFX native ASC control is not wholly inside a qualified SGX bank");
+                return Err(refuse!(
+                    "GFX native ASC control is not wholly inside a qualified SGX bank"
+                ));
             }
         }
         self.asc_wrapper = Some(physical);
@@ -285,18 +292,20 @@ impl FirmwarePower {
         self.family
     }
 
-    pub(super) fn check_reset(&self) -> Result<(), &'static str> {
+    pub(super) fn check_reset(&self) -> Result<()> {
         if !self.native.borrow().gpu_awake.get() {
-            return Err("GFX firmware reset while native GPU sleep retains restore ownership");
+            return Err(refuse!(
+                "GFX firmware reset while native GPU sleep retains restore ownership"
+            ));
         }
         Ok(())
     }
     #[cfg(test)]
-    fn logical(&self, physical: u64) -> Result<u64, &'static str> {
+    fn logical(&self, physical: u64) -> Result<u64> {
         self.logical_range(physical, 4)
     }
     #[cfg(test)]
-    fn logical_range(&self, physical: u64, width: u64) -> Result<u64, &'static str> {
+    fn logical_range(&self, physical: u64, width: u64) -> Result<u64> {
         for &(base, bytes, offset) in &self.banks {
             if let Some(at) = physical.checked_sub(base)
                 && at.checked_add(width).is_some_and(|end| end <= bytes)
@@ -304,7 +313,9 @@ impl FirmwarePower {
                 return Ok(offset + at);
             }
         }
-        Err("GFX firmware PIO does not target a mounted SGX bank")
+        Err(refuse!(
+            "GFX firmware PIO does not target a mounted SGX bank"
+        ))
     }
 
     /// Resolve a PIO word through the firmware's UAT permissions before any
@@ -317,27 +328,35 @@ impl FirmwarePower {
         region: &crate::research::agx_pio::Region,
         offset: u32,
         write: bool,
-    ) -> Result<u64, &'static str> {
+    ) -> Result<u64> {
         if !self.native.borrow().available {
-            return Err("GFX firmware PIO while PMGR inhibits SGX execution");
+            return Err(refuse!(
+                "GFX firmware PIO while PMGR inhibits SGX execution"
+            ));
         }
         if !matches!(
             region.kind,
             crate::research::agx_pio::Kind::GFender | crate::research::agx_pio::Kind::GmGifaf
         ) {
-            return Err("GFX native callback PIO region is not modeled");
+            return Err(refuse!("GFX native callback PIO region is not modeled"));
         }
         let (va, expected) = region.word(offset, write)?;
         let physical = port
             .iommu
             .translate(port.memory, port.stream, va, va + 3, write, port.access)
             .map_err(|error| match error {
-                stela_contracts::dma::DmaError::Fault(_) => "GFX firmware PIO faults in the UAT",
-                stela_contracts::dma::DmaError::Memory => "GFX firmware PIO page table is not RAM",
+                stela_contracts::dma::DmaError::Fault(code) => {
+                    refuse!("GFX firmware PIO faults in the UAT", code)
+                }
+                stela_contracts::dma::DmaError::Memory => {
+                    refuse!("GFX firmware PIO page table is not RAM")
+                }
                 stela_contracts::dma::DmaError::Unsupported(reason) => reason,
             })?;
         if physical != expected {
-            return Err("GFX firmware PIO translation disagrees with its AP physical descriptor");
+            return Err(refuse!(
+                "GFX firmware PIO translation disagrees with its AP physical descriptor"
+            ));
         }
         let logical = self.logical(physical)?;
         let kind_matches = match region.kind {
@@ -348,7 +367,9 @@ impl FirmwarePower {
             _ => false,
         };
         if !kind_matches {
-            return Err("GFX native callback PIO kind disagrees with its target register");
+            return Err(refuse!(
+                "GFX native callback PIO kind disagrees with its target register"
+            ));
         }
         Ok(logical)
     }
@@ -361,7 +382,7 @@ impl FirmwarePower {
         port: &mut stela_contracts::dma::Port<'_, '_>,
         region: &crate::research::agx_pio::Region,
         offset: u32,
-    ) -> Result<u32, &'static str> {
+    ) -> Result<u32> {
         let logical = self.target(port, region, offset, false)?;
         self.native.borrow().read(self.family, logical)
     }
@@ -372,7 +393,7 @@ impl FirmwarePower {
         region: &crate::research::agx_pio::Region,
         offset: u32,
         value: u32,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         let logical = self.target(port, region, offset, true)?;
         self.native.borrow_mut().write(self.family, logical, value)
     }
@@ -395,7 +416,7 @@ pub struct Sgx {
 
 impl Sgx {
     /// The registers of `gpu`, which must be admitted.
-    pub fn new(gpu: &'static Gpu) -> Result<Self, &'static str> {
+    pub fn new(gpu: &'static Gpu) -> Result<Self> {
         let identity = gpu.admitted()?;
         let model = gpu.family.model()?;
         let native = Rc::new(RefCell::new(Native::default()));
@@ -426,11 +447,11 @@ impl Sgx {
     /// `setupMMUConfig` would and enabled at the 16 KiB-aligned `ttbat`,
     /// with the shared TTBR1 window resolving from the page-directory page
     /// `shared_l2` (`gfx-shared-l2-region`, [`uat::SHARED_INDEX`]).
-    pub fn handed_off(gpu: &'static Gpu, ttbat: u64, shared_l2: u64) -> Result<Self, &'static str> {
+    pub fn handed_off(gpu: &'static Gpu, ttbat: u64, shared_l2: u64) -> Result<Self> {
         let mut sgx = Self::new(gpu)?;
         let page = ttbat >> uat::PAGE_SHIFT;
         if ttbat == 0 || page >> sgx.mmu().ttbat_page_bits != 0 {
-            return Err("GPU TTBAT outside the MMU's page field");
+            return Err(refuse!("GPU TTBAT outside the MMU's page field"));
         }
         sgx.uat.configure(ttbat)?;
         sgx.uat.share_kernel_window(shared_l2)?;
@@ -452,19 +473,21 @@ impl Sgx {
 
     /// Bind firmware PIO to this exact GPU instance and its mounted banks.
     /// The geometry alone grants no additional register semantics.
-    pub fn firmware_power(&self, banks: &[(u64, u64, u64)]) -> Result<FirmwarePower, &'static str> {
+    pub fn firmware_power(&self, banks: &[(u64, u64, u64)]) -> Result<FirmwarePower> {
         for (index, &(physical, bytes, offset)) in banks.iter().enumerate() {
             if bytes == 0
                 || physical.checked_add(bytes).is_none()
                 || offset.checked_add(bytes).is_none()
             {
-                return Err("GFX firmware PIO bank has an empty or wrapping range");
+                return Err(refuse!(
+                    "GFX firmware PIO bank has an empty or wrapping range"
+                ));
             }
             for &(other, length, logical) in &banks[..index] {
                 if physical < other + length && other < physical + bytes
                     || offset < logical + length && logical < offset + bytes
                 {
-                    return Err("GFX firmware PIO banks overlap");
+                    return Err(refuse!("GFX firmware PIO banks overlap"));
                 }
             }
         }
@@ -481,15 +504,15 @@ impl Sgx {
         &self.family.mmu
     }
 
-    fn accessible(&self) -> Result<(), &'static str> {
+    fn accessible(&self) -> Result<()> {
         if !self.lifecycle.powered {
-            return Err("SGX power is gated");
+            return Err(refuse!("SGX power is gated"));
         }
         if !self.lifecycle.clocked {
-            return Err("SGX clock is gated");
+            return Err(refuse!("SGX clock is gated"));
         }
         if self.lifecycle.reset {
-            return Err("SGX reset is asserted");
+            return Err(refuse!("SGX reset is asserted"));
         }
         Ok(())
     }
@@ -510,7 +533,7 @@ impl Sgx {
             .position(|&register| register == offset)
     }
 
-    fn read32(&self, offset: u64) -> Result<u32, &'static str> {
+    fn read32(&self, offset: u64) -> Result<u32> {
         let id = &self.identity;
         let mmu = self.mmu();
         let identification = self.model.identification;
@@ -542,11 +565,11 @@ impl Sgx {
             MMU_ENABLE => u32::from(self.mmu_enabled),
             _ if offset == mmu.ttbat => self.ttbat_page,
             _ if offset == mmu.invalidate => self.last_invalidate,
-            _ => return Err("sgx register is not modeled"),
+            _ => return Err(refuse!("sgx register is not modeled")),
         })
     }
 
-    fn write32(&mut self, offset: u64, value: u32) -> Result<(), &'static str> {
+    fn write32(&mut self, offset: u64, value: u32) -> Result<()> {
         let mmu = self.mmu();
         let mmu_register = offset == MMU_ENABLE
             || offset == mmu.ttbat
@@ -555,14 +578,14 @@ impl Sgx {
         match offset {
             _ if offset == gpc + GPC_HOST_INTERRUPT_ENABLE => {
                 if value & !GPC_HOST_INTERRUPTS != 0 {
-                    return Err("GPC host-interrupt enable bit is not modeled");
+                    return Err(refuse!("GPC host-interrupt enable bit is not modeled"));
                 }
                 self.interrupt_enable = value;
             }
             _ if offset == gpc + GPC_HOST_INTERRUPT_STATUS => {
                 // Nothing is ever pending, so an acknowledgement clears nothing.
                 if value & !GPC_HOST_INTERRUPTS != 0 {
-                    return Err("GPC host-interrupt status bit is not modeled");
+                    return Err(refuse!("GPC host-interrupt status bit is not modeled"));
                 }
             }
             GATING_CONTROL | FENDER_SLEEP | FENDER_WAKE => {
@@ -570,11 +593,11 @@ impl Sgx {
             }
             _ if offset == mmu.invalidate => self.last_invalidate = value,
             _ if self.mmu_enabled && mmu_register => {
-                return Err("reconfiguring an enabled GPU MMU is not modeled");
+                return Err(refuse!("reconfiguring an enabled GPU MMU is not modeled"));
             }
             _ if offset == mmu.ttbat => {
                 if value >> mmu.ttbat_page_bits != 0 {
-                    return Err("TTBAT page number wider than the MMU's field");
+                    return Err(refuse!("TTBAT page number wider than the MMU's field"));
                 }
                 self.ttbat_page = value;
             }
@@ -588,17 +611,19 @@ impl Sgx {
                         .zip(&self.configuration)
                         .all(|(&(_, wanted), &held)| wanted == held);
                     if !configured || ttbat == 0 {
-                        return Err("GPU MMU enabled before its configuration is written");
+                        return Err(refuse!(
+                            "GPU MMU enabled before its configuration is written"
+                        ));
                     }
                     self.uat.configure(ttbat)?;
                     self.mmu_enabled = true;
                 }
-                _ => return Err("GPU MMU enable value is not modeled"),
+                _ => return Err(refuse!("GPU MMU enable value is not modeled")),
             },
             _ => match self.configuration_slot(offset) {
                 Some((slot, wanted)) if value == wanted => self.configuration[slot] = value,
-                Some(_) => return Err("GPU MMU configuration value is not modeled"),
-                None => return Err("sgx register is not modeled"),
+                Some(_) => return Err(refuse!("GPU MMU configuration value is not modeled")),
+                None => return Err(refuse!("sgx register is not modeled")),
             },
         }
         Ok(())
@@ -606,13 +631,13 @@ impl Sgx {
 }
 
 impl Lifecycle for Sgx {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         if proposed.reset && !self.lifecycle.reset
             || !proposed.powered && self.lifecycle.powered && !proposed.retention
         {
-            return Err(
-                "SGX physical reset or nonretained power loss requires protected UAT and firmware restore semantics",
-            );
+            return Err(refuse!(
+                "SGX physical reset or nonretained power loss requires protected UAT and firmware restore semantics"
+            ));
         }
         Ok(())
     }
@@ -663,10 +688,10 @@ impl MmioDevice for Sgx {
         value: u64,
         _access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         self.accessible().map_err(fail)?;
         if width != Width::Word {
-            return Err(fail("sgx register access width is not qualified"));
+            return Err(fail(refuse!("sgx register access width is not qualified")));
         }
         self.write32(offset, value as u32).map_err(fail)
     }

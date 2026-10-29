@@ -1,6 +1,8 @@
 //! DeviceTree namespace records, independent of a backing medium or driver.
 //! The execution model assigns and erases medium extents separately.
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 pub const BLOCK_BYTES: u32 = 4096;
 const RECORD_BYTES: usize = 12;
@@ -13,9 +15,9 @@ pub struct Description {
 }
 
 impl Description {
-    pub fn decode(property: &[u8]) -> Result<Vec<Self>, &'static str> {
+    pub fn decode(property: &[u8]) -> Result<Vec<Self>> {
         if property.is_empty() || !property.len().is_multiple_of(RECORD_BYTES) {
-            return Err("ANS namespaces must be nonempty 12-byte records");
+            return Err(refuse!("ANS namespaces must be nonempty 12-byte records"));
         }
         let mut records = Vec::new();
         for record in property.as_chunks::<RECORD_BYTES>().0 {
@@ -26,12 +28,14 @@ impl Description {
                 blocks: word(8),
             };
             if entry.id as usize != records.len() + 1 || entry.kind >= 16 {
-                return Err("ANS namespaces require consecutive IDs and a four-bit type");
+                return Err(refuse!(
+                    "ANS namespaces require consecutive IDs and a four-bit type"
+                ));
             }
             records.push(entry);
         }
         if records.len() > 255 {
-            return Err("ANS has more than 255 namespaces");
+            return Err(refuse!("ANS has more than 255 namespaces"));
         }
         Ok(records)
     }

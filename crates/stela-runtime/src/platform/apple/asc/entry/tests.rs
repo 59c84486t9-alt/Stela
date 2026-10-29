@@ -1,7 +1,9 @@
 use super::*;
+use crate::Result;
 use crate::platform::apple::asc::{Asc, Firmware, Lines, Message};
 use alloc::{boxed::Box, vec::Vec};
 use stela_contracts::bus::Lifecycle;
+use stela_contracts::refuse;
 use {stela_contracts::dma::Memory, stela_contracts::dma::test_support::Ram};
 use {stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch};
 
@@ -12,22 +14,24 @@ struct FetchOwner {
 }
 struct Peer(Rc<RefCell<FetchOwner>>);
 impl Firmware for Peer {
-    fn fetch_entry(&mut self, iop: u64) -> Result<EntryFetch, &'static str> {
+    fn fetch_entry(&mut self, iop: u64) -> Result<EntryFetch> {
         let mut owner = self.0.borrow_mut();
         if !owner.allocated {
-            return Err("test allocation owner released");
+            return Err(refuse!("test allocation owner released"));
         }
-        let (base, physical, bytes) = owner.mapping.ok_or("test IOP mapping is absent")?;
-        let offset = iop.checked_sub(base).ok_or("test fetch precedes mapping")?;
+        let (base, physical, bytes) = owner.mapping.ok_or(refuse!("test IOP mapping is absent"))?;
+        let offset = iop
+            .checked_sub(base)
+            .ok_or(refuse!("test fetch precedes mapping"))?;
         if offset.checked_add(4).is_none_or(|end| end > bytes) {
-            return Err("test complete fetch exceeds mapping");
+            return Err(refuse!("test complete fetch exceeds mapping"));
         }
         let physical = physical
             .checked_add(offset)
-            .ok_or("test fetch physical overflow")?;
+            .ok_or(refuse!("test fetch physical overflow"))?;
         let mut raw = [0; 4];
         if !owner.ram.read(physical, &mut raw) {
-            return Err("test fetch is not owned RAM");
+            return Err(refuse!("test fetch is not owned RAM"));
         }
         Ok(EntryFetch {
             physical,
@@ -35,22 +39,22 @@ impl Firmware for Peer {
         })
     }
 
-    fn start(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn start(&mut self, _: &mut Vec<Message>) -> Result<()> {
         Ok(())
     }
-    fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<()> {
         Ok(())
     }
-    fn check_reset(&self) -> Result<(), &'static str> {
+    fn check_reset(&self) -> Result<()> {
         Ok(())
     }
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         Ok(())
     }
-    fn stop(&mut self) -> Result<(), &'static str> {
+    fn stop(&mut self) -> Result<()> {
         Ok(())
     }
-    fn resume(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn resume(&mut self, _: &mut Vec<Message>) -> Result<()> {
         Ok(())
     }
 }
@@ -334,10 +338,10 @@ fn source_instruction_or_resolved_physical_mismatch_refuses_handoff() {
 fn protocol_only_peer_cannot_claim_original_entry_ownership() {
     struct Protocol;
     impl Firmware for Protocol {
-        fn start(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn start(&mut self, _: &mut Vec<Message>) -> Result<()> {
             Ok(())
         }
-        fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<()> {
             Ok(())
         }
     }
@@ -349,6 +353,8 @@ fn protocol_only_peer_cannot_claim_original_entry_ownership() {
     .unwrap();
     assert_eq!(
         asc.establish_entry(handoff(ENTRY | LOCK)),
-        Err("original coprocessor instruction fetch ownership is not modeled")
+        Err(refuse!(
+            "original coprocessor instruction fetch ownership is not modeled"
+        ))
     );
 }

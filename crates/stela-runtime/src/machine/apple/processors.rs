@@ -2,6 +2,8 @@
 //! counters and the AIC.
 
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 
 impl AppleDevices {
     /// Apple's fast-IPI registers for PEs with these MPIDR_EL1 values, in PE
@@ -135,14 +137,9 @@ impl AppleDevices {
     /// The PMGR's CPU start registers for `clusters` clusters at `physical`,
     /// releasing the PEs with these MPIDR_EL1 values, in PE order, at the
     /// RVBARs of their `cpu-impl-reg` blocks.
-    pub fn add_cpu_start(
-        &mut self,
-        physical: u64,
-        clusters: u8,
-        mpidrs: &[u64],
-    ) -> Result<(), String> {
+    pub fn add_cpu_start(&mut self, physical: u64, clusters: u8, mpidrs: &[u64]) -> Result<()> {
         if self.cpu_start.is_some() {
-            return Err("CPU start owner is already bound".into());
+            return Err(refuse!("CPU start owner is already bound"));
         }
         let device = self
             .bus
@@ -150,7 +147,7 @@ impl AppleDevices {
                 Box::new(CpuStart::new(clusters)),
                 &[(physical, stela_soc_data::cpustart::bytes(clusters), 0)],
             )
-            .map_err(|error| format!("CPU start placement: {error:?}"))?;
+            .map_err(|error| refuse!("CPU start placement: {error}", ?error))?;
         self.cpu_start = Some(CpuStarter {
             device,
             mpidrs: mpidrs.to_vec(),
@@ -200,7 +197,7 @@ impl AppleDevices {
     /// AICv2's or AICv3's `layout` gives its MAX_IRQ and populated dies and
     /// says where its per-die arrays, timestamp slots and event register
     /// are; an AICv1's are fixed.
-    pub fn add_aic(&mut self, physical: u64, nr_irq: u16, layout: AicLayout) -> Result<(), String> {
+    pub fn add_aic(&mut self, physical: u64, nr_irq: u16, layout: AicLayout) -> Result<()> {
         self.add_aic_for_processors(physical, nr_irq, layout, 1)
     }
 
@@ -213,17 +210,19 @@ impl AppleDevices {
         nr_irq: u16,
         layout: AicLayout,
         cpus: usize,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         if cpus == 0 || cpus > u64::BITS as usize || self.sleep.boot >= cpus {
-            return Err("AIC boot PE is outside the served processor roster".into());
+            return Err(refuse!(
+                "AIC boot PE is outside the served processor roster"
+            ));
         }
         if self.aic.is_some() {
-            return Err("AIC owner is already bound".into());
+            return Err(refuse!("AIC owner is already bound"));
         }
         let (model, span, v1): (Box<dyn MmioDevice>, u64, bool) = match layout {
             AicLayout::V1 => {
                 let aic = Aic1::new(nr_irq, cpus)
-                    .map_err(|error| format!("AIC1 configuration: {error:?}"))?;
+                    .map_err(|error| refuse!("AIC1 configuration: {error}", ?error))?;
                 (Box::new(aic), Aic1::span(), true)
             }
             AicLayout::V2 {
@@ -247,7 +246,7 @@ impl AppleDevices {
                     default_cpus: 1 << self.sleep.boot,
                 };
                 let aic = Aic2::stacked(config, dies)
-                    .map_err(|error| format!("AIC2 configuration: {error:?}"))?;
+                    .map_err(|error| refuse!("AIC2 configuration: {error}", ?error))?;
                 let span = aic.span();
                 (Box::new(aic), span, false)
             }
@@ -255,7 +254,7 @@ impl AppleDevices {
         let id = self
             .bus
             .install(model, &[(physical, span, 0)])
-            .map_err(|error| format!("AIC placement: {error:?}"))?;
+            .map_err(|error| refuse!("AIC placement: {error}", ?error))?;
         let device = if v1 {
             Controller::V1(id)
         } else {

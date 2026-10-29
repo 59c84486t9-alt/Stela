@@ -5,31 +5,41 @@
 //! streams and cf8a8..cf918 restores by writing the saved words to c00.
 //! Readback of c20, physical reset/retention and store completion remain
 //! separate requirements; no empty observation is synthesized for them.
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 pub const ENABLE: u64 = 0xc00;
 pub const DISABLE: u64 = 0xc20;
 const REGISTER_WORDS: usize = 8;
 
-pub(super) fn word(offset: u64, base: u64) -> Result<usize, &'static str> {
+pub(super) fn word(offset: u64, base: u64) -> Result<usize> {
     let relative = offset
         .checked_sub(base)
         .filter(|relative| *relative < (REGISTER_WORDS * 4) as u64)
-        .ok_or("gen3 DART stream register is outside its native word window")?;
+        .ok_or(refuse!(
+            "gen3 DART stream register is outside its native word window"
+        ))?;
     if !relative.is_multiple_of(4) {
-        return Err("gen3 DART stream register requires an aligned 32-bit word");
+        return Err(refuse!(
+            "gen3 DART stream register requires an aligned 32-bit word"
+        ));
     }
     Ok((relative / 4) as usize)
 }
 
-pub(super) fn validate(streams: usize, word: usize, bits: u32) -> Result<(), &'static str> {
+pub(super) fn validate(streams: usize, word: usize, bits: u32) -> Result<()> {
     if !(1..=256).contains(&streams) || word >= streams.div_ceil(32) {
-        return Err("gen3 DART stream word is outside the actual SID count");
+        return Err(refuse!(
+            "gen3 DART stream word is outside the actual SID count"
+        ));
     }
     let count = (streams - word * 32).min(32);
     let valid = u32::MAX >> (32 - count);
     if bits & !valid != 0 {
-        return Err("gen3 DART stream command names an out-of-profile SID");
+        return Err(refuse!(
+            "gen3 DART stream command names an out-of-profile SID"
+        ));
     }
     Ok(())
 }
@@ -44,9 +54,11 @@ pub struct Command {
 impl Command {
     /// Decode one 32-bit native command; the register boundary owns access
     /// width and ordering. Applying it validates the receiving SID count.
-    pub fn decode(offset: u64, bits: u32) -> Result<Self, &'static str> {
+    pub fn decode(offset: u64, bits: u32) -> Result<Self> {
         if !offset.is_multiple_of(4) {
-            return Err("gen3 DART stream command requires an aligned 32-bit word");
+            return Err(refuse!(
+                "gen3 DART stream command requires an aligned 32-bit word"
+            ));
         }
         let (word, enabled) = match word(offset, ENABLE) {
             Ok(word) => (word, true),

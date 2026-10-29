@@ -1,11 +1,13 @@
 //! Immutable fabric-bridge register roles and validated counter geometry.
 //! Layout construction describes offsets, widths and command encodings only.
 //! Live kept words, knownness, MMIO writes and completion stay device-owned.
+use crate::Result;
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     vec::Vec,
 };
 use stela_contracts::bus::Width;
+use stela_contracts::refuse;
 pub const CONFIG_BYTES: usize = 36;
 const SELECTOR_BASE: u64 = 8;
 const EVENT_SELECTOR: u64 = 0x208;
@@ -45,7 +47,7 @@ impl Layout {
         header: [u8; 4],
         configs: &[[u8; CONFIG_BYTES]],
         axi: Option<[u8; 4]>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         Self::configuration(fields, header, configs, axi, 1)
     }
     fn configuration(
@@ -54,19 +56,21 @@ impl Layout {
         configs: &[[u8; CONFIG_BYTES]],
         axi: Option<[u8; 4]>,
         max_side: u8,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let mut words = BTreeMap::new();
         let mut counter_enables = BTreeSet::new();
         for &(offset, _) in fields {
             if !offset.is_multiple_of(4) {
-                return Err("unaligned bridge tuning field");
+                return Err(refuse!("unaligned bridge tuning field"));
             }
             words.insert(offset, Role::Configuration);
         }
         let bank = u64::from(u16::from_le_bytes([header[0], header[1]]));
         if header[3] != 0 {
             if bank & 3 != 0 || configs.len() != usize::from(header[3]) {
-                return Err("unsupported bridge counter flags or partial config selection");
+                return Err(refuse!(
+                    "unsupported bridge counter flags or partial config selection"
+                ));
             }
             for o in [0x410, 0x420, 0x430, bank] {
                 words.insert(o, Role::Configuration);
@@ -76,7 +80,9 @@ impl Layout {
             for config in configs {
                 let slot = config[2];
                 if slot >= 32 || config[0] > max_side || config[10] > 6 || config[3] > 1 {
-                    return Err("unsupported bridge counter selector, side or histogram layout");
+                    return Err(refuse!(
+                        "unsupported bridge counter selector, side or histogram layout"
+                    ));
                 }
                 let at = |base: u64| bank + base + 8 * u64::from(slot);
                 if config[3] == 0 {
@@ -148,7 +154,9 @@ impl Layout {
                 counter_enables.insert(bank + EVENT_ENABLE);
             }
         } else if !configs.is_empty() {
-            return Err("bridge without counters has selected counter configurations");
+            return Err(refuse!(
+                "bridge without counters has selected counter configurations"
+            ));
         }
         Ok(Self {
             words,
@@ -163,7 +171,7 @@ impl Layout {
         header: [u8; 4],
         configs: &[[u8; CONFIG_BYTES]],
         axi: Option<[u8; 4]>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         Self::configuration(fields, header, configs, axi, u8::MAX)
     }
     pub fn counter_enables(&self) -> impl Iterator<Item = u64> + '_ {
@@ -182,14 +190,14 @@ impl Layout {
             .map(|(&o, role)| (o, role.width().bytes()))
             .collect()
     }
-    pub fn role(&self, o: u64, w: Width) -> Result<Role, &'static str> {
-        let role = self
-            .words
-            .get(&o)
-            .copied()
-            .ok_or("fabric bridge word has no described configuration or sample contract")?;
+    pub fn role(&self, o: u64, w: Width) -> Result<Role> {
+        let role = self.words.get(&o).copied().ok_or(refuse!(
+            "fabric bridge word has no described configuration or sample contract"
+        ))?;
         if w != role.width() {
-            return Err("fabric bridge configuration is full32 and samples are full64");
+            return Err(refuse!(
+                "fabric bridge configuration is full32 and samples are full64"
+            ));
         }
         Ok(role)
     }

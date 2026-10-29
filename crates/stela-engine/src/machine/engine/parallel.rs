@@ -47,6 +47,7 @@ use alloc::{
 };
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use stela_compiler::aarch64::system::registers::Encoding;
+use stela_contracts::refuse;
 
 mod shared_devices;
 pub use shared_devices::SharedDevices;
@@ -1106,7 +1107,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // The mail applied meanwhile settles first: its refusal is this
         // access's.
         applied.map_err(|stop| {
-            DeviceError::TransferRefused(alloc::format!("while forwarded: {stop:?}"))
+            DeviceError::TransferRefused(refuse!("while forwarded: {stop}", ?stop))
         })?;
         Ok(answer)
     }

@@ -148,7 +148,8 @@ pub(super) fn resolve(
         .zip(records)
         .enumerate()
     {
-        let parsed = Record::parse(Layout::V1, row).map_err(Error::Malformed)?;
+        let parsed =
+            Record::parse(Layout::V1, row).map_err(|record| Error::Malformed(record.what()))?;
         if view.id.die != 0 {
             return Err(Error::UnsupportedDie(view.id.die));
         }

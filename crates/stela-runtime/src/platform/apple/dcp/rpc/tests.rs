@@ -1,6 +1,8 @@
 use super::*;
+use crate::Result;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use stela_contracts::refuse;
 
 const WINDOW: u64 = 0x8_0000_0000;
 const VERSION: u32 = stela_formats::builds::DEFAULT.dcp_link_version;
@@ -12,13 +14,16 @@ const REGION: u64 = WINDOW + REGION_DVA;
 struct Memory(BTreeMap<u64, u8>);
 
 impl Bus for Memory {
-    fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
+    fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<()> {
         for (n, byte) in buffer.iter_mut().enumerate() {
-            *byte = *self.0.get(&(address + n as u64)).ok_or("unmapped")?;
+            *byte = *self
+                .0
+                .get(&(address + n as u64))
+                .ok_or(refuse!("unmapped"))?;
         }
         Ok(())
     }
-    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), &'static str> {
+    fn write(&mut self, address: u64, data: &[u8]) -> Result<()> {
         for (n, &byte) in data.iter().enumerate() {
             self.0.insert(address + n as u64, byte);
         }
@@ -48,12 +53,7 @@ struct Test {
 }
 
 impl Service for Test {
-    fn call(
-        &mut self,
-        tag: [u8; 4],
-        input: &[u8],
-        output: u32,
-    ) -> Result<Step<Self>, &'static str> {
+    fn call(&mut self, tag: [u8; 4], input: &[u8], output: u32) -> Result<Step<Self>> {
         self.log
             .push(String::from(core::str::from_utf8(&tag).unwrap()));
         match &tag {
@@ -68,7 +68,7 @@ impl Service for Test {
                 }),
             }),
             b"A100" => Ok(Step::Return(vec![input[0] + 1; output as usize])),
-            _ => Err("refused"),
+            _ => Err(refuse!("refused")),
         }
     }
     fn callback_pending(&self) -> bool {
@@ -143,15 +143,15 @@ struct Fault<'a> {
     write: Option<u64>,
 }
 impl Bus for Fault<'_> {
-    fn read(&mut self, at: u64, bytes: &mut [u8]) -> Result<(), &'static str> {
+    fn read(&mut self, at: u64, bytes: &mut [u8]) -> Result<()> {
         if self.read == Some(at) {
-            return Err("injected read fault");
+            return Err(refuse!("injected read fault"));
         }
         self.memory.read(at, bytes)
     }
-    fn write(&mut self, at: u64, bytes: &[u8]) -> Result<(), &'static str> {
+    fn write(&mut self, at: u64, bytes: &[u8]) -> Result<()> {
         if self.write == Some(at) {
-            return Err("injected write fault");
+            return Err(refuse!("injected write fault"));
         }
         self.memory.write(at, bytes)
     }
@@ -167,12 +167,7 @@ struct Effects {
     refuse_finish: bool,
 }
 impl Service for Effects {
-    fn call(
-        &mut self,
-        tag: [u8; 4],
-        input: &[u8],
-        output: u32,
-    ) -> Result<Step<Self>, &'static str> {
+    fn call(&mut self, tag: [u8; 4], input: &[u8], output: u32) -> Result<Step<Self>> {
         match &tag {
             b"RETN" => {
                 self.calls += 1;
@@ -187,13 +182,13 @@ impl Service for Effects {
                     then: Box::new(move |service, reply| {
                         service.continues += 1;
                         if &tag == b"FAIL" {
-                            return Err("native continuation refused");
+                            return Err(refuse!("native continuation refused"));
                         }
                         Ok(Step::Return(reply.iter().rev().copied().collect()))
                     }),
                 })
             }
-            _ => Err("unsupported effect"),
+            _ => Err(refuse!("unsupported effect")),
         }
     }
     fn callback_pending(&self) -> bool {
@@ -213,7 +208,7 @@ impl Service for Effects {
                 assert_eq!(reply, &[1, 2, 3, 4]);
                 service.finishes += 1;
                 if service.refuse_finish {
-                    return Err("native finish refused");
+                    return Err(refuse!("native finish refused"));
                 }
                 Ok(())
             }),
@@ -252,7 +247,7 @@ fn request_header_and_body_read_faults_keep_only_unaccepted_input() {
                 },
                 &mut out
             ),
-            Err("injected read fault")
+            Err(refuse!("injected read fault"))
         );
         assert_eq!(link.service().calls, 0);
         assert!(link.pending() && !link.retained_idle() && out.is_empty());
@@ -313,13 +308,13 @@ fn return_dma_fault_and_restart_refusal_preserve_the_accepted_service_result() {
                 },
                 &mut out
             ),
-            Err("injected write fault")
+            Err(refuse!("injected write fault"))
         );
         assert_eq!(link.service().calls, 1);
         assert!(out.is_empty());
         assert_eq!(
             link.start(),
-            Err("DCP link restart with unfinished RPC ownership")
+            Err(refuse!("DCP link restart with unfinished RPC ownership"))
         );
         assert_eq!(link.heap(), heap);
         assert!(link.is_up() && !link.retained_idle());
@@ -500,7 +495,8 @@ fn native_continuation_refusals_keep_identity_without_false_completion_or_reexec
                     "native finish refused"
                 } else {
                     "native continuation refused"
-                })
+                }
+                .into())
             );
             assert_eq!(link.service().finishes + link.service().continues, 1);
             assert!(!link.retained_idle() && out.is_empty());
@@ -569,7 +565,7 @@ fn rpc_faults_keep_committed_acks_and_ownership() {
     for _ in 0..2 {
         assert_eq!(
             link.dma(&mut memory, &mut out),
-            Err("DCP callback exceeds a message length")
+            Err(refuse!("DCP callback exceeds a message length"))
         );
         assert_eq!(link.service().calls, 3);
         assert!(out.is_empty());
@@ -691,7 +687,7 @@ fn protocol_violations_refuse_by_name_without_consuming_the_input() {
         let result = link.dma(&mut memory, &mut out);
         assert!(result.is_err());
         if case == 3 {
-            assert_eq!(result, Err("refused"));
+            assert_eq!(result, Err(refuse!("refused")));
         }
         assert_eq!(link.incoming.front(), Some(&word));
         assert!(out.is_empty());

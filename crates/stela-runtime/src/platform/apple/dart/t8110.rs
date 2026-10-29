@@ -162,10 +162,13 @@
 use super::descriptor::Format;
 use super::gen3::fault::{Capture, Code, Level, Record};
 use super::{DAPF_BYTES, DAPF_OFFSET, Fault, Profile, SMMU_BYTES, SMMU_OFFSET, SmmuBlock};
+use crate::Result;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::RefCell;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -387,9 +390,9 @@ impl Slice {
 }
 
 impl Dart {
-    pub(super) fn bind_shared_irq(&mut self, irq: &super::SharedIrq) -> Result<(), &'static str> {
+    pub(super) fn bind_shared_irq(&mut self, irq: &super::SharedIrq) -> Result<()> {
         if self.irq != Some(irq.input) {
-            return Err("DART shared IRQ does not match its physical input");
+            return Err(refuse!("DART shared IRQ does not match its physical input"));
         }
         if self.irq_level
             || self
@@ -397,7 +400,7 @@ impl Dart {
                 .as_ref()
                 .is_some_and(|(levels, _)| levels.borrow().iter().any(|&level| level))
         {
-            return Err("an asserted DART IRQ source cannot be rebound");
+            return Err(refuse!("an asserted DART IRQ source cannot be rebound"));
         }
         self.shared_fault = Some(irq.source());
         Ok(())
@@ -597,20 +600,22 @@ impl Dart {
         width: Width,
         access: &mut Access<'_>,
     ) -> Option<Result<u64, MmioError>> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         let registers = self.fault_register(offset);
         let faults = self.faults.as_mut()?;
         Some(match offset {
             ERROR | ERROR_MASK | ERROR_ADDRESS_LOW | ERROR_ADDRESS_HIGH => {
-                Err(fail(REVISION_2_2_ERRORS))
+                Err(fail(REVISION_2_2_ERRORS.into()))
             }
-            _ if bitmap_word(offset, ERROR_STREAMS).is_some() => Err(fail(REVISION_2_2_ERRORS)),
+            _ if bitmap_word(offset, ERROR_STREAMS).is_some() => {
+                Err(fail(REVISION_2_2_ERRORS.into()))
+            }
             // The cacheless model captures no state; only a zero mask is
             // accepted.
             CAPTURE_COUNT | ERROR_MASK_2_2 => Ok(0),
             _ if registers => faults.read(offset, width, access),
             _ if (REGISTER_BYTES_2_2..DAPF_OFFSET).contains(&offset) => {
-                Err(fail(REVISION_2_2_TAIL))
+                Err(fail(REVISION_2_2_TAIL.into()))
             }
             _ => return None,
         })
@@ -624,20 +629,24 @@ impl Dart {
         value: u64,
         access: &mut Access<'_>,
     ) -> Option<Result<(), MmioError>> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         let registers = self.fault_register(offset);
         let faults = self.faults.as_mut()?;
         Some(match offset {
             ERROR | ERROR_MASK | ERROR_ADDRESS_LOW | ERROR_ADDRESS_HIGH => {
-                Err(fail(REVISION_2_2_ERRORS))
+                Err(fail(REVISION_2_2_ERRORS.into()))
             }
-            _ if bitmap_word(offset, ERROR_STREAMS).is_some() => Err(fail(REVISION_2_2_ERRORS)),
-            CAPTURE_COUNT => Err(fail("DART capture count is read-only")),
+            _ if bitmap_word(offset, ERROR_STREAMS).is_some() => {
+                Err(fail(REVISION_2_2_ERRORS.into()))
+            }
+            CAPTURE_COUNT => Err(fail(refuse!("DART capture count is read-only"))),
             ERROR_MASK_2_2 if value == 0 => Ok(()),
-            ERROR_MASK_2_2 => Err(fail("DART revision 2.2 error-mask encoding is unrecovered")),
+            ERROR_MASK_2_2 => Err(fail(refuse!(
+                "DART revision 2.2 error-mask encoding is unrecovered"
+            ))),
             _ if registers => faults.write(offset, width, value, access),
             _ if (REGISTER_BYTES_2_2..DAPF_OFFSET).contains(&offset) => {
-                Err(fail(REVISION_2_2_TAIL))
+                Err(fail(REVISION_2_2_TAIL.into()))
             }
             _ => return None,
         })
@@ -661,15 +670,15 @@ impl Dart {
             return Ok(sid);
         }
         if tcr & (TCR_TRANSLATE | TCR_BYPASS_DART) != 0 || self.ttbr[sid] & TTBR_VALID != 0 {
-            return Err(DmaError::Unsupported(
-                "DART remapped stream with its own translation, bypass or table",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "DART remapped stream with its own translation, bypass or table"
+            )));
         }
         let target = ((tcr & TCR_REMAP) >> TCR_REMAP_SHIFT) as usize;
         if target >= self.streams || self.tcr[target] & TCR_REMAP_ENABLE != 0 {
-            return Err(DmaError::Unsupported(
-                "DART remap target is outside the profile or itself remapped",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "DART remap target is outside the profile or itself remapped"
+            )));
         }
         Ok(target)
     }
@@ -687,21 +696,23 @@ impl Dart {
         write: bool,
     ) -> Result<u64, DmaError> {
         if !self.powered {
-            return Err(DmaError::Unsupported("DART power domain is off"));
+            return Err(DmaError::Unsupported(refuse!("DART power domain is off")));
         }
         if !self.clock_enabled {
-            return Err(DmaError::Unsupported("DART functional clock is gated"));
+            return Err(DmaError::Unsupported(refuse!(
+                "DART functional clock is gated"
+            )));
         }
         if self.reset {
-            return Err(DmaError::Unsupported("DART reset is asserted"));
+            return Err(DmaError::Unsupported(refuse!("DART reset is asserted")));
         }
         if self.quiesced {
-            return Err(DmaError::Unsupported("DART DMA is quiesced"));
+            return Err(DmaError::Unsupported(refuse!("DART DMA is quiesced")));
         }
         if sid >= self.streams {
-            return Err(DmaError::Unsupported(
-                "DART incoming stream is outside the native profile",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "DART incoming stream is outside the native profile"
+            )));
         }
         let sid = self.context(sid)?;
         if !self.stream_enabled(sid) {
@@ -709,12 +720,14 @@ impl Dart {
         }
         let tcr = self.tcr[sid];
         if tcr & (TCR_BYPASS_DART | TCR_TRANSLATE) == TCR_BYPASS_DART | TCR_TRANSLATE {
-            return Err(DmaError::Unsupported(
-                "DART simultaneous translation and bypass",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "DART simultaneous translation and bypass"
+            )));
         }
         if self.apf.is_some() && tcr & TCR_BYPASS_DAPF == 0 {
-            return Err(DmaError::Unsupported("DART address permission filtering"));
+            return Err(DmaError::Unsupported(refuse!(
+                "DART address permission filtering"
+            )));
         }
         if tcr & TCR_BYPASS_DART != 0 {
             return Ok(iova);
@@ -724,12 +737,12 @@ impl Dart {
         }
         let four_level = tcr & TCR_FOUR_LEVEL != 0;
         if four_level && !self.revision_2_2() {
-            return Err(DmaError::Unsupported("four-level DART tables"));
+            return Err(DmaError::Unsupported(refuse!("four-level DART tables")));
         }
         if !four_level && !TWO_LEVEL_WINDOWS.contains(&(iova >> IOVA_BITS)) {
-            return Err(DmaError::Unsupported(
-                "DART two-level DVA bits [46:36] outside the recovered 0 and 0x10 windows",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "DART two-level DVA bits [46:36] outside the recovered 0 and 0x10 windows"
+            )));
         }
         let ttbr = self.ttbr[sid];
         if ttbr & TTBR_VALID == 0 {
@@ -907,7 +920,7 @@ impl Iommu for Dart {
         let result = self.walk(memory, sid, iova, last, write);
         if let Err(DmaError::Fault(code)) = result {
             if self.tcr[sid] & TCR_REMAP_ENABLE != 0 {
-                return Err(DmaError::Unsupported(remapped_fault(code)));
+                return Err(DmaError::Unsupported(remapped_fault(code).into()));
             }
             self.report(sid, iova, code, write, access)?;
         }
@@ -946,34 +959,34 @@ impl MmioDevice for Dart {
         width: Width,
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         if width != Width::Word {
-            return Err(fail("DART registers are 32-bit"));
+            return Err(fail(refuse!("DART registers are 32-bit")));
         }
         if !self.powered {
-            return Err(fail("DART power domain is off"));
+            return Err(fail(refuse!("DART power domain is off")));
         }
         if !self.clock_enabled {
-            return Err(fail("DART functional clock is gated"));
+            return Err(fail(refuse!("DART functional clock is gated")));
         }
         if self.reset {
-            return Err(fail("DART reset is asserted"));
+            return Err(fail(refuse!("DART reset is asserted")));
         }
         if (SMMU_OFFSET..SMMU_OFFSET + SMMU_BYTES).contains(&offset) {
             if self.revision_2_2() && self.smmu.is_some() {
-                return Err(fail(REVISION_2_2_UMMS));
+                return Err(fail(REVISION_2_2_UMMS.into()));
             }
             return self
                 .smmu
                 .as_mut()
-                .ok_or_else(|| fail("DART has no paired SMMU instance"))?
+                .ok_or_else(|| fail(refuse!("DART has no paired SMMU instance")))?
                 .read(offset - SMMU_OFFSET, width, access);
         }
         if let Some(apf) = offset.checked_sub(DAPF_OFFSET) {
             return self
                 .apf_register(apf)
                 .map(|(value, _)| u64::from(*value))
-                .ok_or_else(|| fail("unknown DART APF register"));
+                .ok_or_else(|| fail(refuse!("unknown DART APF register")));
         }
         if let Some(result) = self.revision_2_2_read(offset, width, access) {
             return result;
@@ -1020,7 +1033,7 @@ impl MmioDevice for Dart {
                 } else if let Some(sid) = self.stream(offset, TTBR) {
                     self.ttbr[sid]
                 } else {
-                    return Err(fail("unknown DART register"));
+                    return Err(fail(refuse!("unknown DART register")));
                 }
             }
         };
@@ -1034,27 +1047,27 @@ impl MmioDevice for Dart {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         if width != Width::Word {
-            return Err(fail("DART registers are 32-bit"));
+            return Err(fail(refuse!("DART registers are 32-bit")));
         }
         if !self.powered {
-            return Err(fail("DART power domain is off"));
+            return Err(fail(refuse!("DART power domain is off")));
         }
         if !self.clock_enabled {
-            return Err(fail("DART functional clock is gated"));
+            return Err(fail(refuse!("DART functional clock is gated")));
         }
         if self.reset {
-            return Err(fail("DART reset is asserted"));
+            return Err(fail(refuse!("DART reset is asserted")));
         }
         if (SMMU_OFFSET..SMMU_OFFSET + SMMU_BYTES).contains(&offset) {
             if self.revision_2_2() && self.smmu.is_some() {
-                return Err(fail(REVISION_2_2_UMMS));
+                return Err(fail(REVISION_2_2_UMMS.into()));
             }
             return self
                 .smmu
                 .as_mut()
-                .ok_or_else(|| fail("DART has no paired SMMU instance"))?
+                .ok_or_else(|| fail(refuse!("DART has no paired SMMU instance")))?
                 .write(offset - SMMU_OFFSET, width, value, access);
         }
         let value = value as u32;
@@ -1062,9 +1075,9 @@ impl MmioDevice for Dart {
             let locked = self.protect & PROTECT_APF != 0;
             let (register, known) = self
                 .apf_register(apf)
-                .ok_or_else(|| fail("unknown DART APF register"))?;
+                .ok_or_else(|| fail(refuse!("unknown DART APF register")))?;
             if value & !known != 0 {
-                return Err(fail("DART APF slice control bits outside 0x333"));
+                return Err(fail(refuse!("DART APF slice control bits outside 0x333")));
             }
             if !locked {
                 *register = value;
@@ -1078,18 +1091,18 @@ impl MmioDevice for Dart {
         }
         let protected = self.protect & PROTECT_TTBR_TCR != 0;
         if matches!(offset, PROTECT | UNPROTECT | PROTECT_LOCK) && value & !self.domains() != 0 {
-            return Err(fail("DART protection domain without a model"));
+            return Err(fail(refuse!("DART protection domain without a model")));
         }
         match offset {
             TLB_CMD => {
                 if value & !(TLB_STREAM | TLB_OP | TLB_QUALIFIERS) != 0
                     || !TLB_OPS.contains(&(value & TLB_OP))
                 {
-                    return Err(fail("unknown DART TLB command"));
+                    return Err(fail(refuse!("unknown DART TLB command")));
                 }
             }
             TLB_SYNC if value == 0 => {}
-            TLB_SYNC => return Err(fail("DART TLB barrier trigger takes zero")),
+            TLB_SYNC => return Err(fail(refuse!("DART TLB barrier trigger takes zero"))),
             TLB_PARAMETER => self.tlb_words[0] = value,
             _ if TLB_RANGE.contains(&offset) => {
                 self.tlb_words[1 + usize::from(offset == TLB_RANGE[1])] = value
@@ -1103,12 +1116,14 @@ impl MmioDevice for Dart {
             }
             ERROR_MASK => self.error_mask = value & ERROR_CODE,
             TZ_CONFIG | TZ_SELECT => {
-                return Err(fail(
-                    "translation zones are owned by the boot stage; active-zone programming is unsupported",
-                ));
+                return Err(fail(refuse!(
+                    "translation zones are owned by the boot stage; active-zone programming is unsupported"
+                )));
             }
             _ if (TZ_FIRST..TZ_END).contains(&offset) && (offset - TZ_FIRST).is_multiple_of(8) => {
-                return Err(fail("translation-zone bounds are owned by the boot stage"));
+                return Err(fail(refuse!(
+                    "translation-zone bounds are owned by the boot stage"
+                )));
             }
             _ if TLIMITS.contains(&offset) => {
                 self.tlimits[((offset - TLIMITS[0]) / 4) as usize] = value
@@ -1117,7 +1132,11 @@ impl MmioDevice for Dart {
             // Write-one-to-clear; nothing is pending.
             PERF_INTERRUPT_STATUS => {}
             PROTECTED_WRITE if value == 0 => {}
-            PROTECTED_WRITE => return Err(fail("nonzero protected-write policy is not described")),
+            PROTECTED_WRITE => {
+                return Err(fail(refuse!(
+                    "nonzero protected-write policy is not described"
+                )));
+            }
             PROTECT => self.protect |= value,
             UNPROTECT => self.protect &= !(value & !self.locked),
             PROTECT_LOCK => self.locked |= value,
@@ -1132,7 +1151,7 @@ impl MmioDevice for Dart {
                     self.stream_interrupts[word] = value;
                 } else if let Some(sid) = self.stream(offset, TCR).filter(|_| offset < TTBR) {
                     if value & !TCR_KNOWN != 0 {
-                        return Err(fail("DART TCR reserved bits"));
+                        return Err(fail(refuse!("DART TCR reserved bits")));
                     }
                     if !protected {
                         self.tcr[sid] = value;
@@ -1142,7 +1161,7 @@ impl MmioDevice for Dart {
                         self.ttbr[sid] = value;
                     }
                 } else {
-                    return Err(fail("unknown DART register"));
+                    return Err(fail(refuse!("unknown DART register")));
                 }
             }
         }

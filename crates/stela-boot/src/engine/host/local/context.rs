@@ -1,6 +1,7 @@
 //! Time-free native root admission. Intended child of engine::host::local.
 //! No timer, work::Cpu implementation, interrupt delivery or device access.
 use super::{MmioRoots, Owner, current, irq_active, native_frames_idle, state};
+use crate::Result;
 use crate::{
     engine::interrupts,
     native_smp::{firmware, topology::Snapshot},
@@ -11,6 +12,7 @@ use core::{
     marker::PhantomData,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use stela_contracts::refuse;
 use stela_drivers::{bus::mmio::owned::PhysicalSpan, platform::work::WorkError};
 
 const IF: u64 = 1 << 9;
@@ -478,21 +480,18 @@ impl Owner {
     /// Join the new canonical RAM owner without granting it additional host bytes.
     /// Old publication/absence views must already be closed; no ISR/native/helper
     /// frame can overlap. CPU/root identity survives, but its old generation ends.
-    pub(super) fn join_ram_identity(
-        &mut self,
-        incoming: &[super::super::RamRange],
-    ) -> Result<(), &'static str> {
+    pub(super) fn join_ram_identity(&mut self, incoming: &[super::super::RamRange]) -> Result<()> {
         if self.root_context.strong_count() != 0 {
-            return Err("RAM absence/publication views are still retained");
+            return Err(refuse!("RAM absence/publication views are still retained"));
         }
         let Some(identity) = &self.root_identity else {
             return Ok(());
         };
         identity
             .check_current()
-            .map_err(|_| "retained CPU/root identity changed before RAM adoption")?;
+            .map_err(|_| refuse!("retained CPU/root identity changed before RAM adoption"))?;
         if irq_active() || !native_frames_idle() {
-            return Err("active native/IRQ frame prevents RAM adoption");
+            return Err(refuse!("active native/IRQ frame prevents RAM adoption"));
         }
         let flags: u64;
         // SAFETY: current physical Owner, read-only IRQ observation.
@@ -500,37 +499,41 @@ impl Owner {
             asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags));
         }
         if flags & IF != 0 {
-            return Err("RAM adoption requires excluded local interrupts");
+            return Err(refuse!("RAM adoption requires excluded local interrupts"));
         }
         let state = state();
         let mut roots = alloc::vec::Vec::new();
         roots
             .try_reserve_exact(2 + super::super::ROOTS * (1 + super::super::BANKS))
-            .map_err(|_| "RAM transition root catalog allocation failed")?;
+            .map_err(|_| refuse!("RAM transition root catalog allocation failed"))?;
         roots.extend([state.window_root, state.host_root]);
         roots.extend(state.all_roots());
         roots.sort_unstable();
         roots.dedup();
         if roots != identity.root_pages() {
-            return Err("retained native root catalog changed before RAM adoption");
+            return Err(refuse!(
+                "retained native root catalog changed before RAM adoption"
+            ));
         }
         let backing = identity.roots.ram().iter().map(|r| (r.start(), r.bytes()));
         let existing = state.ram.iter().map(|r| (r.host, r.bytes));
         let incoming = incoming.iter().map(|r| (r.host, r.bytes));
         let existing_matches =
             stela_boot_core::root_transition::same_backing_iter(backing.clone(), existing)
-                .map_err(|_| "malformed old physical backing before RAM adoption")?;
+                .map_err(|_| refuse!("malformed old physical backing before RAM adoption"))?;
         let incoming_matches =
             stela_boot_core::root_transition::same_backing_iter(backing, incoming)
-                .map_err(|_| "malformed canonical physical backing before RAM adoption")?;
+                .map_err(|_| refuse!("malformed canonical physical backing before RAM adoption"))?;
         if !existing_matches || !incoming_matches {
-            return Err("canonical RAM adoption changes retained physical placements");
+            return Err(refuse!(
+                "canonical RAM adoption changes retained physical placements"
+            ));
         }
         let next = identity
             .ram_generation
             .load(Ordering::Acquire)
             .checked_add(1)
-            .ok_or("native RAM ownership generation exhausted")?;
+            .ok_or(refuse!("native RAM ownership generation exhausted"))?;
         // Every old absence view is gone, proven above. There is no callback,
         // root mutation or IRQ between this invalidation and the caller's join.
         identity.ram_generation.store(next, Ordering::Release);

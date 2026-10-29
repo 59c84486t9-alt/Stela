@@ -539,7 +539,7 @@ fn native_start_preflights_current_time_and_deadline_without_admitting_missing_s
         owner.write(0x7000, &[0], now).unwrap();
         let before = native_time(&owner);
         assert!(
-            matches!(owner.write(0xc806, &[1], now), Err(SlaveError::Unsupported(reason)) if reason.contains("deadline"))
+            matches!(owner.write(0xc806, &[1], now), Err(SlaveError::Unsupported(reason)) if reason.to_string().contains("deadline"))
         );
         assert_eq!(native_time(&owner), before);
         assert_eq!(owner.loader.as_ref().unwrap().phase, Phase::Locked);
@@ -558,7 +558,7 @@ fn native_start_preflights_current_time_and_deadline_without_admitting_missing_s
     owner.write(0xc828, &[4], 0).unwrap();
     owner.write(0x7000, &[0], 0).unwrap();
     assert!(
-        matches!(owner.write(0xc806, &[1], 100), Err(SlaveError::Unsupported(reason)) if reason.contains("service resource owners"))
+        matches!(owner.write(0xc806, &[1], 100), Err(SlaveError::Unsupported(reason)) if reason.to_string().contains("service resource owners"))
     );
     assert_eq!(native_time(&owner), (0, 0, 0));
     assert_eq!(owner.loader.as_ref().unwrap().phase, Phase::Locked);
@@ -590,7 +590,7 @@ fn source_tag_failure_refuses_before_clock_control_or_image_effects() {
         .unwrap()
         .digest;
     assert!(
-        matches!(owner.write(0xc806, &[1], 100), Err(SlaveError::Unsupported(reason)) if reason.contains("integrity tag mismatch"))
+        matches!(owner.write(0xc806, &[1], 100), Err(SlaveError::Unsupported(reason)) if reason.to_string().contains("integrity tag mismatch"))
     );
     assert_eq!(native_time(&owner), (0, 0, 0));
     assert_eq!(owner.loader.as_ref().unwrap().phase, Phase::Locked);

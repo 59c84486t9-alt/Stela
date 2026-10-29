@@ -1,5 +1,6 @@
 use super::*;
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 use stela_soc_data::aic::layout::Aic2DieLayout;
 
 const NR_IRQ: u16 = 0x3a0;
@@ -509,9 +510,9 @@ fn firmware_routing_refusals_are_atomic_across_dies() {
     let before = aic.irq_cfg.clone();
     assert_eq!(
         aic.apply_ext_intr_cfg(&[3, 0, 0, 3, 0x10, 0]),
-        Err(Aic2Error::InvalidConfig(
+        Err(Aic2Error::InvalidConfig(refuse!(
             "nonzero IRQ_CFG DELAY_IDX delay/priority effects are unqualified"
-        ))
+        )))
     );
     assert_eq!(aic.irq_cfg, before);
     aic.irq_cfg[second_index] = 0;
@@ -578,7 +579,7 @@ fn unqualified_irq_cfg_selectors_and_delays_refuse_without_effects() {
                 assert!(matches!(
                     aic.write(bank.irq_config + 12, Width::Word, u64::from(value),
                               &mut Access::new(0, 456, &mut latch)),
-                    Err(MmioError::Unsupported { reason: actual, .. }) if actual == reason
+                    Err(MmioError::Unsupported { reason: actual, .. }) if actual == reason.into()
                 ));
                 assert_eq!(
                     (

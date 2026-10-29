@@ -4,6 +4,7 @@
 mod platform;
 mod prepare;
 use super::{ActivatedTables, PAGE, RootError};
+use crate::Refusal;
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     fmt,
@@ -46,7 +47,7 @@ pub(crate) enum Error {
     Firmware(uefi::Status),
     Mapping(owned::Error),
     Root(RootError),
-    Tables(&'static str),
+    Tables(Refusal),
     Config(stela_drivers::bus::pci::owned::ConfigError),
     NotReady(Address),
 }
@@ -61,7 +62,7 @@ impl fmt::Display for Error {
             Self::Firmware(status) => write!(f, "PCI firmware inventory: {status:?}"),
             Self::Mapping(error) => write!(f, "owned PCI mapping: {error:?}"),
             Self::Root(error) => write!(f, "owned PCI root: {error}"),
-            Self::Tables(error) => f.write_str(error),
+            Self::Tables(error) => write!(f, "{error}"),
             Self::Config(error) => write!(f, "owned PCI configuration: {error:?}"),
             Self::NotReady(address) => {
                 write!(f, "PCI {address} returned CRS; no qualified retry clock")

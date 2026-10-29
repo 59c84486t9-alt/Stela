@@ -14,7 +14,9 @@ use super::{
 use crate::platform::apple::ptd::transport::notifications::LocalNotifications;
 use alloc::{boxed::Box, collections::VecDeque, rc::Rc, vec::Vec};
 use core::cell::Cell;
+use stela_contracts::Refusal;
 use stela_contracts::bus::Access;
+use stela_contracts::refuse;
 
 /// Identity of the actual101cff0 context allocation. Cloning carries
 /// that identity, not permission to mark registration complete or set flags.
@@ -144,7 +146,7 @@ pub struct Owner {
     completed: Option<Completed>,
     last_tail: Option<Request>,
     last_transition: Option<(super::super::super::owner::Request, u64)>,
-    fault: Option<&'static str>,
+    fault: Option<Refusal>,
 }
 impl Owner {
     pub fn initialized_software(
@@ -184,16 +186,19 @@ impl Owner {
     pub fn pending_step(&self) -> Option<u64> {
         self.pending.as_ref().map(|p| p.cursor)
     }
-    pub fn refusal(&self) -> Option<&'static str> {
-        self.fault
+    pub fn refusal(&self) -> Option<&Refusal> {
+        self.fault.as_ref()
     }
 
     /// Context identity only. The root may keep it in the registration
     /// resource closure before configure_auxiliary; it grants no admission.
     pub fn auxiliary_binding(&self, slot: usize) -> Result<AuxiliaryBinding, Error> {
-        self.auxiliary.get(slot).cloned().ok_or(Error::Contract(
-            "auxiliary binding slot exceeds source geometry",
-        ))
+        self.auxiliary
+            .get(slot)
+            .cloned()
+            .ok_or(Error::Contract(refuse!(
+                "auxiliary binding slot exceeds source geometry"
+            )))
     }
     /// Read-only query; initial software flags alone cannot make this Some.
     pub fn registered_auxiliary(&self, slot: usize) -> Result<Option<AuxiliaryBinding>, Error> {
@@ -209,7 +214,9 @@ impl Owner {
     ) -> Completion<()> {
         let slot = reset.slot();
         let Some(binding) = self.auxiliary.get(slot) else {
-            return Completion::Refused("auxiliary reset slot exceeds actual control owner");
+            return Completion::Refused(refuse!(
+                "auxiliary reset slot exceeds actual control owner"
+            ));
         };
         if let Err(reason) = reset.validate(binding) {
             return Completion::Refused(reason);
@@ -256,7 +263,7 @@ impl Owner {
             activation,
         } = configuration;
         if slot >= 4 {
-            return Completion::Refused("auxiliary configuration exceeds source slots");
+            return Completion::Refused(refuse!("auxiliary configuration exceeds source slots"));
         }
         let caller = Caller::Transition(request.clone(), source_step);
         let signature = Signature::ConfigureAuxiliary {
@@ -276,7 +283,9 @@ impl Owner {
                 && (request.serial(), request.operation(), source_step)
                     <= (last.serial(), last.operation(), *step)
             {
-                return Completion::Refused("auxiliary configuration source cursor is stale");
+                return Completion::Refused(refuse!(
+                    "auxiliary configuration source cursor is stale"
+                ));
             }
             if let Err(error) = self.begin(
                 caller,
@@ -311,14 +320,14 @@ impl Owner {
                 ..
             } = call
             else {
-                return Err(Error::Contract(
-                    "auxiliary owner received a foreign ingestion call",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "auxiliary owner received a foreign ingestion call"
+                )));
             };
             if *ordinal != self.configuration.ordinal || descriptors != &self.configuration.rows {
-                return Err(Error::Contract(
-                    "auxiliary call differs from retained complete source rows",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "auxiliary call differs from retained complete source rows"
+                )));
             }
             frames
                 .check_bank(resources.notifications())
@@ -333,9 +342,9 @@ impl Owner {
                 && (!Rc::ptr_eq(&last.owner, &request.owner)
                     || (request.serial, request.cursor) <= (last.serial, last.cursor))
             {
-                return Err(Error::Contract(
-                    "auxiliary ingestion caller is foreign or stale",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "auxiliary ingestion caller is foreign or stale"
+                )));
             }
             // This is a read-only view, never another bulk copy or consume.
             let retained = frames
@@ -349,9 +358,9 @@ impl Owner {
                 .is_some_and(|slice| slice.start != layout.start || slice.count != layout.count)
                 || (self.configuration.slice.is_none() && layout.count != 0)
             {
-                return Err(Error::Contract(
-                    "auxiliary retained storage differs from source descriptor geometry",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "auxiliary retained storage differs from source descriptor geometry"
+                )));
             }
             self.begin(
                 caller,
@@ -392,9 +401,9 @@ impl Owner {
         } = step;
         let result = (|| {
             if slot >= 4 || mode > 2 {
-                return Err(Error::Contract(
-                    "auxiliary transition exceeds source slots or modes",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "auxiliary transition exceeds source slots or modes"
+                )));
             }
             let caller = Caller::Transition(request.clone(), source_step);
             let signature = Signature::Transition {
@@ -409,9 +418,9 @@ impl Owner {
                 && (request.serial(), request.operation(), source_step)
                     <= (last.serial(), last.operation(), *step)
             {
-                return Err(Error::Contract(
-                    "auxiliary lifecycle transition is stale or already retired",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "auxiliary lifecycle transition is stale or already retired"
+                )));
             }
             self.begin(
                 caller,
@@ -434,7 +443,7 @@ impl Owner {
         signature: &Signature,
         resources: &impl Resources,
     ) -> Result<bool, Error> {
-        if let Some(reason) = self.fault {
+        if let Some(reason) = self.fault.clone() {
             return Err(Error::Refused(reason));
         }
         if self
@@ -446,23 +455,23 @@ impl Owner {
                 .as_ref()
                 .is_some_and(|local| !local.owns(resources.notifications().bank()))
         {
-            return Err(Error::Contract(
-                "auxiliary actual resource owners were replaced",
-            ));
+            return Err(Error::Contract(refuse!(
+                "auxiliary actual resource owners were replaced"
+            )));
         }
         if let Some(p) = &self.pending {
             if !p.caller.same(caller) || &p.signature != signature {
-                return Err(Error::Contract(
-                    "auxiliary retained source operation cannot be replaced",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "auxiliary retained source operation cannot be replaced"
+                )));
             }
         } else if let Some(done) = &self.completed
             && done.caller.same(caller)
         {
             if &done.signature != signature {
-                return Err(Error::Contract(
-                    "auxiliary retired operation changed its operands",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "auxiliary retired operation changed its operands"
+                )));
             }
             return Ok(true);
         }
@@ -479,10 +488,9 @@ impl Owner {
         if self.pending.is_some() {
             return Ok(());
         }
-        let sequence = self
-            .sequence
-            .checked_add(1)
-            .ok_or(Error::Contract("auxiliary operation sequence exhausted"))?;
+        let sequence = self.sequence.checked_add(1).ok_or(Error::Contract(refuse!(
+            "auxiliary operation sequence exhausted"
+        )))?;
         self.sequence = sequence;
         self.pending = Some(Pending {
             caller,
@@ -511,9 +519,9 @@ impl Owner {
             .pending
             .as_ref()
             .and_then(|p| p.storage.as_ref())
-            .ok_or(Error::Contract(
-                "auxiliary local field has no actual retained storage",
-            ))?;
+            .ok_or(Error::Contract(refuse!(
+                "auxiliary local field has no actual retained storage"
+            )))?;
         frames
             .retained_cells(&storage.retained)
             .map_err(Error::Contract)
@@ -532,8 +540,9 @@ impl Owner {
             let validation = (|| {
                 let p = self.pending.as_ref().unwrap();
                 if let Some(storage) = &p.storage {
-                    let frames =
-                        frames.ok_or(Error::Contract("auxiliary Frames borrow is absent"))?;
+                    let frames = frames.ok_or(Error::Contract(refuse!(
+                        "auxiliary Frames borrow is absent"
+                    )))?;
                     frames
                         .validate_capture_identity(&storage.capture)
                         .map_err(Error::Contract)?;
@@ -543,7 +552,7 @@ impl Owner {
                 }
                 p.cursor
                     .checked_add(1)
-                    .ok_or(Error::Contract("auxiliary inner cursor exhausted"))
+                    .ok_or(Error::Contract(refuse!("auxiliary inner cursor exhausted")))
             })();
             let next = match validation {
                 Ok(n) => n,
@@ -578,7 +587,7 @@ impl Owner {
                         self.pending.as_mut().unwrap().cursor = next;
                         if let Err(e) = self.after(after, value) {
                             let text = reason(e);
-                            self.fault = Some(text); // The call already retired; never replay it.
+                            self.fault = Some(text.clone()); // The call already retired; never replay it.
                             return Completion::Refused(text);
                         }
                         if let Some(reason) = refusal {
@@ -664,9 +673,9 @@ impl Owner {
                 }
             }
             _ => {
-                return Err(Error::Contract(
-                    "auxiliary actual resource result shape mismatch",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "auxiliary actual resource result shape mismatch"
+                )));
             }
         }
         Ok(())
@@ -781,21 +790,22 @@ impl Owner {
                         After::ExtendedPacked(slot),
                     )),
                     2 => {
-                        let frames = frames
-                            .ok_or(Error::Contract("auxiliary local Frames borrow absent"))?;
+                        let frames = frames.ok_or(Error::Contract(refuse!(
+                            "auxiliary local Frames borrow absent"
+                        )))?;
                         let value = self
                             .cells(frames)?
                             .get((r[4] >> 6) as usize)
-                            .ok_or(Error::Contract(
-                                "auxiliary local packed field exceeds actual retained cells",
-                            ))?
+                            .ok_or(Error::Contract(refuse!(
+                                "auxiliary local packed field exceeds actual retained cells"
+                            )))?
                             .value;
                         out.push(Step::PackedValue(slot, value, false));
                     }
                     _ => {
-                        return Err(Error::Refused(
-                            "auxiliary packed source kind is unqualified",
-                        ));
+                        return Err(Error::Refused(refuse!(
+                            "auxiliary packed source kind is unqualified"
+                        )));
                     }
                 }
             }
@@ -836,7 +846,11 @@ impl Owner {
                             },
                             After::ExtendedMember(slot, member),
                         )),
-                        _ => return Err(Error::Refused("auxiliary member class is unqualified")),
+                        _ => {
+                            return Err(Error::Refused(refuse!(
+                                "auxiliary member class is unqualified"
+                            )));
+                        }
                     }
                     out.push(Step::Member(slot, member + 1));
                 }
@@ -855,9 +869,9 @@ impl Owner {
             Step::Correction(slot, member, raw) => {
                 let r = &self.configuration.rows[slot];
                 if r.words[10] != 0 || r.words[11] != 0 {
-                    return Err(Error::Refused(
-                        "auxiliary correction list requires actual paired scalar owners",
-                    ));
+                    return Err(Error::Refused(refuse!(
+                        "auxiliary correction list requires actual paired scalar owners"
+                    )));
                 }
                 let value =
                     (raw as u16 as i16 as i32).wrapping_add(i32::from(r.members[member][4] as u16));
@@ -950,7 +964,7 @@ impl Owner {
         Ok(out)
     }
 }
-fn reason(error: Error) -> &'static str {
+fn reason(error: Error) -> Refusal {
     match error {
         Error::Contract(reason) | Error::Refused(reason) => reason,
     }

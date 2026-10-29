@@ -5,6 +5,9 @@
 //! and validates map-table requests at d32c8..d3318. Those are software
 //! request rules. They do not establish native out-of-window fault codes,
 //! upper TCR security fields, or permission to alias distinct fill regions.
+use crate::Result;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 
 pub const PAGE_SHIFT: u32 = 14;
 pub const PAGE_BYTES: u64 = 1 << PAGE_SHIFT;
@@ -36,14 +39,16 @@ pub enum TableLevel {
 }
 
 impl TryFrom<u8> for TableLevel {
-    type Error = &'static str;
+    type Error = Refusal;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::Context),
             1 => Ok(Self::Segment),
             2 => Ok(Self::Page),
-            _ => Err("gen3 DART map-table target level is outside the native ABI"),
+            _ => Err(refuse!(
+                "gen3 DART map-table target level is outside the native ABI"
+            )),
         }
     }
 }
@@ -101,13 +106,15 @@ impl Geometry {
     }
 
     /// The existing component's explicitly bounded zero-context form.
-    pub(super) fn zero_indices(self, dva: u64) -> Result<Indices, &'static str> {
+    pub(super) fn zero_indices(self, dva: u64) -> Result<Indices> {
         let bits = match self {
             Self::TwoLevel => CONTEXT_SHIFT,
             Self::ThreeLevel => VA_BITS,
         };
         if dva >> bits != 0 {
-            return Err("gen3 DART address context is outside the recovered table form");
+            return Err(refuse!(
+                "gen3 DART address context is outside the recovered table form"
+            ));
         }
         Ok(self.indices(dva))
     }
@@ -123,7 +130,7 @@ pub struct Context {
 
 impl Context {
     /// The original global VM construction with no vm-alignment property.
-    pub fn from_vm_range(base: u64, bytes: u64) -> Result<Self, &'static str> {
+    pub fn from_vm_range(base: u64, bytes: u64) -> Result<Self> {
         Self::from_vm_range_aligned(base, bytes, None)
     }
 
@@ -134,14 +141,18 @@ impl Context {
         base: u64,
         bytes: u64,
         alignment_pages: Option<u32>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         if base >= VA_LIMIT || !(MIN_VM_BYTES..=MAX_VM_BYTES).contains(&bytes) {
-            return Err("gen3 DART VM range exceeds the original global construction bounds");
+            return Err(refuse!(
+                "gen3 DART VM range exceeds the original global construction bounds"
+            ));
         }
         let end = base
             .checked_add(bytes)
             .filter(|&end| end <= VA_LIMIT)
-            .ok_or("gen3 DART VM range end exceeds its native address width")?;
+            .ok_or(refuse!(
+                "gen3 DART VM range end exceeds its native address width"
+            ))?;
         let start_page = (base >> PAGE_SHIFT) as u32;
         let end_page = (end >> PAGE_SHIFT) as u32;
         let alignment_trim = match alignment_pages {
@@ -154,22 +165,22 @@ impl Context {
                     alignment - remainder
                 }
             }
-            Some(_) => return Err("gen3 DART vm-alignment must be a power of two in 1..64 pages"),
+            Some(_) => {
+                return Err(refuse!(
+                    "gen3 DART vm-alignment must be a power of two in 1..64 pages"
+                ));
+            }
         };
         let start_page = start_page + alignment_trim;
         let end_page = end_page
             .checked_sub(alignment_trim)
-            .ok_or("gen3 DART vm-alignment exhausts its VM window")?;
+            .ok_or(refuse!("gen3 DART vm-alignment exhausts its VM window"))?;
         Self::from_pages(start_page, end_page, alignment_trim)
     }
 
-    fn from_pages(
-        start_page: u32,
-        end_page: u32,
-        alignment_trim: u32,
-    ) -> Result<Self, &'static str> {
+    fn from_pages(start_page: u32, end_page: u32, alignment_trim: u32) -> Result<Self> {
         if start_page >= end_page || u64::from(end_page) > VA_LIMIT >> PAGE_SHIFT {
-            return Err("gen3 DART context has invalid native page bounds");
+            return Err(refuse!("gen3 DART context has invalid native page bounds"));
         }
         Ok(Self {
             start_page,
@@ -192,11 +203,13 @@ impl Context {
         base: Option<u64>,
         bytes: Option<u64>,
         dynamic_assignment: bool,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         if base.is_some_and(|base| base >= VA_LIMIT)
             || bytes.is_some_and(|bytes| bytes >> PAGE_SHIFT > MAX_VM_BYTES >> PAGE_SHIFT)
         {
-            return Err("gen3 DART per-SID VM fields exceed the native construction width");
+            return Err(refuse!(
+                "gen3 DART per-SID VM fields exceed the native construction width"
+            ));
         }
         let start = base.map_or(self.start_page, |base| (base >> PAGE_SHIFT) as u32);
         let count = bytes.map_or(self.end_page - self.start_page, |bytes| {
@@ -206,21 +219,25 @@ impl Context {
             return Ok(self);
         }
         if dynamic_assignment {
-            return Err("gen3 DART dynamic SID assignment forbids per-SID VM overrides");
+            return Err(refuse!(
+                "gen3 DART dynamic SID assignment forbids per-SID VM overrides"
+            ));
         }
         let end = start
             .checked_add(count)
-            .ok_or("gen3 DART per-SID VM endpoint overflows")?;
+            .ok_or(refuse!("gen3 DART per-SID VM endpoint overflows"))?;
         if start < self.start_page
             || end > self.end_page
             || !(MIN_VM_BYTES >> PAGE_SHIFT..=MAX_VM_BYTES >> PAGE_SHIFT)
                 .contains(&u64::from(count))
         {
-            return Err("gen3 DART per-SID VM override exceeds its global bounds or native size");
+            return Err(refuse!(
+                "gen3 DART per-SID VM override exceeds its global bounds or native size"
+            ));
         }
-        let end = end
-            .checked_sub(self.alignment_trim)
-            .ok_or("gen3 DART per-SID alignment exhausts its VM window")?;
+        let end = end.checked_sub(self.alignment_trim).ok_or(refuse!(
+            "gen3 DART per-SID alignment exhausts its VM window"
+        ))?;
         Self::from_pages(start, end, self.alignment_trim)
     }
 
@@ -236,13 +253,17 @@ impl Context {
         self.end_page
     }
 
-    fn validate_address(self, dva: u64, policy: BoundsPolicy) -> Result<(), &'static str> {
+    fn validate_address(self, dva: u64, policy: BoundsPolicy) -> Result<()> {
         if dva >= VA_LIMIT {
-            return Err("gen3 DART request exceeds its native virtual address width");
+            return Err(refuse!(
+                "gen3 DART request exceeds its native virtual address width"
+            ));
         }
         let page = (dva >> PAGE_SHIFT) as u32;
         if policy == BoundsPolicy::Strict && !(self.start_page..self.end_page).contains(&page) {
-            return Err("gen3 DART request is outside its software VM page bounds");
+            return Err(refuse!(
+                "gen3 DART request is outside its software VM page bounds"
+            ));
         }
         Ok(())
     }
@@ -250,27 +271,26 @@ impl Context {
     /// Validate the original MAP ABI's start and exclusive endpoint. The
     /// original checks both endpoint pages strictly below end_page, including
     /// when the endpoint is page aligned. No hardware fault is inferred.
-    pub fn map(
-        self,
-        dva: u64,
-        bytes: u64,
-        policy: BoundsPolicy,
-    ) -> Result<MapRequest, &'static str> {
+    pub fn map(self, dva: u64, bytes: u64, policy: BoundsPolicy) -> Result<MapRequest> {
         if bytes == 0 || bytes > SEGMENT_BYTES {
-            return Err("gen3 DART map size is outside the original 1..32 MiB bounds");
+            return Err(refuse!(
+                "gen3 DART map size is outside the original 1..32 MiB bounds"
+            ));
         }
         self.validate_address(dva, policy)?;
         let end = dva
             .checked_add(bytes)
-            .ok_or("gen3 DART map endpoint overflows")?;
+            .ok_or(refuse!("gen3 DART map endpoint overflows"))?;
         self.validate_address(end, policy)?;
         let segment_end = (dva & !(SEGMENT_BYTES - 1)) + SEGMENT_BYTES;
         if end > segment_end {
-            return Err("gen3 DART map crosses a segment table boundary");
+            return Err(refuse!("gen3 DART map crosses a segment table boundary"));
         }
         let entries = (bytes + (dva & (PAGE_BYTES - 1))).div_ceil(PAGE_BYTES);
         if entries * 8 > PAGE_BYTES {
-            return Err("gen3 DART map exceeds the original page-sized scratch table");
+            return Err(refuse!(
+                "gen3 DART map exceeds the original page-sized scratch table"
+            ));
         }
         Ok(MapRequest {
             dva,
@@ -285,7 +305,7 @@ impl Context {
         dva: u64,
         level: TableLevel,
         policy: BoundsPolicy,
-    ) -> Result<TableRequest, &'static str> {
+    ) -> Result<TableRequest> {
         self.validate_address(dva, policy)?;
         let indices = self.geometry.indices(dva);
         // MAP_TABLE names the table being installed, so its slot belongs
@@ -293,7 +313,7 @@ impl Context {
         // not another RAM lookup or a CTE index.
         let (slot, root) = match (self.geometry, level) {
             (Geometry::TwoLevel, TableLevel::Context) => {
-                return Err("gen3 DART two-level mode has no context table");
+                return Err(refuse!("gen3 DART two-level mode has no context table"));
             }
             (Geometry::ThreeLevel, TableLevel::Context)
             | (Geometry::TwoLevel, TableLevel::Segment) => (0, true),
@@ -315,9 +335,11 @@ impl Context {
     /// indices match the original walk: vm-base is never subtracted. Refuse
     /// two-level windows spanning different upper fill regions rather than
     /// silently folding their addresses. Native handling there is unresolved.
-    pub(super) fn transfer(self, dva: u64, last: u64) -> Result<Indices, &'static str> {
+    pub(super) fn transfer(self, dva: u64, last: u64) -> Result<Indices> {
         if last < dva || dva / PAGE_BYTES != last / PAGE_BYTES {
-            return Err("gen3 DART transfer is not within one ordered translation page");
+            return Err(refuse!(
+                "gen3 DART transfer is not within one ordered translation page"
+            ));
         }
         self.validate_address(dva, BoundsPolicy::Strict)?;
         self.validate_address(last, BoundsPolicy::Strict)?;
@@ -325,7 +347,9 @@ impl Context {
             let first_region = u64::from(self.start_page) >> (CONTEXT_SHIFT - PAGE_SHIFT);
             let last_region = u64::from(self.end_page - 1) >> (CONTEXT_SHIFT - PAGE_SHIFT);
             if first_region != last_region {
-                return Err("gen3 DART two-level window spans unqualified upper fill regions");
+                return Err(refuse!(
+                    "gen3 DART two-level window spans unqualified upper fill regions"
+                ));
             }
         }
         Ok(self.geometry.indices(dva))
@@ -372,9 +396,11 @@ impl TableRequest {
         self,
         sid: usize,
         parameters4: u32,
-    ) -> Result<Option<super::tlbi::ContextCommand>, &'static str> {
+    ) -> Result<Option<super::tlbi::ContextCommand>> {
         if sid > usize::from(u8::MAX) {
-            return Err("gen3 DART publication SID exceeds its native command field");
+            return Err(refuse!(
+                "gen3 DART publication SID exceeds its native command field"
+            ));
         }
         if parameters4 & (1 << 4) == 0 || self.level != TableLevel::Segment || self.root {
             return Ok(None);
@@ -628,7 +654,9 @@ mod tests {
         assert!(crossing.map(1 << 40, 1, BoundsPolicy::Strict).is_ok());
         assert_eq!(
             crossing.transfer(1 << 40, 1 << 40),
-            Err("gen3 DART two-level window spans unqualified upper fill regions")
+            Err(refuse!(
+                "gen3 DART two-level window spans unqualified upper fill regions"
+            ))
         );
     }
 

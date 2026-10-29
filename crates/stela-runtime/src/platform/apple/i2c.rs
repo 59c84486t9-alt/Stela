@@ -17,7 +17,10 @@
 //! matches the driver's bounded PIO command (0x2cc0f08). Unknown registers,
 //! fields and target operations refuse, including diagnostic XFSTA, whose
 //! encoding the available evidence does not establish.
+use crate::Result;
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
@@ -77,10 +80,10 @@ fn configuration_bit(offset: u64) -> u8 {
 }
 
 /// A target NACK is a bus result; an undescribed operation stops the machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetError {
     Nack,
-    Unsupported(&'static str),
+    Unsupported(Refusal),
 }
 
 /// One seven-bit I2C target. `write` is the buffered write phase, followed by
@@ -101,7 +104,7 @@ pub trait I2cTarget {
 pub struct Unmodeled(pub &'static str);
 impl I2cTarget for Unmodeled {
     fn transfer(&mut self, _: &[u8], _: &mut [u8], _: bool) -> Result<(), TargetError> {
-        Err(TargetError::Unsupported(self.0))
+        Err(TargetError::Unsupported(self.0.into()))
     }
 }
 
@@ -155,12 +158,12 @@ impl I2c {
         }
     }
     /// Attach only explicitly placed targets; an unoccupied address NACKs.
-    pub fn attach(&mut self, address: u8, device: Box<dyn I2cTarget>) -> Result<(), &'static str> {
+    pub fn attach(&mut self, address: u8, device: Box<dyn I2cTarget>) -> Result<()> {
         if address == 0 || address >= 0x78 || self.targets.iter().any(|t| t.address == address) {
-            return Err("invalid, reserved or duplicate I2C target address");
+            return Err(refuse!("invalid, reserved or duplicate I2C target address"));
         }
         if self.address.is_some() {
-            return Err("cannot attach an I2C target during a transfer");
+            return Err(refuse!("cannot attach an I2C target during a transfer"));
         }
         self.targets.push(Target { address, device });
         Ok(())
@@ -186,15 +189,15 @@ impl I2c {
         );
     }
 
-    fn mmio_ready(&self) -> Result<(), &'static str> {
+    fn mmio_ready(&self) -> Result<()> {
         if !self.lifecycle.powered {
-            return Err("I2C power domain is off");
+            return Err(refuse!("I2C power domain is off"));
         }
         if !self.lifecycle.clocked {
-            return Err("I2C clock is gated");
+            return Err(refuse!("I2C clock is gated"));
         }
         if self.lifecycle.reset {
-            return Err("I2C physical reset is asserted");
+            return Err(refuse!("I2C physical reset is asserted"));
         }
         Ok(())
     }
@@ -202,13 +205,8 @@ impl I2c {
     fn active(&self) -> bool {
         self.mmio_ready().is_ok() && !self.lifecycle.quiesced
     }
-    fn exchange(
-        &mut self,
-        write: &[u8],
-        count: usize,
-        stop: bool,
-    ) -> Result<Vec<u8>, &'static str> {
-        let address = self.address.ok_or("I2C FIFO data without START")?;
+    fn exchange(&mut self, write: &[u8], count: usize, stop: bool) -> Result<Vec<u8>> {
+        let address = self.address.ok_or(refuse!("I2C FIFO data without START"))?;
         let mut data = alloc::vec![0; count];
         let result = self
             .targets
@@ -224,31 +222,38 @@ impl I2c {
                 Ok(Vec::new())
             }
             // A refusal stops the machine: name the transaction it refused.
-            Err(TargetError::Unsupported(reason)) => Err(Box::leak(
-                alloc::format!(
-                    "{reason} (target {address:#04x}, wrote {write:02x?}, read {count})"
-                )
-                .into_boxed_str(),
-            )),
+            Err(TargetError::Unsupported(reason)) => Err(refuse!(
+                "I2C target {address:#04x} transaction",
+                address,
+                wrote = alloc::format!("{write:02x?}"),
+                read = count
+            )
+            .because(reason)),
         }
     }
-    fn fifo(&mut self, word: u32) -> Result<(), &'static str> {
+    fn fifo(&mut self, word: u32) -> Result<()> {
         if word & !(START | STOP | READ | 0xff) != 0 || word & (START | READ) == (START | READ) {
-            return Err("unknown I2C FIFO fields or simultaneous START/read-count");
+            return Err(refuse!(
+                "unknown I2C FIFO fields or simultaneous START/read-count"
+            ));
         }
         let stop = word & STOP != 0;
         if word & START != 0 {
             let address = (word as u8) >> 1;
             if address == 0 || address >= 0x78 {
-                return Err("reserved or ten-bit I2C addressing");
+                return Err(refuse!("reserved or ten-bit I2C addressing"));
             }
             if self.address.is_some()
                 && (self.address != Some(address) || self.reading || stop || word & 1 == 0)
             {
-                return Err("only same-target write-to-read I2C repeated START is modeled");
+                return Err(refuse!(
+                    "only same-target write-to-read I2C repeated START is modeled"
+                ));
             }
             if stop {
-                return Err("I2C address-only QUICK transactions are undetermined");
+                return Err(refuse!(
+                    "I2C address-only QUICK transactions are undetermined"
+                ));
             }
             self.address = Some(address);
             self.reading = word & 1 != 0;
@@ -261,10 +266,10 @@ impl I2c {
         if word & READ != 0 {
             let count = (word & 0xff) as usize;
             if !self.reading || count == 0 {
-                return Err("I2C read-count without read address or zero count");
+                return Err(refuse!("I2C read-count without read address or zero count"));
             }
             if self.rx.len() + count > CAPACITY {
-                return Err("I2C receive FIFO backpressure is not modeled");
+                return Err(refuse!("I2C receive FIFO backpressure is not modeled"));
             }
             let data = self.exchange(&self.write.clone(), count, stop)?;
             self.rx.extend(data);
@@ -273,10 +278,10 @@ impl I2c {
             self.status |= END;
         } else {
             if self.address.is_none() || self.reading {
-                return Err("I2C write byte without write address");
+                return Err(refuse!("I2C write byte without write address"));
             }
             if self.write.len() == CAPACITY {
-                return Err("I2C write phase exceeds PIO capacity");
+                return Err(refuse!("I2C write phase exceeds PIO capacity"));
             }
             if stop {
                 let mut data = self.write.clone();
@@ -297,7 +302,7 @@ impl I2c {
 }
 
 impl Lifecycle for I2c {
-    fn check_lifecycle(&self, _: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, _: LifecycleState) -> Result<()> {
         Ok(())
     }
 
@@ -339,14 +344,18 @@ impl MmioDevice for I2c {
         width: Width,
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
-        let err = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let err = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(err("I2C registers require aligned 32-bit accesses"));
+            return Err(err(refuse!(
+                "I2C registers require aligned 32-bit accesses"
+            )));
         }
         self.mmio_ready().map_err(err)?;
         let bit = configuration_bit(offset);
         if bit != 0 && self.configuration & bit == 0 {
-            return Err(err("I2C configuration reset value has not been qualified"));
+            return Err(err(refuse!(
+                "I2C configuration reset value has not been qualified"
+            )));
         }
         let value = match offset {
             RX => self.rx.pop_front().map_or(EMPTY, u32::from),
@@ -359,7 +368,7 @@ impl MmioDevice for I2c {
             RX_CONFIG => self.rx_config,
             TIMING => self.timing,
             FILTER => self.filter,
-            _ => return Err(err("unmodeled I2C register or write-only FIFO")),
+            _ => return Err(err(refuse!("unmodeled I2C register or write-only FIFO"))),
         };
         self.interrupt(access);
         Ok(u64::from(value))
@@ -371,39 +380,43 @@ impl MmioDevice for I2c {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let err = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let err = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(err("I2C registers require aligned 32-bit accesses"));
+            return Err(err(refuse!(
+                "I2C registers require aligned 32-bit accesses"
+            )));
         }
         self.mmio_ready().map_err(err)?;
         let value = value as u32;
         match offset {
             TX => {
                 if !self.active() {
-                    return Err(err("I2C client is quiesced"));
+                    return Err(err(refuse!("I2C client is quiesced")));
                 }
                 if self.configuration & TRANSFER_CONFIGURATION != TRANSFER_CONFIGURATION {
-                    return Err(err(
-                        "I2C divider, timeout and receive configuration require initialization",
-                    ));
+                    return Err(err(refuse!(
+                        "I2C divider, timeout and receive configuration require initialization"
+                    )));
                 }
                 self.fifo(value).map_err(err)?;
             }
             STATUS => {
                 if value & !STATUS_KNOWN != 0 {
-                    return Err(err("unknown I2C status acknowledgement bits"));
+                    return Err(err(refuse!("unknown I2C status acknowledgement bits")));
                 }
                 self.status &= !(value & LATCHES);
             }
             MASK => {
                 if value & !STATUS_KNOWN != 0 {
-                    return Err(err("unknown I2C interrupt mask bits"));
+                    return Err(err(refuse!("unknown I2C interrupt mask bits")));
                 }
                 self.mask = value;
             }
             CONTROL => {
                 if value & !(0xff | UNJAM | TX_RESET | RX_RESET) != 0 {
-                    return Err(err("I2C revision-2 control fields are undetermined"));
+                    return Err(err(refuse!(
+                        "I2C revision-2 control fields are undetermined"
+                    )));
                 }
                 if value & TX_RESET != 0 {
                     for target in &mut self.targets {
@@ -426,9 +439,9 @@ impl MmioDevice for I2c {
             TIMING => self.timing = value,
             FILTER => self.filter = value,
             _ => {
-                return Err(err(
-                    "unmodeled I2C register, timeout setting or read-only register",
-                ));
+                return Err(err(refuse!(
+                    "unmodeled I2C register, timeout setting or read-only register"
+                )));
             }
         }
         self.configuration |= configuration_bit(offset);
@@ -453,7 +466,7 @@ mod tests {
     impl I2cTarget for Echo {
         fn transfer(&mut self, write: &[u8], read: &mut [u8], _: bool) -> Result<(), TargetError> {
             if write.first() == Some(&0xff) {
-                return Err(TargetError::Unsupported("test target refusal"));
+                return Err(TargetError::Unsupported(refuse!("test target refusal")));
             }
             let mut cursor = write.first().copied().unwrap_or(self.cursor);
             for byte in read {

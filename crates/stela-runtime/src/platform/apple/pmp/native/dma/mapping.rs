@@ -7,8 +7,10 @@ use super::{
     broker::{Broker, Descriptor, Key, Life, Op, Output, Reply, convert, reason},
     service::Effect,
 };
+use crate::Result;
 use alloc::vec::Vec;
 use stela_contracts::bus::Access;
+use stela_contracts::refuse;
 
 #[derive(Clone, PartialEq, Eq)]
 enum Action {
@@ -39,17 +41,19 @@ impl Client {
             last_retired: None,
         }
     }
-    fn begin(&mut self, key: Key, offset: u64, action: Action) -> Result<(), &'static str> {
+    fn begin(&mut self, key: Key, offset: u64, action: Action) -> Result<()> {
         if self
             .last_retired
             .as_ref()
             .is_some_and(|last| last.same(&key))
         {
-            return Err("native PMP DMA request was already retired");
+            return Err(refuse!("native PMP DMA request was already retired"));
         }
         if let Some(p) = &self.pending {
             if !p.key.same(&key) || p.offset != offset || p.action != action {
-                return Err("native PMP DMA request changed before its prefix retired");
+                return Err(refuse!(
+                    "native PMP DMA request changed before its prefix retired"
+                ));
             }
             return Ok(());
         }
@@ -67,7 +71,9 @@ impl Client {
         self.broker.check(self.descriptor, offset, bytes, life)?;
         if matches!(&action, Action::Read(0)) || matches!(&action,Action::Write(b) if b.is_empty())
         {
-            return Err("native PMP DMA empty transfer is not a source effect");
+            return Err(refuse!(
+                "native PMP DMA empty transfer is not a source effect"
+            ));
         }
         self.pending = Some(Pending {
             key,
@@ -132,9 +138,12 @@ impl Client {
                 refusal: outer,
             } => {
                 let p = self.pending.as_mut().unwrap();
-                if data.len() > bytes - p.cursor || fault.is_some_and(|f| f.completed != data.len())
+                if data.len() > bytes - p.cursor
+                    || fault.as_ref().is_some_and(|f| f.completed != data.len())
                 {
-                    return Completion::Refused("native PMP DMA read receipt has invalid prefix");
+                    return Completion::Refused(refuse!(
+                        "native PMP DMA read receipt has invalid prefix"
+                    ));
                 }
                 p.cursor += data.len();
                 p.read.extend(data);
@@ -148,12 +157,13 @@ impl Client {
                     }
                 } else {
                     Completion::Refused(
-                        diagnostic.unwrap_or("native PMP DMA read retired an incomplete extent"),
+                        diagnostic
+                            .unwrap_or(refuse!("native PMP DMA read retired an incomplete extent")),
                     )
                 }
             }
             Completion::Retired { .. } => {
-                Completion::Refused("native PMP DMA read received another operation")
+                Completion::Refused(refuse!("native PMP DMA read received another operation"))
             }
         }
     }
@@ -174,22 +184,26 @@ impl Client {
             } => {
                 let p = self.pending.as_mut().unwrap();
                 if completed > bytes.len() - p.cursor
-                    || fault.is_some_and(|f| f.completed != completed)
+                    || fault.as_ref().is_some_and(|f| f.completed != completed)
                 {
-                    return Completion::Refused("native PMP DMA write receipt has invalid prefix");
+                    return Completion::Refused(refuse!(
+                        "native PMP DMA write receipt has invalid prefix"
+                    ));
                 }
                 p.cursor += completed;
                 let diagnostic = fault.map(|f| reason(f.error)).or(refusal).or(outer);
                 if whole && p.cursor < bytes.len() {
                     return Completion::Refused(
-                        diagnostic.unwrap_or("native PMP DMA write retired an incomplete extent"),
+                        diagnostic.unwrap_or(refuse!(
+                            "native PMP DMA write retired an incomplete extent"
+                        )),
                     );
                 }
                 if !whole && completed == 0 {
                     // No bytes committed. Keep the same source request but a
                     // fresh transfer ticket on a caller-authorized retry.
                     return Completion::Refused(
-                        diagnostic.unwrap_or("native PMP DMA write has no retired prefix"),
+                        diagnostic.unwrap_or(refuse!("native PMP DMA write has no retired prefix")),
                     );
                 }
                 let p = self.pending.take().unwrap();
@@ -200,7 +214,7 @@ impl Client {
                 }
             }
             Completion::Retired { .. } => {
-                Completion::Refused("native PMP DMA write received another operation")
+                Completion::Refused(refuse!("native PMP DMA write received another operation"))
             }
         }
     }
@@ -230,9 +244,9 @@ impl Client {
                     refusal: refusal.or(outer),
                 }
             }
-            Completion::Retired { .. } => {
-                Completion::Refused("native PMP DMA synchronization received another operation")
-            }
+            Completion::Retired { .. } => Completion::Refused(refuse!(
+                "native PMP DMA synchronization received another operation"
+            )),
         }
     }
 }
@@ -266,7 +280,7 @@ impl reporting::resources::Mapping for ReportingMapping {
             bytes: self.0.descriptor.bytes,
         }
     }
-    fn synchronization_granule(&self) -> Result<u64, &'static str> {
+    fn synchronization_granule(&self) -> Result<u64> {
         Ok(self.0.broker.synchronization_granule())
     }
     fn write(
@@ -297,9 +311,9 @@ impl reporting::resources::Mapping for ReportingMapping {
     ) -> Completion<()> {
         let granule = self.0.broker.synchronization_granule();
         if !offset.is_multiple_of(granule) || !bytes.is_multiple_of(granule) {
-            return Completion::Refused(
-                "native PMP DMA synchronization is not runtime-granule aligned",
-            );
+            return Completion::Refused(refuse!(
+                "native PMP DMA synchronization is not runtime-granule aligned"
+            ));
         }
         self.0.effect(
             Key::Reporting(request.clone()),

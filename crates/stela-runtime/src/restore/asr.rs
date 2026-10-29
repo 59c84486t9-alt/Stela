@@ -493,7 +493,7 @@ mod tests {
         let Error::Refused { reason, request } = result.unwrap().unwrap_err() else {
             panic!("missing OOB Ranges context")
         };
-        assert!(reason.contains("OOB Ranges"));
+        assert!(reason.to_string().contains("OOB Ranges"));
         assert!(request.get("OOB Ranges").is_some());
         assert_eq!(sender.phase(), Phase::Failed);
         // Nothing but the Initiate reply was sent.

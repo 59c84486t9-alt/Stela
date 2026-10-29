@@ -1,6 +1,7 @@
 use super::super::Description;
 use super::*;
 use alloc::boxed::Box;
+use stela_contracts::refuse;
 use stela_drivers::block::{BlockDevice, RamDisk};
 use {
     crate::platform::apple::sart::Sart, stela_contracts::bus::Access,
@@ -195,12 +196,18 @@ fn device_time_tunnel_records_the_recovery_request_and_unserved_types_refuse_by_
     output.0[52..60].copy_from_slice(&(REQUEST + 0x4000).to_le_bytes());
     output.0[60..64].copy_from_slice(&tunnel_buffer(1).to_le_bytes());
     let error = refused(&mut ans, &mut port, &mut sart, changed, output);
-    assert_eq!(error, "ANS device-time tunnel fields are not modeled");
+    assert_eq!(
+        error,
+        refuse!("ANS device-time tunnel fields are not modeled")
+    );
     for extension in [0, 0x18, 0x34, 0x4b] {
         let mut extended = changed;
         extended[extension] = 1;
         let error = refused(&mut ans, &mut port, &mut sart, extended, Command(command.0));
-        assert_eq!(error, "ANS device-time tunnel fields are not modeled");
+        assert_eq!(
+            error,
+            refuse!("ANS device-time tunnel fields are not modeled")
+        );
     }
 
     // Every census type the die does not serve refuses by its own name
@@ -213,10 +220,10 @@ fn device_time_tunnel_records_the_recovery_request_and_unserved_types_refuse_by_
         other[12..16].copy_from_slice(&kind.to_le_bytes());
         other[0x4c..].fill(0xff);
         let error = refused(&mut ans, &mut port, &mut sart, other, Command(command.0));
-        assert_eq!(error, unserved_tunnel(kind));
+        assert_eq!(error, unserved_tunnel(kind).into());
         assert_ne!(
             error,
-            unserved_tunnel(0x77),
+            unserved_tunnel(0x77).into(),
             "type {kind:#x} has a named refusal"
         );
     }
@@ -716,7 +723,11 @@ fn firmware_uuid_identify_refuses_by_name() {
     let mut command = Command([0; 64]);
     command.0[0] = APPLE_IDENTIFY_STORAGE;
     let refusal = command.direction(0).unwrap_err();
-    assert!(refusal.contains("Identify Storage Device (0xc8)"));
+    assert!(
+        refusal
+            .to_string()
+            .contains("Identify Storage Device (0xc8)")
+    );
 }
 
 #[test]

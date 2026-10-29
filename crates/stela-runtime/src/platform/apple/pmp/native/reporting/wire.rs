@@ -1,4 +1,6 @@
 //! Original endpoint-4 kind/size encoding, not a class1 PMP allocation reply.
+use crate::Result;
+use stela_contracts::refuse;
 
 pub const ENDPOINT: u8 = 4;
 pub const REQUEST_BYTES: u64 = 0x48000;
@@ -26,9 +28,9 @@ pub fn kind(payload: u64) -> u8 {
     }
 }
 
-pub fn buffer(payload: u64) -> Result<Buffer, &'static str> {
+pub fn buffer(payload: u64) -> Result<Buffer> {
     if kind(payload) != 0 {
-        return Err("IOReporting message is not a buffer reply");
+        return Err(refuse!("IOReporting message is not a buffer reply"));
     }
     let units = (payload >> 44) & 255;
     let shift = match (payload >> 52) & 3 {
@@ -48,17 +50,17 @@ pub fn buffer(payload: u64) -> Result<Buffer, &'static str> {
 
 /// Source102e2b4..102e2fc rounds to pages below1MiB, MiB otherwise.
 /// The caller supplies the mapping's published bus address.
-pub fn advertisement(buffer: Buffer) -> Result<u64, &'static str> {
+pub fn advertisement(buffer: Buffer) -> Result<u64> {
     let shift = if buffer.bytes < 1 << 20 { 12 } else { 20 };
     let granule = 1u64 << shift;
     let units = buffer.bytes / granule + u64::from(!buffer.bytes.is_multiple_of(granule));
     if units > 255 {
-        return Err("IOReporting buffer exceeds its source size field");
+        return Err(refuse!("IOReporting buffer exceeds its source size field"));
     }
     let sign_extended =
         (((buffer.bus & ADDRESS_MASK) << (64 - ADDRESS_BITS)) as i64 >> (64 - ADDRESS_BITS)) as u64;
     if sign_extended != buffer.bus {
-        return Err("IOReporting bus address exceeds signed44 encoding");
+        return Err(refuse!("IOReporting bus address exceeds signed44 encoding"));
     }
     Ok((if shift == 12 { 1u64 } else { 2u64 }) << 52 | units << 44 | buffer.bus & ADDRESS_MASK)
 }

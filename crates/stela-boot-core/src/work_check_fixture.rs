@@ -1,19 +1,21 @@
 //! Only an admission check for the separately source-bound QEMU -smp 1 fixture.
 //! This inventory is not a general processor election or SMP quiescence proof.
-pub fn one_processor(table: &[u8], executing: u32) -> Result<(), &'static str> {
+use crate::Result;
+use stela_contracts::refuse;
+pub fn one_processor(table: &[u8], executing: u32) -> Result<()> {
     if table.len() < 44 || &table[..4] != b"APIC" {
-        return Err("work fixture has no valid MADT");
+        return Err(refuse!("work fixture has no valid MADT"));
     }
     let length = u32::from_le_bytes(table[4..8].try_into().unwrap()) as usize;
     if length != table.len() || table.iter().fold(0u8, |a, b| a.wrapping_add(*b)) != 0 {
-        return Err("work fixture MADT length/checksum invalid");
+        return Err(refuse!("work fixture MADT length/checksum invalid"));
     }
     let mut offset = 44;
     let mut processor = None;
     while offset < length {
         let remaining = &table[offset..];
         if remaining.len() < 2 || remaining[1] < 2 || usize::from(remaining[1]) > remaining.len() {
-            return Err("work fixture MADT entry malformed");
+            return Err(refuse!("work fixture MADT entry malformed"));
         }
         let entry = &remaining[..usize::from(remaining[1])];
         let (id, flags) = match entry[0] {
@@ -25,7 +27,7 @@ pub fn one_processor(table: &[u8], executing: u32) -> Result<(), &'static str> {
                 u32::from_le_bytes(entry[4..8].try_into().unwrap()),
                 u32::from_le_bytes(entry[8..12].try_into().unwrap()),
             ),
-            0 | 9 => return Err("work fixture MADT processor malformed"),
+            0 | 9 => return Err(refuse!("work fixture MADT processor malformed")),
             _ => {
                 offset += entry.len();
                 continue;
@@ -35,12 +37,16 @@ pub fn one_processor(table: &[u8], executing: u32) -> Result<(), &'static str> {
         // this narrow fixture refuses even additional disabled representations.
         // Neither an alias nor type0+type9 can count as another safe BSP.
         if flags & !3 != 0 || flags & 1 == 0 || processor.replace(id).is_some() {
-            return Err("work fixture requires exactly one enabled MADT processor");
+            return Err(refuse!(
+                "work fixture requires exactly one enabled MADT processor"
+            ));
         }
         offset += entry.len();
     }
     if processor != Some(executing) {
-        return Err("work fixture MADT does not match executing APIC ID");
+        return Err(refuse!(
+            "work fixture MADT does not match executing APIC ID"
+        ));
     }
     Ok(())
 }

@@ -10,7 +10,10 @@
 //! configuration. Its completion is recorded; electrical effects and
 //! command readback are not proved. Other values and reads of it refuse.
 use super::regfile::Held;
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use stela_soc_data::cpm::RESTORE;
 #[cfg(test)]
 use stela_soc_data::cpm::{P_THROTTLER, THROTTLERS};
@@ -41,9 +44,11 @@ impl Cpm {
     pub fn restored(&self) -> bool {
         self.restored
     }
-    fn check(&self, o: u64, w: Width) -> Result<(), &'static str> {
+    fn check(&self, o: u64, w: Width) -> Result<()> {
         if w != Width::Double || !self.offsets().contains(&o) {
-            Err("CPM register or width has no described power-control contract")
+            Err(refuse!(
+                "CPM register or width has no described power-control contract"
+            ))
         } else {
             Ok(())
         }
@@ -57,21 +62,23 @@ impl MmioDevice for Cpm {
         NAME
     }
     fn read(&mut self, o: u64, w: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |r| refuse(NAME, o, w, Direction::Read, r);
+        let fail = |r: Refusal| refuse(NAME, o, w, Direction::Read, r);
         self.check(o, w).map_err(fail)?;
         if o == RESTORE {
-            return Err(fail("CPM restore command readback is not established"));
+            return Err(fail(refuse!(
+                "CPM restore command readback is not established"
+            )));
         }
         Ok(self.values.get(o))
     }
     fn write(&mut self, o: u64, w: Width, v: u64, _: &mut Access<'_>) -> Result<(), MmioError> {
-        let fail = |r| refuse(NAME, o, w, Direction::Write, r);
+        let fail = |r: Refusal| refuse(NAME, o, w, Direction::Write, r);
         self.check(o, w).map_err(fail)?;
         if o == RESTORE {
             if v != 1 {
-                return Err(fail(
-                    "CPM restore accepts only the documented full64 command1",
-                ));
+                return Err(fail(refuse!(
+                    "CPM restore accepts only the documented full64 command1"
+                )));
             }
             self.restored = true;
         } else {

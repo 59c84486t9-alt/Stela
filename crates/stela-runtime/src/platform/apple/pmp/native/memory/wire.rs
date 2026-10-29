@@ -1,4 +1,6 @@
 //! Original PMPEndpoint1 class1, mac13j ApplePMPv2 memory handlers.
+use crate::Result;
+use stela_contracts::refuse;
 pub(super) const BODY: u64 = (1 << 48) - 1;
 pub(super) const PAGE: u64 = 4096;
 pub(super) const TABLE_BYTES: usize = 0x300;
@@ -18,30 +20,36 @@ impl Kind {
         };
         1 << 52 | kind << 48 | body
     }
-    pub(super) fn reply(self, payload: u64) -> Result<u64, &'static str> {
+    pub(super) fn reply(self, payload: u64) -> Result<u64> {
         let kind = match self {
             Self::Init => 1,
             Self::Allocate => 3,
             Self::Free => 5,
         };
         if payload >> 56 != 0 || payload >> 52 & 15 != 1 || payload >> 48 & 15 != kind {
-            return Err("PMP memory reply does not match its actual class transaction");
+            return Err(refuse!(
+                "PMP memory reply does not match its actual class transaction"
+            ));
         }
         let body = payload & BODY;
         if self == Self::Free && body != 0 {
-            return Err("PMP memory free reply has unqualified body bits");
+            return Err(refuse!("PMP memory free reply has unqualified body bits"));
         }
         if self != Self::Free && !body.is_multiple_of(PAGE) {
-            return Err("PMP memory reply is not aligned for its native mapping");
+            return Err(refuse!(
+                "PMP memory reply is not aligned for its native mapping"
+            ));
         }
         Ok(body)
     }
 }
 
-pub(super) fn allocation_bytes(bytes: u32) -> Result<u64, &'static str> {
+pub(super) fn allocation_bytes(bytes: u32) -> Result<u64> {
     let rounded = (u64::from(bytes) + PAGE - 1) & !(PAGE - 1);
     if rounded > 0xff_ffff {
-        return Err("PMP allocation exceeds the source request's 24-bit size field");
+        return Err(refuse!(
+            "PMP allocation exceeds the source request's 24-bit size field"
+        ));
     }
     Ok(rounded)
 }

@@ -43,8 +43,11 @@
 //! driver's separate enableWakeOnly/claimWakeEvents contract is not modeled,
 //! so a stopped clock cannot silently discard edge/wake ownership. Physical
 //! supply loss, pad retention and reset remain explicit refusals.
+use crate::Result;
 use alloc::{rc::Rc, vec, vec::Vec};
 use core::cell::Cell;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
@@ -86,11 +89,11 @@ impl Net {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn open_drain(&self) -> Result<OpenDrain, &'static str> {
+    pub fn open_drain(&self) -> Result<OpenDrain> {
         let mut state = self.0.get();
         let bit = 1u64
             .checked_shl(state.outputs)
-            .ok_or("too many open-drain outputs on one net")?;
+            .ok_or(refuse!("too many open-drain outputs on one net"))?;
         state.outputs += 1;
         self.0.set(state);
         Ok(OpenDrain {
@@ -149,7 +152,7 @@ impl Gpio {
         lines: Vec<AicInput>,
         selects: &[u32],
         nets: Vec<(u32, Net)>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         Self::with_profile(Profile::T8101, pins, lines, selects, nets)
     }
 
@@ -161,7 +164,7 @@ impl Gpio {
         lines: Vec<AicInput>,
         selects: &[u32],
         nets: Vec<(u32, Net)>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         if pins == 0
             || pins > 512
             || lines.is_empty()
@@ -172,7 +175,7 @@ impl Gpio {
                 .any(|&p| p >= pins)
             || selects.iter().any(|p| nets.iter().any(|(n, _)| n == p))
         {
-            return Err("invalid GPIO pin/group geometry, CS or board net");
+            return Err(refuse!("invalid GPIO pin/group geometry, CS or board net"));
         }
         let words = (pins as usize).div_ceil(32);
         let mut bank = Self {
@@ -199,16 +202,18 @@ impl Gpio {
         }
         for (pin, net) in nets {
             if bank.nets[pin as usize].replace(net).is_some() {
-                return Err("two board nets on one GPIO pin");
+                return Err(refuse!("two board nets on one GPIO pin"));
             }
         }
         Ok(bank)
     }
     /// A bank of `groups` interrupt groups, of which the first have the
     /// AIC lines [`Gpio::new`] took.
-    pub fn with_groups(mut self, groups: usize) -> Result<Self, &'static str> {
+    pub fn with_groups(mut self, groups: usize) -> Result<Self> {
         if groups < self.lines.len() || groups > GROUPS {
-            return Err("GPIO group count below its lines or beyond the group field");
+            return Err(refuse!(
+                "GPIO group count below its lines or beyond the group field"
+            ));
         }
         self.groups = groups;
         self.pending = vec![0; self.words * groups];
@@ -284,19 +289,23 @@ impl Gpio {
     }
 }
 impl Lifecycle for Gpio {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         if proposed.reset {
-            return Err("GPIO physical reset, pad state and interrupt restoration are unqualified");
+            return Err(refuse!(
+                "GPIO physical reset, pad state and interrupt restoration are unqualified"
+            ));
         }
         if !proposed.powered {
-            return Err("GPIO supply loss and physical pad/interrupt retention are unqualified");
+            return Err(refuse!(
+                "GPIO supply loss and physical pad/interrupt retention are unqualified"
+            ));
         }
         if (!proposed.clocked || proposed.quiesced)
             && (!self.armed.is_empty() || self.pending.iter().any(|word| *word != 0))
         {
-            return Err(
-                "GPIO pause with armed or pending interrupts has unqualified edge/wake capture",
-            );
+            return Err(refuse!(
+                "GPIO pause with armed or pending interrupts has unqualified edge/wake capture"
+            ));
         }
         Ok(())
     }
@@ -321,37 +330,39 @@ impl MmioDevice for Gpio {
         width: Width,
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
-        let err = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let err = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         if !self.lifecycle.clocked {
-            return Err(err(
-                "GPIO MMIO while its physical clock is stopped is unqualified",
-            ));
+            return Err(err(refuse!(
+                "GPIO MMIO while its physical clock is stopped is unqualified"
+            )));
         }
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(err("GPIO registers require aligned 32-bit accesses"));
+            return Err(err(refuse!(
+                "GPIO registers require aligned 32-bit accesses"
+            )));
         }
         self.sample(access);
         let pin = offset as usize / 4;
         if let Some(&word) = self.pins.get(pin) {
             if word & MODE == INPUT && word & INPUT_ENABLE == 0 {
-                return Err(err(
-                    "plain GPIO input DATA with receiver disabled is unqualified",
-                ));
+                return Err(err(refuse!(
+                    "plain GPIO input DATA with receiver disabled is unqualified"
+                )));
             }
             if word & MODE == OUTPUT || word & INPUT_ENABLE == 0 {
                 return Ok(u64::from(word));
             }
             return match self.input_level(pin, word) {
                 Some(level) => Ok(u64::from(word & !DATA | u32::from(level))),
-                None => Err(err(
-                    "unconnected GPIO input has no pull; DATA is undetermined",
-                )),
+                None => Err(err(refuse!(
+                    "unconnected GPIO input has no pull; DATA is undetermined"
+                ))),
             };
         }
         if let Some(index) = self.irq_word(offset) {
             return Ok(u64::from(self.pending[index]));
         }
-        Err(err("unmodeled GPIO register"))
+        Err(err(refuse!("unmodeled GPIO register")))
     }
     fn write(
         &mut self,
@@ -360,26 +371,28 @@ impl MmioDevice for Gpio {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let err = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let err = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         if !self.lifecycle.clocked {
-            return Err(err(
-                "GPIO MMIO while its physical clock is stopped is unqualified",
-            ));
+            return Err(err(refuse!(
+                "GPIO MMIO while its physical clock is stopped is unqualified"
+            )));
         }
         if self.lifecycle.quiesced {
-            return Err(err(
-                "GPIO register changes while native service is quiesced are unqualified",
-            ));
+            return Err(err(refuse!(
+                "GPIO register changes while native service is quiesced are unqualified"
+            )));
         }
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(err("GPIO registers require aligned 32-bit accesses"));
+            return Err(err(refuse!(
+                "GPIO registers require aligned 32-bit accesses"
+            )));
         }
         let pin = offset as usize / 4;
         if let Some(&word) = self.pins.get(pin) {
             let mut value = value as u32;
             let mode = value & MODE;
             if value & !FIELDS != 0 {
-                return Err(err("unknown GPIO fields are not modeled"));
+                return Err(err(refuse!("unknown GPIO fields are not modeled")));
             }
             // Original mac13j S5L getGPIOData calls direction0, which
             // changes output/mode7 into plain input with receiver9 set
@@ -388,18 +401,18 @@ impl MmioDevice for Gpio {
             // That intermediate form grants no sampled DATA level; reads
             // refuse until the source enables the receiver.
             if self.profile == Profile::S5l8960x && value & LOCK != 0 {
-                return Err(err("S5L GPIO lock bit semantics are unqualified"));
+                return Err(err(refuse!("S5L GPIO lock bit semantics are unqualified")));
             }
             if value & PERIPH != 0 && mode != INPUT_OFF {
-                return Err(err(
-                    "GPIO peripheral mux with output or interrupt mode is not modeled",
-                ));
+                return Err(err(refuse!(
+                    "GPIO peripheral mux with output or interrupt mode is not modeled"
+                )));
             }
             let level = self.input_level(pin, value);
             if matches!(mode, LEVEL_HIGH | LEVEL_LOW) && level.is_none() {
-                return Err(err(
-                    "GPIO level interrupt on an input whose level is undetermined",
-                ));
+                return Err(err(refuse!(
+                    "GPIO level interrupt on an input whose level is undetermined"
+                )));
             }
             if mode != OUTPUT && value & INPUT_ENABLE != 0 {
                 // Enabling the receiver changes configuration, but does not
@@ -412,16 +425,20 @@ impl MmioDevice for Gpio {
             }
             if matches!(mode, LEVEL_HIGH..=EDGE_ANY) {
                 match self.group(value) {
-                    None => return Err(err("GPIO interrupt group beyond the DT group count")),
+                    None => {
+                        return Err(err(refuse!(
+                            "GPIO interrupt group beyond the DT group count"
+                        )));
+                    }
                     Some(group) if group >= self.lines.len() => {
-                        return Err(err("GPIO interrupt group without an AIC line"));
+                        return Err(err(refuse!("GPIO interrupt group without an AIC line")));
                     }
                     Some(_) => {}
                 }
             }
             if word & LOCK != 0 {
                 if (word ^ value) & !(DATA | LOCK) != 0 {
-                    return Err(err("GPIO configuration is locked"));
+                    return Err(err(refuse!("GPIO configuration is locked")));
                 }
                 value |= LOCK;
             }
@@ -440,7 +457,7 @@ impl MmioDevice for Gpio {
             self.sample(access);
             return Ok(());
         }
-        Err(err("unmodeled GPIO register"))
+        Err(err(refuse!("unmodeled GPIO register")))
     }
     fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
         self.sample(access);

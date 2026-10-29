@@ -118,7 +118,7 @@ pub fn root_hash_record(payload: &[u8]) -> Result<(Hash, &[u8])> {
         length == hash.size(),
         "root-hash record holds {length} bytes for a {hash} hash",
         length,
-        hash = alloc::format!("{hash:?}")
+        ?hash
     );
     let bytes = payload
         .get(ROOT_HASH_HEADER_BYTES..ROOT_HASH_HEADER_BYTES + length)

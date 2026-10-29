@@ -6,6 +6,8 @@
 //! no enable, lock, frequency, phase or physical reset value is invented.
 use super::identity::Authority;
 use alloc::{rc::Rc, vec::Vec};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -235,17 +237,19 @@ impl MmioDevice for Image {
         NAME
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         if width != Width::Word {
-            return Err(fail("T6000 native clock input width is unqualified"));
+            return Err(fail(refuse!(
+                "T6000 native clock input width is unqualified"
+            )));
         }
         let register = Register::ALL
             .into_iter()
             .find(|register| register.address() == offset)
-            .ok_or_else(|| fail("T6000 native clock input address is unqualified"))?;
+            .ok_or_else(|| fail(refuse!("T6000 native clock input address is unqualified")))?;
         self.raw(register)
             .map(u64::from)
-            .map_err(|error| fail(error.reason()))
+            .map_err(|error| fail(error.reason().into()))
     }
     fn write(
         &mut self,

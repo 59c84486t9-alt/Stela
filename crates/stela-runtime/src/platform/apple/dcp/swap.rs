@@ -71,6 +71,8 @@
 //! absent.
 pub use super::super::scanout::Rect;
 use super::super::scanout::{PixelFormat, Surface};
+use crate::Result;
+use stela_contracts::refuse;
 
 /// One `SurfaceContents` record.
 pub const SURFACE_BYTES: usize = 0x22c;
@@ -144,9 +146,11 @@ pub struct Record {
 }
 
 impl Record {
-    pub fn parse(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < SURFACE_BYTES {
-            return Err("DCP SurfaceContents record is shorter than 0x22c bytes");
+            return Err(refuse!(
+                "DCP SurfaceContents record is shorter than 0x22c bytes"
+            ));
         }
         Ok(Self {
             tiled: bytes[IS_TILED] != 0,
@@ -165,29 +169,35 @@ impl Record {
     /// The linear 32-bit surface this record names at `dva`, or why the
     /// model cannot scan it out. Tiled, compressed, multi-planar and other
     /// formats refuse rather than present garbage.
-    pub fn surface(&self, dva: u64) -> Result<Surface, &'static str> {
+    pub fn surface(&self, dva: u64) -> Result<Surface> {
         if self.tiled {
-            return Err("DCP swap surface is tiled; the model scans out linear surfaces only");
+            return Err(refuse!(
+                "DCP swap surface is tiled; the model scans out linear surfaces only"
+            ));
         }
         if self.compressed {
-            return Err("DCP swap surface is compressed; the model scans out uncompressed only");
+            return Err(refuse!(
+                "DCP swap surface is compressed; the model scans out uncompressed only"
+            ));
         }
         if self.planes > 1 {
-            return Err("DCP swap surface is multi-planar; the model scans out one plane");
+            return Err(refuse!(
+                "DCP swap surface is multi-planar; the model scans out one plane"
+            ));
         }
         let format = PixelFormat::from_fourcc(self.format)
-            .ok_or("DCP swap surface format is not BGRA, RGBA or l10r")?;
+            .ok_or(refuse!("DCP swap surface format is not BGRA, RGBA or l10r"))?;
         if self.width == 0 || self.height == 0 {
-            return Err("DCP swap surface has no size");
+            return Err(refuse!("DCP swap surface has no size"));
         }
         let row = self
             .width
             .checked_mul(4)
-            .ok_or("DCP swap surface row overflows")?;
+            .ok_or(refuse!("DCP swap surface row overflows"))?;
         if self.stride < row
             || u64::from(self.stride) * u64::from(self.height) > u64::from(self.buffer)
         {
-            return Err("DCP swap surface stride or size is inconsistent");
+            return Err(refuse!("DCP swap surface stride or size is inconsistent"));
         }
         Ok(Surface {
             width: self.width,
@@ -196,7 +206,7 @@ impl Record {
             format,
             iova: dva
                 .checked_add(u64::from(self.offset))
-                .ok_or("DCP swap surface address overflows")?,
+                .ok_or(refuse!("DCP swap surface address overflows"))?,
         })
     }
 }
@@ -237,19 +247,23 @@ impl Submission {
     /// Parse `input`, refusing a shape the model does not present: a missing
     /// record, a secondary surface, enable bits outside layers 0..3 and
     /// `DCP_REMOVE_LAYERS`.
-    pub fn parse(input: &[u8]) -> Result<Self, &'static str> {
+    pub fn parse(input: &[u8]) -> Result<Self> {
         if input.len() != SUBMIT_BYTES {
-            return Err("DCP swap_submit_dcp input is not 0x1d30 bytes");
+            return Err(refuse!("DCP swap_submit_dcp input is not 0x1d30 bytes"));
         }
         if input[RECORD_NULL] != 0 {
-            return Err("DCP swap_submit_dcp carries no IOMFBSwapRec");
+            return Err(refuse!("DCP swap_submit_dcp carries no IOMFBSwapRec"));
         }
         if input[SECONDARY_NULL..SECONDARY_NULL + SECONDARY].contains(&0) {
-            return Err("DCP swap carries a secondary surface, which the model does not compose");
+            return Err(refuse!(
+                "DCP swap carries a secondary surface, which the model does not compose"
+            ));
         }
         let enabled = u32_at(input, ENABLED);
         if enabled & !(REMOVE_LAYERS | ((1 << LAYERS) - 1)) != 0 {
-            return Err("DCP swap enables a layer outside the four the record carries");
+            return Err(refuse!(
+                "DCP swap enables a layer outside the four the record carries"
+            ));
         }
         let mut layers = [None; LAYERS];
         for (index, slot) in layers.iter_mut().enumerate() {

@@ -3,6 +3,7 @@ use super::super::super::Evaluation;
 use super::*;
 use alloc::{rc::Rc, vec};
 use core::cell::RefCell;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Direction, stela_contracts::bus::refuse,
     stela_contracts::interrupt::InterruptLatch,
@@ -67,7 +68,7 @@ impl Counters for Queries {
             return Completion::Busy { deadline: Some(99) };
         }
         if core::mem::take(&mut q.refusal_once) {
-            return Completion::Refused("authored callback unavailable");
+            return Completion::Refused(refuse!("authored callback unavailable"));
         }
         q.retired.push((
             request.ordinal().index() as u8,
@@ -77,7 +78,7 @@ impl Counters for Queries {
         Completion::Retired {
             value: u32::MAX - u32::from(request.kind()),
             refusal: core::mem::take(&mut q.retired_refusal_once)
-                .then_some("authored retired callback failure"),
+                .then_some(refuse!("authored retired callback failure")),
         }
     }
 }
@@ -447,18 +448,18 @@ impl crate::platform::apple::pmp::native::Resources for MissingNativeResources {
         _: &crate::platform::apple::pmp::native::Request,
         _: &mut Access<'_>,
     ) -> crate::platform::apple::pmp::native::Refresh {
-        crate::platform::apple::pmp::native::Refresh::Refused(
-            "authored native hardware unavailable",
-        )
+        crate::platform::apple::pmp::native::Refresh::Refused(refuse!(
+            "authored native hardware unavailable"
+        ))
     }
     fn snapshot_observer_packets(
         &mut self,
         _: &crate::platform::apple::pmp::native::Request,
         _: &mut Access<'_>,
     ) -> crate::platform::apple::pmp::native::Refresh {
-        crate::platform::apple::pmp::native::Refresh::Refused(
-            "authored native observer unavailable",
-        )
+        crate::platform::apple::pmp::native::Refresh::Refused(refuse!(
+            "authored native observer unavailable"
+        ))
     }
     fn effect(
         &mut self,
@@ -468,7 +469,9 @@ impl crate::platform::apple::pmp::native::Resources for MissingNativeResources {
         _: &crate::platform::apple::pmp::native::Packets,
         _: &mut Access<'_>,
     ) -> crate::platform::apple::pmp::native::Step {
-        crate::platform::apple::pmp::native::Step::Refused("authored native effect unavailable")
+        crate::platform::apple::pmp::native::Step::Refused(refuse!(
+            "authored native effect unavailable"
+        ))
     }
 }
 type CacheHarness = (
@@ -677,8 +680,8 @@ fn provider_cache_rejects_unbound_and_other_recipient_masks_even_on_same_ptd() {
             MissingNativeResources,
         ),
         Err(native::Error::Contract(
-            "PTD actual bank already admitted its native PMP recipient"
-        ))
+            reason
+        )) if reason == refuse!("PTD actual bank already admitted its native PMP recipient")
     ));
     let local = fixture.notifications().clone();
     let ranges = local.bank().ranges();
@@ -704,7 +707,7 @@ fn provider_cache_rejects_unbound_and_other_recipient_masks_even_on_same_ptd() {
     let top = || core::array::from_fn(|_| alloc::vec![0; 8]);
     assert!(matches!(
         Cache::initialized(claim(Rc::new(())), &[[1; 4]], bound.read_masks(), top()),
-        Err("provider cache and manager G540 have different native recipients")
+        Err(e) if e == refuse!("provider cache and manager G540 have different native recipients")
     ));
     assert_eq!(bound.scratch(), [0; 32]);
     let accepted = Cache::initialized(
@@ -718,7 +721,7 @@ fn provider_cache_rejects_unbound_and_other_recipient_masks_even_on_same_ptd() {
     let (unbound, _, _) = manager(configuration(&[], &[], &[]));
     assert!(matches!(
         Cache::initialized(claim(recipient), &[[1; 4]], unbound.read_masks(), top()),
-        Err("provider cache requires a native-bound manager G540")
+        Err(e) if e == refuse!("provider cache requires a native-bound manager G540")
     ));
     assert_eq!(actual_cache.consumed(), 0);
     assert_eq!(actual_manager.scratch(), [0; 32]);
@@ -735,8 +738,8 @@ fn provider_cache_refuses_another_native_capture_on_the_same_ptd() {
             MissingNativeResources,
         ),
         Err(native::Error::Contract(
-            "PTD actual bank already admitted its native PMP recipient"
-        ))
+            reason
+        )) if reason == refuse!("PTD actual bank already admitted its native PMP recipient")
     ));
     let profile = native::platform::authored_profile();
     let raw: Vec<u8> = profile
@@ -775,17 +778,19 @@ fn provider_cache_refuses_another_native_capture_on_the_same_ptd() {
     let foreign_capture = foreign_frames.capture_pending(&access).unwrap();
     assert_eq!(
         cache.bind_capture(&foreign_frames, &foreign_capture),
-        Err("PMP frames belong to a different actual native recipient")
+        Err(refuse!(
+            "PMP frames belong to a different actual native recipient"
+        ))
     );
     let own_capture = own_frames.capture_pending(&access).unwrap();
     cache.bind_capture(&own_frames, &own_capture).unwrap();
     assert!(matches!(
         cache.read(&foreign_frames, &foreign_capture, 2, 0, &mut access),
-        Completion::Refused("PMP frames belong to a different actual native recipient")
+        Completion::Refused(reason) if reason == refuse!("PMP frames belong to a different actual native recipient")
     ));
     assert!(matches!(
         cache.read_bound(&foreign_frames, 2, 0, &mut access),
-        Completion::Refused("PMP frames belong to a different actual native recipient")
+        Completion::Refused(reason) if reason == refuse!("PMP frames belong to a different actual native recipient")
     ));
     assert_eq!(cache.consumed(), 0);
     assert_eq!(manager.scratch(), [0; 32]);

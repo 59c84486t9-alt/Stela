@@ -9,6 +9,8 @@ use super::{
     context::{BoundsPolicy, Context, Geometry, PAGE_SHIFT, TableLevel},
     descriptor::Encoding,
 };
+use crate::Result;
+use stela_contracts::refuse;
 
 const TRANSLATE: u32 = 1;
 const THREE_LEVEL: u32 = 1 << 3;
@@ -28,7 +30,7 @@ impl Handoff {
     /// Bind the recovered original client revision, complete supported TCR
     /// form and software bounds to a representable root. Unknown controls,
     /// compact handoff modes and bypass still require their own contracts.
-    pub fn new(revision: u16, config: u32, context: Context) -> Result<Self, &'static str> {
+    pub fn new(revision: u16, config: u32, context: Context) -> Result<Self> {
         Self::native_client(revision, config, context, BoundsPolicy::Strict)
     }
 
@@ -42,16 +44,22 @@ impl Handoff {
         config: u32,
         context: Context,
         policy: BoundsPolicy,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let encoding = Encoding::handoff_revision(revision)?;
         if config & !(TRANSLATE | THREE_LEVEL) != 0 {
-            return Err("gen3 DART native handoff has unqualified TCR fields");
+            return Err(refuse!(
+                "gen3 DART native handoff has unqualified TCR fields"
+            ));
         }
         if config & TRANSLATE == 0 {
-            return Err("gen3 DART native handoff requires the untranslated/BPF contract");
+            return Err(refuse!(
+                "gen3 DART native handoff requires the untranslated/BPF contract"
+            ));
         }
         if Geometry::from_tcr(config) != context.geometry() {
-            return Err("gen3 DART native handoff geometry disagrees with its context");
+            return Err(refuse!(
+                "gen3 DART native handoff geometry disagrees with its context"
+            ));
         }
         if context.geometry() == Geometry::TwoLevel {
             let start = u64::from(context.start_page()) << PAGE_SHIFT;
@@ -63,9 +71,9 @@ impl Handoff {
             // accepted low window to64 GiB, never all addresses below1 TiB.
             let low = policy == BoundsPolicy::NoncompliantDeadMappings && end <= 1 << ROOT_SHIFT;
             if !ordinary && !low {
-                return Err(
-                    "gen3 DART native two-level context exceeds its qualified root windows",
-                );
+                return Err(refuse!(
+                    "gen3 DART native two-level context exceeds its qualified root windows"
+                ));
             }
         }
         // Context already enforces the original 42-bit construction limit.

@@ -159,7 +159,7 @@ fn normal_consumers_child_gates_and_provider_power_remain_enforced() {
             ClockRole::PmgrProvider(_)
         ));
         let error = validate_power_graph(&states).unwrap_err();
-        assert!(error.contains("197"), "{error}");
+        assert!(error.to_string().contains("197"), "{error}");
     }
 }
 
@@ -178,7 +178,12 @@ fn compatible_or_names_cannot_replace_function_provider_binding() {
                 .iter()
                 .all(|resource| resource.clock_role == ClockRole::Consumer)
         );
-        assert!(validate_power_graph(&states).unwrap_err().contains("197"));
+        assert!(
+            validate_power_graph(&states)
+                .unwrap_err()
+                .to_string()
+                .contains("197")
+        );
     }
     let binding = words(&[0x99, 0x636c6b47]);
     let mut foreign_bus = tree(Some(&binding), "pmgr1,t6000", &[], &[], false);
@@ -231,6 +236,7 @@ fn malformed_or_ambiguous_provider_inputs_and_changed_role_refuse() {
         states
             .apply_admission(&bytes, &[])
             .unwrap_err()
+            .to_string()
             .contains("differs")
     );
     assert_eq!(
@@ -263,6 +269,7 @@ fn malformed_or_ambiguous_provider_inputs_and_changed_role_refuse() {
     assert!(
         inventory(&Node::root(&bytes).unwrap())
             .unwrap_err()
+            .to_string()
             .contains("ambiguous")
     );
 }

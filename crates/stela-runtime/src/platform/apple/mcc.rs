@@ -2,8 +2,11 @@
 //! programs this bank directly; it does not use the T8112 PMP quota protocol.
 //! Explicit Stela initialization and kept physical observations are distinct.
 //! Committed inputs never become cache-power or quota completion by themselves.
+use crate::Result;
 use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
@@ -122,9 +125,9 @@ enum Role {
     DsidCommand(u8),
 }
 
-fn role(offset: u64) -> Result<Role, &'static str> {
+fn role(offset: u64) -> Result<Role> {
     if offset >= APERTURE_BYTES || !offset.is_multiple_of(4) {
-        return Err("MCC register outside its aperture or alignment");
+        return Err(refuse!("MCC register outside its aperture or alignment"));
     }
     if offset < u64::from(PLANES) * PLANE_STRIDE {
         let plane = (offset / PLANE_STRIDE) as u8;
@@ -154,7 +157,9 @@ fn role(offset: u64) -> Result<Role, &'static str> {
             _ => {}
         }
     }
-    Err("MCC register/event-accounting effect has not been qualified")
+    Err(refuse!(
+        "MCC register/event-accounting effect has not been qualified"
+    ))
 }
 fn offsets() -> Vec<u64> {
     let mut offsets = alloc::vec![SHARED_GATING, BROADCAST];
@@ -188,12 +193,12 @@ struct State {
     serial: u64,
 }
 impl State {
-    fn accessible(&self) -> Result<(), &'static str> {
+    fn accessible(&self) -> Result<()> {
         if !self.lifecycle.powered || !self.lifecycle.clocked || self.lifecycle.quiesced {
-            return Err("MCC/DCS resource is paused by its actual owner");
+            return Err(refuse!("MCC/DCS resource is paused by its actual owner"));
         }
         if self.lifecycle.reset {
-            return Err("MCC/DCS resource is in reset");
+            return Err(refuse!("MCC/DCS resource is in reset"));
         }
         Ok(())
     }
@@ -209,10 +214,7 @@ impl Controller {
     /// reservations are zero, and channel configuration is supplied explicitly.
     /// This allocates controller input/state backing, not a functional cache,
     /// native DRAM reconfiguration, event source or physical reset observation.
-    pub fn initialized(
-        configuration: Configuration,
-        lifecycle: LifecycleState,
-    ) -> Result<Self, &'static str> {
+    pub fn initialized(configuration: Configuration, lifecycle: LifecycleState) -> Result<Self> {
         let apertures = configuration.validate()?;
         let mut observations = Vec::new();
         for aperture in 0..apertures {
@@ -252,32 +254,40 @@ impl Controller {
         apertures: u8,
         lifecycle: LifecycleState,
         observations: &[Observation],
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         if apertures == 0 || apertures > 16 {
-            return Err("MCC aperture count exceeds original source capacity");
+            return Err(refuse!(
+                "MCC aperture count exceeds original source capacity"
+            ));
         }
         if lifecycle.reset || (!lifecycle.powered && !lifecycle.retention) {
-            return Err("MCC physical reset/nonretained loss is unqualified");
+            return Err(refuse!(
+                "MCC physical reset/nonretained loss is unqualified"
+            ));
         }
         let mut words = BTreeMap::new();
         for &word in observations {
             if word.aperture >= apertures {
-                return Err("MCC observation names an absent aperture");
+                return Err(refuse!("MCC observation names an absent aperture"));
             }
             if policy::exclusive(role(word.offset)?) {
-                return Err("retained MCC policy/accounting requires its actual resource owner");
+                return Err(refuse!(
+                    "retained MCC policy/accounting requires its actual resource owner"
+                ));
             }
             if word.value > u64::from(u32::MAX) || word.known > u64::from(u32::MAX) {
-                return Err("MCC observation exceeds its original 32-bit register");
+                return Err(refuse!(
+                    "MCC observation exceeds its original 32-bit register"
+                ));
             }
             if words.insert((word.aperture, word.offset), word).is_some() {
-                return Err("duplicate MCC observation");
+                return Err(refuse!("duplicate MCC observation"));
             }
         }
         for aperture in 0..apertures {
             for offset in offsets() {
                 if !words.contains_key(&(aperture, offset)) {
-                    return Err("MCC input/status observation is absent");
+                    return Err(refuse!("MCC input/status observation is absent"));
                 }
             }
         }
@@ -291,9 +301,9 @@ impl Controller {
             serial: 0,
         }))))
     }
-    pub fn view(&self, aperture: u8) -> Result<View, &'static str> {
+    pub fn view(&self, aperture: u8) -> Result<View> {
         if aperture >= self.0.borrow().apertures {
-            return Err("MCC view names an absent aperture");
+            return Err(refuse!("MCC view names an absent aperture"));
         }
         Ok(View {
             controller: self.clone(),
@@ -332,14 +342,16 @@ pub struct View {
     aperture: u8,
 }
 impl Lifecycle for View {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         let _exclusive = self
             .controller
             .0
             .try_borrow_mut()
-            .map_err(|_| "MCC resource/policy is borrowed by its actual consumer")?;
+            .map_err(|_| refuse!("MCC resource/policy is borrowed by its actual consumer"))?;
         if proposed.reset || (!proposed.powered && !proposed.retention) {
-            return Err("MCC/DCS native reset, loss and cancellation are unqualified");
+            return Err(refuse!(
+                "MCC/DCS native reset, loss and cancellation are unqualified"
+            ));
         }
         Ok(())
     }
@@ -356,34 +368,36 @@ impl MmioDevice for View {
         Some(self)
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         let state = self.controller.0.borrow();
         state.accessible().map_err(fail)?;
         if width != Width::Word {
-            return Err(fail("MCC register requires an original 32-bit access"));
+            return Err(fail(refuse!(
+                "MCC register requires an original 32-bit access"
+            )));
         }
         let source = status::canonical(offset).unwrap_or(offset);
         if source != offset && state.origin != Origin::StelaInitialized {
-            return Err(fail(
-                "retained physical MCC status-alias relationship is unqualified",
-            ));
+            return Err(fail(refuse!(
+                "retained physical MCC status-alias relationship is unqualified"
+            )));
         }
         if matches!(
             role(source).map_err(fail)?,
             Role::DsidCommand(_) | Role::Persistence(_) | Role::PersistenceAuxiliary(_)
         ) {
-            return Err(fail(
-                "MCC persistence/DSID write-alias readback is unqualified",
-            ));
+            return Err(fail(refuse!(
+                "MCC persistence/DSID write-alias readback is unqualified"
+            )));
         }
         let word = state
             .words
             .get(&(self.aperture, source))
-            .ok_or_else(|| fail("MCC register has no actual backing"))?;
+            .ok_or_else(|| fail(refuse!("MCC register has no actual backing")))?;
         if word.known != u64::from(u32::MAX) {
-            return Err(fail(
-                "MCC/DCS register requires unqualified backend settlement",
-            ));
+            return Err(fail(refuse!(
+                "MCC/DCS register requires unqualified backend settlement"
+            )));
         }
         Ok(word.value)
     }
@@ -394,21 +408,23 @@ impl MmioDevice for View {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
-        let mut state = self
-            .controller
-            .0
-            .try_borrow_mut()
-            .map_err(|_| fail("MCC resource/policy is borrowed by its actual consumer"))?;
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
+        let mut state = self.controller.0.try_borrow_mut().map_err(|_| {
+            fail(refuse!(
+                "MCC resource/policy is borrowed by its actual consumer"
+            ))
+        })?;
         state.accessible().map_err(fail)?;
         if width != Width::Word {
-            return Err(fail("MCC register requires an original 32-bit access"));
+            return Err(fail(refuse!(
+                "MCC register requires an original 32-bit access"
+            )));
         }
         let role = role(offset).map_err(fail)?;
         let previous = *state
             .words
             .get(&(self.aperture, offset))
-            .ok_or_else(|| fail("MCC register has no actual backing"))?;
+            .ok_or_else(|| fail(refuse!("MCC register has no actual backing")))?;
         let written = value as u32;
         if state.resource == CacheResource::Cacheless
             && (policy::exclusive(role) || matches!(role, Role::Quota(_) | Role::Ways(_)))
@@ -417,21 +433,23 @@ impl MmioDevice for View {
                 .map_err(fail);
         }
         if policy::exclusive(role) {
-            return Err(fail(
-                "MCC policy/accounting has no qualified resource owner",
-            ));
+            return Err(fail(refuse!(
+                "MCC policy/accounting has no qualified resource owner"
+            )));
         }
         if matches!(role, Role::Status) {
-            return Err(fail("write to actual cache power status"));
+            return Err(fail(refuse!("write to actual cache power status")));
         }
         if let Role::Drain = role {
-            return Err(fail(
-                "DCS drain requires the actual shared memory/visibility backend",
-            ));
+            return Err(fail(refuse!(
+                "DCS drain requires the actual shared memory/visibility backend"
+            )));
         }
         if matches!(role, Role::Broadcast) {
             if written > 1 {
-                return Err(fail("MCC broadcast request contains unqualified fields"));
+                return Err(fail(refuse!(
+                    "MCC broadcast request contains unqualified fields"
+                )));
             }
             state.words.insert(
                 (self.aperture, offset),
@@ -446,7 +464,7 @@ impl MmioDevice for View {
         let broadcast = state.words[&(self.aperture, BROADCAST)];
         let broadcast = if matches!(role, Role::Ways(_) | Role::Quota(_)) {
             if broadcast.known & 1 == 0 {
-                return Err(fail("MCC broadcast scope is unknown"));
+                return Err(fail(refuse!("MCC broadcast scope is unknown")));
             }
             broadcast.value & 1 != 0
         } else {
@@ -455,7 +473,9 @@ impl MmioDevice for View {
         let kind = match role {
             Role::Ways(plane) => {
                 if written > u32::from(MAX_WAYS) {
-                    return Err(fail("MCC way target exceeds the source 12-way geometry"));
+                    return Err(fail(refuse!(
+                        "MCC way target exceeds the source 12-way geometry"
+                    )));
                 }
                 RequestKind::Ways {
                     plane,
@@ -466,9 +486,9 @@ impl MmioDevice for View {
             Role::Quota(group) => {
                 let units = (u64::from(written) & QUOTA_UNITS) as u8;
                 if units > MAX_QUOTA_UNITS {
-                    return Err(fail(
-                        "MCC quota exceeds the source 6 MiB per-aperture capacity",
-                    ));
+                    return Err(fail(refuse!(
+                        "MCC quota exceeds the source 6 MiB per-aperture capacity"
+                    )));
                 }
                 RequestKind::Quota {
                     group,
@@ -500,7 +520,9 @@ impl MmioDevice for View {
                 if previous.known & preserved != preserved
                     || (u64::from(written) ^ previous.value) & preserved != 0
                 {
-                    return Err(fail("MCC/DCS request cannot preserve unqualified fields"));
+                    return Err(fail(refuse!(
+                        "MCC/DCS request cannot preserve unqualified fields"
+                    )));
                 }
                 let selector = u64::from(written) & fields;
                 if !matches!(kind, RequestKind::Quota { .. })
@@ -511,9 +533,9 @@ impl MmioDevice for View {
                             0x2000_0000
                         }
                 {
-                    return Err(fail(
-                        "MCC/DCS gating selector is absent from the original protocol",
-                    ));
+                    return Err(fail(refuse!(
+                        "MCC/DCS gating selector is absent from the original protocol"
+                    )));
                 }
                 fields
             }
@@ -522,7 +544,7 @@ impl MmioDevice for View {
         let serial = state
             .serial
             .checked_add(1)
-            .ok_or_else(|| fail("MCC request serial exhausted"))?;
+            .ok_or_else(|| fail(refuse!("MCC request serial exhausted")))?;
         let word = Observation {
             value: u64::from(written),
             known: previous.known & !pending_fields,

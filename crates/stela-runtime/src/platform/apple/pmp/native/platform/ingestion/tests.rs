@@ -2,6 +2,7 @@ use super::super::super::counters::{Claim, CopyStep};
 use super::super::super::power::DeviceTable;
 use super::*;
 use core::cell::Cell;
+use stela_contracts::refuse;
 use {
     crate::platform::apple::ptd::Ptd,
     crate::platform::apple::ptd::transport::notifications::LocalNotifications,
@@ -37,7 +38,7 @@ impl Backend for TestBackend {
         }
         if matches!(c, Call::ControlTail { .. }) && self.refuse_tail {
             self.refuse_tail = false;
-            return Completion::Refused("authored missing auxiliary effect");
+            return Completion::Refused(refuse!("authored missing auxiliary effect"));
         }
         let value = if self.bad {
             Value::Complete
@@ -70,7 +71,7 @@ impl Backend for TestBackend {
         };
         let refusal = if matches!(c, Call::ControlTail { .. }) && self.retired_tail {
             self.retired_tail = false;
-            Some("authored retired auxiliary refusal")
+            Some(refuse!("authored retired auxiliary refusal"))
         } else {
             None
         };
@@ -314,7 +315,7 @@ fn provider_tuple_sums_and_auxiliary_refusal_keep_exact_prefix() {
     o.begin_capture(&frames, receipt, &d, context(), 1).unwrap();
     assert_eq!(
         run(&mut o, &frames, &mut latch),
-        Err(Error::Refused("authored missing auxiliary effect"))
+        Err(Error::Refused(refuse!("authored missing auxiliary effect")))
     );
     assert_eq!(
         o.base[0][0],
@@ -391,9 +392,9 @@ fn tuple_callback_shape_and_cursor_exhaustion_fail_before_fabrication() {
     o.begin_capture(&frames, receipt, &d, context(), 1).unwrap();
     assert_eq!(
         run(&mut o, &frames, &mut latch),
-        Err(Error::Contract(
+        Err(Error::Contract(refuse!(
             "generic actual callback result shape mismatch"
-        ))
+        )))
     );
     assert_eq!(o.products().0, 0);
     let receipt = copied(&mut frames, &local, 4, 0, &mut latch);
@@ -430,9 +431,9 @@ fn constructor_preflight_keeps_receipt_products_and_pending_post_intact() {
     d.counters = None;
     assert_eq!(
         o.begin_capture(&frames, receipt, &d, context(), 1),
-        Err(Error::Contract(
+        Err(Error::Contract(refuse!(
             "generic no-counter descriptor received a nonempty frame slice"
-        ))
+        )))
     );
     assert!(o.receipt.is_none());
     assert!(!o.awaiting_post);
@@ -442,7 +443,9 @@ fn constructor_preflight_keeps_receipt_products_and_pending_post_intact() {
     o.serial = u64::MAX;
     assert_eq!(
         o.begin_capture(&frames, receipt, &d, context(), 1),
-        Err(Error::Contract("generic ingestion serial exhausted"))
+        Err(Error::Contract(refuse!(
+            "generic ingestion serial exhausted"
+        )))
     );
     assert!(o.receipt.is_none());
     assert!(!o.awaiting_post);
@@ -459,7 +462,9 @@ fn constructor_preflight_keeps_receipt_products_and_pending_post_intact() {
     };
     assert_eq!(
         o.begin_postprocess(&frames, &d, c, 1),
-        Err(Error::Contract("generic ingestion serial exhausted"))
+        Err(Error::Contract(refuse!(
+            "generic ingestion serial exhausted"
+        )))
     );
     assert_eq!(o.products(), products);
     assert!(o.awaiting_post);

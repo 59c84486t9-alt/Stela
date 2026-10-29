@@ -55,9 +55,11 @@
 //! The model walks the tables on every access and caches nothing, so a TLB or
 //! TTBA-cache invalidation has nothing to discard.
 
+use crate::Result;
 use alloc::rc::Rc;
 use core::cell::Cell;
 use stela_contracts::bus::Access as BusAccess;
+use stela_contracts::refuse;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::Iommu, stela_contracts::dma::Memory};
 
 /// Page shift and size (`UAT_PGBIT`/`UAT_PGSZ`).
@@ -264,7 +266,9 @@ pub const fn gpu_stream(context: usize) -> Result<usize, DmaError> {
     // Validate before inserting the agent bit: otherwise context 0x100
     // would be encoded exactly like GPU context 0 and silently alias it.
     if context >= CONTEXTS {
-        return Err(DmaError::Unsupported("UAT context outside the TTBAT"));
+        return Err(DmaError::Unsupported(refuse!(
+            "UAT context outside the TTBAT"
+        )));
     }
     Ok(GPU_STREAM | context)
 }
@@ -529,9 +533,9 @@ impl Uat {
     }
 
     /// Root the translator at a 16 KiB-aligned TTBAT.
-    pub fn configure(&mut self, ttbat: u64) -> Result<(), &'static str> {
+    pub fn configure(&mut self, ttbat: u64) -> Result<()> {
         if !self.outputs(ttbat) {
-            return Err("UAT TTBAT base is not an aligned output address");
+            return Err(refuse!("UAT TTBAT base is not an aligned output address"));
         }
         self.ttbat = Some(ttbat);
         Ok(())
@@ -539,9 +543,9 @@ impl Uat {
 
     /// Resolve the shared TTBR1 window ([`SHARED_INDEX`]) of every context
     /// from the 16 KiB-aligned page-directory page `l2`.
-    pub fn share_kernel_window(&mut self, l2: u64) -> Result<(), &'static str> {
+    pub fn share_kernel_window(&mut self, l2: u64) -> Result<()> {
         if !self.outputs(l2) || l2 == 0 {
-            return Err("UAT shared L2 is not an aligned output address");
+            return Err(refuse!("UAT shared L2 is not an aligned output address"));
         }
         self.shared_l2 = Some(l2);
         Ok(())
@@ -565,11 +569,13 @@ impl Uat {
 
     /// The table root of `context`'s half for `iova`.
     fn root(&self, memory: &mut dyn Memory, context: usize, iova: u64) -> Result<u64, DmaError> {
-        let ttbat = self.ttbat.ok_or(DmaError::Unsupported(
-            "UAT access before the TTBAT is configured",
-        ))?;
+        let ttbat = self.ttbat.ok_or(DmaError::Unsupported(refuse!(
+            "UAT access before the TTBAT is configured"
+        )))?;
         if context >= CONTEXTS {
-            return Err(DmaError::Unsupported("UAT context outside the TTBAT"));
+            return Err(DmaError::Unsupported(refuse!(
+                "UAT context outside the TTBAT"
+            )));
         }
         let half = u64::from(iova & TTBR_SELECT_BIT != 0);
         let address = ttbat + context as u64 * TTBAT_ENTRY_BYTES + half * ENTRY_BYTES;
@@ -603,17 +609,17 @@ impl Uat {
             return Err(self.record(agent, context, iova, write, Fault::NotPresent { level: 0 }));
         }
         if (ttbr >> CONTEXT_SHIFT) & CONTEXT_MASK != context as u64 {
-            return Err(DmaError::Unsupported(
-                "UAT TTBAT entry tagged with another context",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "UAT TTBAT entry tagged with another context"
+            )));
         }
         if ttbr & TTBAT_ADDRESS & !self.output != 0 {
             return Err(self.record(agent, context, iova, write, Fault::BadAddress { level: 0 }));
         }
         if ttbr & !(self.output | TTBAT_CONTEXT | VALID) != 0 {
-            return Err(DmaError::Unsupported(
-                "UAT TTBAT entry has unsupported low address bits",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "UAT TTBAT entry has unsupported low address bits"
+            )));
         }
         let (half, idx) = indices(iova);
         let shared = (half == Half::Ttbr1 && idx[0] == SHARED_INDEX)
@@ -627,9 +633,9 @@ impl Uat {
             Ok(mapping) => mapping,
             Err(fault) => return Err(self.record(agent, context, iova, write, fault)),
         };
-        let permits = permits(&mapping.flags, agent).ok_or(DmaError::Unsupported(
-            "UAT leaf permission encoding not modeled for this agent",
-        ))?;
+        let permits = permits(&mapping.flags, agent).ok_or(DmaError::Unsupported(refuse!(
+            "UAT leaf permission encoding not modeled for this agent"
+        )))?;
         if !(if write { permits.write } else { permits.read }) {
             return Err(self.record(agent, context, iova, write, Fault::Permission));
         }
@@ -655,9 +661,9 @@ impl Uat {
         });
         match fault {
             Fault::Memory { .. } => DmaError::Memory,
-            Fault::UnsupportedDescriptor { .. } => {
-                DmaError::Unsupported("UAT descriptor type, flags or attributes are not modeled")
-            }
+            Fault::UnsupportedDescriptor { .. } => DmaError::Unsupported(refuse!(
+                "UAT descriptor type, flags or attributes are not modeled"
+            )),
             Fault::Permission => DmaError::Fault(FAULT_PERMISSION),
             _ => DmaError::Fault(FAULT_TRANSLATION),
         }
@@ -687,9 +693,9 @@ impl Iommu for AgentView<'_> {
         _access: &mut BusAccess<'_>,
     ) -> Result<u64, DmaError> {
         if !self.uat.available {
-            return Err(DmaError::Unsupported(
-                "SGX DMA while PMGR inhibits execution",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "SGX DMA while PMGR inhibits execution"
+            )));
         }
         debug_assert!(last >= iova && last >> PAGE_SHIFT == iova >> PAGE_SHIFT);
         // A GPU stream is the GPU's units in that context, whichever view
@@ -700,9 +706,9 @@ impl Iommu for AgentView<'_> {
             (self.agent, stream)
         };
         if agent == Agent::Gpu && !self.uat.gpu_available.get() {
-            return Err(DmaError::Unsupported(
-                "GPU DMA while native Fender sleep inhibits execution",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "GPU DMA while native Fender sleep inhibits execution"
+            )));
         }
         self.uat.walk(memory, agent, context, iova, write)
     }

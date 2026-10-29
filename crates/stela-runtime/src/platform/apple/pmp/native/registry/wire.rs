@@ -2,6 +2,8 @@
 //! words by `Kind` (init, add, remove, set), the class 4 incoming request and
 //! the 88-byte entry descriptor.
 use super::Configuration;
+use crate::Result;
+use stela_contracts::refuse;
 #[derive(Clone, Copy)]
 pub(super) enum Kind {
     Init,
@@ -24,20 +26,24 @@ impl Kind {
     pub(super) fn reply_word(self, body: u32) -> u64 {
         3 << 52 | (self.kind() + 1) << 48 | u64::from(body)
     }
-    pub(super) fn reply(self, payload: u64) -> Result<u32, &'static str> {
+    pub(super) fn reply(self, payload: u64) -> Result<u32> {
         if payload & !0xffff_ffff != self.reply_word(0) {
-            return Err("PMP registry reply does not match its actual class3 waiter");
+            return Err(refuse!(
+                "PMP registry reply does not match its actual class3 waiter"
+            ));
         }
         let body = payload as u32;
         if matches!(self, Self::Init) && body != 0 {
-            return Err("PMP registry init reply has unqualified body bits");
+            return Err(refuse!("PMP registry init reply has unqualified body bits"));
         }
         Ok(body)
     }
 }
-pub(super) fn incoming(payload: u64) -> Result<usize, &'static str> {
+pub(super) fn incoming(payload: u64) -> Result<usize> {
     if payload & !0xffff != 0x0046_0000_0000_0000 {
-        return Err("PMP class4 request has unqualified kind or body bits");
+        return Err(refuse!(
+            "PMP class4 request has unqualified kind or body bits"
+        ));
     }
     Ok((payload & 0xffff) as usize)
 }

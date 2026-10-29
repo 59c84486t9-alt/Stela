@@ -1,13 +1,15 @@
 //! A decoded kernelcache's XNU `version[]` string, which `kern.version` and
 //! `host_kernel_version` report: "Darwin Kernel Version ...", ending at its
 //! NUL. The kernel keeps copies of it, and they must agree.
+use crate::Result;
 use alloc::{collections::BTreeSet, string::String};
+use stela_contracts::refuse;
 
 /// The prefix of XNU's `version[]`.
 pub const PREFIX: &[u8] = b"Darwin Kernel Version ";
 
 /// The one `version[]` string in `kernelcache`, or why there is none.
-pub fn read(kernelcache: &[u8]) -> Result<String, &'static str> {
+pub fn read(kernelcache: &[u8]) -> Result<String> {
     let mut found = BTreeSet::new();
     let mut rest = kernelcache;
     while let Some(start) = rest
@@ -18,17 +20,19 @@ pub fn read(kernelcache: &[u8]) -> Result<String, &'static str> {
         let end = tail
             .iter()
             .position(|&byte| byte == 0)
-            .ok_or("the kernel version string is not terminated")?;
+            .ok_or(refuse!("the kernel version string is not terminated"))?;
         let version = core::str::from_utf8(&tail[..end])
-            .map_err(|_| "the kernel version string is not UTF-8")?;
+            .map_err(|_| refuse!("the kernel version string is not UTF-8"))?;
         found.insert(String::from(version));
         rest = &tail[end..];
     }
     let mut versions = found.into_iter();
     match (versions.next(), versions.next()) {
         (Some(version), None) => Ok(version),
-        (None, _) => Err("the kernelcache has no kernel version string"),
-        (Some(_), Some(_)) => Err("the kernelcache has differing kernel version strings"),
+        (None, _) => Err(refuse!("the kernelcache has no kernel version string").into()),
+        (Some(_), Some(_)) => {
+            Err(refuse!("the kernelcache has differing kernel version strings").into())
+        }
     }
 }
 

@@ -28,7 +28,10 @@
 //! what an entry means belongs to its consumer ([`super::firmware`]).
 
 use super::uat;
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 /// Entries in every ring.
@@ -49,15 +52,15 @@ pub const DESCRIPTOR_BYTES: usize = 0x20;
 /// an unpublished, firmware-owned body; scalar publications must fit one UAT
 /// page (whose Memory::write failure transfers nothing).
 pub trait Shared {
-    fn read(&mut self, va: u64, buffer: &mut [u8]) -> Result<(), &'static str>;
-    fn write(&mut self, va: u64, data: &[u8]) -> Result<(), &'static str>;
+    fn read(&mut self, va: u64, buffer: &mut [u8]) -> Result<()>;
+    fn write(&mut self, va: u64, data: &[u8]) -> Result<()>;
 
-    fn read_u32(&mut self, va: u64) -> Result<u32, &'static str> {
+    fn read_u32(&mut self, va: u64) -> Result<u32> {
         let mut word = [0; 4];
         self.read(va, &mut word)?;
         Ok(u32::from_le_bytes(word))
     }
-    fn read_u64(&mut self, va: u64) -> Result<u64, &'static str> {
+    fn read_u64(&mut self, va: u64) -> Result<u64> {
         let mut word = [0; 8];
         self.read(va, &mut word)?;
         Ok(u64::from_le_bytes(word))
@@ -74,29 +77,29 @@ pub trait Shared {
 
 /// Check a scalar store's indivisible RAM transfer. Cross-page
 /// scalars require an explicit partial-store protocol, which is not modeled.
-pub(crate) fn scalar_range(address: u64, bytes: u64) -> Result<(), &'static str> {
+pub(crate) fn scalar_range(address: u64, bytes: u64) -> Result<()> {
     let last = address
         .checked_add(bytes - 1)
-        .ok_or("GFX scalar store range wraps")?;
+        .ok_or(refuse!("GFX scalar store range wraps"))?;
     if address / uat::PAGE_BYTES != last / uat::PAGE_BYTES {
-        return Err("GFX scalar publication crosses a UAT page");
+        return Err(refuse!("GFX scalar publication crosses a UAT page"));
     }
     Ok(())
 }
 
-fn reason(error: DmaError) -> &'static str {
+fn reason(error: DmaError) -> Refusal {
     match error {
-        DmaError::Fault(_) => "GFX shared memory faults in the UAT",
-        DmaError::Memory => "GFX shared memory is not RAM",
+        DmaError::Fault(code) => refuse!("GFX shared memory faults in the UAT", code),
+        DmaError::Memory => refuse!("GFX shared memory is not RAM"),
         DmaError::Unsupported(reason) => reason,
     }
 }
 
 impl Shared for Port<'_, '_> {
-    fn read(&mut self, va: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
+    fn read(&mut self, va: u64, buffer: &mut [u8]) -> Result<()> {
         Port::read(self, va, buffer).map_err(reason)
     }
-    fn write(&mut self, va: u64, data: &[u8]) -> Result<(), &'static str> {
+    fn write(&mut self, va: u64, data: &[u8]) -> Result<()> {
         Port::write(self, va, data).map_err(reason)
     }
     #[cfg(test)]
@@ -155,14 +158,16 @@ impl Descriptor {
     /// Parse a descriptor. The three index pointers must name one state
     /// block, as `getReadIndexFWPtr`/`getCFIIndexFWPtr`/`getWriteIndexFWPtr`
     /// form them; anything else is a layout the model does not know.
-    pub fn parse(bytes: &[u8; DESCRIPTOR_BYTES]) -> Result<Self, &'static str> {
+    pub fn parse(bytes: &[u8; DESCRIPTOR_BYTES]) -> Result<Self> {
         let word = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
         let (read, cfi, write, entries) = (word(0), word(8), word(0x10), word(0x18));
         if read == 0 || entries == 0 {
-            return Err("GFX ring descriptor is not populated");
+            return Err(refuse!("GFX ring descriptor is not populated"));
         }
         if read.checked_add(CFI) != Some(cfi) || read.checked_add(WRITE) != Some(write) {
-            return Err("GFX ring descriptor's index pointers do not name one state block");
+            return Err(refuse!(
+                "GFX ring descriptor's index pointers do not name one state block"
+            ));
         }
         Ok(Self {
             state: read,
@@ -171,22 +176,22 @@ impl Descriptor {
     }
 
     /// Read the descriptor at `va`.
-    pub fn read(memory: &mut dyn Shared, va: u64) -> Result<Self, &'static str> {
+    pub fn read(memory: &mut dyn Shared, va: u64) -> Result<Self> {
         let mut bytes = [0; DESCRIPTOR_BYTES];
         memory.read(va, &mut bytes)?;
         Self::parse(&bytes)
     }
 
-    fn index(memory: &mut dyn Shared, va: u64, name: &'static str) -> Result<u32, &'static str> {
+    fn index(memory: &mut dyn Shared, va: u64, name: &'static str) -> Result<u32> {
         let value = memory.read_u32(va)?;
         if value >= ENTRIES {
-            return Err(name);
+            return Err(name.into());
         }
         Ok(value)
     }
 
     /// The (read, write) indices, each checked as the kext checks them.
-    pub fn indices(&self, memory: &mut dyn Shared) -> Result<(u32, u32), &'static str> {
+    pub fn indices(&self, memory: &mut dyn Shared) -> Result<(u32, u32)> {
         let read = Self::index(
             memory,
             self.state + READ,
@@ -201,31 +206,26 @@ impl Descriptor {
     }
 
     /// The entry at `index`.
-    pub fn entry(
-        &self,
-        memory: &mut dyn Shared,
-        kind: Kind,
-        index: u32,
-    ) -> Result<Vec<u8>, &'static str> {
+    pub fn entry(&self, memory: &mut dyn Shared, kind: Kind, index: u32) -> Result<Vec<u8>> {
         if index >= ENTRIES {
-            return Err("GFX ring entry index out-of-bounds");
+            return Err(refuse!("GFX ring entry index out-of-bounds"));
         }
         let mut entry = alloc::vec![0; kind.entry_bytes()];
         let address = self
             .entries
             .checked_add(u64::from(index) * kind.entry_bytes() as u64)
-            .ok_or("GFX ring entry range wraps")?;
+            .ok_or(refuse!("GFX ring entry range wraps"))?;
         address
             .checked_add(kind.entry_bytes() as u64 - 1)
-            .ok_or("GFX ring entry range wraps")?;
+            .ok_or(refuse!("GFX ring entry range wraps"))?;
         memory.read(address, &mut entry)?;
         Ok(entry)
     }
 
     /// Retire entries up to (not including) `read`: the firmware's consume.
-    pub fn retire(&self, memory: &mut dyn Shared, read: u32) -> Result<(), &'static str> {
+    pub fn retire(&self, memory: &mut dyn Shared, read: u32) -> Result<()> {
         if read >= ENTRIES {
-            return Err("GFX ring read_index out-of-bounds");
+            return Err(refuse!("GFX ring read_index out-of-bounds"));
         }
         scalar_range(self.state + READ, 4)?;
         memory.write(self.state + READ, &read.to_le_bytes())
@@ -283,12 +283,16 @@ pub(crate) mod tests {
                 let mut output = [0x5a; 8];
                 assert_eq!(
                     Shared::gpu_read(&mut port, context, 0, &mut output),
-                    Err(DmaError::Unsupported("UAT context outside the TTBAT"))
+                    Err(DmaError::Unsupported(refuse!(
+                        "UAT context outside the TTBAT"
+                    )))
                 );
                 assert_eq!(output, [0x5a; 8]);
                 assert_eq!(
                     Shared::gpu_write(&mut port, context, 0, &[0xff; 8]),
-                    Err(DmaError::Unsupported("UAT context outside the TTBAT"))
+                    Err(DmaError::Unsupported(refuse!(
+                        "UAT context outside the TTBAT"
+                    )))
                 );
             }
             // The same address is mapped for context 0. Invalid
@@ -314,15 +318,17 @@ pub(crate) mod tests {
                 bytes: alloc::vec![0; bytes],
             }
         }
-        fn range(&self, va: u64, len: usize) -> Result<core::ops::Range<usize>, &'static str> {
+        fn range(&self, va: u64, len: usize) -> Result<core::ops::Range<usize>> {
             let start = va
                 .checked_sub(self.base)
                 .and_then(|n| usize::try_from(n).ok())
-                .ok_or("outside the flat memory")?;
-            let end = start.checked_add(len).ok_or("outside the flat memory")?;
+                .ok_or(refuse!("outside the flat memory"))?;
+            let end = start
+                .checked_add(len)
+                .ok_or(refuse!("outside the flat memory"))?;
             (end <= self.bytes.len())
                 .then_some(start..end)
-                .ok_or("outside the flat memory")
+                .ok_or(refuse!("outside the flat memory"))
         }
         pub fn put(&mut self, va: u64, data: &[u8]) {
             let range = self.range(va, data.len()).unwrap();
@@ -344,12 +350,12 @@ pub(crate) mod tests {
     }
 
     impl Shared for Flat {
-        fn read(&mut self, va: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
+        fn read(&mut self, va: u64, buffer: &mut [u8]) -> Result<()> {
             let range = self.range(va, buffer.len())?;
             buffer.copy_from_slice(&self.bytes[range]);
             Ok(())
         }
-        fn write(&mut self, va: u64, data: &[u8]) -> Result<(), &'static str> {
+        fn write(&mut self, va: u64, data: &[u8]) -> Result<()> {
             let range = self.range(va, data.len())?;
             self.bytes[range].copy_from_slice(data);
             Ok(())
@@ -412,7 +418,7 @@ pub(crate) mod tests {
         memory.put_u32(BASE + 0x100 + WRITE, ENTRIES);
         assert_eq!(
             ring.indices(&mut memory),
-            Err("GFX ring write_index out-of-bounds")
+            Err(refuse!("GFX ring write_index out-of-bounds"))
         );
         assert!(ring.retire(&mut memory, ENTRIES).is_err());
         assert!(ring.entry(&mut memory, Kind::DataMaster, ENTRIES).is_err());

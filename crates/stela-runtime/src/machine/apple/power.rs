@@ -2,20 +2,22 @@
 //! banks.
 
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 
 impl AppleDevices {
     /// The PMGR power-state registers at `registers`, in `blocks` of guest
     /// PA. Each starts active under the existing boot assumption; this is
     /// not a checked transfer of the original firmware's control words.
-    pub fn add_power_states(&mut self, blocks: &[Range], registers: &[u64]) -> Result<(), String> {
+    pub fn add_power_states(&mut self, blocks: &[Range], registers: &[u64]) -> Result<()> {
         if self.pmgr.is_some() {
-            return Err("PMGR lifecycle owner is already bound".into());
+            return Err(refuse!("PMGR lifecycle owner is already bound"));
         }
         let states = registers.iter().map(|&address| PowerState {
             address,
             initial: ACTIVE,
         });
-        let model = Pmgr::new(states).map_err(|error| format!("PMGR states: {error:?}"))?;
+        let model = Pmgr::new(states).map_err(|error| refuse!("PMGR states: {error}", ?error))?;
         // The model's offsets are guest PAs. Publish all banks together.
         let bindings: Vec<_> = blocks
             .iter()
@@ -24,7 +26,7 @@ impl AppleDevices {
         let device = self
             .bus
             .install(Box::new(model), &bindings)
-            .map_err(|error| format!("PMGR placement: {error:?}"))?;
+            .map_err(|error| refuse!("PMGR placement: {error}", ?error))?;
         self.pmgr = Some(device);
         Ok(())
     }
@@ -37,18 +39,21 @@ impl AppleDevices {
         physical: u64,
         device: DeviceId,
         retention: bool,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         if self.power_configured
             || self
                 .power_devices
                 .iter()
                 .any(|entry| entry.device == device)
         {
-            return Err("native lifecycle registration is duplicate or already bound".into());
+            return Err(refuse!(
+                "native lifecycle registration is duplicate or already bound"
+            ));
         }
         if self.bus.lifecycle(device).is_none() {
-            return Err(format!(
-                "native lifecycle at {physical:#x} has no actual model hook"
+            return Err(refuse!(
+                "native lifecycle at {physical:#x} has no actual model hook",
+                physical
             ));
         }
         self.power_devices.push(PowerDevice {
@@ -68,14 +73,16 @@ impl AppleDevices {
         states: &stela_soc_data::board::PowerStates,
         darts: &[Vec<DartId>],
         retention: &[bool],
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         if self.power_configured || darts.len() != retention.len() {
-            return Err("PMGR binding is duplicate or has mismatched DART groups".into());
+            return Err(refuse!(
+                "PMGR binding is duplicate or has mismatched DART groups"
+            ));
         }
         let pmgr = self
             .pmgr
             .and_then(|id| self.bus.device::<Pmgr>(id))
-            .ok_or("PMGR resources have no mapped power-state model")?;
+            .ok_or(refuse!("PMGR resources have no mapped power-state model"))?;
         let complete = LifecycleSinks {
             clock: true,
             power: true,
@@ -85,11 +92,11 @@ impl AppleDevices {
         let mut devices = Vec::new();
         for instances in darts {
             if instances.is_empty() {
-                return Err("PMGR binding has an empty DART group".into());
+                return Err(refuse!("PMGR binding has an empty DART group"));
             }
             for dart in instances {
                 if self.bus.device::<Dart>(dart.0).is_none() || devices.contains(&dart.0) {
-                    return Err("PMGR binding is duplicate or not a DART".into());
+                    return Err(refuse!("PMGR binding is duplicate or not a DART"));
                 }
                 devices.push(dart.0);
             }
@@ -105,7 +112,10 @@ impl AppleDevices {
                 _ => true,
             });
             if connected && resource.admission == coverage::Admission::Unavailable {
-                return Err(format!("{} is both unavailable and placed", resource.name));
+                return Err(refuse!(
+                    "{name} is both unavailable and placed",
+                    name = resource.name
+                ));
             }
             if resource.owner.is_some_and(|owner| match owner {
                 PowerOwner::Dart(index) => index >= darts.len(),
@@ -113,9 +123,9 @@ impl AppleDevices {
                 PowerOwner::Phy(index) => index >= self.phys.len(),
                 PowerOwner::Mmio(_) => false,
             }) {
-                return Err(format!(
-                    "{} names an unplaced hardware lifecycle owner",
-                    resource.name
+                return Err(refuse!(
+                    "{name} names an unplaced hardware lifecycle owner",
+                    name = resource.name
                 ));
             }
             consumers.push(Consumer {
@@ -132,14 +142,16 @@ impl AppleDevices {
             });
         }
         let coverage = coverage::analyze(&states.domains, &consumers)
-            .map_err(|error| format!("PMGR resource coverage: {error:?}"))?;
+            .map_err(|error| refuse!("PMGR resource coverage: {error}", ?error))?;
         if coverage.len() != states.registers.len()
             || coverage.iter().any(|record| {
                 !states.registers.contains(&record.address)
                     || pmgr.domain_state(record.address).is_none()
             })
         {
-            return Err("PMGR resource graph differs from mapped power states".into());
+            return Err(refuse!(
+                "PMGR resource graph differs from mapped power states"
+            ));
         }
         let mut clients = darts
             .iter()
@@ -247,7 +259,7 @@ impl AppleDevices {
             } else {
                 pmgr.refuse_lifecycle(record.address)
             };
-            result.map_err(|error| format!("PMGR resource binding: {error:?}"))?;
+            result.map_err(|error| refuse!("PMGR resource binding: {error}", ?error))?;
         }
         self.power_clients = links;
         self.power_refusals = refusals;
@@ -271,10 +283,9 @@ impl AppleDevices {
         counter_capacity: usize,
         mapped: bool,
         events: &[u8],
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let model = Cluster::new(dvmr, pstates)
-            .and_then(|c| c.with_counters(counter_capacity, mapped, events))
-            .map_err(String::from)?;
+            .and_then(|c| c.with_counters(counter_capacity, mapped, events))?;
         let table = model.pstate_bytes();
         let device = self.bus.add(Box::new(model));
         for (offset, bytes) in [
@@ -285,13 +296,13 @@ impl AppleDevices {
         ] {
             self.bus
                 .map(device, base + offset, bytes, offset)
-                .map_err(|error| format!("CPU cluster placement: {error:?}"))?;
+                .map_err(|error| refuse!("CPU cluster placement: {error}", ?error))?;
         }
         Ok(())
     }
 
     /// CPM throttlers and restore command in the DT-validated CPM window.
-    pub fn add_cpm_power(&mut self, physical: u64, performance: bool) -> Result<(), String> {
+    pub fn add_cpm_power(&mut self, physical: u64, performance: bool) -> Result<()> {
         let model = Cpm::new(performance);
         let offsets = model.offsets();
         let device = self.bus.add(Box::new(model));
@@ -301,11 +312,11 @@ impl AppleDevices {
                     device,
                     physical
                         .checked_add(offset)
-                        .ok_or("CPM address overflows")?,
+                        .ok_or(refuse!("CPM address overflows"))?,
                     8,
                     offset,
                 )
-                .map_err(|e| format!("CPM power placement: {e:?}"))?;
+                .map_err(|e| refuse!("CPM power placement: {e}", ?e))?;
         }
         Ok(())
     }
@@ -318,37 +329,41 @@ impl AppleDevices {
         header: [u8; 4],
         configs: &[[u8; 36]],
         axi: Option<[u8; 4]>,
-    ) -> Result<(), String> {
-        let model = Bridge::new(fields, header, configs, axi).map_err(String::from)?;
+    ) -> Result<()> {
+        let model = Bridge::new(fields, header, configs, axi)?;
         let spans = model.spans();
         let device = self.bus.add(Box::new(model));
         for (o, n) in spans {
             self.bus
                 .map(
                     device,
-                    physical.checked_add(o).ok_or("bridge address overflows")?,
+                    physical
+                        .checked_add(o)
+                        .ok_or(refuse!("bridge address overflows"))?,
                     n,
                     o,
                 )
-                .map_err(|e| format!("bridge placement: {e:?}"))?;
+                .map_err(|e| refuse!("bridge placement: {e}", ?e))?;
         }
         Ok(())
     }
 
     /// SOC DPE sample aliases and enable words, each mapped sparsely.
-    pub fn add_soc_dpe(&mut self, physical: u64, samples: &[(u64, bool)]) -> Result<(), String> {
-        let model = Dpe::new(samples).map_err(String::from)?;
+    pub fn add_soc_dpe(&mut self, physical: u64, samples: &[(u64, bool)]) -> Result<()> {
+        let model = Dpe::new(samples)?;
         let spans = model.spans();
         let device = self.bus.add(Box::new(model));
         for (o, n) in spans {
             self.bus
                 .map(
                     device,
-                    physical.checked_add(o).ok_or("SOC DPE address overflows")?,
+                    physical
+                        .checked_add(o)
+                        .ok_or(refuse!("SOC DPE address overflows"))?,
                     n,
                     o,
                 )
-                .map_err(|e| format!("SOC DPE placement: {e:?}"))?;
+                .map_err(|e| refuse!("SOC DPE placement: {e}", ?e))?;
         }
         Ok(())
     }
@@ -358,7 +373,7 @@ impl AppleDevices {
         &mut self,
         physical: u64,
         kind: stela_soc_data::power::Kind,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let model = Power::new(kind);
         let device = self.bus.add(Box::new(model));
         for offset in kind.offsets() {
@@ -367,11 +382,11 @@ impl AppleDevices {
                     device,
                     physical
                         .checked_add(offset)
-                        .ok_or("SOC power address overflows")?,
+                        .ok_or(refuse!("SOC power address overflows"))?,
                     4,
                     offset,
                 )
-                .map_err(|e| format!("SOC power placement: {e:?}"))?;
+                .map_err(|e| refuse!("SOC power placement: {e}", ?e))?;
         }
         Ok(())
     }
@@ -384,21 +399,17 @@ impl AppleDevices {
         physical: u64,
         valid: [u32; wake::WORDS],
         smc_wake: Option<u8>,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let device = self.bus.add(Box::new(WakeMasks::new(valid)));
         self.sleep.wake_masks = Some((device, smc_wake));
         self.bus
             .map(device, physical, wake::BYTES, 0)
-            .map_err(|error| format!("AOP wake mask placement: {error:?}"))
+            .map_err(|error| refuse!("AOP wake mask placement: {error}", ?error))
     }
 
     /// One version-1 PMGR performance bank, at its `perf-regs` global word.
-    pub fn add_performance_counters(
-        &mut self,
-        physical: u64,
-        selectors: &[u16],
-    ) -> Result<(), String> {
-        let model = PerfCounters::new(selectors).map_err(String::from)?;
+    pub fn add_performance_counters(&mut self, physical: u64, selectors: &[u16]) -> Result<()> {
+        let model = PerfCounters::new(selectors)?;
         let spans = model.spans();
         let device = self.bus.add(Box::new(model));
         for (offset, bytes) in spans {
@@ -407,43 +418,43 @@ impl AppleDevices {
                     device,
                     physical
                         .checked_add(offset)
-                        .ok_or("PMGR performance address overflows")?,
+                        .ok_or(refuse!("PMGR performance address overflows"))?,
                     bytes,
                     offset,
                 )
-                .map_err(|error| format!("PMGR performance placement: {error:?}"))?;
+                .map_err(|error| refuse!("PMGR performance placement: {error}", ?error))?;
         }
         Ok(())
     }
 
     /// A CPU/CPM energy bank at its absolute `hw-dpe-reg` address. Map only
     /// the two accumulators and, for CPM, its separate configuration word.
-    pub fn add_cpu_energy(&mut self, physical: u64, cpm: bool) -> Result<(), String> {
+    pub fn add_cpu_energy(&mut self, physical: u64, cpm: bool) -> Result<()> {
         let device = self.bus.add(Box::new(Energy::new(cpm)));
         self.bus
             .map(device, physical, energy::COUNTER_BYTES, 0)
-            .map_err(|error| format!("CPU energy placement: {error:?}"))?;
+            .map_err(|error| refuse!("CPU energy placement: {error}", ?error))?;
         if cpm {
             self.bus
                 .map(
                     device,
                     physical
                         .checked_add(energy::CONTROL_OFFSET)
-                        .ok_or("CPM energy configuration address overflows")?,
+                        .ok_or(refuse!("CPM energy configuration address overflows"))?,
                     8,
                     energy::CONTROL_OFFSET,
                 )
-                .map_err(|error| format!("CPM energy configuration placement: {error:?}"))?;
+                .map_err(|error| refuse!("CPM energy configuration placement: {error}", ?error))?;
         }
         Ok(())
     }
 
     /// The always-on eFuse block at `physical`.
-    pub fn add_aon_fuses(&mut self, physical: u64) -> Result<(), String> {
+    pub fn add_aon_fuses(&mut self, physical: u64) -> Result<()> {
         let device = self.bus.add(Box::new(AonFuses));
         self.bus
             .map(device, physical, fuse::FUSE_BYTES, 0)
-            .map_err(|error| format!("eFuse placement: {error:?}"))
+            .map_err(|error| refuse!("eFuse placement: {error}", ?error))
     }
 
     pub(super) fn settle_phys(&mut self, cpu: CpuIndex, now: u64) {
@@ -498,9 +509,17 @@ impl AppleDevices {
                 .map(|(_, resources)| resources.as_str())
                 .unwrap_or("request validation");
             let control = pmgr.control_word(physical).expect("described PMGR domain");
-            DeviceError::Refused(format!(
-                "PMGR domain {physical:#x} ({resources}): {reason}; current control {control:#010x}, requested {value:#010x}"
-            ))
+            DeviceError::Refused(
+                refuse!(
+                    "PMGR domain {physical:#x} ({resources}) current control {control:#010x}, \
+                     requested {value:#010x}",
+                    physical,
+                    resources,
+                    control,
+                    value
+                )
+                .because(reason),
+            )
         })?;
         if transition.before == transition.after {
             return Ok(());
@@ -534,10 +553,14 @@ impl AppleDevices {
                 .expect("binding checked actual lifecycle hook")
                 .check_lifecycle(proposed)
                 .map_err(|reason| {
-                    DeviceError::Refused(format!(
-                        "PMGR domain {physical:#x} ({}): {reason}",
-                        link.resources
-                    ))
+                    DeviceError::Refused(
+                        refuse!(
+                            "PMGR domain {physical:#x} ({resources})",
+                            physical,
+                            resources = link.resources
+                        )
+                        .because(reason),
+                    )
                 })?;
         }
         Ok(())

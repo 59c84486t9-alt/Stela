@@ -1,7 +1,9 @@
 //! Real MC destinations on the same reporting/trace/scheduler owners.
 use super::super::cache::metrics;
 use super::*;
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 struct Forward(Box<dyn scheduler::Callback>);
 impl scheduler::Callback for Forward {
     fn advance(&mut self, i: &scheduler::Invocation, a: &mut Access<'_>) -> Completion<u32> {
@@ -80,10 +82,10 @@ impl MetricsBackend {
     pub fn last_emission(&self) -> Option<&(metrics::Request, trace::Emission)> {
         self.last_emission.as_ref()
     }
-    fn invocation(&self) -> Result<scheduler::Invocation, &'static str> {
+    fn invocation(&self) -> Result<scheduler::Invocation> {
         self.runtime
             .current()
-            .ok_or("MC destination requires actual native invocation")
+            .ok_or(refuse!("MC destination requires actual native invocation"))
     }
     fn register_metric(
         &mut self,
@@ -97,9 +99,9 @@ impl MetricsBackend {
             .as_ref()
             .is_some_and(|job| !job.request.same_operation(r))
         {
-            return Completion::Refused(
-                "MC metric registration request changed across actual prefix",
-            );
+            return Completion::Refused(refuse!(
+                "MC metric registration request changed across actual prefix"
+            ));
         }
         if self.registration.is_none() {
             self.registration = Some(Registration {
@@ -129,14 +131,14 @@ impl MetricsBackend {
             }
         }
         let Some(cell) = self.report.upgrade() else {
-            return Completion::Refused("MC actual reporting owner abandoned");
+            return Completion::Refused(refuse!("MC actual reporting owner abandoned"));
         };
         let mut db = match cell.try_borrow_mut() {
             Ok(db) => db,
             Err(_) => {
-                return Completion::Refused(
-                    "MC reporting owner is executing another native caller",
-                );
+                return Completion::Refused(refuse!(
+                    "MC reporting owner is executing another native caller"
+                ));
             }
         };
         if !job.started {
@@ -161,28 +163,32 @@ impl MetricsBackend {
                     job.result = Some(result)
                 }
                 Ok(reporting::Progress::Busy { deadline }) => return Completion::Busy { deadline },
-                Ok(_) => return Completion::Refused("MC registration reached unrelated DB job"),
+                Ok(_) => {
+                    return Completion::Refused(refuse!(
+                        "MC registration reached unrelated DB job"
+                    ));
+                }
                 Err(e) => return Completion::Refused(e),
             }
         }
-        let result = job.result.unwrap();
+        let result = job.result.take().unwrap();
         if let Err(e) = job.lease.as_mut().unwrap().release() {
             return Completion::Refused(schedule_error(e));
         }
         self.registration = None;
-        self.registrations.push((r.clone(), result));
+        self.registrations.push((r.clone(), result.clone()));
         //1007d04/MC ignore the source DB return, but keep its failure
         // instead of claiming publication. The caller retires this prefix first.
         Completion::Retired {
             value: (),
             refusal: match result {
                 reporting::RegistrationResult::Published { .. } => None,
-                reporting::RegistrationResult::SourceError(reporting::NO_DATABASE) => {
-                    Some("native IOReporting registration returned80000007 without database")
-                }
-                reporting::RegistrationResult::SourceError(_) => {
-                    Some("native IOReporting registration returned a source error")
-                }
+                reporting::RegistrationResult::SourceError(reporting::NO_DATABASE) => Some(
+                    refuse!("native IOReporting registration returned80000007 without database"),
+                ),
+                reporting::RegistrationResult::SourceError(_) => Some(refuse!(
+                    "native IOReporting registration returned a source error"
+                )),
                 reporting::RegistrationResult::Refused(e) => Some(e),
             },
         }
@@ -199,7 +205,7 @@ impl MetricsBackend {
             .as_ref()
             .is_some_and(|job| !job.request.same_operation(r))
         {
-            return Completion::Refused("MC trace request changed across actual prefix");
+            return Completion::Refused(refuse!("MC trace request changed across actual prefix"));
         }
         if self.emission.is_none() {
             self.emission = Some(Emission {
@@ -230,12 +236,14 @@ impl MetricsBackend {
             }
         }
         let Some(cell) = self.trace.upgrade() else {
-            return Completion::Refused("MC actual trace owner abandoned");
+            return Completion::Refused(refuse!("MC actual trace owner abandoned"));
         };
         let mut trace = match cell.try_borrow_mut() {
             Ok(v) => v,
             Err(_) => {
-                return Completion::Refused("MC trace owner is executing another native caller");
+                return Completion::Refused(refuse!(
+                    "MC trace owner is executing another native caller"
+                ));
             }
         };
         if !job.started {
@@ -249,12 +257,14 @@ impl MetricsBackend {
                 Ok(trace::Progress::Emitted(result)) => job.result = Some(result),
                 Ok(trace::Progress::Busy { deadline }) => return Completion::Busy { deadline },
                 Ok(_) => {
-                    return Completion::Refused("MC trace destination returned unrelated phase");
+                    return Completion::Refused(refuse!(
+                        "MC trace destination returned unrelated phase"
+                    ));
                 }
                 Err(e) => return Completion::Refused(trace_error(e)),
             }
         }
-        let result = job.result.unwrap();
+        let result = job.result.take().unwrap();
         if let Err(e) = job.lease.as_mut().unwrap().release() {
             return Completion::Refused(schedule_error(e));
         }
@@ -271,7 +281,7 @@ impl MetricsBackend {
             .as_ref()
             .is_some_and(|d| !d.request.same_operation(r))
         {
-            return Completion::Refused("MC retained drain request changed");
+            return Completion::Refused(refuse!("MC retained drain request changed"));
         }
         if self.drain.is_none() {
             self.drain = Some(Drain {
@@ -285,7 +295,7 @@ impl MetricsBackend {
             Err(e) => return Completion::Refused(e),
         };
         let Some(queue) = self.queue.as_ref() else {
-            return Completion::Refused("MC actual queue absent for drain");
+            return Completion::Refused(refuse!("MC actual queue absent for drain"));
         };
         let d = self.drain.as_mut().unwrap();
         if d.lease.is_none() {
@@ -347,9 +357,9 @@ impl metrics::Backend for MetricsBackend {
                     )
                     || self.queue.is_some()
                 {
-                    return Completion::Refused(
-                        "MC actual queue initialization is duplicate or not source geometry",
-                    );
+                    return Completion::Refused(refuse!(
+                        "MC actual queue initialization is duplicate or not source geometry"
+                    ));
                 }
                 match self.runtime.create_queue(expected) {
                     Ok(q) => {
@@ -361,12 +371,14 @@ impl metrics::Backend for MetricsBackend {
             }
             metrics::Effect::BindWork { priority } => {
                 if *priority != 15 || self.work.is_some() {
-                    return Completion::Refused(
-                        "MC actual Work binding is duplicate or not source priority",
-                    );
+                    return Completion::Refused(refuse!(
+                        "MC actual Work binding is duplicate or not source priority"
+                    ));
                 }
                 let Some(callback) = self.callback.take() else {
-                    return Completion::Refused("MC required actual service callback absent");
+                    return Completion::Refused(refuse!(
+                        "MC required actual service callback absent"
+                    ));
                 };
                 match self.runtime.bind_work(*priority, Forward(callback)) {
                     Ok(w) => {
@@ -378,14 +390,16 @@ impl metrics::Backend for MetricsBackend {
             }
             metrics::Effect::RegisterWork => {
                 let (Some(q), Some(w)) = (&self.queue, &self.work) else {
-                    return Completion::Refused("MC actual queue/work absent at registration");
+                    return Completion::Refused(refuse!(
+                        "MC actual queue/work absent at registration"
+                    ));
                 };
                 self.runtime.register_work(q, w)
             }
             metrics::Effect::Wake => match self
                 .work
                 .as_ref()
-                .ok_or("MC actual Work absent at Wake")
+                .ok_or(refuse!("MC actual Work absent at Wake"))
                 .and_then(|w| self.runtime.wake(w).map_err(schedule_error))
             {
                 Ok(()) => done(()),
@@ -403,9 +417,9 @@ impl metrics::Backend for MetricsBackend {
                     || *format != 2
                     || *unit_descriptor != 0x0900820000000000
                 {
-                    return Completion::Refused(
-                        "MC metric registration operands differ from source",
-                    );
+                    return Completion::Refused(refuse!(
+                        "MC metric registration operands differ from source"
+                    ));
                 }
                 self.register_metric(r, name, counter.clone(), a)
             }
@@ -419,11 +433,13 @@ impl metrics::Backend for MetricsBackend {
     }
     fn trace_control(&mut self, _: &metrics::Request, _: &mut Access<'_>) -> Completion<u32> {
         let Some(cell) = self.trace.upgrade() else {
-            return Completion::Refused("MC actual trace control owner abandoned");
+            return Completion::Refused(refuse!("MC actual trace control owner abandoned"));
         };
         match cell.try_borrow() {
             Ok(trace) => done(trace.trace_control()),
-            Err(_) => Completion::Refused("MC trace control currently borrowed by actual owner"),
+            Err(_) => Completion::Refused(refuse!(
+                "MC trace control currently borrowed by actual owner"
+            )),
         }
     }
 }

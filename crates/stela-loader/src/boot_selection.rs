@@ -77,7 +77,7 @@
 //! not read).
 use crate::Result;
 use alloc::{format, string::String, vec::Vec};
-use stela_contracts::{Refusal, refuse, require};
+use stela_contracts::{refuse, require};
 use {stela_soc_data::nor::nvram::Partition, stela_soc_data::nor::nvram::Variables};
 
 pub const BOOT_VOLUME: &[u8] = b"boot-volume";
@@ -524,9 +524,7 @@ pub fn record_upgrade_failure(variables: &mut Variables, step: &str) -> Result<(
         (OTA_RESULT, UPGRADE_FAILURE),
         (OTA_FAILURE_REASON, step.as_bytes()),
     ] {
-        variables
-            .set(Partition::System, name, value)
-            .map_err(Refusal::from)?;
+        variables.set(Partition::System, name, value)?;
     }
     Ok(())
 }
@@ -542,9 +540,7 @@ pub fn consume(variables: &mut Variables, selection: &Selection) -> Result<bool>
         }
     }
     for (name, value) in &selection.assigned {
-        variables
-            .set(Partition::System, name, value)
-            .map_err(Refusal::from)?;
+        variables.set(Partition::System, name, value)?;
         changed = true;
     }
     Ok(changed)
@@ -555,9 +551,7 @@ pub fn consume(variables: &mut Variables, selection: &Selection) -> Result<bool>
 /// disk choice is Inferred to live.
 pub fn choose(variables: &mut Variables, volume: &BootVolume, once: bool) -> Result<()> {
     let name = if once { ALT_BOOT_VOLUME } else { BOOT_VOLUME };
-    variables
-        .set(Partition::System, name, &volume.encode())
-        .map_err(|what| Refusal::from(what).into())
+    Ok(variables.set(Partition::System, name, &volume.encode())?)
 }
 
 /// `stela.cfg`'s installed-system option: the disk the bundle is built from.

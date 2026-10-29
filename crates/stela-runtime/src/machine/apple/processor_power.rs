@@ -5,9 +5,11 @@
 mod projection;
 
 use super::*;
+use crate::Result;
 pub(super) use projection::AssignedPower;
 use projection::Request;
 use stela_contracts::adt::Node;
+use stela_contracts::refuse;
 use stela_engine::machine::CpuProfile;
 use stela_engine::machine::engine::CanonicalDeviceWrite;
 use stela_engine::machine::engine::ConsumedWrite;
@@ -29,14 +31,18 @@ impl AppleDevices {
         full_profile: &CpuProfile,
         plan: &Plan<'_>,
         effective_acc_harvesting: u32,
-    ) -> Result<Vec<ProcessorBinding>, String> {
+    ) -> Result<Vec<ProcessorBinding>> {
         if self.processor_power.is_some() || !self.power_configured {
-            return Err("CPU power requires one completed actual PMGR resource placement".into());
+            return Err(refuse!(
+                "CPU power requires one completed actual PMGR resource placement"
+            ));
         }
         plan.revalidate()
-            .map_err(|e| format!("CPU power assignment is stale: {e:?}"))?;
+            .map_err(|e| refuse!("CPU power assignment is stale: {e}", ?e))?;
         if full_profile.chip != plan.chip() {
-            return Err("CPU power source profile differs from the assigned chip".into());
+            return Err(refuse!(
+                "CPU power source profile differs from the assigned chip"
+            ));
         }
         let associations = states.processor_associations(
             full_profile.chip,
@@ -47,20 +53,22 @@ impl AppleDevices {
         let cpus = original
             .child("cpus")
             .and_then(|cpus| cpus.children())
-            .ok_or("CPU power requires the complete original CPU nodes")?;
+            .ok_or(refuse!(
+                "CPU power requires the complete original CPU nodes"
+            ))?;
         let regs = cpus
             .iter()
             .map(|cpu| {
                 cpu.property("reg")
                     .and_then(|value| value.try_into().ok())
                     .map(u32::from_le_bytes)
-                    .ok_or_else(|| String::from("CPU power source reg is not one u32"))
+                    .ok_or_else(|| refuse!("CPU power source reg is not one u32"))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let pmgr = self
             .pmgr
             .and_then(|id| self.bus.device::<Pmgr>(id))
-            .ok_or("CPU power has no actual placed PMGR")?;
+            .ok_or(refuse!("CPU power has no actual placed PMGR"))?;
         let assigned = AssignedPower::prepare(
             plan.identity(),
             plan.pes(),
@@ -72,7 +80,7 @@ impl AppleDevices {
         // Recheck after source/placed-state preparation, before publishing the
         // mapping. The immutable kept Plan cannot be replaced by an ID list.
         plan.revalidate()
-            .map_err(|e| format!("CPU power assignment changed: {e:?}"))?;
+            .map_err(|e| refuse!("CPU power assignment changed: {e}", ?e))?;
         let bindings = assigned.bindings();
         self.processor_power = Some(assigned);
         Ok(bindings)
@@ -182,7 +190,10 @@ impl AppleDevices {
         let mut unchanged = None;
         let _settled = if let Some(change) = request.change {
             Some(processors.apply(&[change]).map_err(|error| {
-                DeviceError::TransferRefused(format!("CPU PMGR settlement refused: {error:?}"))
+                DeviceError::TransferRefused(refuse!(
+                    "CPU PMGR settlement refused: {error}",
+                    ?error
+                ))
             })?)
         } else {
             unchanged = Some(processors);
@@ -272,9 +283,9 @@ mod tests {
         commits: Rc<Cell<usize>>,
     }
     impl Lifecycle for Bank {
-        fn check_lifecycle(&self, state: LifecycleState) -> Result<(), &'static str> {
+        fn check_lifecycle(&self, state: LifecycleState) -> Result<()> {
             if self.reject_clock_gate && !state.clocked {
-                Err("gate rejected")
+                Err(refuse!("gate rejected"))
             } else {
                 Ok(())
             }

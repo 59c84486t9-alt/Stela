@@ -2,6 +2,7 @@
 //! a later refusal must neither drop its tail nor replay its committed prefix.
 use super::*;
 use crate::platform::apple::pmgr::DomainTransition;
+use stela_contracts::refuse;
 
 /// A reached wire edge, with the context of its first service attempt.
 /// Retrying delivery must not move an AIC timestamp to a later counter value.
@@ -182,13 +183,14 @@ impl AppleDevices {
             .iter()
             .position(|&mpidr| mpidr & 0xffff == affinity)
             .ok_or_else(|| {
-                DeviceError::Refused(format!(
-                    "CPU start of cluster {} core {}, which the board does not have",
-                    core.cluster, core.core
+                DeviceError::Refused(refuse!(
+                    "CPU start of cluster {cluster} core {core}, which the board does not have",
+                    cluster = core.cluster,
+                    core = core.core
                 ))
             })?;
         let address = self.locked_reset_vector(cpu).ok_or_else(|| {
-            DeviceError::Refused(format!("CPU start of PE {cpu}, which has no RVBAR"))
+            DeviceError::Refused(refuse!("CPU start of PE {cpu}, which has no RVBAR", cpu))
         })?;
         self.starts.push(Start { cpu, address });
         Ok(())
@@ -196,10 +198,9 @@ impl AppleDevices {
 
     fn deliver_input(&mut self, delivery: AicDelivery) -> Result<(), DeviceError> {
         let Some(aic) = self.aic else {
-            return Err(DeviceError::Refused(format!(
-                "AIC input {:?} changed but no AIC model is mapped",
-                delivery.input
-            )));
+            return Err(DeviceError::Refused(
+                refuse!("AIC input {input} changed but no AIC model is mapped", input = ?delivery.input),
+            ));
         };
         let mut access = Access::new(delivery.cpu, delivery.now, &mut self.latch);
         let result = match aic {
@@ -208,15 +209,15 @@ impl AppleDevices {
                 .device_mut::<Aic1>(id)
                 .expect("the AIC id names an Aic1")
                 .set_input(delivery.input, delivery.level, &mut access)
-                .map_err(|error| format!("{error:?}")),
+                .map_err(|error| refuse!("AIC input: {error}", ?error)),
             Controller::V2(id) => self
                 .bus
                 .device_mut::<Aic2>(id)
                 .expect("the AIC id names an Aic2")
                 .set_input(delivery.input, delivery.level, &mut access)
-                .map_err(|error| format!("{error:?}")),
+                .map_err(|error| refuse!("AIC input: {error}", ?error)),
         };
-        result.map_err(|error| DeviceError::Refused(format!("AIC input: {error}")))
+        result.map_err(DeviceError::Refused)
     }
 }
 

@@ -5,7 +5,9 @@
 //! distinct original task queues. The CIO owner must supply all
 //! initial state and atomically keep generated events; no ready state,
 //! register defaults, event completion or Configuration backend is implied.
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 const ROUTE_SELECTOR: u32 = 7 << 20;
 const ROUTE_COMMIT: u32 = 1 << 31;
@@ -25,15 +27,17 @@ pub fn read_registered_word(
     offset: u16,
     retained: u32,
     limits: [u16; 2],
-    read_control: impl FnOnce(u16) -> Result<u32, &'static str>,
-) -> Result<u32, &'static str> {
+    read_control: impl FnOnce(u16) -> Result<u32>,
+) -> Result<u32> {
     match offset {
         0x3a..=0x3d => read_control(0x30 + (offset - 0x3a) * 4),
         0x47 => Ok((retained & LIMIT_CONTROL)
             | u32::from(limits[0]).min(LIMIT_MASK)
             | (u32::from(limits[1]).min(LIMIT_MASK) << 16)),
         0..=0x1a | 0x35..=0x1f0 => Ok(retained),
-        _ => Err("CIO router read requires its separately registered owner"),
+        _ => Err(refuse!(
+            "CIO router read requires its separately registered owner"
+        )),
     }
 }
 
@@ -98,15 +102,17 @@ impl Header {
         &self.state
     }
 
-    fn word(state: &State, offset: u16) -> Result<u32, &'static str> {
+    fn word(state: &State, offset: u16) -> Result<u32> {
         match offset {
             0..=8 => Ok(state.header[usize::from(offset)]),
             UUID_ALIAS..=0x175 => Ok(state.uuid_aliases[usize::from(offset - UUID_ALIAS)]),
-            _ => Err("CIO router word requires its actual registered callback"),
+            _ => Err(refuse!(
+                "CIO router word requires its actual registered callback"
+            )),
         }
     }
 
-    pub fn read(&self, offset: u16, count: usize) -> Result<Vec<u32>, &'static str> {
+    pub fn read(&self, offset: u16, count: usize) -> Result<Vec<u32>> {
         (0..count)
             .map(|i| {
                 let offset = Self::offset(offset, i)?;
@@ -115,11 +121,12 @@ impl Header {
             .collect()
     }
 
-    fn offset(first: u16, index: usize) -> Result<u16, &'static str> {
-        let index = u16::try_from(index).map_err(|_| "CIO router span overflows its address")?;
+    fn offset(first: u16, index: usize) -> Result<u16> {
+        let index =
+            u16::try_from(index).map_err(|_| refuse!("CIO router span overflows its address"))?;
         first
             .checked_add(index)
-            .ok_or("CIO router span overflows its address")
+            .ok_or(refuse!("CIO router span overflows its address"))
     }
 
     /// Execute a span in original per-word order. `enqueue` must keep the
@@ -131,8 +138,8 @@ impl Header {
         &mut self,
         offset: u16,
         data: &[u32],
-        enqueue: impl FnOnce(&[Event]) -> Result<(), &'static str>,
-    ) -> Result<(), &'static str> {
+        enqueue: impl FnOnce(&[Event]) -> Result<()>,
+    ) -> Result<()> {
         let mut next = self.state;
         let mut events = Vec::new();
         for (index, &value) in data.iter().enumerate() {
@@ -145,7 +152,9 @@ impl Header {
                 3 => {
                     if value & ROUTE_COMMIT != 0 && old & ROUTE_COMMIT == 0 {
                         if next.header[1] & ROUTE_SELECTOR != 0 {
-                            return Err("CIO original route commit requires a zero route-selector");
+                            return Err(refuse!(
+                                "CIO original route commit requires a zero route-selector"
+                            ));
                         }
                         next.pending_route = PendingRoute {
                             high: value & ROUTE_HIGH,
@@ -233,8 +242,8 @@ mod tests {
                 Ok(value)
             );
             assert_eq!(
-                read_registered_word(word, 0, [0; 2], |_| Err("CIO is powered off")),
-                Err("CIO is powered off")
+                read_registered_word(word, 0, [0; 2], |_| Err(refuse!("CIO is powered off"))),
+                Err(refuse!("CIO is powered off"))
             );
         }
         assert_eq!(
@@ -372,9 +381,9 @@ mod tests {
             assert_eq!(
                 h.write(2, &data, |batch| {
                     assert_eq!(batch, [Event::Route, Event::AdapterChange, Event::Sleep]);
-                    Err("CIO connection event queue is full")
+                    Err(refuse!("CIO connection event queue is full"))
                 }),
-                Err("CIO connection event queue is full")
+                Err(refuse!("CIO connection event queue is full"))
             );
             assert_eq!(*h.state(), initial);
         }

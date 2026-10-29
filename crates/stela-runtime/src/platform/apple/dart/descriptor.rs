@@ -5,6 +5,7 @@
 //! wider address fields through bit39. A profile's smaller PA width must
 //! reject those high address bits rather than silently truncate them.
 use stela_contracts::dma::DmaError;
+use stela_contracts::refuse;
 
 const VALID: u64 = 1;
 /// DART1: subpage protection disable. DART2: no-cache. Neither adds an
@@ -46,18 +47,20 @@ impl Format {
                 0
             };
         if entry & !known != 0 {
-            return Err(DmaError::Unsupported(
-                "DART descriptor contains unmodeled attributes",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "DART descriptor contains unmodeled attributes"
+            )));
         }
         let target = (entry & address) << shift;
         if target >> pa_bits != 0 {
-            return Err(DmaError::Unsupported(
-                "DART descriptor target exceeds its native profile",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "DART descriptor target exceeds its native profile"
+            )));
         }
         if target & (page - 1) != 0 {
-            return Err(DmaError::Unsupported("unaligned DART descriptor target"));
+            return Err(DmaError::Unsupported(refuse!(
+                "unaligned DART descriptor target"
+            )));
         }
         Ok(target)
     }
@@ -75,9 +78,9 @@ mod tests {
                 for leaf in [false, true] {
                     assert_eq!(
                         format.target(entry, bits, 0x4000, leaf),
-                        Err(DmaError::Unsupported(
+                        Err(DmaError::Unsupported(refuse!(
                             "DART descriptor target exceeds its native profile"
-                        ))
+                        )))
                     );
                 }
             }
@@ -91,9 +94,9 @@ mod tests {
                 for leaf in [false, true] {
                     assert_eq!(
                         format.target(VALID | 1 << reserved_bit, 42, 0x4000, leaf),
-                        Err(DmaError::Unsupported(
+                        Err(DmaError::Unsupported(refuse!(
                             "DART descriptor contains unmodeled attributes"
-                        ))
+                        )))
                     );
                 }
             }
@@ -117,9 +120,9 @@ mod tests {
             for bit in bits {
                 assert_eq!(
                     format.target(VALID | 1 << bit, 42, 0x4000, false),
-                    Err(DmaError::Unsupported(
+                    Err(DmaError::Unsupported(refuse!(
                         "DART descriptor contains unmodeled attributes"
-                    ))
+                    )))
                 );
             }
         }

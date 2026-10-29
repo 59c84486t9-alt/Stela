@@ -1,6 +1,7 @@
 //! Scalar guest accesses that reach devices, and the aborts they raise.
 
 use super::*;
+use stela_contracts::refuse;
 
 impl<H: Host, D: Devices> Machine<H, D> {
     /// A device read by the running PE, watched.
@@ -28,8 +29,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.host.speculation_barrier();
         if let Some(cpu) = self.devices.pc_sample_target(physical, bytes) {
             let pc = self.processor_pc(cpu).ok_or_else(|| {
-                DeviceError::Refused(format!(
-                    "debug PC sample: PE {cpu} has no powered execution state"
+                DeviceError::Refused(refuse!(
+                    "debug PC sample: PE {cpu} has no powered execution state",
+                    cpu
                 ))
             })?;
             self.devices.observe_pc_sample(physical, pc);
@@ -80,9 +82,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Err(DeviceError::Refused(reason) | DeviceError::TransferRefused(reason)) => {
                 Err(DeviceError::TransferRefused(reason))
             }
-            Err(DeviceError::NoDevice) => Err(DeviceError::TransferRefused(
-                "device DMA has no service model".into(),
-            )),
+            Err(DeviceError::NoDevice) => Err(DeviceError::TransferRefused(refuse!(
+                "device DMA has no service model"
+            ))),
         };
         self.observe_parallel_source(SourcePhase::DeviceAdvanceExit);
         result
@@ -425,7 +427,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let mut requirement = self.requirement(RequirementKind::Device {
             physical,
             write,
-            detail,
+            detail: detail.to_string(),
         });
         requirement.address = Some(address);
         // Each written value is the same refusal (`degrade`).
@@ -447,7 +449,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let mut requirement = self.requirement(RequirementKind::Device {
             physical,
             write,
-            detail,
+            detail: detail.to_string(),
         });
         requirement.address = Some(address);
         self.degrade(requirement);

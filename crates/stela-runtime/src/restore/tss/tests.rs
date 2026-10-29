@@ -379,6 +379,6 @@ fn only_a_successful_response_yields_its_ticket() {
     let Err(Error::Transport(message)) = ticket(refused) else {
         panic!()
     };
-    assert!(message.contains("STATUS=94"));
+    assert!(message.to_string().contains("STATUS=94"));
     assert!(ticket(b"<?xml").is_err());
 }

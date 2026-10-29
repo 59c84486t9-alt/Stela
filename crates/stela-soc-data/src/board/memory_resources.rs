@@ -1,9 +1,11 @@
 //! Direct T6000 MCC placement, checked independently of T8112's PMP service.
 //! Descriptor parsing does not admit a native-memory completion capability.
 use super::{MemoryController, PTD_RANGE, PtdBank};
+use crate::Result;
 use crate::mcc;
-use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
+use alloc::{collections::BTreeSet, vec::Vec};
 use stela_contracts::adt::Node;
+use stela_contracts::refuse;
 
 pub mod t6020;
 
@@ -27,7 +29,7 @@ pub struct DirectMemoryCache {
 impl DirectMemoryCache {
     /// Recheck public descriptor values before allocating owners. This
     /// also protects callers constructing a descriptor without the ADT parser.
-    pub fn validate(&self, locks: &MemoryController) -> Result<(), &'static str> {
+    pub fn validate(&self, locks: &MemoryController) -> Result<()> {
         if self.apertures.is_empty()
             || self.apertures.len() > 16
             || self.apertures != locks.apertures
@@ -37,29 +39,33 @@ impl DirectMemoryCache {
             || self.config_data.is_empty()
             || self.ptd.ranges.len() != self.ptd.interrupts.len()
         {
-            return Err("direct MCC descriptor does not match actual memory resources");
+            return Err(refuse!(
+                "direct MCC descriptor does not match actual memory resources"
+            ));
         }
         let geometry = crate::ptd::Geometry::new(
             (self.ptd.physical, crate::ptd::PTD_BYTES),
             self.ptd_updates,
         )?;
         if self.ptd_entries != geometry.entries() {
-            return Err("PTD descriptor capacity differs from its actual bank/update geometry");
+            return Err(refuse!(
+                "PTD descriptor capacity differs from its actual bank/update geometry"
+            ));
         }
         let ptd_end = self
             .ptd
             .physical
             .checked_add(crate::ptd::PTD_BYTES)
-            .ok_or("PTD bank end overflows")?;
+            .ok_or(refuse!("PTD bank end overflows"))?;
         let mut mapped = Vec::new();
         for &pa in &self.apertures {
             let end = pa
                 .checked_add(mcc::APERTURE_BYTES)
-                .ok_or("MCC aperture end overflows")?;
+                .ok_or(refuse!("MCC aperture end overflows"))?;
             if mapped.iter().any(|&(other, last)| pa < last && other < end)
                 || (pa < ptd_end && self.ptd.physical < end)
             {
-                return Err("direct memory resource apertures overlap");
+                return Err(refuse!("direct memory resource apertures overlap"));
             }
             mapped.push((pa, end));
         }
@@ -69,66 +75,62 @@ impl DirectMemoryCache {
             let end = range
                 .start
                 .checked_add(range.count)
-                .ok_or("PTD range end overflows")?;
+                .ok_or(refuse!("PTD range end overflows"))?;
             if range.count == 0
                 || usize::try_from(end).map_or(true, |end| end > self.ptd_entries)
                 || !ids.insert(range.id)
                 || range.name.len() > 16
                 || range.name.as_bytes().contains(&0)
             {
-                return Err("PTD range identity/capacity is invalid");
+                return Err(refuse!("PTD range identity/capacity is invalid"));
             }
             for entry in range.start..end {
                 if !entries.insert(entry) {
-                    return Err("PTD ranges overlap");
+                    return Err(refuse!("PTD ranges overlap"));
                 }
             }
         }
         if ids.is_empty() {
-            return Err("PTD ranges are absent");
+            return Err(refuse!("PTD ranges are absent"));
         }
         Ok(())
     }
 }
 
-fn scalar(node: &Node<'_>, name: &str) -> Result<u32, String> {
+fn scalar(node: &Node<'_>, name: &str) -> Result<u32> {
     let bytes = node
         .property(name)
         .filter(|bytes| bytes.len() == 4)
-        .ok_or_else(|| format!("memory resource {name} is not one u32"))?;
+        .ok_or_else(|| refuse!("memory resource {name} is not one u32", name))?;
     Ok(u32::from_le_bytes(bytes.try_into().expect("checked u32")))
 }
-fn reg_pairs<'a>(node: &Node<'a>) -> Result<&'a [u8], String> {
+fn reg_pairs<'a>(node: &Node<'a>) -> Result<&'a [u8]> {
     node.property("reg")
         .filter(|raw| !raw.is_empty() && raw.len().is_multiple_of(16))
-        .ok_or_else(|| "memory resource reg is not whole address/size pairs".into())
+        .ok_or_else(|| refuse!("memory resource reg is not whole address/size pairs"))
 }
 fn range_at(
     node: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     index: usize,
-) -> Result<(u64, u64), String> {
+) -> Result<(u64, u64)> {
     let pair = reg_pairs(node)?
         .as_chunks::<16>()
         .0
         .get(index)
-        .ok_or("selected memory resource reg is absent")?;
+        .ok_or(refuse!("selected memory resource reg is absent"))?;
     let address = u64::from_le_bytes(pair[..8].try_into().expect("u64"));
     let bytes = u64::from_le_bytes(pair[8..].try_into().expect("u64"));
-    let physical =
-        translate(address, bytes).ok_or("selected memory resource outside arm-io ranges")?;
+    let physical = translate(address, bytes)
+        .ok_or(refuse!("selected memory resource outside arm-io ranges"))?;
     if bytes == 0 || address.checked_add(bytes).is_none() || physical.checked_add(bytes).is_none() {
-        return Err(
+        return Err(refuse!(
             "selected memory resource range is empty, overflowing or has inconsistent translation"
-                .into(),
-        );
+        ));
     }
     Ok((physical, bytes))
 }
-fn ranges(
-    node: &Node<'_>,
-    translate: &dyn Fn(u64, u64) -> Option<u64>,
-) -> Result<Vec<(u64, u64)>, String> {
+fn ranges(node: &Node<'_>, translate: &dyn Fn(u64, u64) -> Option<u64>) -> Result<Vec<(u64, u64)>> {
     (0..reg_pairs(node)?.len() / 16)
         .map(|index| range_at(node, translate, index))
         .collect()
@@ -139,12 +141,16 @@ fn ranges(
 pub(super) fn publication_ranges(
     records: &[u8],
     entries: usize,
-) -> Result<(Vec<crate::ptd::Range>, Vec<u32>), String> {
+) -> Result<(Vec<crate::ptd::Range>, Vec<u32>)> {
     if entries == 0 || entries > crate::ptd::MAX_ENTRIES {
-        return Err("PMP PTD descriptor capacity exceeds actual interrupt-routing storage".into());
+        return Err(refuse!(
+            "PMP PTD descriptor capacity exceeds actual interrupt-routing storage"
+        ));
     }
     if records.is_empty() || !records.len().is_multiple_of(PTD_RANGE) {
-        return Err("PMP PTD descriptors are not whole nonempty records".into());
+        return Err(refuse!(
+            "PMP PTD descriptors are not whole nonempty records"
+        ));
     }
     let mut ids = BTreeSet::new();
     let mut used = BTreeSet::new();
@@ -153,13 +159,17 @@ pub(super) fn publication_ranges(
     for record in records.as_chunks::<PTD_RANGE>().0 {
         let word = |at| u32::from_le_bytes(record[at..at + 4].try_into().expect("u32"));
         let (id, start, count, interrupt) = (word(0), word(4), word(8), word(12));
-        let end = start.checked_add(count).ok_or("PTD range end overflows")?;
+        let end = start
+            .checked_add(count)
+            .ok_or(refuse!("PTD range end overflows"))?;
         if count == 0 || usize::try_from(end).map_or(true, |end| end > entries) || !ids.insert(id) {
-            return Err("PTD range is empty, duplicate or outside its real bank".into());
+            return Err(refuse!(
+                "PTD range is empty, duplicate or outside its real bank"
+            ));
         }
         for entry in start..end {
             if !used.insert(entry) {
-                return Err("PTD ranges overlap".into());
+                return Err(refuse!("PTD ranges overlap"));
             }
         }
         let name = &record[16..];
@@ -167,7 +177,8 @@ pub(super) fn publication_ranges(
             .iter()
             .position(|&byte| byte == 0)
             .unwrap_or(name.len());
-        let name = core::str::from_utf8(&name[..end]).map_err(|_| "PTD range name is not UTF-8")?;
+        let name = core::str::from_utf8(&name[..end])
+            .map_err(|_| refuse!("PTD range name is not UTF-8"))?;
         ranges.push(crate::ptd::Range {
             id,
             start,
@@ -183,11 +194,11 @@ pub(super) fn direct_memory_cache(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     controller: Option<&MemoryController>,
-) -> Result<Option<DirectMemoryCache>, String> {
+) -> Result<Option<DirectMemoryCache>> {
     let Some(node) = io.child("mcc").filter(|node| node.compatible(COMPATIBLE)) else {
         return Ok(None);
     };
-    let controller = controller.ok_or("T6000 MCC has no actual AMCC descriptor")?;
+    let controller = controller.ok_or(refuse!("T6000 MCC has no actual AMCC descriptor"))?;
     let apertures = ranges(&node, translate)?;
     if apertures.is_empty()
         || apertures.len() > 16
@@ -200,20 +211,24 @@ pub(super) fn direct_memory_cache(
         || controller.layout.stride != mcc::PLANE_STRIDE
         || controller.layout.aperture_bytes > mcc::APERTURE_BYTES
     {
-        return Err("T6000 MCC and AMCC do not describe the same actual apertures/planes".into());
+        return Err(refuse!(
+            "T6000 MCC and AMCC do not describe the same actual apertures/planes"
+        ));
     }
     for (index, &(start, bytes)) in apertures.iter().enumerate() {
         if apertures[..index]
             .iter()
             .any(|&(other, len)| start < other + len && other < start + bytes)
         {
-            return Err("T6000 MCC apertures overlap".into());
+            return Err(refuse!("T6000 MCC apertures overlap"));
         }
     }
     let config = node
         .property("config-data")
         .filter(|data| !data.is_empty() && data.len().is_multiple_of(4))
-        .ok_or("T6000 MCC config-data has a partial or missing source word")?;
+        .ok_or(refuse!(
+            "T6000 MCC config-data has a partial or missing source word"
+        ))?;
     let config_data = config
         .as_chunks::<4>()
         .0
@@ -222,28 +237,30 @@ pub(super) fn direct_memory_cache(
         .collect();
     let pmp = io
         .child("pmp")
-        .ok_or("T6000 MCC has no PMP transport descriptor")?;
+        .ok_or(refuse!("T6000 MCC has no PMP transport descriptor"))?;
     if pmp.property("ptd-driver-version").is_some() {
-        return Err("PMP versioned PTD routing requires a separately qualified layout".into());
+        return Err(refuse!(
+            "PMP versioned PTD routing requires a separately qualified layout"
+        ));
     }
     let pmgr = io
         .child("pmgr")
-        .ok_or("T6000 PMP PTD has no PMGR selector8 owner")?;
+        .ok_or(refuse!("T6000 PMP PTD has no PMGR selector8 owner"))?;
     // PMGR reg3/reg6 are original zero-length sentinels. Validate the
     // selected owner, not unrelated slots that are never mounted here.
     let bank = range_at(&pmgr, translate, PTD_PMGR_REG)?;
     if bank.1 != crate::ptd::PTD_BYTES {
-        return Err("T6000 PTD selector8 is not one complete bank".into());
+        return Err(refuse!("T6000 PTD selector8 is not one complete bank"));
     }
     let index = usize::try_from(scalar(&pmp, "ptd-update-reg-index")?)
-        .map_err(|_| "PMP update reg index overflows")?;
+        .map_err(|_| refuse!("PMP update reg index overflows"))?;
     let updates = range_at(&pmp, translate, index)?;
-    let geometry = crate::ptd::Geometry::new(bank, updates).map_err(String::from)?;
+    let geometry = crate::ptd::Geometry::new(bank, updates)?;
     let entries = geometry.entries();
     let records = pmp
         .child("iop-pmp-nub")
         .and_then(|nub| nub.property("ptd-range"))
-        .ok_or("PMP nub has no PTD range records")?;
+        .ok_or(refuse!("PMP nub has no PTD range records"))?;
     let (ranges, interrupts) = publication_ranges(records, entries)?;
     let resource = DirectMemoryCache {
         apertures: apertures.into_iter().map(|(pa, _)| pa).collect(),
@@ -257,7 +274,7 @@ pub(super) fn direct_memory_cache(
         ptd_updates: updates,
         ptd_entries: entries,
     };
-    resource.validate(controller).map_err(String::from)?;
+    resource.validate(controller)?;
     Ok(Some(resource))
 }
 

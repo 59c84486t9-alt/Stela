@@ -1,4 +1,6 @@
 //! Source101fb00 reads counter plus signed offset;102a598 converts it.
+use crate::Result;
+use stela_contracts::refuse;
 #[derive(Clone, Copy)]
 pub struct Clock {
     read: fn() -> u64,
@@ -8,13 +10,9 @@ pub struct Clock {
 impl Clock {
     /// The configuration owner supplies a fresh native counter reader,
     /// e.g. its calibrated BSP physical counter. No Access.now or default clock.
-    pub fn new(
-        read: fn() -> u64,
-        frequency: u32,
-        signed_offset: i64,
-    ) -> Result<Self, &'static str> {
+    pub fn new(read: fn() -> u64, frequency: u32, signed_offset: i64) -> Result<Self> {
         if frequency == 0 {
-            return Err("native clock frequency is zero");
+            return Err(refuse!("native clock frequency is zero"));
         }
         Ok(Self {
             read,

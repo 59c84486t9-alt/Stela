@@ -8,6 +8,7 @@
 //! short entries, which every FAT driver writes beside a long name. A file
 //! comes back as the device extents of its cluster chain, cut to its size.
 //! Nothing is written, and a malformed volume or chain is refused.
+use crate::Result;
 use alloc::{format, string::String, vec, vec::Vec};
 use core::fmt;
 use {stela_formats::payload::ReadAt, stela_formats::payload::pieces::Extent};
@@ -349,6 +350,7 @@ impl<R: ReadAt> Fat32<R> {
 pub(crate) mod tests {
     use super::*;
     use alloc::collections::BTreeMap;
+    use stela_contracts::{Refusal, refuse};
 
     const SECTOR: u64 = 512;
     /// Sectors per cluster of the test volume.
@@ -374,13 +376,13 @@ pub(crate) mod tests {
     }
 
     impl ReadAt for Sparse {
-        type Error = &'static str;
+        type Error = Refusal;
         fn len(&self) -> u64 {
             self.bytes
         }
-        fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
+        fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<()> {
             if offset + buffer.len() as u64 > self.bytes {
-                return Err("past end");
+                return Err(refuse!("past end"));
             }
             for (i, byte) in buffer.iter_mut().enumerate() {
                 let at = offset + i as u64;

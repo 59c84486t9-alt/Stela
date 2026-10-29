@@ -11,8 +11,10 @@
 pub mod persist;
 
 use super::{Entropy, keys::Roots};
+use crate::Result;
 use alloc::{collections::BTreeMap, vec::Vec};
 use hmac::{Hmac, Mac};
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use zeroize::Zeroizing;
 
@@ -47,15 +49,15 @@ pub struct Head {
 /// unprovisioned. A commit error may have an uncertain outcome: the caller
 /// poisons its live state and requires reopening, never acknowledges success.
 pub trait Backend {
-    fn load(&mut self) -> Result<Option<Head>, &'static str>;
-    fn commit(&mut self, expected: u64, next: Head) -> Result<(), &'static str>;
+    fn load(&mut self) -> Result<Option<Head>>;
+    fn commit(&mut self, expected: u64, next: Head) -> Result<()>;
 }
 
 impl Backend for alloc::boxed::Box<dyn Backend> {
-    fn load(&mut self) -> Result<Option<Head>, &'static str> {
+    fn load(&mut self) -> Result<Option<Head>> {
         (**self).load()
     }
-    fn commit(&mut self, expected: u64, next: Head) -> Result<(), &'static str> {
+    fn commit(&mut self, expected: u64, next: Head) -> Result<()> {
         (**self).commit(expected, next)
     }
 }
@@ -69,15 +71,15 @@ pub struct Volatile {
 }
 
 impl Backend for Volatile {
-    fn load(&mut self) -> Result<Option<Head>, &'static str> {
+    fn load(&mut self) -> Result<Option<Head>> {
         Ok(self.head.as_ref().map(|head| Head {
             generation: head.generation,
             record: head.record.clone(),
         }))
     }
-    fn commit(&mut self, expected: u64, next: Head) -> Result<(), &'static str> {
+    fn commit(&mut self, expected: u64, next: Head) -> Result<()> {
         if self.head.as_ref().map_or(0, |head| head.generation) != expected {
-            return Err("SEP nonce store generation conflict");
+            return Err(refuse!("SEP nonce store generation conflict"));
         }
         self.head = Some(next);
         Ok(())
@@ -112,9 +114,9 @@ pub struct Nonces<B: Backend> {
 impl<B: Backend> Nonces<B> {
     /// Explicit first provisioning only. Reopening an existing machine uses
     /// `open`, which refuses loss/corruption rather than resetting its nonces.
-    pub fn provision(roots: &Roots, mut backend: B) -> Result<Self, &'static str> {
+    pub fn provision(roots: &Roots, mut backend: B) -> Result<Self> {
         if backend.load()?.is_some() {
-            return Err("SEP nonce store is already provisioned");
+            return Err(refuse!("SEP nonce store is already provisioned"));
         }
         let key = roots.uid(PURPOSE)?;
         let system_key_root = roots.uid(SYSTEM_KEY_PURPOSE)?;
@@ -141,12 +143,12 @@ impl<B: Backend> Nonces<B> {
         })
     }
 
-    pub fn open(roots: &Roots, mut backend: B) -> Result<Self, &'static str> {
+    pub fn open(roots: &Roots, mut backend: B) -> Result<Self> {
         let key = roots.uid(PURPOSE)?;
         let system_key_root = roots.uid(SYSTEM_KEY_PURPOSE)?;
-        let head = backend
-            .load()?
-            .ok_or("SEP nonce store is missing; explicit provisioning required")?;
+        let head = backend.load()?.ok_or(refuse!(
+            "SEP nonce store is missing; explicit provisioning required"
+        ))?;
         let state = decode(head, &key)?;
         Ok(Self {
             backend,
@@ -156,16 +158,16 @@ impl<B: Backend> Nonces<B> {
         })
     }
 
-    fn state(&self) -> Result<&State, &'static str> {
-        self.state
-            .as_ref()
-            .ok_or("SEP nonce store commit outcome is uncertain; reopen required")
+    fn state(&self) -> Result<&State> {
+        self.state.as_ref().ok_or(refuse!(
+            "SEP nonce store commit outcome is uncertain; reopen required"
+        ))
     }
 
     /// Immutable machine identity is separate from erasable nonce state. This
     /// seed is reconstructed from the same persisted roots on every open; it
     /// is never serialized into the nonce banks or exposed to the guest.
-    pub(super) fn system_key_root(&self) -> Result<Zeroizing<[u8; MAC_BYTES]>, &'static str> {
+    pub(super) fn system_key_root(&self) -> Result<Zeroizing<[u8; MAC_BYTES]>> {
         self.state()?;
         Ok(self.system_key_root.clone())
     }
@@ -173,15 +175,15 @@ impl<B: Backend> Nonces<B> {
     /// The currently authenticated durable revision. A pending policy update
     /// uses it to refuse a commit after another service changed or erased the
     /// store. Poisoned state cannot authorize a new transaction.
-    pub(super) fn generation(&self) -> Result<u64, &'static str> {
+    pub(super) fn generation(&self) -> Result<u64> {
         Ok(self.state()?.generation)
     }
 
-    fn update(&mut self, mut next: State) -> Result<(), &'static str> {
+    fn update(&mut self, mut next: State) -> Result<()> {
         let expected = self.state()?.generation;
         next.generation = expected
             .checked_add(1)
-            .ok_or("SEP nonce store generation exhausted")?;
+            .ok_or(refuse!("SEP nonce store generation exhausted"))?;
         let record = encode(&next, &self.key);
         // Poison before entering a backend whose error may mean that the
         // write reached durable storage but its acknowledgement was lost.
@@ -197,35 +199,29 @@ impl<B: Backend> Nonces<B> {
         Ok(())
     }
 
-    pub fn read(&self, slot: u8) -> Result<[u8; NONCE_BYTES], &'static str> {
-        self.state()?
-            .slots
-            .get(&slot)
-            .copied()
-            .ok_or("SEP nonce slot is not generated or was invalidated")
+    pub fn read(&self, slot: u8) -> Result<[u8; NONCE_BYTES]> {
+        self.state()?.slots.get(&slot).copied().ok_or(refuse!(
+            "SEP nonce slot is not generated or was invalidated"
+        ))
     }
 
     /// An absent nonce is distinct from a store whose last commit has an
     /// uncertain outcome. Service handlers must not turn the latter into a
     /// successful idempotent invalidation.
-    pub fn contains(&self, slot: u8) -> Result<bool, &'static str> {
+    pub fn contains(&self, slot: u8) -> Result<bool> {
         Ok(self.state()?.slots.contains_key(&slot))
     }
 
     /// Commits are already durable by the Backend contract. A flush still
     /// refuses poisoned state rather than acknowledging an unknown outcome.
-    pub fn flush(&self) -> Result<(), &'static str> {
+    pub fn flush(&self) -> Result<()> {
         self.state().map(|_| ())
     }
 
     /// The service, once recovered, owns slot selection. No Apple slot count
     /// or allocation rule is inferred here. Entropy/commit failures yield no
     /// nonce reply; the previous state survives an entropy failure.
-    pub fn generate(
-        &mut self,
-        slot: u8,
-        entropy: &mut dyn Entropy,
-    ) -> Result<[u8; NONCE_BYTES], &'static str> {
+    pub fn generate(&mut self, slot: u8, entropy: &mut dyn Entropy) -> Result<[u8; NONCE_BYTES]> {
         let mut next = self.state()?.clone();
         let mut nonce = [0; NONCE_BYTES];
         entropy.fill(&mut nonce)?;
@@ -234,23 +230,25 @@ impl<B: Backend> Nonces<B> {
         Ok(nonce)
     }
 
-    pub fn invalidate(&mut self, slot: u8) -> Result<(), &'static str> {
+    pub fn invalidate(&mut self, slot: u8) -> Result<()> {
         let mut next = self.state()?.clone();
         if next.slots.remove(&slot).is_none() {
-            return Err("SEP nonce slot is not generated or was invalidated");
+            return Err(refuse!(
+                "SEP nonce slot is not generated or was invalidated"
+            ));
         }
         self.update(next)
     }
 
     /// A measured, already-authorized manifest commitment. This stores bytes;
     /// it grants no Image4 authentication, signing or rollback authorization.
-    pub fn commit_firmware(&mut self, digest: [u8; HASH_BYTES]) -> Result<(), &'static str> {
+    pub fn commit_firmware(&mut self, digest: [u8; HASH_BYTES]) -> Result<()> {
         let mut next = self.state()?.clone();
         next.firmware = Some(digest);
         self.update(next)
     }
 
-    pub fn firmware(&self) -> Result<Option<[u8; HASH_BYTES]>, &'static str> {
+    pub fn firmware(&self) -> Result<Option<[u8; HASH_BYTES]>> {
         Ok(self.state()?.firmware)
     }
 
@@ -260,7 +258,7 @@ impl<B: Backend> Nonces<B> {
         &mut self,
         which: PolicyNonce,
         nonce: Option<[u8; POLICY_NONCE_BYTES]>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         let mut next = self.state()?.clone();
         match which {
             PolicyNonce::Recovery => next.recovery_policy = nonce,
@@ -270,10 +268,7 @@ impl<B: Backend> Nonces<B> {
     }
 
     /// The committed BootPolicy nonce, if any.
-    pub fn policy_nonce(
-        &self,
-        which: PolicyNonce,
-    ) -> Result<Option<[u8; POLICY_NONCE_BYTES]>, &'static str> {
+    pub fn policy_nonce(&self, which: PolicyNonce) -> Result<Option<[u8; POLICY_NONCE_BYTES]>> {
         let state = self.state()?;
         Ok(match which {
             PolicyNonce::Recovery => state.recovery_policy,
@@ -284,7 +279,7 @@ impl<B: Backend> Nonces<B> {
     /// Erase every nonce, the firmware commitment and the policy nonces, as an
     /// Erase Install erases the SEP's anti-replay state; the generation keeps
     /// counting.
-    pub fn erase(&mut self) -> Result<(), &'static str> {
+    pub fn erase(&mut self) -> Result<()> {
         self.state()?;
         self.update(State {
             generation: 0,
@@ -331,7 +326,7 @@ fn take_policy(
     bytes: &[u8],
     at: &mut usize,
     end: usize,
-) -> Result<Option<[u8; POLICY_NONCE_BYTES]>, &'static str> {
+) -> Result<Option<[u8; POLICY_NONCE_BYTES]>> {
     match bytes.get(*at) {
         Some(0) => {
             *at += 1;
@@ -344,31 +339,31 @@ fn take_policy(
             *at += 1 + POLICY_NONCE_BYTES;
             Ok(Some(nonce))
         }
-        _ => Err("SEP nonce store policy nonce is invalid"),
+        _ => Err(refuse!("SEP nonce store policy nonce is invalid")),
     }
 }
 
-fn decode(head: Head, key: &[u8; MAC_BYTES]) -> Result<State, &'static str> {
+fn decode(head: Head, key: &[u8; MAC_BYTES]) -> Result<State> {
     let bytes = head.record.as_slice();
     // Minimum: header, firmware-absent byte, two policy-absent bytes, MAC.
     if !(HEADER_BYTES + 3 + MAC_BYTES..=MAX_BYTES).contains(&bytes.len()) {
-        return Err("SEP nonce store record length is invalid");
+        return Err(refuse!("SEP nonce store record length is invalid"));
     }
     let end = bytes.len() - MAC_BYTES;
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts 256-bit keys");
     mac.update(&bytes[..end]);
     mac.verify_slice(&bytes[end..])
-        .map_err(|_| "SEP nonce store authentication failed")?;
+        .map_err(|_| refuse!("SEP nonce store authentication failed"))?;
     if &bytes[..MAGIC.len()] != MAGIC {
-        return Err("SEP nonce store format is unsupported");
+        return Err(refuse!("SEP nonce store format is unsupported"));
     }
     let generation = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
     if generation == 0 || generation != head.generation {
-        return Err("SEP nonce store generation is stale or invalid");
+        return Err(refuse!("SEP nonce store generation is stale or invalid"));
     }
     let count = usize::from(u16::from_be_bytes(bytes[16..18].try_into().unwrap()));
     if count > MAX_SLOTS || HEADER_BYTES + count * RECORD_BYTES + 1 > end {
-        return Err("SEP nonce store slot count is invalid");
+        return Err(refuse!("SEP nonce store slot count is invalid"));
     }
     let mut slots = BTreeMap::new();
     let mut previous = None;
@@ -376,7 +371,7 @@ fn decode(head: Head, key: &[u8; MAC_BYTES]) -> Result<State, &'static str> {
     for _ in 0..count {
         let slot = bytes[at];
         if previous.is_some_and(|p| p >= slot) {
-            return Err("SEP nonce store slots are duplicated or unsorted");
+            return Err(refuse!("SEP nonce store slots are duplicated or unsorted"));
         }
         previous = Some(slot);
         slots.insert(slot, bytes[at + 1..at + RECORD_BYTES].try_into().unwrap());
@@ -392,12 +387,12 @@ fn decode(head: Head, key: &[u8; MAC_BYTES]) -> Result<State, &'static str> {
             at += 1 + HASH_BYTES;
             Some(hash)
         }
-        _ => return Err("SEP nonce store commitment is invalid"),
+        _ => return Err(refuse!("SEP nonce store commitment is invalid")),
     };
     let recovery_policy = take_policy(bytes, &mut at, end)?;
     let macos_policy = take_policy(bytes, &mut at, end)?;
     if at != end {
-        return Err("SEP nonce store has trailing data");
+        return Err(refuse!("SEP nonce store has trailing data"));
     }
     Ok(State {
         generation,
@@ -418,22 +413,22 @@ mod tests {
         fail_after: bool,
     }
     impl Backend for Memory {
-        fn load(&mut self) -> Result<Option<Head>, &'static str> {
+        fn load(&mut self) -> Result<Option<Head>> {
             Ok(self.head.as_ref().map(|h| Head {
                 generation: h.generation,
                 record: h.record.clone(),
             }))
         }
-        fn commit(&mut self, expected: u64, next: Head) -> Result<(), &'static str> {
+        fn commit(&mut self, expected: u64, next: Head) -> Result<()> {
             if self.head.as_ref().map_or(0, |h| h.generation) != expected {
-                return Err("generation conflict");
+                return Err(refuse!("generation conflict"));
             }
             if self.fail {
-                return Err("write failed");
+                return Err(refuse!("write failed"));
             }
             self.head = Some(next);
             if self.fail_after {
-                return Err("acknowledgement lost");
+                return Err(refuse!("acknowledgement lost"));
             }
             Ok(())
         }
@@ -441,7 +436,7 @@ mod tests {
     fn roots() -> Roots {
         Roots::provisioned([1; 32], [2; 32], 0xa5a5_0002).unwrap()
     }
-    fn entropy(bytes: &mut [u8]) -> Result<(), &'static str> {
+    fn entropy(bytes: &mut [u8]) -> Result<()> {
         bytes.fill(0x5a);
         Ok(())
     }
@@ -495,7 +490,7 @@ mod tests {
         let first = store.generate(1, &mut entropy).unwrap();
         let mut fail = |bytes: &mut [u8]| {
             bytes[0] = 1;
-            Err("entropy failed")
+            Err(refuse!("entropy failed"))
         };
         assert!(store.generate(1, &mut fail).is_err());
         assert_eq!(store.read(1), Ok(first));

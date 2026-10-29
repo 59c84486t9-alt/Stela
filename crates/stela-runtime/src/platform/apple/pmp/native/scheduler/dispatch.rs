@@ -1,5 +1,6 @@
 //! Callback execution and source queue scan ordering.
 use super::*;
+use stela_contracts::refuse;
 
 impl State {
     fn ready(&self, frame: &Frame, now: u64) -> bool {
@@ -89,11 +90,14 @@ impl Runtime {
             let mut selected = None;
             for queue in queues {
                 if let Some(work) = s.queues[queue].active {
-                    let frame = s.works[work]
-                        .target
-                        .frame
-                        .as_ref()
-                        .ok_or(Error::Contract("native active work has no invocation"))?;
+                    let frame =
+                        s.works[work]
+                            .target
+                            .frame
+                            .as_ref()
+                            .ok_or(Error::Contract(refuse!(
+                                "native active work has no invocation"
+                            )))?;
                     if s.ready(frame, access.now) {
                         selected = Some(Kind::Work(work));
                         break;
@@ -157,9 +161,9 @@ impl Runtime {
             let mut s = self.state.borrow_mut();
             if let Some(frame) = s.target(kind).frame.as_ref() {
                 if frame.executing.get() {
-                    return Err(Error::Contract(
-                        "same native immediate callback already executing",
-                    ));
+                    return Err(Error::Contract(refuse!(
+                        "same native immediate callback already executing"
+                    )));
                 }
                 if !s.ready(frame, access.now) {
                     return Ok(Progress::Busy {
@@ -193,18 +197,20 @@ impl Runtime {
                 .target(kind)
                 .frame
                 .as_ref()
-                .ok_or(Error::Contract("native dispatch lacks invocation"))?
+                .ok_or(Error::Contract(refuse!("native dispatch lacks invocation")))?
                 .clone();
             if frame.executing.get() {
-                return Err(Error::Contract(
-                    "native callback recursively reentered itself",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "native callback recursively reentered itself"
+                )));
             }
             let callback = s
                 .target_mut(kind)
                 .callback
                 .take()
-                .ok_or(Error::Contract("native registered callback is absent"))?;
+                .ok_or(Error::Contract(refuse!(
+                    "native registered callback is absent"
+                )))?;
             frame.executing.set(true);
             s.context.push(frame.clone());
             (
@@ -219,12 +225,13 @@ impl Runtime {
         // It may wake work, wait/unlock, or invoke a different immediate target.
         let result = callback.advance(&invocation, access);
         let mut s = self.state.borrow_mut();
-        let top = s
-            .context
-            .pop()
-            .ok_or(Error::Contract("native callback context disappeared"))?;
+        let top = s.context.pop().ok_or(Error::Contract(refuse!(
+            "native callback context disappeared"
+        )))?;
         if !Rc::ptr_eq(&top, &invocation.frame) {
-            return Err(Error::Contract("native callback context nesting corrupted"));
+            return Err(Error::Contract(refuse!(
+                "native callback context nesting corrupted"
+            )));
         }
         invocation.frame.executing.set(false);
         s.target_mut(kind).callback = Some(callback);
@@ -251,31 +258,36 @@ impl Runtime {
             .target(kind)
             .frame
             .as_ref()
-            .ok_or(Error::Contract("retired native callback lost invocation"))?
+            .ok_or(Error::Contract(refuse!(
+                "retired native callback lost invocation"
+            )))?
             .clone();
-        let (source_return, refusal) = s
-            .target(kind)
-            .retired
-            .ok_or(Error::Contract("native callback has not actually retired"))?;
+        let (source_return, refusal) =
+            s.target(kind)
+                .retired
+                .clone()
+                .ok_or(Error::Contract(refuse!(
+                    "native callback has not actually retired"
+                )))?;
         if frame.leases.get() != 0
             || frame.thread.wait.borrow().is_some()
             || frame.thread.mutex.get().is_some()
         {
             // Preserve the already-retired result. Never rerun a callback
             // just because its adapter failed to retire a lock/wait prefix.
-            return Err(Error::Contract(
-                "native callback returned while retaining lock/wait ownership",
-            ));
+            return Err(Error::Contract(refuse!(
+                "native callback returned while retaining lock/wait ownership"
+            )));
         }
         if let Kind::Work(work) = kind {
-            let queue = s.works[work]
-                .queue
-                .ok_or(Error::Contract("native callback lost registered queue"))?;
+            let queue = s.works[work].queue.ok_or(Error::Contract(refuse!(
+                "native callback lost registered queue"
+            )))?;
             let q = &s.queues[queue];
             if q.active != Some(work) || q.lock != Some(frame.thread.id) || q.depth != 1 {
-                return Err(Error::Contract(
-                    "native callback did not restore its queue lock",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "native callback did not restore its queue lock"
+                )));
             }
             if source_return != 0 {
                 s.works[work].cells.pending.set(true);
@@ -293,7 +305,9 @@ impl Runtime {
                 q.order
                     .iter()
                     .position(|id| *id == work)
-                    .ok_or(Error::Contract("native registered work disappeared"))?
+                    .ok_or(Error::Contract(refuse!(
+                        "native registered work disappeared"
+                    )))?
                     + 1
             };
         }
@@ -438,11 +452,11 @@ mod tests {
         fn advance(&mut self, i: &Invocation, _: &mut Access<'_>) -> Completion<u32> {
             self.seen.borrow_mut().push(i.clone());
             if self.seen.borrow().len() == 1 {
-                Completion::Refused("actual native callback destination refused")
+                Completion::Refused(refuse!("actual native callback destination refused"))
             } else {
                 Completion::Retired {
                     value: 1,
-                    refusal: Some("actual retired callback diagnostic"),
+                    refusal: Some(refuse!("actual retired callback diagnostic")),
                 }
             }
         }

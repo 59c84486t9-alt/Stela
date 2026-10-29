@@ -7,12 +7,15 @@ use super::{
     mapping::{Client, ReportingMapping, TraceMapping},
     service::Service,
 };
+use crate::Result;
 use alloc::{
     collections::{BTreeMap, VecDeque},
     rc::Rc,
     vec::Vec,
 };
 use core::cell::RefCell;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::TransferFault};
 
 /// Placement selected by the device dispatcher. Numeric topology does
@@ -136,7 +139,7 @@ pub(super) enum Output {
 }
 pub(super) struct Reply {
     pub output: Output,
-    pub refusal: Option<&'static str>,
+    pub refusal: Option<Refusal>,
 }
 pub(super) struct MapAttempt {
     key: Key,
@@ -167,13 +170,15 @@ pub fn pair(
     route: Route,
     owners: Owners,
     configuration: Configuration,
-) -> Result<(Broker, Service), &'static str> {
+) -> Result<(Broker, Service)> {
     if route.mapper == 0
         || configuration.mapper_index != 0
         || configuration.asc_dram_mask != 0
         || !configuration.synchronization_granule.is_power_of_two()
     {
-        return Err("native PMP DMA needs a qualified actual mapper and zero-mask configuration");
+        return Err(refuse!(
+            "native PMP DMA needs a qualified actual mapper and zero-mask configuration"
+        ));
     }
     let state = Rc::new(RefCell::new(State {
         identity: Rc::new(()),
@@ -202,15 +207,15 @@ impl Broker {
     pub fn synchronization_granule(&self) -> u64 {
         self.state.borrow().configuration.synchronization_granule
     }
-    pub(super) fn enqueue(&self, op: Op) -> Result<u64, &'static str> {
+    pub(super) fn enqueue(&self, op: Op) -> Result<u64> {
         let mut state = self.state.borrow_mut();
         if !state.alive {
-            return Err("native PMP DMA dispatcher was abandoned");
+            return Err(refuse!("native PMP DMA dispatcher was abandoned"));
         }
         let serial = state
             .serial
             .checked_add(1)
-            .ok_or("native PMP DMA request identity exhausted")?;
+            .ok_or(refuse!("native PMP DMA request identity exhausted"))?;
         state.serial = serial;
         let request = ServiceRequest {
             owner: state.identity.clone(),
@@ -223,10 +228,10 @@ impl Broker {
         });
         Ok(serial)
     }
-    pub(super) fn reply(&self, ticket: u64) -> Result<Option<Completion<Reply>>, &'static str> {
+    pub(super) fn reply(&self, ticket: u64) -> Result<Option<Completion<Reply>>> {
         let mut state = self.state.borrow_mut();
         if !state.alive {
-            return Err("native PMP DMA dispatcher was abandoned");
+            return Err(refuse!("native PMP DMA dispatcher was abandoned"));
         }
         Ok(state.replies.remove(&ticket))
     }
@@ -236,23 +241,25 @@ impl Broker {
         offset: u64,
         bytes: u64,
         life: Life,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         let state = self.state.borrow();
         if !state.alive {
-            return Err("native PMP DMA dispatcher was abandoned");
+            return Err(refuse!("native PMP DMA dispatcher was abandoned"));
         }
         let grant = state
             .grants
             .get(&descriptor.id)
-            .ok_or("native PMP DMA descriptor is not owned")?;
+            .ok_or(refuse!("native PMP DMA descriptor is not owned"))?;
         if grant.descriptor != descriptor || grant.life != life {
-            return Err("native PMP DMA descriptor/lifetime changed");
+            return Err(refuse!("native PMP DMA descriptor/lifetime changed"));
         }
         if offset
             .checked_add(bytes)
             .is_none_or(|end| end > descriptor.bytes)
         {
-            return Err("native PMP DMA extent exceeds its actual descriptor");
+            return Err(refuse!(
+                "native PMP DMA extent exceeds its actual descriptor"
+            ));
         }
         Ok(())
     }
@@ -260,7 +267,7 @@ impl Broker {
         let (index, ticket, descriptor) = {
             let mut state = self.state.borrow_mut();
             if !state.alive {
-                return Completion::Refused("native PMP DMA dispatcher was abandoned");
+                return Completion::Refused(refuse!("native PMP DMA dispatcher was abandoned"));
             }
             if iova == 0
                 || !iova.is_multiple_of(0x1000)
@@ -271,9 +278,9 @@ impl Broker {
                 || !bytes.is_multiple_of(state.configuration.synchronization_granule)
                 || usize::try_from(bytes).is_err()
             {
-                return Completion::Refused(
-                    "native PMP DMA geometry/flags are not source qualified",
-                );
+                return Completion::Refused(refuse!(
+                    "native PMP DMA geometry/flags are not source qualified"
+                ));
             }
             let index = state.maps.iter().position(|attempt| attempt.key.same(&key));
             if let Some(index) = index {
@@ -285,14 +292,16 @@ impl Broker {
                 ) != (iova, bytes, flags)
                     || attempt.returned
                 {
-                    return Completion::Refused(
-                        "native PMP DMA map request changed or was already delivered",
-                    );
+                    return Completion::Refused(refuse!(
+                        "native PMP DMA map request changed or was already delivered"
+                    ));
                 }
                 (index, attempt.ticket, attempt.descriptor)
             } else {
                 let Some(id) = state.serial.checked_add(1) else {
-                    return Completion::Refused("native PMP DMA descriptor identity exhausted");
+                    return Completion::Refused(refuse!(
+                        "native PMP DMA descriptor identity exhausted"
+                    ));
                 };
                 state.serial = id;
                 let descriptor = Descriptor {
@@ -334,7 +343,9 @@ impl Broker {
                 refusal: outer,
             })) => {
                 if actual != descriptor {
-                    return Completion::Refused("native PMP DMA map receipt changed descriptor");
+                    return Completion::Refused(refuse!(
+                        "native PMP DMA map receipt changed descriptor"
+                    ));
                 }
                 self.state.borrow_mut().maps[index].returned = true;
                 Completion::Retired {
@@ -342,7 +353,9 @@ impl Broker {
                     refusal: refusal.or(outer),
                 }
             }
-            Ok(Some(_)) => Completion::Refused("native PMP DMA map receipt has wrong operation"),
+            Ok(Some(_)) => {
+                Completion::Refused(refuse!("native PMP DMA map receipt has wrong operation"))
+            }
         }
     }
     pub fn map_reporting(
@@ -387,10 +400,10 @@ pub(super) fn convert<T, U>(c: Completion<T>, f: impl FnOnce(T) -> U) -> Complet
         },
     }
 }
-pub(super) fn reason(error: DmaError) -> &'static str {
+pub(super) fn reason(error: DmaError) -> Refusal {
     match error {
-        DmaError::Fault(_) => "actual PMP DART translation fault",
-        DmaError::Memory => "actual PMP canonical RAM transfer refused",
+        DmaError::Fault(code) => refuse!("actual PMP DART translation fault", code),
+        DmaError::Memory => refuse!("actual PMP canonical RAM transfer refused"),
         DmaError::Unsupported(reason) => reason,
     }
 }

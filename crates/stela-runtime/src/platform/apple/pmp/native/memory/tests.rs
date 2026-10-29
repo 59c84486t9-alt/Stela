@@ -1,6 +1,8 @@
 use super::*;
+use crate::Result;
 use alloc::{collections::VecDeque, vec};
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 struct Mapped {
     geometry: MapRequest,
     bytes: Vec<u8>,
@@ -10,16 +12,16 @@ impl Mapping for Mapped {
     fn geometry(&self) -> MapRequest {
         self.geometry
     }
-    fn read(&mut self, offset: u64, output: &mut [u8], _: &mut Access<'_>) -> Result<(), Error> {
+    fn read(&mut self, offset: u64, output: &mut [u8], _: &mut Access<'_>) -> Result<()> {
         if self.fail_read {
             self.fail_read = false;
-            return Err("actual RAM read fault");
+            return Err(refuse!("actual RAM read fault"));
         }
         let at = usize::try_from(offset).unwrap();
         output.copy_from_slice(&self.bytes[at..at + output.len()]);
         Ok(())
     }
-    fn write(&mut self, offset: u64, input: &[u8], _: &mut Access<'_>) -> Result<(), Error> {
+    fn write(&mut self, offset: u64, input: &[u8], _: &mut Access<'_>) -> Result<()> {
         let at = usize::try_from(offset).unwrap();
         self.bytes[at..at + input.len()].copy_from_slice(input);
         Ok(())
@@ -65,7 +67,7 @@ impl Backend for Backing {
         self.maps.push(request.clone());
         match self.map_steps.pop_front().unwrap_or(Outcome::Retire) {
             Outcome::Busy => MapStep::Busy { deadline: Some(11) },
-            Outcome::Refuse => MapStep::Refused("actual mapping unavailable"),
+            Outcome::Refuse => MapStep::Refused(refuse!("actual mapping unavailable")),
             value => {
                 if self.bad_geometry {
                     geometry.bus += PAGE;
@@ -80,7 +82,8 @@ impl Backend for Backing {
                         bytes,
                         fail_read: core::mem::take(&mut self.fail_read),
                     },
-                    refusal: matches!(value, Outcome::RetireRefuse).then_some("post-map refusal"),
+                    refusal: matches!(value, Outcome::RetireRefuse)
+                        .then_some(refuse!("post-map refusal")),
                 }
             }
         }
@@ -89,9 +92,10 @@ impl Backend for Backing {
         self.unmaps.push(request.clone());
         match self.unmap_steps.pop_front().unwrap_or(Outcome::Retire) {
             Outcome::Busy => Step::Busy { deadline: Some(12) },
-            Outcome::Refuse => Step::Refused("actual unmap unavailable"),
+            Outcome::Refuse => Step::Refused(refuse!("actual unmap unavailable")),
             value => Step::Retired {
-                refusal: matches!(value, Outcome::RetireRefuse).then_some("post-unmap refusal"),
+                refusal: matches!(value, Outcome::RetireRefuse)
+                    .then_some(refuse!("post-unmap refusal")),
             },
         }
     }
@@ -99,7 +103,7 @@ impl Backend for Backing {
 fn client(backing: Backing) -> Client<Backing> {
     Client::new(Claim::new(Rc::new(()), Rc::new(Cell::new(true))), backing).unwrap()
 }
-fn advance(c: &mut Client<Backing>) -> Result<Progress, Error> {
+fn advance(c: &mut Client<Backing>) -> Result<Progress> {
     c.advance(&mut Access::new(0, 5, &mut InterruptLatch::new()))
 }
 fn allocated(c: &mut Client<Backing>, bus: u64) -> Allocation {
@@ -138,7 +142,7 @@ fn shared_slot_reply_survives_busy_and_refusal() {
     }
     assert_eq!(advance(&mut c), Ok(Progress::Busy { deadline: Some(11) }));
     assert!(advance(&mut c).is_err());
-    assert_eq!(advance(&mut c), Err("post-map refusal"));
+    assert_eq!(advance(&mut c), Err(refuse!("post-map refusal")));
     assert!(!c.emit(&mut out).unwrap());
     assert_eq!(out.len(), 1);
     assert_eq!(c.backend.maps.len(), 3);
@@ -177,7 +181,7 @@ fn local_unmap_retires_before_wire_free_and_equal_bus_reuse_has_new_identity() {
     assert_eq!(advance(&mut c), Ok(Progress::Busy { deadline: Some(12) }));
     assert!(advance(&mut c).is_err());
     assert!(!c.emit(&mut out).unwrap());
-    assert_eq!(advance(&mut c), Err("post-unmap refusal"));
+    assert_eq!(advance(&mut c), Err(refuse!("post-unmap refusal")));
     assert!(c.emit(&mut out).unwrap());
     assert_eq!(out, [0x0014_0000_0000_4000]);
     assert!(!c.emit(&mut out).unwrap());
@@ -246,7 +250,7 @@ fn static_table_is_actual_read_prefix_not_mapping_permission_or_dynamic_allocati
     c.emit(&mut out).unwrap();
     assert_eq!(out, [0x0010_0000_0000_0000]);
     c.receive(0x0011_0000_0000_1000).unwrap();
-    assert_eq!(advance(&mut c), Err("actual RAM read fault"));
+    assert_eq!(advance(&mut c), Err(refuse!("actual RAM read fault")));
     assert!(c.table.is_none());
     advance(&mut c).unwrap();
     assert_eq!(c.backend.maps.len(), 1);

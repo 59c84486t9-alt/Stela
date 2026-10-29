@@ -21,7 +21,9 @@
 //!
 //! Only DT-selected counters exist; holes, other widths, layout versions,
 //! class-1 busy status and control fields without described effects refuse.
+use crate::Result;
 use alloc::{collections::BTreeMap, vec::Vec};
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -51,14 +53,16 @@ pub struct PerfCounters {
 }
 
 impl PerfCounters {
-    pub fn new(selectors: &[u16]) -> Result<Self, &'static str> {
+    pub fn new(selectors: &[u16]) -> Result<Self> {
         let mut counters = BTreeMap::new();
         for &selector in selectors {
             if selector > u16::from(u8::MAX) {
-                return Err("PMGR performance selector exceeds the DT selector width");
+                return Err(refuse!(
+                    "PMGR performance selector exceeds the DT selector width"
+                ));
             }
             if counters.insert(selector, Counter::default()).is_some() {
-                return Err("duplicate PMGR performance counter selector");
+                return Err(refuse!("duplicate PMGR performance counter selector"));
             }
         }
         Ok(Self {
@@ -81,14 +85,13 @@ impl PerfCounters {
     /// Record documented units from a source whose mode includes polarity
     /// and the mode nibble exactly as programmed. No guessed event scaling.
     #[cfg(test)]
-    pub fn record(&mut self, selector: u16, mode: u32, amount: u64) -> Result<(), &'static str> {
+    pub fn record(&mut self, selector: u16, mode: u32, amount: u64) -> Result<()> {
         if mode & !MODE_MASK != 0 {
-            return Err("PMGR event mode contains undescribed fields");
+            return Err(refuse!("PMGR event mode contains undescribed fields"));
         }
-        let counter = self
-            .counters
-            .get_mut(&selector)
-            .ok_or("PMGR event selector is not described by the DeviceTree")?;
+        let counter = self.counters.get_mut(&selector).ok_or(refuse!(
+            "PMGR event selector is not described by the DeviceTree"
+        ))?;
         if self.global & ENABLE == 0 {
             return Ok(());
         }
@@ -99,23 +102,24 @@ impl PerfCounters {
         Ok(())
     }
 
-    fn locate(&mut self, offset: u64, width: Width) -> Result<(&mut Counter, u64), &'static str> {
+    fn locate(&mut self, offset: u64, width: Width) -> Result<(&mut Counter, u64)> {
         if width != Width::Word {
-            return Err("PMGR performance registers require 32-bit accesses");
+            return Err(refuse!(
+                "PMGR performance registers require 32-bit accesses"
+            ));
         }
         let offset = offset
             .checked_sub(COUNTER_BASE)
-            .ok_or("undescribed PMGR performance register")?;
+            .ok_or(refuse!("undescribed PMGR performance register"))?;
         let selector = u16::try_from(offset / STRIDE)
-            .map_err(|_| "PMGR performance selector is out of range")?;
+            .map_err(|_| refuse!("PMGR performance selector is out of range"))?;
         let word = offset % STRIDE;
         if !matches!(word, 0 | LOW | HIGH) {
-            return Err("undescribed word within PMGR performance counter");
+            return Err(refuse!("undescribed word within PMGR performance counter"));
         }
-        let counter = self
-            .counters
-            .get_mut(&selector)
-            .ok_or("PMGR performance selector is not described by the DeviceTree")?;
+        let counter = self.counters.get_mut(&selector).ok_or(refuse!(
+            "PMGR performance selector is not described by the DeviceTree"
+        ))?;
         Ok((counter, word))
     }
 }
@@ -152,7 +156,9 @@ impl MmioDevice for PerfCounters {
     ) -> Result<(), MmioError> {
         let result = if offset == 0 && width == Width::Word {
             if value & !u64::from(ENABLE) != 0 {
-                Err("PMGR global performance control contains undescribed fields")
+                Err(refuse!(
+                    "PMGR global performance control contains undescribed fields"
+                ))
             } else {
                 self.global = value as u32;
                 Ok(())
@@ -162,7 +168,9 @@ impl MmioDevice for PerfCounters {
                 match word {
                     0 => {
                         if value & !u64::from(CONTROL_MASK) != 0 {
-                            return Err("PMGR performance control contains undescribed fields");
+                            return Err(refuse!(
+                                "PMGR performance control contains undescribed fields"
+                            ));
                         }
                         counter.control = value as u32;
                     }

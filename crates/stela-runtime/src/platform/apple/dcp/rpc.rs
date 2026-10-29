@@ -28,22 +28,25 @@ use super::link::{
     self, ALIGNMENT, HEADER_BYTES, Header, Owner, RegionHeader, Rpc, STREAM_BYTES, STREAMS, Stream,
     Word,
 };
+use crate::Result;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 
 /// The bus addresses the coprocessor reaches through its DART.
 pub trait Bus {
-    fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<(), &'static str>;
-    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), &'static str>;
+    fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<()>;
+    fn write(&mut self, address: u64, data: &[u8]) -> Result<()>;
 }
 
 /// How a method continues with the AP's output of its callback.
-pub type Continuation<S> = Box<dyn FnOnce(&mut S, &[u8]) -> Result<Step<S>, &'static str>>;
+pub type Continuation<S> = Box<dyn FnOnce(&mut S, &[u8]) -> Result<Step<S>>>;
 /// What a top-level callback does with the AP's output.
-pub type Finish<S> = Box<dyn FnOnce(&mut S, &[u8]) -> Result<(), &'static str>>;
+pub type Finish<S> = Box<dyn FnOnce(&mut S, &[u8]) -> Result<()>>;
 
 /// The next step of a method the coprocessor serves.
 pub enum Step<S> {
@@ -71,8 +74,7 @@ pub trait Service: Sized + 'static {
     /// Begin the AP's call `tag` with `input`; its output is `output` bytes.
     /// A refusal leaves architectural effects uncommitted. An accepted Step
     /// transfers native result ownership to the link before any output DMA.
-    fn call(&mut self, tag: [u8; 4], input: &[u8], output: u32)
-    -> Result<Step<Self>, &'static str>;
+    fn call(&mut self, tag: [u8; 4], input: &[u8], output: u32) -> Result<Step<Self>>;
     /// Whether the service has a callback to make.
     fn callback_pending(&self) -> bool {
         false
@@ -95,7 +97,7 @@ enum Resume<S> {
     Method(Continuation<S>),
     Callback(Finish<S>),
     /// The continuation ran once and refused; preserve its in-flight identity.
-    Refused(&'static str),
+    Refused(Refusal),
 }
 
 /// One entry of a stream's stack.
@@ -218,13 +220,13 @@ impl<S: Service> Link<S> {
     }
 
     /// The endpoint started: the coprocessor says hello.
-    pub fn start(&mut self) -> Result<u64, &'static str> {
+    pub fn start(&mut self) -> Result<u64> {
         if !self.incoming.is_empty()
             || self.pending.is_some()
             || self.lanes.iter().any(|lane| !lane.frames.is_empty())
             || self.is_up() && self.service.callback_pending()
         {
-            return Err("DCP link restart with unfinished RPC ownership");
+            return Err(refuse!("DCP link restart with unfinished RPC ownership"));
         }
         self.phase = Phase::Hello;
         self.heap = None;
@@ -244,9 +246,9 @@ impl<S: Service> Link<S> {
     /// Lose a cold-reset link session only after every accepted input,
     /// continuation and callback has relinquished ownership. Guest RAM is
     /// not erased and no completion word is synthesized.
-    pub(super) fn reset(&mut self) -> Result<(), &'static str> {
+    pub(super) fn reset(&mut self) -> Result<()> {
         if !self.retained_idle() {
-            return Err("DCP physical reset with unfinished RPC ownership");
+            return Err(refuse!("DCP physical reset with unfinished RPC ownership"));
         }
         self.phase = Phase::Hello;
         self.heap = None;
@@ -279,7 +281,7 @@ impl<S: Service> Link<S> {
 
     /// Serve every waiting word and start any callback the service has,
     /// pushing the words the coprocessor sends to `outbox`.
-    pub fn dma(&mut self, bus: &mut dyn Bus, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    pub fn dma(&mut self, bus: &mut dyn Bus, outbox: &mut Vec<u64>) -> Result<()> {
         if self.pending.is_some() {
             self.flush_pending(bus, outbox)?;
         }
@@ -309,11 +311,7 @@ impl<S: Service> Link<S> {
         Ok(())
     }
 
-    fn flush_pending(
-        &mut self,
-        bus: &mut dyn Bus,
-        outbox: &mut Vec<u64>,
-    ) -> Result<(), &'static str> {
+    fn flush_pending(&mut self, bus: &mut dyn Bus, outbox: &mut Vec<u64>) -> Result<()> {
         self.commit_pending(bus, outbox)?;
         if self.pending_input {
             self.incoming.pop_front().expect("accepted RPC input");
@@ -333,23 +331,18 @@ impl<S: Service> Link<S> {
         })
     }
 
-    fn region(&self) -> Result<u64, &'static str> {
+    fn region(&self) -> Result<u64> {
         match self.phase {
             Phase::Up { region } => Ok(region),
-            Phase::Hello => Err("DCP link RPC before the AP announced its region"),
+            Phase::Hello => Err(refuse!("DCP link RPC before the AP announced its region")),
         }
     }
 
-    fn serve(
-        &mut self,
-        bus: &mut dyn Bus,
-        word: u64,
-        outbox: &mut Vec<u64>,
-    ) -> Result<(), &'static str> {
+    fn serve(&mut self, bus: &mut dyn Bus, word: u64, outbox: &mut Vec<u64>) -> Result<()> {
         match Word::decode(word)? {
             Word::Region { dva } => {
                 if self.lanes.iter().any(|lane| !lane.frames.is_empty()) {
-                    return Err("DCP link region re-announced with calls in flight");
+                    return Err(refuse!("DCP link region re-announced with calls in flight"));
                 }
                 let region = self.bus(dva);
                 let mut bytes = [0; RegionHeader::BYTES];
@@ -368,40 +361,44 @@ impl<S: Service> Link<S> {
                 );
                 Ok(())
             }
-            Word::Hello { .. } => Err("DCP link hello came from the AP"),
-            Word::Ready { .. } => {
-                Err("DCP link ready came from the AP, which only the owner-1 side sends")
-            }
+            Word::Hello { .. } => Err(refuse!("DCP link hello came from the AP")),
+            Word::Ready { .. } => Err(refuse!(
+                "DCP link ready came from the AP, which only the owner-1 side sends"
+            )),
             Word::Rpc(rpc) if rpc.answer => self.answered(bus, rpc),
             Word::Rpc(rpc) => self.called(bus, rpc),
         }
     }
 
     /// The AP called a method.
-    fn called(&mut self, bus: &mut dyn Bus, call: Rpc) -> Result<(), &'static str> {
+    fn called(&mut self, bus: &mut dyn Bus, call: Rpc) -> Result<()> {
         let region = self.region()?;
         let lane = &self.lanes[lane_index(call.stream)];
         let fresh = call.stream.owner == Owner::Ap && lane.frames.is_empty();
         if call.opens != fresh {
             return Err(if call.opens {
-                "DCP link call opens a stream already in use"
+                refuse!("DCP link call opens a stream already in use")
             } else {
-                "DCP link call nests in a stream that waits for no callback"
+                refuse!("DCP link call nests in a stream that waits for no callback")
             });
         }
         if !fresh && !lane.frames.last().is_some_and(Frame::waiting) {
-            return Err("DCP link call nests in a stream that waits for no callback");
+            return Err(refuse!(
+                "DCP link call nests in a stream that waits for no callback"
+            ));
         }
         let length = u32::from(call.length);
         if length < HEADER_BYTES || u32::from(call.offset) + length > STREAM_BYTES {
-            return Err("DCP link call payload lies outside its stream buffer");
+            return Err(refuse!(
+                "DCP link call payload lies outside its stream buffer"
+            ));
         }
         let payload = region + call.stream.buffer_of(Owner::Ap) + u64::from(call.offset);
         let mut bytes = [0; HEADER_BYTES as usize];
         bus.read(payload, &mut bytes)?;
         let header = Header::parse(&bytes);
         if header.length() != Some(call.length) {
-            return Err("DCP link call length differs from its header");
+            return Err(refuse!("DCP link call length differs from its header"));
         }
         let mut input = vec![0; header.input as usize];
         bus.read(payload + u64::from(HEADER_BYTES), &mut input)?;
@@ -428,11 +425,7 @@ impl<S: Service> Link<S> {
 
     /// Validate and publish a native result. All fallible checks
     /// and DMA precede stream-stack changes and the corresponding mailbox word.
-    fn commit_pending(
-        &mut self,
-        bus: &mut dyn Bus,
-        outbox: &mut Vec<u64>,
-    ) -> Result<(), &'static str> {
+    fn commit_pending(&mut self, bus: &mut dyn Bus, outbox: &mut Vec<u64>) -> Result<()> {
         let region = self.region()?;
         let pending = self.pending.as_ref().expect("pending RPC work");
         if let Pending::Method {
@@ -447,10 +440,14 @@ impl<S: Service> Link<S> {
                 waiting: None,
             }) = lane.frames.last()
             else {
-                return Err("DCP link method continued outside the call it serves");
+                return Err(refuse!(
+                    "DCP link method continued outside the call it serves"
+                ));
             };
             if output.len() != header.output as usize {
-                return Err("DCP method output size differs from the AP's header");
+                return Err(refuse!(
+                    "DCP method output size differs from the AP's header"
+                ));
             }
             let at = region
                 + stream.buffer_of(Owner::Ap)
@@ -481,22 +478,27 @@ impl<S: Service> Link<S> {
         };
         let header = Header {
             tag,
-            input: u32::try_from(input.len()).map_err(|_| "DCP callback input exceeds a stream")?,
+            input: u32::try_from(input.len())
+                .map_err(|_| refuse!("DCP callback input exceeds a stream"))?,
             output,
         };
         let length = header
             .length()
-            .ok_or("DCP callback exceeds a message length")?;
-        let slot = align(u32::from(length)).ok_or("DCP callback exceeds a stream")?;
+            .ok_or(refuse!("DCP callback exceeds a message length"))?;
+        let slot = align(u32::from(length)).ok_or(refuse!("DCP callback exceeds a stream"))?;
         let lane = &self.lanes[lane_index(stream)];
         let offset = lane.cursor;
         if offset + slot > STREAM_BYTES {
-            return Err("DCP callback overflows its stream buffer");
+            return Err(refuse!("DCP callback overflows its stream buffer"));
         }
         match lane.frames.last() {
             Some(Frame::Serving { waiting: None, .. }) if !opens => (),
             None if opens => (),
-            _ => return Err("DCP callback made on a stream not serving its caller"),
+            _ => {
+                return Err(refuse!(
+                    "DCP callback made on a stream not serving its caller"
+                ));
+            }
         }
         let at = region + stream.buffer_of(Owner::Dcp) + u64::from(offset);
         bus.write(at, &header.bytes())?;
@@ -537,10 +539,10 @@ impl<S: Service> Link<S> {
     }
 
     /// The AP answered a callback.
-    fn answered(&mut self, bus: &mut dyn Bus, answer: Rpc) -> Result<(), &'static str> {
+    fn answered(&mut self, bus: &mut dyn Bus, answer: Rpc) -> Result<()> {
         let region = self.region()?;
         if answer.offset != 0 || answer.length != 0 {
-            return Err("DCP link answer carries a payload");
+            return Err(refuse!("DCP link answer carries a payload"));
         }
         let lane = &self.lanes[lane_index(answer.stream)];
         let outgoing = match lane.frames.last() {
@@ -549,10 +551,10 @@ impl<S: Service> Link<S> {
                 ..
             }) => outgoing,
             Some(Frame::Calling(outgoing)) => outgoing,
-            _ => return Err("DCP link answer on a stream that waits for none"),
+            _ => return Err(refuse!("DCP link answer on a stream that waits for none")),
         };
-        if let Resume::Refused(reason) = outgoing.resume {
-            return Err(reason);
+        if let Resume::Refused(reason) = &outgoing.resume {
+            return Err(reason.clone());
         }
         let mut output = vec![0; outgoing.header.output as usize];
         let at = region
@@ -574,7 +576,7 @@ impl<S: Service> Link<S> {
         };
         let resume = core::mem::replace(
             &mut outgoing.resume,
-            Resume::Refused("DCP callback native continuation did not complete"),
+            Resume::Refused(refuse!("DCP callback native continuation did not complete")),
         );
         let result = match resume {
             Resume::Method(then) => then(&mut self.service, &output).map(Some),
@@ -613,7 +615,7 @@ impl<S: Service> Link<S> {
                     Some(Frame::Calling(outgoing)) => outgoing,
                     _ => unreachable!("retained refused callback"),
                 };
-                outgoing.resume = Resume::Refused(reason);
+                outgoing.resume = Resume::Refused(reason.clone());
                 Err(reason)
             }
         }

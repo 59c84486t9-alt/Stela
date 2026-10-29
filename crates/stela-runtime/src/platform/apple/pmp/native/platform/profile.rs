@@ -3,7 +3,9 @@
 //! controllers, counter selection and `Interpolation` state.
 use super::super::power::DeviceTable;
 use super::{CounterReference, CounterSelection, Interpolation, McSelection};
+use crate::Result;
 use alloc::{vec, vec::Vec};
+use stela_contracts::refuse;
 
 const SOURCE_IDS: [u32; 18] = [
     1, 2, 16, 17, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18,
@@ -155,11 +157,7 @@ pub struct Profile {
 impl Profile {
     /// ADT dvfs-domain is whole28-byte rows; controller indices are their dense
     /// ordinals. Source IDs and source state counts must resolve independently.
-    pub fn t8112(
-        table: &DeviceTable,
-        dvfs_domains: &[u8],
-        packet: Slice,
-    ) -> Result<Self, &'static str> {
+    pub fn t8112(table: &DeviceTable, dvfs_domains: &[u8], packet: Slice) -> Result<Self> {
         if table.len() != 18
             || !table
                 .records()
@@ -167,13 +165,17 @@ impl Profile {
                 .zip(SOURCE_IDS)
                 .all(|(r, id)| r[0] == id)
         {
-            return Err("native platform registry differs from qualified T8112 source ordinals");
+            return Err(refuse!(
+                "native platform registry differs from qualified T8112 source ordinals"
+            ));
         }
         if !dvfs_domains.len().is_multiple_of(28)
             || dvfs_domains.is_empty()
             || dvfs_domains.len() / 28 > 32
         {
-            return Err("native DVFS domain property is not whole bounded source rows");
+            return Err(refuse!(
+                "native DVFS domain property is not whole bounded source rows"
+            ));
         }
         let domains: Vec<(u32, u32)> = dvfs_domains
             .as_chunks::<28>()
@@ -189,9 +191,11 @@ impl Profile {
         if domains.iter().enumerate().any(|(i, (id, count))| {
             *id == 0 || *count == 0 || *count > 16 || domains[..i].iter().any(|r| r.0 == *id)
         }) {
-            return Err("native DVFS source IDs/state counts are ambiguous or unbounded");
+            return Err(refuse!(
+                "native DVFS source IDs/state counts are ambiguous or unbounded"
+            ));
         }
-        let resolve = |id: u32| -> Result<Option<u8>, &'static str> {
+        let resolve = |id: u32| -> Result<Option<u8>> {
             if id == 0 {
                 Ok(None)
             } else {
@@ -199,7 +203,7 @@ impl Profile {
                     .iter()
                     .position(|r| r.0 == id)
                     .map(|x| Some(x as u8))
-                    .ok_or("native SOC descriptor has no joined DVFS domain")
+                    .ok_or(refuse!("native SOC descriptor has no joined DVFS domain"))
             }
         };
         let mut descriptors = Vec::new();
@@ -221,9 +225,9 @@ impl Profile {
             }
             let count = raw[3]
                 .checked_mul(8)
-                .ok_or("native SOC counter slice overflow")?;
+                .ok_or(refuse!("native SOC counter slice overflow"))?;
             if count > 128 {
-                return Err("native platform slice exceeds two evaluator words");
+                return Err(refuse!("native platform slice exceeds two evaluator words"));
             }
             let counters = if count == 0 {
                 None
@@ -231,7 +235,7 @@ impl Profile {
                 let s = Slice { start: next, count };
                 next = next
                     .checked_add(count)
-                    .ok_or("native SOC counter prefix overflow")?;
+                    .ok_or(refuse!("native SOC counter prefix overflow"))?;
                 Some(s)
             };
             let controller = resolve(raw[6])?;
@@ -242,7 +246,9 @@ impl Profile {
             let controller_states = controller.map_or(0, |x| domains[usize::from(x)].1);
             let mode = if matches!(raw[11], 1 | 2) { raw[11] } else { 0 };
             if mode == 1 && (i != 8 || controller_states != 3) {
-                return Err("native mode1 needs its qualified joined interpolation table");
+                return Err(refuse!(
+                    "native mode1 needs its qualified joined interpolation table"
+                ));
             }
             let freshness_check = u8::from(i == 4 || i == 5);
             let mut selection = CounterSelection::initialized(source_references(i), 0)?;
@@ -306,9 +312,11 @@ impl Profile {
             != packet
                 .start
                 .checked_add(packet.count)
-                .ok_or("native packet range overflow")?
+                .ok_or(refuse!("native packet range overflow"))?
         {
-            return Err("native SOC counter slices do not cover actual packet range");
+            return Err(refuse!(
+                "native SOC counter slices do not cover actual packet range"
+            ));
         }
         Ok(Self {
             descriptors,

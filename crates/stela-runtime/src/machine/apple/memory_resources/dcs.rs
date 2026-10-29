@@ -1,6 +1,7 @@
 //! Canonical RAM service join for the T8112 DCS channel owner.
 //! This component is composed into the prepared memory resource; it does not
 //! create another AMCC/PTD owner or check missing PMP service producers.
+use crate::Result;
 use crate::platform::apple::dcs::native::CHANNELS;
 use crate::platform::apple::dcs::native::ChannelConfiguration;
 use crate::platform::apple::dcs::native::ChannelProgress;
@@ -12,6 +13,7 @@ use stela_contracts::bus::LifecycleState;
 use stela_contracts::bus::MmioDevice;
 use stela_contracts::bus::MmioError;
 use stela_contracts::bus::Width;
+use stela_contracts::refuse;
 use stela_engine::memory::CanonicalRamService;
 use stela_engine::memory::RegisteredSystemRam;
 
@@ -27,7 +29,7 @@ impl NativeDcs {
         configuration: Vec<ChannelConfiguration>,
         lifecycle: LifecycleState,
         ram: Arc<RegisteredSystemRam>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         Ok(Self {
             controller: Controller::initialized(configuration, lifecycle)?,
             ram,
@@ -44,13 +46,15 @@ impl NativeDcs {
         offset: u64,
         width: Width,
         memory: &CanonicalRamService<'_>,
-    ) -> Result<(usize, u16), &'static str> {
+    ) -> Result<(usize, u16)> {
         if !memory.belongs_to(&self.ram) {
-            return Err("native DCS drain borrowed another actual RAM owner");
+            return Err(refuse!(
+                "native DCS drain borrowed another actual RAM owner"
+            ));
         }
         memory
             .validate_current()
-            .map_err(|_| "native DCS drain lost actual RAM generation/writer exclusion")?;
+            .map_err(|_| refuse!("native DCS drain lost actual RAM generation/writer exclusion"))?;
         self.controller.drain_control(offset, width)
     }
     /// Observe the empty synchronous frontend while its native workers,
@@ -68,7 +72,7 @@ impl NativeDcs {
         offset: u64,
         width: Width,
         memory: &CanonicalRamService<'_>,
-    ) -> Result<u64, &'static str> {
+    ) -> Result<u64> {
         let (_, high) = self.live_drain(offset, width, memory)?;
         Ok(u64::from(high) << 16)
     }
@@ -85,13 +89,13 @@ impl NativeDcs {
         value: u64,
         at: u64,
         memory: &CanonicalRamService<'_>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         self.live_drain(offset, width, memory)?;
         self.controller.record_ram_drain(offset, width, value, at)
     }
 }
 impl Lifecycle for NativeDcs {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         self.controller.check_lifecycle(proposed)
     }
     fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {

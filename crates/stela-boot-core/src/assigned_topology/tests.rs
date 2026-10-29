@@ -628,6 +628,7 @@ fn original_t8112_adapter_joins_dense_driver_ids_to_physical_first_p_resources()
         Source::t8112(&original, &override_live, identity, 0x100)
             .err()
             .unwrap()
+            .to_string()
             .contains("boot-argument override")
     );
 }
@@ -977,6 +978,7 @@ fn missing_owner_capacity_source_counts_or_profile_refuse_before_publication() {
         )
         .err()
         .unwrap()
+        .to_string()
         .contains("MissingCapacity")
     );
     owner.capacities[0].maximum = Some(2);
@@ -1006,6 +1008,7 @@ fn missing_owner_capacity_source_counts_or_profile_refuse_before_publication() {
         )
         .err()
         .unwrap()
+        .to_string()
         .contains("source board profile")
     );
     let (tree, owner, nodes, profile) = fixture();
@@ -1015,6 +1018,7 @@ fn missing_owner_capacity_source_counts_or_profile_refuse_before_publication() {
         prepare(&roster, &owner, nodes[0].slot, &tree, &s, profile.clone())
             .err()
             .unwrap()
+            .to_string()
             .contains("#main-cpus")
     );
     let mut counts = COUNT_FIELDS.to_vec();
@@ -1028,6 +1032,7 @@ fn missing_owner_capacity_source_counts_or_profile_refuse_before_publication() {
         prepare(&roster, &owner, nodes[0].slot, &tree, &s, profile)
             .err()
             .unwrap()
+            .to_string()
             .contains("cannot add")
     );
 }

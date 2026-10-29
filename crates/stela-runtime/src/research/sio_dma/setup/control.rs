@@ -3,6 +3,7 @@
 use super::{Effect, EffectResult, FinishError, Request, TunableProgram};
 use crate::research::sio_dma::Error;
 use stela_contracts::dma::Port;
+use stela_contracts::refuse;
 
 /// A physical map range checked by the owner. Geometry alone does
 /// not check its registers; requests still use checked machine MMIO.
@@ -59,7 +60,9 @@ impl TunableControl {
     pub fn new(wrapper: PhysicalRange, icu: PhysicalRange) -> Result<Self, Error> {
         for range in [wrapper, icu] {
             if range.base.checked_add(range.bytes).is_none() {
-                return Err(Error::Unsupported("SIO setup physical range overflows"));
+                return Err(Error::Unsupported(refuse!(
+                    "SIO setup physical range overflows"
+                )));
             }
         }
         Ok(Self {
@@ -75,12 +78,14 @@ impl TunableControl {
     /// tunables waits until both exist. A zero field remains unset, as there.
     pub fn receive(&mut self, request: u64) -> Result<(), Error> {
         if self.pending.is_some() {
-            return Err(Error::Unsupported(
-                "SIO setup request or reply is still owned",
-            ));
+            return Err(Error::Unsupported(refuse!(
+                "SIO setup request or reply is still owned"
+            )));
         }
         if request as u8 != 0 || (request >> 16) as u8 != 3 {
-            return Err(Error::Unsupported("SIO setup command is not qualified"));
+            return Err(Error::Unsupported(refuse!(
+                "SIO setup command is not qualified"
+            )));
         }
         let parameter = (request >> 24) as u8;
         let (bank, address) = match parameter {
@@ -89,34 +94,39 @@ impl TunableControl {
             0x20 => (1, true),
             0x21 => (1, false),
             _ => {
-                return Err(Error::Unsupported(
-                    "SIO setup parameter family is not qualified",
-                ));
+                return Err(Error::Unsupported(refuse!(
+                    "SIO setup parameter family is not qualified"
+                )));
             }
         };
         let data = (request >> 32) as u32;
         let mut buffer = self.buffers[bank];
         if address {
             if buffer.address != 0 {
-                return Err(Error::Unsupported(
-                    "SIO setup buffer address is already owned",
-                ));
+                return Err(Error::Unsupported(refuse!(
+                    "SIO setup buffer address is already owned"
+                )));
             }
             buffer.address = u64::from(data) << 12;
         } else {
             if buffer.bytes != 0 {
-                return Err(Error::Unsupported("SIO setup buffer size is already owned"));
+                return Err(Error::Unsupported(refuse!(
+                    "SIO setup buffer size is already owned"
+                )));
             }
             if data > super::MAX_TABLE_BYTES || !data.is_multiple_of(super::ROW_BYTES as u32) {
-                return Err(Error::Unsupported(
-                    "SIO tunable table length is not qualified",
-                ));
+                return Err(Error::Unsupported(refuse!(
+                    "SIO tunable table length is not qualified"
+                )));
             }
             buffer.bytes = data;
         }
-        let generation = self.generation.checked_add(1).ok_or(Error::Unsupported(
-            "SIO setup request generation is exhausted",
-        ))?;
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(Error::Unsupported(refuse!(
+                "SIO setup request generation is exhausted"
+            )))?;
         self.buffers[bank] = buffer;
         self.generation = generation;
         self.pending = Some(Pending {
@@ -215,9 +225,9 @@ impl TunableControl {
 
     pub fn acknowledge_reply(&mut self, expected: u64) -> Result<(), Error> {
         if self.reply() != Some(expected) {
-            return Err(Error::Unsupported(
-                "SIO setup ACK delivery has no matching owner",
-            ));
+            return Err(Error::Unsupported(refuse!(
+                "SIO setup ACK delivery has no matching owner"
+            )));
         }
         self.pending = None;
         Ok(())

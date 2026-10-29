@@ -11,13 +11,14 @@
 use super::super::Ordinal;
 use super::super::counter_cache::{ManagerClaim, ReadMasks};
 use super::{Completion, ManagerContext, ManagerEffect, Request};
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::MmioDevice,
     stela_contracts::bus::MmioError, stela_contracts::bus::Width,
 };
 
-type Error = &'static str;
 const CONTROL_MASK: u32 = 0xf << 16;
 const SAVED_CONTROLS: usize = 4;
 const RECORD_BYTES: usize = 24;
@@ -47,16 +48,20 @@ impl Configuration {
         accumulator_count: u32,
         records: &[u8],
         state_counts: &[u32],
-    ) -> Result<Self, Error> {
+    ) -> Result<Self> {
         let count = control_list
             .get(..4)
             .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
-            .ok_or("native manager controller count is absent")?;
+            .ok_or(refuse!("native manager controller count is absent"))?;
         if count > SAVED_CONTROLS || control_list.len() != 4 + count * 4 {
-            return Err("native manager controller list exceeds its source save area");
+            return Err(refuse!(
+                "native manager controller list exceeds its source save area"
+            ));
         }
         if !index_map.len().is_multiple_of(4) {
-            return Err("native manager controller index map has a partial word");
+            return Err(refuse!(
+                "native manager controller index map has a partial word"
+            ));
         }
         let mut controls = Vec::new();
         for b in control_list[4..].as_chunks::<4>().0 {
@@ -65,9 +70,13 @@ impl Configuration {
                 .checked_mul(4)
                 .and_then(|start| index_map.get(start..start.checked_add(4)?))
                 .map(|b| u64::from(u32::from_le_bytes(b.try_into().unwrap())))
-                .ok_or("native manager controller ID has no actual index-map row")?;
+                .ok_or(refuse!(
+                    "native manager controller ID has no actual index-map row"
+                ))?;
             if offset % 4 != 0 || offset.checked_add(4).is_none_or(|end| end > aperture_bytes) {
-                return Err("native manager controller word exceeds its actual aperture");
+                return Err(refuse!(
+                    "native manager controller word exceeds its actual aperture"
+                ));
             }
             // Repeated IDs are intentional source operations, not deduplicated.
             controls.push(offset);
@@ -75,20 +84,22 @@ impl Configuration {
         if records.len() / RECORD_BYTES != accumulator_count as usize
             || !records.len().is_multiple_of(RECORD_BYTES)
         {
-            return Err("native manager accumulator count differs from its complete records");
+            return Err(refuse!(
+                "native manager accumulator count differs from its complete records"
+            ));
         }
         let mut descriptors = Vec::new();
         for raw in records.as_chunks::<RECORD_BYTES>().0 {
             let eligible = u64::from_le_bytes(raw[8..16].try_into().unwrap());
             let selector = u32::from_le_bytes(raw[16..20].try_into().unwrap());
             let domain = u32::from_le_bytes(raw[20..24].try_into().unwrap()) as usize;
-            let states = *state_counts
-                .get(domain)
-                .ok_or("native manager accumulator lacks its joined DVFS domain")?;
+            let states = *state_counts.get(domain).ok_or(refuse!(
+                "native manager accumulator lacks its joined DVFS domain"
+            ))?;
             if eligible & !REGISTRY_MASK != 0 || domain >= 32 || !(1..=16).contains(&states) {
-                return Err(
-                    "native manager accumulator geometry exceeds its source packet/registry",
-                );
+                return Err(refuse!(
+                    "native manager accumulator geometry exceeds its source packet/registry"
+                ));
             }
             descriptors.push(Descriptor {
                 raw: *raw,
@@ -186,7 +197,7 @@ impl<D: MmioDevice, C: Counters> Manager<D, C> {
         device: D,
         counters: C,
         claim: ManagerClaim,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self> {
         Ok(Self::with_masks(
             configuration,
             device,
@@ -233,16 +244,18 @@ impl<D: MmioDevice, C: Counters> Manager<D, C> {
     // Authored mutation for the original stage-order fixture only. Production
     // mask writes belong to the same shared provider cache and source reset.
     #[cfg(test)]
-    fn capture_scratch(&mut self) -> Result<core::cell::RefMut<'_, [u8; 32]>, Error> {
+    fn capture_scratch(&mut self) -> Result<core::cell::RefMut<'_, [u8; 32]>> {
         if self.pending.is_some() || self.expected != ManagerEffect::RestoreControllers {
-            return Err("native manager scratch requires the completed pre-capture stage");
+            return Err(refuse!(
+                "native manager scratch requires the completed pre-capture stage"
+            ));
         }
         Ok(self.scratch.test_bytes_mut())
     }
     /// Ordinary MmioError proves no retirement boundary. Preserve it and never
     /// replay the uncertain device operation; no reset/replacement API exists.
     pub fn uncertain_access(&self) -> Option<MmioError> {
-        self.uncertain
+        self.uncertain.clone()
     }
 
     fn begin(
@@ -250,9 +263,11 @@ impl<D: MmioDevice, C: Counters> Manager<D, C> {
         request: &Request,
         effect: ManagerEffect,
         context: ManagerContext,
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         if self.uncertain.is_some() {
-            return Err("native manager MMIO effect is uncertain; replay refused");
+            return Err(refuse!(
+                "native manager MMIO effect is uncertain; replay refused"
+            ));
         }
         if effect == ManagerEffect::BeforeCapture && self.pending.is_none() {
             self.scratch.preflight_reset()?;
@@ -262,29 +277,35 @@ impl<D: MmioDevice, C: Counters> Manager<D, C> {
                 || pending.effect != effect
                 || pending.context != context
             {
-                return Err("native manager pending operation cannot be replaced");
+                return Err(refuse!(
+                    "native manager pending operation cannot be replaced"
+                ));
             }
             return Ok(());
         }
         if effect != self.expected {
-            return Err("native manager effects are out of source order");
+            return Err(refuse!("native manager effects are out of source order"));
         }
         if let Some((first, prior)) = &self.cycle {
             if !alloc::rc::Rc::ptr_eq(&first.owner, &request.owner) {
-                return Err("native manager effect belongs to a different evaluator");
+                return Err(refuse!(
+                    "native manager effect belongs to a different evaluator"
+                ));
             }
             if effect == ManagerEffect::BeforeCapture {
                 if request.serial <= first.serial {
-                    return Err("native manager cycle is stale or already retired");
+                    return Err(refuse!("native manager cycle is stale or already retired"));
                 }
             } else if request.serial != first.serial
                 || context.output != prior.output
                 || context.current_packet != prior.current_packet
             {
-                return Err("native manager cycle packet or identity changed between hooks");
+                return Err(refuse!(
+                    "native manager cycle packet or identity changed between hooks"
+                ));
             }
         } else if effect != ManagerEffect::BeforeCapture {
-            return Err("native manager controller save stage is absent");
+            return Err(refuse!("native manager controller save stage is absent"));
         }
         if effect == ManagerEffect::BeforeCapture {
             self.cycle = Some((request.clone(), context));
@@ -341,9 +362,9 @@ impl<D: MmioDevice, C: Counters> Manager<D, C> {
                         }
                         Err(error) => {
                             self.uncertain = Some(error);
-                            return Completion::Refused(
-                                "native manager controller read refused; effect retained as uncertain",
-                            );
+                            return Completion::Refused(refuse!(
+                                "native manager controller read refused; effect retained as uncertain"
+                            ));
                         }
                     }
                 };
@@ -357,9 +378,9 @@ impl<D: MmioDevice, C: Counters> Manager<D, C> {
                     .write(offset, Width::Word, u64::from(value), access)
                 {
                     self.uncertain = Some(error);
-                    return Completion::Refused(
-                        "native manager controller write refused; effect retained as uncertain",
-                    );
+                    return Completion::Refused(refuse!(
+                        "native manager controller write refused; effect retained as uncertain"
+                    ));
                 }
                 if p.effect == ManagerEffect::BeforeCapture {
                     self.saved[p.index] = Some((word & CONTROL_MASK) >> 16);
@@ -382,9 +403,9 @@ impl<D: MmioDevice, C: Counters> Manager<D, C> {
                         >> ((descriptor.domain % 16) * 4))
                         & 15) as usize;
                     if bits != 0 && bucket >= self.buckets[p.index].len() {
-                        return Completion::Refused(
-                            "native manager current packet exceeds joined DVFS bucket count",
-                        );
+                        return Completion::Refused(refuse!(
+                            "native manager current packet exceeds joined DVFS bucket count"
+                        ));
                     }
                     p.remaining = Some(bits);
                     p.bucket = bucket;

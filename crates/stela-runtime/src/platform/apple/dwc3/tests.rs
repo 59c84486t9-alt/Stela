@@ -247,11 +247,11 @@ fn software_core_reset_keeps_globals_readable_and_physical_reset_keeps_phy_confi
     write(&mut dwc, GUSB2PHYCFG, 1 << 3, &mut access);
     for offset in [GSNPSID, GCTL, DCTL] {
         assert!(matches!(dwc.read(offset, Width::Word, &mut access),
-                Err(MmioError::Unsupported { reason, .. }) if reason.contains("unqualified")));
+                Err(MmioError::Unsupported { reason, .. }) if reason.to_string().contains("unqualified")));
     }
     assert!(
         matches!(dwc.write(GCTL, Width::Word, gctl.into(), &mut access),
-            Err(MmioError::Unsupported { reason, .. }) if reason.contains("unqualified"))
+            Err(MmioError::Unsupported { reason, .. }) if reason.to_string().contains("unqualified"))
     );
     dwc.set_phy_state(false, true, true, false, &mut access);
     assert_eq!(dwc.read(GSNPSID, Width::Word, &mut access), Ok(0x5533_300a));
@@ -284,7 +284,7 @@ fn phy_electrical_edges_preserve_transfer_resources_and_reset_sources_are_ored()
     // Final-ready must not swallow the edge.
     assert_eq!(
         dwc.unavailable(),
-        Some("a PHY disconnect is pending service")
+        Some(refuse!("a PHY disconnect is pending service"))
     );
     assert!(dwc.take_session_reset());
     // Backpressure preserves both the connection and its pending edge.

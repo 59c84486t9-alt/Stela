@@ -5,7 +5,10 @@
 //! configuration images. Downstream USB-A/Ethernet require real endpoint
 //! models and firmware protocols; adding a config header never creates one.
 //! See `docs/research/apple-pcie.md` for evidence and unsupported boundaries.
+use crate::Result;
 use alloc::{boxed::Box, vec::Vec};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
@@ -60,13 +63,9 @@ pub struct RootComplex {
     endpoints: Vec<Endpoint>,
 }
 impl RootComplex {
-    pub fn new(
-        first_bus: u8,
-        last_bus: u8,
-        ports: Vec<(Port, ConfigSpace)>,
-    ) -> Result<Self, &'static str> {
+    pub fn new(first_bus: u8, last_bus: u8, ports: Vec<(Port, ConfigSpace)>) -> Result<Self> {
         if first_bus > last_bus || ports.is_empty() || ports.len() > 32 {
-            return Err("PCIe ECAM bus/port geometry is invalid");
+            return Err(refuse!("PCIe ECAM bus/port geometry is invalid"));
         }
         for (index, (port, root)) in ports.iter().enumerate() {
             if ports[..index]
@@ -76,24 +75,26 @@ impl RootComplex {
                     .iter()
                     .any(|(other, _)| other.has_msi_wire(port.management_irq()))
             {
-                return Err("PCIe management IRQ ownership overlaps another port or MSI wire");
+                return Err(refuse!(
+                    "PCIe management IRQ ownership overlaps another port or MSI wire"
+                ));
             }
             root.check_header_contract(true)?;
             if root
                 .read(0xe, Width::Byte)
-                .map_err(|_| "root has no header type")?
+                .map_err(|_| refuse!("root has no header type"))?
                 & 0x7f
                 != 1
             {
-                return Err("PCIe root port needs a type-one bridge header");
+                return Err(refuse!("PCIe root port needs a type-one bridge header"));
             }
             // Lifecycle and topology cannot be enforced without these fields.
             root.read(BUSES, Width::Word)
-                .map_err(|_| "root has no bus-number register")?;
+                .map_err(|_| refuse!("root has no bus-number register"))?;
             root.read(config::COMMAND, Width::Half)
-                .map_err(|_| "root has no command register")?;
+                .map_err(|_| refuse!("root has no command register"))?;
             root.read(BRIDGE_CONTROL, Width::Half)
-                .map_err(|_| "root has no bridge control")?;
+                .map_err(|_| refuse!("root has no bridge control"))?;
         }
         let (ports, roots) = ports.into_iter().unzip();
         Ok(Self {
@@ -122,16 +123,16 @@ impl RootComplex {
         backend: Box<dyn MmioDevice>,
         mappings: Vec<BarMapping>,
         access: &mut Access<'_>,
-    ) -> Result<usize, &'static str> {
+    ) -> Result<usize> {
         if port >= self.ports.len() {
-            return Err("PCIe endpoint address is invalid");
+            return Err(refuse!("PCIe endpoint address is invalid"));
         }
         if self
             .endpoints
             .iter()
             .any(|e| e.port == port && e.device_function == device_function)
         {
-            return Err("PCIe endpoint address is duplicate");
+            return Err(refuse!("PCIe endpoint address is duplicate"));
         }
         let state = Self::endpoint_state(
             self.lifecycle,
@@ -156,13 +157,20 @@ impl RootComplex {
         port: usize,
         inputs: Inputs,
         access: &mut Access<'_>,
-    ) -> Result<(), &'static str> {
-        let p = self.ports.get(port).ok_or("PCIe port index is invalid")?;
+    ) -> Result<()> {
+        let p = self
+            .ports
+            .get(port)
+            .ok_or(refuse!("PCIe port index is invalid"))?;
         if inputs.peer && !self.endpoints.iter().any(|endpoint| endpoint.port == port) {
-            return Err("PCIe peer presence requires an actual attached endpoint bank");
+            return Err(refuse!(
+                "PCIe peer presence requires an actual attached endpoint bank"
+            ));
         }
         if (!self.lifecycle.clocked || self.lifecycle.quiesced) && inputs != p.inputs() {
-            return Err("PCIe external input changes during a controller pause are unqualified");
+            return Err(refuse!(
+                "PCIe external input changes during a controller pause are unqualified"
+            ));
         }
         let candidate = p.preview_inputs(inputs)?;
         self.check_port(port, &candidate, &self.roots[port], self.lifecycle)?;
@@ -196,7 +204,7 @@ impl RootComplex {
         candidate: &Port,
         root: &ConfigSpace,
         global: LifecycleState,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         let proposed = Self::endpoint_state(global, candidate, Self::secondary_reset(root));
         for endpoint in self
             .endpoints
@@ -306,9 +314,9 @@ impl RootComplex {
     /// Return endpoint index, BAR index and relative offset only if both
     /// bridge memory windows and endpoint memory decoding admit every byte.
     /// Caller routes to that endpoint; this is never host passthrough.
-    pub fn memory_route(&self, address: u64, bytes: u64) -> Result<(usize, u8, u64), &'static str> {
+    pub fn memory_route(&self, address: u64, bytes: u64) -> Result<(usize, u8, u64)> {
         if !self.service_enabled() {
-            return Err("PCIe native controller service is paused");
+            return Err(refuse!("PCIe native controller service is paused"));
         }
         let mut route = None;
         for (index, endpoint) in self.endpoints.iter().enumerate() {
@@ -322,20 +330,22 @@ impl RootComplex {
             }
             let requester = u16::from(bus) << 8 | u16::from(endpoint.device_function);
             if self.endpoint(requester) == Err(RouteError::Ambiguous) {
-                return Err("PCIe bus-number windows overlap");
+                return Err(refuse!("PCIe bus-number windows overlap"));
             }
             if let Some((bar, offset)) = endpoint
                 .config
                 .memory_decode(address, bytes)
-                .map_err(|_| "PCIe memory BAR decoders overlap")?
+                .map_err(|_| refuse!("PCIe memory BAR decoders overlap"))?
             {
                 if route.is_some() {
-                    return Err("PCIe memory decoders overlap");
+                    return Err(refuse!("PCIe memory decoders overlap"));
                 }
                 route = Some((index, bar, offset));
             }
         }
-        route.ok_or("no active PCIe memory decoder admits the transaction")
+        route.ok_or(refuse!(
+            "no active PCIe memory decoder admits the transaction"
+        ))
     }
     pub fn read_memory(
         &mut self,
@@ -376,16 +386,18 @@ impl RootComplex {
     ) -> Result<usize, DmaError> {
         let index = self
             .endpoint(requester)
-            .map_err(|error| DmaError::Unsupported(error.reason()))?;
+            .map_err(|error| DmaError::Unsupported(error.reason().into()))?;
         let endpoint = &self.endpoints[index];
         if endpoint.config.command() & BUS_MASTER_ENABLE == 0
             || self.roots[endpoint.port].command() & BUS_MASTER_ENABLE == 0
         {
-            return Err(DmaError::Unsupported("PCIe bus mastering is disabled"));
+            return Err(DmaError::Unsupported(refuse!(
+                "PCIe bus mastering is disabled"
+            )));
         }
         self.ports[endpoint.port]
             .stream(requester, access)
-            .map_err(|_| DmaError::Unsupported("PCIe requester-to-stream mapping refused"))
+            .map_err(|_| DmaError::Unsupported(refuse!("PCIe requester-to-stream mapping refused")))
     }
     /// DMA transfer admission wrapper uses the existing page/fault-aware port
     /// supplied by the machine's DART owner, with checked SID.
@@ -398,9 +410,9 @@ impl RootComplex {
     ) -> Result<(), DmaError> {
         let stream = self.dma_stream(requester, dma.access)?;
         if stream != dma.stream {
-            return Err(DmaError::Unsupported(
-                "PCIe DMA port stream disagrees with RID mapping",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "PCIe DMA port stream disagrees with RID mapping"
+            )));
         }
         dma.read(address, buffer)
     }
@@ -413,9 +425,9 @@ impl RootComplex {
     ) -> Result<(), DmaError> {
         let stream = self.dma_stream(requester, dma.access)?;
         if stream != dma.stream {
-            return Err(DmaError::Unsupported(
-                "PCIe DMA port stream disagrees with RID mapping",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "PCIe DMA port stream disagrees with RID mapping"
+            )));
         }
         dma.write(address, data)
     }
@@ -446,9 +458,9 @@ impl RootComplex {
         pin: u8,
         asserted: bool,
         access: &mut Access<'_>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if pin >= 4 {
-            return Err("PCIe INTx pin exceeds D");
+            return Err(refuse!("PCIe INTx pin exceeds D"));
         }
         let index = self.endpoint(requester).map_err(RouteError::reason)?;
         let endpoint = &mut self.endpoints[index];
@@ -469,46 +481,63 @@ impl RootComplex {
         address: u64,
         data: u32,
         access: &mut Access<'_>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         let endpoint = self.endpoint(requester).map_err(RouteError::reason)?;
         let port = self.endpoints[endpoint].port;
         if self.endpoints[endpoint].config.command() & BUS_MASTER_ENABLE == 0
             || self.roots[port].command() & BUS_MASTER_ENABLE == 0
         {
-            return Err("PCIe MSI requester bus mastering is disabled");
+            return Err(refuse!("PCIe MSI requester bus mastering is disabled"));
         }
         self.ports[port]
             .msi(address, data, access)
-            .map_err(|error| if error == port::RequestError::DeliveryUnqualified { "PCIe MSI requires a qualified parent interrupt capture/mask/retirement boundary" } else { "PCIe MSI decoder refused the message" })
+            .map_err(|error| {
+                if error == port::RequestError::DeliveryUnqualified {
+                    refuse!("PCIe MSI requires a qualified parent interrupt capture/mask/retirement boundary")
+                } else {
+                    refuse!("PCIe MSI decoder refused the message")
+                }
+            })
     }
-    fn error(offset: u64, width: Width, direction: Direction, reason: &'static str) -> MmioError {
+    fn error(
+        offset: u64,
+        width: Width,
+        direction: Direction,
+        reason: impl Into<Refusal>,
+    ) -> MmioError {
         refuse(NAME, offset, width, direction, reason)
     }
-    fn decode(&self, offset: u64, width: Width) -> Result<(u16, u16), &'static str> {
+    fn decode(&self, offset: u64, width: Width) -> Result<(u16, u16)> {
         if width == Width::Double
             || !offset.is_multiple_of(width.bytes())
             || offset >= ECAM_BYTES
             || offset + width.bytes() > ECAM_BYTES
         {
-            return Err("ECAM requires naturally aligned byte/half/word accesses");
+            return Err(refuse!(
+                "ECAM requires naturally aligned byte/half/word accesses"
+            ));
         }
         let bus = (offset >> 20) as u8;
         if bus < self.first_bus || bus > self.last_bus {
-            return Err("ECAM bus is outside the declared window");
+            return Err(refuse!("ECAM bus is outside the declared window"));
         }
         Ok(((offset >> 12) as u16, (offset & 0xfff) as u16))
     }
 }
 
 impl Lifecycle for RootComplex {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         if proposed.reset || !proposed.powered {
-            return Err("PCIe root-complex physical reset/supply restoration is unqualified");
+            return Err(refuse!(
+                "PCIe root-complex physical reset/supply restoration is unqualified"
+            ));
         }
         if (!proposed.clocked || proposed.quiesced)
             && self.ports.iter().any(Port::interrupt_pending)
         {
-            return Err("PCIe controller pause with a pending IRQ has unqualified wake retention");
+            return Err(refuse!(
+                "PCIe controller pause with a pending IRQ has unqualified wake retention"
+            ));
         }
         for (index, port) in self.ports.iter().enumerate() {
             self.check_port(index, port, &self.roots[index], proposed)?;
@@ -530,24 +559,24 @@ impl MmioDevice for RootComplex {
         Some(self)
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let error = |reason| Self::error(offset, width, Direction::Read, reason);
+        let error = |reason: Refusal| Self::error(offset, width, Direction::Read, reason);
         if !self.lifecycle.clocked {
-            return Err(error(
-                "PCIe MMIO while the controller clock is stopped is unqualified",
-            ));
+            return Err(error(refuse!(
+                "PCIe MMIO while the controller clock is stopped is unqualified"
+            )));
         }
         if offset >= PORT_BASE {
             let port = ((offset - PORT_BASE) / PORT_STRIDE) as usize;
             let register = (offset - PORT_BASE) % PORT_STRIDE;
             if width != Width::Word || !register.is_multiple_of(4) || register >= PORT_BYTES {
-                return Err(error(
-                    "port view requires aligned words in its declared aperture",
-                ));
+                return Err(error(refuse!(
+                    "port view requires aligned words in its declared aperture"
+                )));
             }
             return self
                 .ports
                 .get(port)
-                .ok_or(error("port is not described"))?
+                .ok_or(error(refuse!("port is not described")))?
                 .read(register)
                 .map(u64::from);
         }
@@ -560,12 +589,12 @@ impl MmioDevice for RootComplex {
             }
             self.roots[(devfn >> 3) as usize]
                 .read(register, width)
-                .map_err(|_| error("root config register is not implemented"))
+                .map_err(|_| error(refuse!("root config register is not implemented")))
         } else {
             if self.lifecycle.quiesced {
-                return Err(error(
-                    "PCIe downstream config access while quiesced is unqualified",
-                ));
+                return Err(error(refuse!(
+                    "PCIe downstream config access while quiesced is unqualified"
+                )));
             }
             // An absent function completes enumeration with all ones. Conflicting
             // active roots refuse rather than pretending an endpoint is absent.
@@ -573,9 +602,9 @@ impl MmioDevice for RootComplex {
                 Ok(index) => self.endpoints[index]
                     .config
                     .read(register, width)
-                    .map_err(|_| error("endpoint config register is not implemented")),
+                    .map_err(|_| error(refuse!("endpoint config register is not implemented"))),
                 Err(RouteError::Ambiguous) => {
-                    Err(error("requester is ambiguous across root ports"))
+                    Err(error(refuse!("requester is ambiguous across root ports")))
                 }
                 Err(_) => Ok(width.mask()),
             }
@@ -606,20 +635,20 @@ impl MmioDevice for RootComplex {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let error = |reason| Self::error(offset, width, Direction::Write, reason);
+        let error = |reason: Refusal| Self::error(offset, width, Direction::Write, reason);
         if !self.service_enabled() {
-            return Err(error("PCIe native controller service is paused"));
+            return Err(error(refuse!("PCIe native controller service is paused")));
         }
         if offset >= PORT_BASE {
             let port = ((offset - PORT_BASE) / PORT_STRIDE) as usize;
             let register = (offset - PORT_BASE) % PORT_STRIDE;
             if width != Width::Word || !register.is_multiple_of(4) || register >= PORT_BYTES {
-                return Err(error("port view requires aligned words"));
+                return Err(error(refuse!("port view requires aligned words")));
             }
             let candidate = self
                 .ports
                 .get(port)
-                .ok_or(error("port is not described"))?
+                .ok_or(error(refuse!("port is not described")))?
                 .preview_write(register, value as u32)?;
             self.check_port(port, &candidate, &self.roots[port], self.lifecycle)
                 .map_err(error)?;
@@ -637,7 +666,7 @@ impl MmioDevice for RootComplex {
             let mut candidate = self.roots[port].clone();
             candidate
                 .write(register, width, value)
-                .map_err(|_| error("root config register is not implemented"))?;
+                .map_err(|_| error(refuse!("root config register is not implemented")))?;
             self.check_port(port, &self.ports[port], &candidate, self.lifecycle)
                 .map_err(error)?;
             self.roots[port] = candidate;
@@ -649,12 +678,14 @@ impl MmioDevice for RootComplex {
                     self.endpoints[index]
                         .config
                         .write(register, width, value)
-                        .map_err(|_| error("endpoint config register is not implemented"))?;
+                        .map_err(|_| {
+                            error(refuse!("endpoint config register is not implemented"))
+                        })?;
                     self.update_intx(self.endpoints[index].port, access);
                     Ok(())
                 }
                 Err(RouteError::Ambiguous) => {
-                    Err(error("requester is ambiguous across root ports"))
+                    Err(error(refuse!("requester is ambiguous across root ports")))
                 }
                 Err(_) => Ok(()),
             }

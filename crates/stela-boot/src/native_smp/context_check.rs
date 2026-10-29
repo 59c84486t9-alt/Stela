@@ -1,6 +1,7 @@
 //! Startup validation of this private host's real context entry/recovery.
 //! The translated GPR/faulting-service source and deliberate native UD2 fixture
 //! test host ABI ownership only; they do not admit guest SMP or RAM mappings.
+use crate::Result;
 use core::{arch::naked_asm, ptr};
 use stela_compiler::{
     GuestAddress, GuestState, TargetCpu,
@@ -13,6 +14,7 @@ use stela_compiler::{
         },
     },
 };
+use stela_contracts::refuse;
 use stela_engine::machine::FaultCause;
 use stela_engine::machine::Host;
 use stela_engine::machine::NativeExit;
@@ -59,7 +61,7 @@ unsafe extern "sysv64" fn aligned_reject(
     );
 }
 
-fn compile(words: &[u32]) -> Result<stela_compiler::block::CompiledBlock, &'static str> {
+fn compile(words: &[u32]) -> Result<stela_compiler::block::CompiledBlock> {
     let source: alloc::vec::Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
     let plan = CompilationPlan::new(
         &source,
@@ -69,18 +71,18 @@ fn compile(words: &[u32]) -> Result<stela_compiler::block::CompiledBlock, &'stat
             TargetCpu::Baseline,
         ),
     )
-    .map_err(|_| "native context fixture source refused")?;
+    .map_err(|_| refuse!("native context fixture source refused"))?;
     if plan.source_bytes() != source.len() {
-        return Err("native context fixture trailing source");
+        return Err(refuse!("native context fixture trailing source"));
     }
     plan.compile()
-        .map_err(|_| "native context fixture emission refused")
+        .map_err(|_| refuse!("native context fixture emission refused"))
 }
 
 /// Run before any artifact/guest loan is published on this private Host.
 /// All private frames/views/code remain alive until true fault/return checks;
 /// installed fixtures are discarded only after their last use.
-pub(super) fn check(host: &mut dyn Host) -> Result<(), &'static str> {
+pub(super) fn check(host: &mut dyn Host) -> Result<()> {
     let mut state = GuestState {
         x: core::array::from_fn(|i| 0x100 + i as u64),
         sp: 0x8000,
@@ -112,7 +114,7 @@ pub(super) fn check(host: &mut dyn Host) -> Result<(), &'static str> {
     let body = compile(&[ADD_X0, RET])?;
     let code = host
         .install(&body.native.x86_64_code)
-        .map_err(|_| "native context arena full")?;
+        .map_err(|_| refuse!("native context arena full"))?;
     // SAFETY: exact compiler-derived context-block ABI/target, pinned private
     // state/context/service owners and this same physical Host throughout.
     let result = unsafe { host.execute_context(code, &mut state, &mut context) };
@@ -127,12 +129,12 @@ pub(super) fn check(host: &mut dyn Host) -> Result<(), &'static str> {
         || calls != 0
         || view.fault_kind != 0
     {
-        return Err("native context register return differs");
+        return Err(refuse!("native context register return differs"));
     }
     let faulting = compile(&[ADD_X2, LOAD_X1, RET])?;
     let faulting_code = host
         .install(&faulting.native.x86_64_code)
-        .map_err(|_| "native context arena full")?;
+        .map_err(|_| refuse!("native context arena full"))?;
     // SAFETY: same exact compiler ABI; the only callback explicitly refuses.
     let result = unsafe { host.execute_context(faulting_code, &mut state, &mut context) };
     expected.x[2] += 1;
@@ -148,14 +150,16 @@ pub(super) fn check(host: &mut dyn Host) -> Result<(), &'static str> {
         || view.completed_bytes != 0
         || !view.has_supported_header()
     {
-        return Err("native context service stack or precise refusal differs");
+        return Err(refuse!(
+            "native context service stack or precise refusal differs"
+        ));
     }
     // This deliberate x86 hardware-fault fixture accepts the same two input
     // arguments and never returns normally. It is not a translated ARM opcode,
     // cached artifact or a production NativeFrame constructor.
     let trap = host
         .install(&UD2)
-        .map_err(|_| "native context arena full")?;
+        .map_err(|_| refuse!("native context arena full"))?;
     let state_pointer = ptr::from_mut(&mut state) as u64;
     let context_pointer = ptr::from_mut(&mut context) as u64;
     // SAFETY: private installed fault-only context fixture, valid pinned inputs;
@@ -166,7 +170,7 @@ pub(super) fn check(host: &mut dyn Host) -> Result<(), &'static str> {
         && fault.registers.get(7) == Some(state_pointer) && fault.registers.get(6) == Some(context_pointer))
         || state != expected
     {
-        return Err("native context hardware recovery differs");
+        return Err(refuse!("native context hardware recovery differs"));
     }
     view.record(MemoryStatus::Success, 0, 0, 0);
     // SAFETY: same artifact/frame; proves recovery did not lose the
@@ -181,7 +185,7 @@ pub(super) fn check(host: &mut dyn Host) -> Result<(), &'static str> {
         || state != expected
         || calls != 1
     {
-        return Err("native context reentry after fault differs");
+        return Err(refuse!("native context reentry after fault differs"));
     }
     host.discard_code();
     Ok(())

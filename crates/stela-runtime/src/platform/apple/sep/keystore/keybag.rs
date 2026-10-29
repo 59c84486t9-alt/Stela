@@ -8,6 +8,8 @@
 //! decoded request refuses until its bag type, parent, authentication, flags,
 //! exported representation and durable key lifecycle have proven semantics.
 use super::Fields;
+use crate::Result;
+use stela_contracts::refuse;
 
 pub(super) const CREATE: u8 = 1;
 pub(super) const COPY: u8 = 2;
@@ -23,19 +25,21 @@ pub(super) fn recognizes(command: u8) -> bool {
 
 /// Validate the complete body of the variants the current AP wrappers use.
 /// Field names describe AP argument flow; they do not assign SEP semantics.
-pub(super) fn validate(
-    command: u8,
-    variant: u32,
-    fields: &mut Fields<'_>,
-) -> Result<(), &'static str> {
+pub(super) fn validate(command: u8, variant: u32, fields: &mut Fields<'_>) -> Result<()> {
     let expected = match command {
         CREATE => 4,
         COPY => 1,
         LOAD | UNLOAD | UUID => 0,
-        _ => return Err("SEP keystore command has no recovered keybag codec"),
+        _ => {
+            return Err(refuse!(
+                "SEP keystore command has no recovered keybag codec"
+            ));
+        }
     };
     if variant != expected {
-        return Err("SEP keystore keybag command variant is not modeled");
+        return Err(refuse!(
+            "SEP keystore keybag command variant is not modeled"
+        ));
     }
     let _session = fields.lword()?;
     match command {

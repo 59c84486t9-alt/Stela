@@ -1,5 +1,6 @@
 use super::*;
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 #[derive(Clone)]
 struct Samples {
     geometry: Geometry,
@@ -25,11 +26,11 @@ impl SamplesView for Samples {
     }
     fn group(&self, g: u32) -> Result<&[u8; 64], Error> {
         if self.forbid_read {
-            return Err(Error::Contract("authored sample read forbidden"));
+            return Err(Error::Contract(refuse!("authored sample read forbidden")));
         }
         self.data
             .get(g as usize)
-            .ok_or(Error::Contract("authored sample group absent"))
+            .ok_or(Error::Contract(refuse!("authored sample group absent")))
     }
 }
 // Authored destination fault controls stay cfg(test). Queue binding and
@@ -87,11 +88,11 @@ struct InvokeMetrics {
 impl super::super::super::scheduler::Callback for InvokeMetrics {
     fn advance(&mut self, invocation: &Invocation, access: &mut Access<'_>) -> Completion<u32> {
         let Some(owner) = self.owner.borrow().upgrade() else {
-            return Completion::Refused("authored actual metrics owner absent");
+            return Completion::Refused(refuse!("authored actual metrics owner absent"));
         };
         let mut owner = owner.borrow_mut();
         let Some(owner) = owner.as_mut() else {
-            return Completion::Refused("authored actual metrics owner moved");
+            return Completion::Refused(refuse!("authored actual metrics owner moved"));
         };
         match owner.dispatch(invocation, &*self.samples.borrow(), access) {
             Ok(Progress::CallbackComplete) => {
@@ -99,8 +100,8 @@ impl super::super::super::scheduler::Callback for InvokeMetrics {
                     assert!(matches!(
                         owner.dispatch(invocation, &*self.samples.borrow(), access),
                         Err(Error::Contract(
-                            "MC callback source return already retired for this invocation"
-                        ))
+                            reason
+                        )) if reason == refuse!("MC callback source return already retired for this invocation")
                     ));
                 }
                 Completion::Retired {
@@ -109,7 +110,9 @@ impl super::super::super::scheduler::Callback for InvokeMetrics {
                 }
             }
             Ok(Progress::Busy { deadline }) => Completion::Busy { deadline },
-            Ok(_) => Completion::Refused("authored metrics callback returned wrong progress"),
+            Ok(_) => {
+                Completion::Refused(refuse!("authored metrics callback returned wrong progress"))
+            }
             Err(Error::Backend(reason) | Error::Contract(reason)) => Completion::Refused(reason),
         }
     }
@@ -124,11 +127,11 @@ impl Backend for Sink {
             && self.refuse_metric == Some((*group, *kind))
         {
             self.refuse_metric = None;
-            return Completion::Refused("authored unavailable metric destination");
+            return Completion::Refused(refuse!("authored unavailable metric destination"));
         }
         if matches!(e, Effect::InitializeQueue { .. }) && self.refuse_init {
             self.refuse_init = false;
-            return Completion::Refused("authored missing native queue resource");
+            return Completion::Refused(refuse!("authored missing native queue resource"));
         }
 
         if matches!(e, Effect::NotifyStop) && self.busy_notify {
@@ -137,7 +140,7 @@ impl Backend for Sink {
         }
         if matches!(e, Effect::Trace { .. }) && self.refuse_trace {
             self.refuse_trace = false;
-            return Completion::Refused("authored unavailable trace destination");
+            return Completion::Refused(refuse!("authored unavailable trace destination"));
         }
         if matches!(e, Effect::DrainWait) && self.wait && self.notifications == 0 {
             return Completion::Busy { deadline: Some(11) };
@@ -187,7 +190,7 @@ impl Backend for Sink {
         }
         let refusal = if matches!(e, Effect::Trace { .. }) && self.retired_trace {
             self.retired_trace = false;
-            Some("authored trace retired prefix refusal")
+            Some(refuse!("authored trace retired prefix refusal"))
         } else {
             None
         };
@@ -276,7 +279,9 @@ fn scheduler_registration_and_wake_cannot_be_replaced_by_effect_success() {
     step(&mut o, &samples).unwrap();
     assert_eq!(
         step(&mut o, &samples),
-        Err(Error::Contract("MC actual work registration did not occur"))
+        Err(Error::Contract(refuse!(
+            "MC actual work registration did not occur"
+        )))
     );
     assert!(!o.initialized() && !o.queued());
     let (mut o, samples) = initialized();
@@ -285,9 +290,9 @@ fn scheduler_registration_and_wake_cannot_be_replaced_by_effect_success() {
     assert!(o.pending() && !o.queued()); // No local shadow pending on submit.
     assert_eq!(
         step(&mut o, &samples),
-        Err(Error::Contract(
+        Err(Error::Contract(refuse!(
             "MC Wake retired without scheduling actual Work"
-        ))
+        )))
     );
     assert!(o.pending() && !o.queued());
 }
@@ -302,8 +307,8 @@ fn missing_weak_callback_owner_refuses_and_same_invocation_can_retry() {
     assert!(matches!(
         runtime.step(&mut Access::new(0, 100, &mut irq)),
         Err(super::super::super::scheduler::Error::Callback(
-            "authored actual metrics owner absent"
-        ))
+            reason
+        )) if reason == refuse!("authored actual metrics owner absent")
     ));
     assert!(!o.queued() && o.pending() && !o.callback_executing());
     // Retry enters the scheduler Invocation rather than re-waking
@@ -646,7 +651,9 @@ fn absent_native_queue_cannot_initialize_or_admit_registration() {
     o.begin_initialize().unwrap();
     assert_eq!(
         step(&mut o, &s),
-        Err(Error::Backend("authored missing native queue resource"))
+        Err(Error::Backend(refuse!(
+            "authored missing native queue resource"
+        )))
     );
     assert!(!o.initialized());
     assert!(!o.registered());

@@ -1,4 +1,6 @@
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 use {stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch};
 
 #[derive(Default)]
@@ -10,9 +12,9 @@ struct Peer {
     fail_poll: bool,
 }
 impl Firmware for Peer {
-    fn start(&mut self, output: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn start(&mut self, output: &mut Vec<Message>) -> Result<()> {
         if self.fail_start {
-            return Err("peer boot failure");
+            return Err(refuse!("peer boot failure"));
         }
         self.starts += 1;
         output.extend((0..self.burst).map(|i| Message {
@@ -21,17 +23,17 @@ impl Firmware for Peer {
         }));
         Ok(())
     }
-    fn receive(&mut self, message: Message, output: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn receive(&mut self, message: Message, output: &mut Vec<Message>) -> Result<()> {
         if message.endpoint == 0xff {
-            return Err("peer rejected endpoint");
+            return Err(refuse!("peer rejected endpoint"));
         }
         self.messages.push(message);
         output.push(message);
         Ok(())
     }
-    fn poll(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn poll(&mut self, _: &mut Vec<Message>) -> Result<()> {
         if self.fail_poll {
-            Err("peer asynchronous failure")
+            Err(refuse!("peer asynchronous failure"))
         } else {
             Ok(())
         }
@@ -303,7 +305,7 @@ fn kept_halt_preserves_fifo_indexes_backlog_staging_and_levels() {
         refuse_resume: bool,
     }
     impl Firmware for Retained {
-        fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn start(&mut self, outbox: &mut Vec<Message>) -> Result<()> {
             self.starts += 1;
             outbox.extend((0..12).map(|payload| Message {
                 endpoint: 0x20,
@@ -311,26 +313,22 @@ fn kept_halt_preserves_fifo_indexes_backlog_staging_and_levels() {
             }));
             Ok(())
         }
-        fn stop(&mut self) -> Result<(), &'static str> {
+        fn stop(&mut self) -> Result<()> {
             self.stops += 1;
             Ok(())
         }
-        fn resume(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn resume(&mut self, _: &mut Vec<Message>) -> Result<()> {
             if self.refuse_resume {
-                return Err("peer resume refused");
+                return Err(refuse!("peer resume refused"));
             }
             self.resumes += 1;
             Ok(())
         }
-        fn receive(
-            &mut self,
-            message: Message,
-            output: &mut Vec<Message>,
-        ) -> Result<(), &'static str> {
+        fn receive(&mut self, message: Message, output: &mut Vec<Message>) -> Result<()> {
             output.push(message);
             Ok(())
         }
-        fn poll(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn poll(&mut self, _: &mut Vec<Message>) -> Result<()> {
             self.polls += 1;
             Ok(())
         }
@@ -412,27 +410,23 @@ fn native_dma_completes_through_ram_before_its_mailbox_reply_is_visible() {
     use {stela_contracts::dma::Physical, stela_contracts::dma::test_support::Ram};
     struct DmaPeer(bool);
     impl Firmware for DmaPeer {
-        fn start(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn start(&mut self, _: &mut Vec<Message>) -> Result<()> {
             Ok(())
         }
-        fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<()> {
             self.0 = true;
             Ok(())
         }
         fn dma_pending(&self) -> bool {
             self.0
         }
-        fn dma(
-            &mut self,
-            port: &mut Port<'_, '_>,
-            output: &mut Vec<Message>,
-        ) -> Result<(), &'static str> {
+        fn dma(&mut self, port: &mut Port<'_, '_>, output: &mut Vec<Message>) -> Result<()> {
             let mut data = [0; 4];
             port.read(0x1000, &mut data)
-                .map_err(|_| "peer DMA read failed")?;
+                .map_err(|_| refuse!("peer DMA read failed"))?;
             data.reverse();
             port.write(0x1004, &data)
-                .map_err(|_| "peer DMA write failed")?;
+                .map_err(|_| refuse!("peer DMA write failed"))?;
             self.0 = false;
             output.push(Message {
                 endpoint: 0x20,
@@ -488,42 +482,35 @@ fn committed_dma_messages_survive_faults_masking_halt_and_wrapping_backlog() {
         writes: usize,
     }
     impl Firmware for PartialDma {
-        fn start(&mut self, out: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn start(&mut self, out: &mut Vec<Message>) -> Result<()> {
             out.extend((0..6).map(|payload| Message {
                 endpoint: 0x20,
                 payload,
             }));
             Ok(())
         }
-        fn stop(&mut self) -> Result<(), &'static str> {
+        fn stop(&mut self) -> Result<()> {
             Ok(())
         }
-        fn resume(&mut self, out: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn resume(&mut self, out: &mut Vec<Message>) -> Result<()> {
             out.push(Message {
                 endpoint: 0,
                 payload: 7 << 52 | 0x20,
             });
             Ok(())
         }
-        fn receive(
-            &mut self,
-            message: Message,
-            out: &mut Vec<Message>,
-        ) -> Result<(), &'static str> {
+        fn receive(&mut self, message: Message, out: &mut Vec<Message>) -> Result<()> {
             out.push(message);
             Ok(())
         }
         fn dma_pending(&self) -> bool {
             true
         }
-        fn dma(
-            &mut self,
-            port: &mut Port<'_, '_>,
-            out: &mut Vec<Message>,
-        ) -> Result<(), &'static str> {
+        fn dma(&mut self, port: &mut Port<'_, '_>, out: &mut Vec<Message>) -> Result<()> {
             self.calls += 1;
             if !self.committed {
-                port.write(0, b"done").map_err(|_| "first DMA failed")?;
+                port.write(0, b"done")
+                    .map_err(|_| refuse!("first DMA failed"))?;
                 self.writes += 1;
                 out.extend((100..112).map(|payload| Message {
                     endpoint: 0x24,
@@ -531,7 +518,8 @@ fn committed_dma_messages_survive_faults_masking_halt_and_wrapping_backlog() {
                 }));
                 self.committed = true;
             }
-            port.read(0x1000, &mut [0]).map_err(|_| "later DMA failed")
+            port.read(0x1000, &mut [0])
+                .map_err(|_| refuse!("later DMA failed"))
         }
     }
     for enabled in [false, true] {
@@ -558,7 +546,7 @@ fn committed_dma_messages_survive_faults_masking_halt_and_wrapping_backlog() {
                     stream: 0,
                     access: &mut access,
                 }),
-                Err("later DMA failed")
+                Err(refuse!("later DMA failed"))
             );
         }
         assert_eq!(&memory.bytes[..4], b"done");
@@ -632,13 +620,13 @@ fn committed_dma_messages_survive_faults_masking_halt_and_wrapping_backlog() {
 fn emitted_poll_messages_remain_visible_after_a_later_asynchronous_error() {
     struct PartialPoll(bool);
     impl Firmware for PartialPoll {
-        fn start(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn start(&mut self, _: &mut Vec<Message>) -> Result<()> {
             Ok(())
         }
-        fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<()> {
             Ok(())
         }
-        fn poll(&mut self, out: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn poll(&mut self, out: &mut Vec<Message>) -> Result<()> {
             if !self.0 {
                 out.extend((0..12).map(|payload| Message {
                     endpoint: 0x24,
@@ -646,7 +634,7 @@ fn emitted_poll_messages_remain_visible_after_a_later_asynchronous_error() {
                 }));
                 self.0 = true;
             }
-            Err("later asynchronous failure")
+            Err(refuse!("later asynchronous failure"))
         }
     }
     let mut latch = InterruptLatch::new();

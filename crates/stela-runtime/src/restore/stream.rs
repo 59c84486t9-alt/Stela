@@ -4,8 +4,9 @@ use super::{
     Error, Result,
     plist::{self, Limits, Value},
 };
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 use core::task::Poll;
+use stela_contracts::refuse;
 
 /// Integration boundary for the native mux API. Pending means no progress;
 /// Ready(Ok(0)) means EOF on read, an error on a nonempty write.
@@ -73,7 +74,7 @@ impl Output {
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             Poll::Ready(Ok(n)) => {
                 if n == 0 || n > self.bytes.len() - self.at {
-                    return Poll::Ready(Err(Error::Transport(String::from("invalid/zero write"))));
+                    return Poll::Ready(Err(Error::Transport(refuse!("invalid/zero write"))));
                 }
                 self.at += n;
                 self.written += n as u64;

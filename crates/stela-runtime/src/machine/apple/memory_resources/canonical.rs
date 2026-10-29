@@ -1,7 +1,9 @@
 //! Live synchronous RAM visibility for the cacheless Stela frontend. This
 //! never settles DRAM timing, clock/power or an outstanding controller request.
 use super::*;
+use crate::Result;
 use alloc::sync::Arc;
+use stela_contracts::refuse;
 use stela_engine::memory::CanonicalRamService;
 use stela_engine::memory::RegisteredSystemRam;
 
@@ -10,18 +12,20 @@ impl super::super::AppleDevices {
     /// This is placement only: native execution must separately admit the
     /// registered RAM, stopped-worker reads, PMP services and source policy.
     /// A failed placement leaves the bus and its existing lock owner intact.
-    pub fn add_memory_resources(&mut self, owner: Prepared) -> Result<(), alloc::string::String> {
+    pub fn add_memory_resources(&mut self, owner: Prepared) -> Result<()> {
         if self.memory_controller.is_some() || self.memory_publication.is_some() {
-            return Err("memory controller already has an actual owner".into());
+            return Err(refuse!("memory controller already has an actual owner"));
         }
         if owner.ram.is_none() {
-            return Err("prepared memory placement requires its canonical RAM association".into());
+            return Err(refuse!(
+                "prepared memory placement requires its canonical RAM association"
+            ));
         }
         let bindings = owner.bindings();
         let device = self
             .bus
             .install(alloc::boxed::Box::new(owner), &bindings)
-            .map_err(|error| alloc::format!("joint memory resource placement: {error:?}"))?;
+            .map_err(|error| refuse!("joint memory resource placement: {error}", ?error))?;
         self.memory_controller = Some(device);
         Ok(())
     }
@@ -32,15 +36,16 @@ impl Prepared {
     /// resource. Registration's all-writer contract excludes raw/unjoined DMA;
     /// the engine must still recover every native frame and finish synchronous
     /// device work before lending a live CanonicalRamService for a read.
-    pub fn with_registered_ram(
-        mut self,
-        ram: Arc<RegisteredSystemRam>,
-    ) -> Result<Self, &'static str> {
+    pub fn with_registered_ram(mut self, ram: Arc<RegisteredSystemRam>) -> Result<Self> {
         if self.ram.is_some() {
-            return Err("prepared memory resource already owns its canonical RAM association");
+            return Err(refuse!(
+                "prepared memory resource already owns its canonical RAM association"
+            ));
         }
         if self.router.controller.cache_resource() != mcc::policy::CacheResource::Cacheless {
-            return Err("native synchronous RAM frontend requires the actual cacheless resource");
+            return Err(refuse!(
+                "native synchronous RAM frontend requires the actual cacheless resource"
+            ));
         }
         self.ram = Some(ram);
         Ok(self)
@@ -71,28 +76,34 @@ impl Prepared {
         offset: u64,
         width: Width,
         memory: &CanonicalRamService<'_>,
-    ) -> Result<u64, &'static str> {
+    ) -> Result<u64> {
         if !self.requires_ram_read(offset, width) {
-            return Err("canonical RAM read is not an original DCS drain word");
+            return Err(refuse!(
+                "canonical RAM read is not an original DCS drain word"
+            ));
         }
         let (aperture, within) = self.router.target(offset)?;
         let ram = self
             .ram
             .as_ref()
-            .ok_or("joint memory resource has no canonical RAM owner")?;
+            .ok_or(refuse!("joint memory resource has no canonical RAM owner"))?;
         if !memory.belongs_to(ram) {
-            return Err("DCS drain borrowed a different canonical RAM owner");
+            return Err(refuse!(
+                "DCS drain borrowed a different canonical RAM owner"
+            ));
         }
         memory
             .validate_current()
-            .map_err(|_| "DCS drain lost its actual RAM generation/writer hold")?;
+            .map_err(|_| refuse!("DCS drain lost its actual RAM generation/writer hold"))?;
         // A request to change channel configuration or gating is not a
         // synchronous RAM copy. Its unknown readback must remain unresolved;
         // memory exclusion cannot stand in for that missing backend effect.
         if self.router.controller.observations().iter().any(|word| {
             !mcc::is_drain_word(word.offset, Width::Word) && word.known != u64::from(u32::MAX)
         }) {
-            return Err("DCS drain cannot settle an outstanding MCC/DRAM/power request");
+            return Err(refuse!(
+                "DCS drain cannot settle an outstanding MCC/DRAM/power request"
+            ));
         }
         // Every admitted frontend transfer is synchronous. The engine
         // completed device copyout and fenced the CPU owners before
@@ -120,11 +131,13 @@ impl Prepared {
         value: u64,
         now: u64,
         memory: &CanonicalRamService<'_>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         // SAFETY: caller keeps exactly the same closed producer set/guard.
         let expected = unsafe { self.read_ram_drain(offset, width, memory) }?;
         if u64::from(value as u32) != expected {
-            return Err("DCS flush must preserve high16 and clear both low bytes");
+            return Err(refuse!(
+                "DCS flush must preserve high16 and clear both low bytes"
+            ));
         }
         let (aperture, within) = self.router.target(offset)?;
         self.router
@@ -165,7 +178,7 @@ mod tests {
         offset: u64,
         width: Width,
         memory: &CanonicalRamService<'_>,
-    ) -> Result<u64, &'static str> {
+    ) -> Result<u64> {
         // SAFETY: these single-thread fixtures have no native frames, jobs,
         // background publishers or DMA; the borrowed memory is their complete
         // closed producer domain. This does not check a production host.

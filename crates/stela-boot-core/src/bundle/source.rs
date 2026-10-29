@@ -3,8 +3,10 @@
 //! an Apple container/signature. The resource factory checks geometry.
 mod clpc;
 mod cpus;
-use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
+use crate::Result;
+use alloc::{collections::BTreeSet, string::String, vec::Vec};
 use sha2::Digest;
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use stela_loader::{apple_device_tree::DeviceTree, boot_bundle::ORIGINAL_DEVICE_TREE_FILE};
 use {
@@ -29,7 +31,7 @@ pub struct Intake {
     hidden_clpc: Vec<String>,
 }
 
-fn digest(value: &str) -> Result<[u8; 32], String> {
+fn digest(value: &str) -> Result<[u8; 32]> {
     fn nibble(byte: u8) -> Option<u8> {
         match byte {
             b'0'..=b'9' => Some(byte - b'0'),
@@ -39,27 +41,32 @@ fn digest(value: &str) -> Result<[u8; 32], String> {
         }
     }
     if value.len() != 64 {
-        return Err("source provenance digest is not SHA-256".into());
+        return Err(refuse!("source provenance digest is not SHA-256"));
     }
     let mut bytes = [0; 32];
     for (slot, pair) in bytes.iter_mut().zip(value.as_bytes().as_chunks::<2>().0) {
-        let high = nibble(pair[0]).ok_or("source provenance digest is not hexadecimal")?;
-        let low = nibble(pair[1]).ok_or("source provenance digest is not hexadecimal")?;
+        let high = nibble(pair[0]).ok_or(refuse!("source provenance digest is not hexadecimal"))?;
+        let low = nibble(pair[1]).ok_or(refuse!("source provenance digest is not hexadecimal"))?;
         *slot = high * 16 + low;
     }
     if bytes == [0; 32] {
-        return Err("source provenance digest is unknown/zero".into());
+        return Err(refuse!("source provenance digest is unknown/zero"));
     }
     Ok(bytes)
 }
 fn text(value: &str) -> bool {
     !value.trim().is_empty() && !value.contains('\0')
 }
-fn word(tree: &DeviceTree, field: &str) -> Result<u32, String> {
+fn word(tree: &DeviceTree, field: &str) -> Result<u32> {
     tree.property("/chosen", field)
         .filter(|p| !p.placeholder)
         .and_then(|p| p.as_u32())
-        .ok_or_else(|| format!("live selected bundle requires complete /chosen/{field}"))
+        .ok_or_else(|| {
+            refuse!(
+                "live selected bundle requires complete /chosen/{field}",
+                field
+            )
+        })
 }
 
 #[allow(
@@ -74,15 +81,14 @@ impl Intake {
         json: &[u8],
         verified: &Verified<'_>,
         named: &impl Fn(&str) -> Option<&'a [u8]>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let manifest = verified.manifest;
-        let target = manifest.target.as_ref().ok_or(
-            "selected Apple bundle requires target/source provenance; reprepare with schema4",
-        )?;
-        let boot_cpu = manifest
-            .boot_cpu
-            .as_ref()
-            .ok_or("selected Apple bundle requires boot_cpu provenance; reprepare with schema4")?;
+        let target = manifest.target.as_ref().ok_or(refuse!(
+            "selected Apple bundle requires target/source provenance; reprepare with schema4"
+        ))?;
+        let boot_cpu = manifest.boot_cpu.as_ref().ok_or(refuse!(
+            "selected Apple bundle requires boot_cpu provenance; reprepare with schema4"
+        ))?;
         if [
             &target.product_type,
             &target.device_class,
@@ -93,30 +99,29 @@ impl Intake {
         .into_iter()
         .any(|value| !text(value))
         {
-            return Err("selected bundle target identity is incomplete".into());
+            return Err(refuse!("selected bundle target identity is incomplete"));
         }
-        let soc = target
-            .chip_id
-            .filter(|chip| *chip != 0)
-            .ok_or("selected bundle lacks an explicit restore chip identity")?;
+        let soc = target.chip_id.filter(|chip| *chip != 0).ok_or(refuse!(
+            "selected bundle lacks an explicit restore chip identity"
+        ))?;
         // Board0 is a legitimate explicitly selected value, not a missing-ID
         // fallback. An absent board is independently refused.
         let board = target
             .board_id
-            .ok_or("selected bundle lacks a restore board identity")?;
+            .ok_or(refuse!("selected bundle lacks a restore board identity"))?;
         let mut names = BTreeSet::new();
         for file in &manifest.files {
             if !names.insert(file.name.as_str()) {
-                return Err("selected bundle repeats a file identity".into());
+                return Err(refuse!("selected bundle repeats a file identity"));
             }
         }
         let original_file = manifest
             .files
             .iter()
             .find(|file| file.name == ORIGINAL_DEVICE_TREE_FILE)
-            .ok_or(
-                "selected bundle lacks unchanged original-devicetree.adt; reprepare with schema4",
-            )?;
+            .ok_or(refuse!(
+                "selected bundle lacks unchanged original-devicetree.adt; reprepare with schema4"
+            ))?;
         if manifest
             .regions
             .iter()
@@ -126,23 +131,27 @@ impl Intake {
                 .iter()
                 .any(|patch| patch.file == ORIGINAL_DEVICE_TREE_FILE)
         {
-            return Err(
-                "original DeviceTree metadata cannot be loaded or patched as guest RAM".into(),
-            );
+            return Err(refuse!(
+                "original DeviceTree metadata cannot be loaded or patched as guest RAM"
+            ));
         }
         let original = named(ORIGINAL_DEVICE_TREE_FILE)
-            .ok_or("verified original DeviceTree source disappeared")?;
+            .ok_or(refuse!("verified original DeviceTree source disappeared"))?;
         let original_sha256: [u8; 32] = Sha256::digest(original).into();
         if original.len() as u64 != original_file.bytes
             || original_sha256 != digest(&original_file.sha256)?
         {
-            return Err("original DeviceTree differs from its verified whole-file identity".into());
+            return Err(refuse!(
+                "original DeviceTree differs from its verified whole-file identity"
+            ));
         }
-        let original_tree =
-            DeviceTree::parse(original).map_err(|e| format!("original source ADT: {e}"))?;
+        let original_tree = DeviceTree::parse(original)
+            .map_err(|error| refuse!("original source ADT: {error}", %error))?;
         let mut selected = None;
         if manifest.sources.is_empty() {
-            return Err("selected bundle has no original input source identities".into());
+            return Err(refuse!(
+                "selected bundle has no original input source identities"
+            ));
         }
         for (index, source) in manifest.sources.iter().enumerate() {
             if !text(&source.component)
@@ -151,7 +160,9 @@ impl Intake {
                 || source.description.contains('\0')
                 || source.decoded_bytes == 0
             {
-                return Err("selected bundle input source identity is incomplete".into());
+                return Err(refuse!(
+                    "selected bundle input source identity is incomplete"
+                ));
             }
             digest(&source.container_sha256)?;
             let decoded = digest(&source.decoded_sha256)?;
@@ -159,42 +170,49 @@ impl Intake {
             // names are held verbatim rather than rewritten or guessed.
             if source.payload_type == "dtre" {
                 if selected.replace(index).is_some() {
-                    return Err("selected bundle has ambiguous DeviceTree source identities".into());
+                    return Err(refuse!(
+                        "selected bundle has ambiguous DeviceTree source identities"
+                    ));
                 }
                 if source.decoded_bytes != original.len() as u64 || decoded != original_sha256 {
-                    return Err(
-                        "original DeviceTree does not match its selected decoded source".into(),
-                    );
+                    return Err(refuse!(
+                        "original DeviceTree does not match its selected decoded source"
+                    ));
                 }
             }
         }
-        let tree_source = selected.ok_or("selected bundle has no dtre input provenance")?;
+        let tree_source =
+            selected.ok_or(refuse!("selected bundle has no dtre input provenance"))?;
         let mut kept = Vec::new();
         kept.try_reserve_exact(original.len())
-            .map_err(|_| "original DeviceTree source allocation failed")?;
+            .map_err(|_| refuse!("original DeviceTree source allocation failed"))?;
         kept.extend_from_slice(original);
         let mut regions = manifest
             .regions
             .iter()
             .filter(|region| region.name == "DeviceTree");
-        let region = regions
-            .next()
-            .ok_or("selected bundle lacks its prepared DeviceTree region")?;
+        let region = regions.next().ok_or(refuse!(
+            "selected bundle lacks its prepared DeviceTree region"
+        ))?;
         if regions.next().is_some() {
-            return Err("selected bundle repeats its prepared DeviceTree region".into());
+            return Err(refuse!(
+                "selected bundle repeats its prepared DeviceTree region"
+            ));
         }
-        let file = named(&region.file).ok_or("verified prepared DeviceTree file disappeared")?;
-        let start =
-            usize::try_from(region.file_offset).map_err(|_| "prepared ADT offset overflows")?;
-        let size = usize::try_from(region.bytes).map_err(|_| "prepared ADT length overflows")?;
+        let file =
+            named(&region.file).ok_or(refuse!("verified prepared DeviceTree file disappeared"))?;
+        let start = usize::try_from(region.file_offset)
+            .map_err(|_| refuse!("prepared ADT offset overflows"))?;
+        let size =
+            usize::try_from(region.bytes).map_err(|_| refuse!("prepared ADT length overflows"))?;
         let end = start
             .checked_add(size)
-            .ok_or("prepared ADT range overflows")?;
+            .ok_or(refuse!("prepared ADT range overflows"))?;
         let prepared = file
             .get(start..end)
-            .ok_or("prepared ADT range is outside verified file")?;
-        let prepared_tree =
-            DeviceTree::parse(prepared).map_err(|e| format!("prepared selected ADT: {e}"))?;
+            .ok_or(refuse!("prepared ADT range is outside verified file"))?;
+        let prepared_tree = DeviceTree::parse(prepared)
+            .map_err(|error| refuse!("prepared selected ADT: {error}", %error))?;
         let cpus = cpus::Prepared::verify(&original_tree, &prepared_tree, boot_cpu)?;
         let hidden_clpc = clpc::verify(
             &original_tree,
@@ -253,9 +271,11 @@ impl Intake {
     /// Caller supplies its runtime profile chip. The source-family
     /// factory must cross-check it against these selected IDs and source/live
     /// geometry. This operation grants no lifecycle or native executor state.
-    pub fn topology_identity(&self, chip: Chip) -> Result<SourceIdentity, String> {
+    pub fn topology_identity(&self, chip: Chip) -> Result<SourceIdentity> {
         if stela_soc_data::board::chip(self.soc) != Some(chip) {
-            return Err("selected restore chip differs from the actual runtime profile".into());
+            return Err(refuse!(
+                "selected restore chip differs from the actual runtime profile"
+            ));
         }
         Ok(SourceIdentity {
             profile: ResourceProfile {
@@ -272,10 +292,13 @@ impl Intake {
     }
     /// Recheck selected identity and the entire verified prepared CPU sequence
     /// after runtime patches. PMGR/resource validation remains independent.
-    pub fn validate_live(&self, bytes: &[u8]) -> Result<(), String> {
-        let tree = DeviceTree::parse(bytes).map_err(|e| format!("live selected ADT: {e}"))?;
+    pub fn validate_live(&self, bytes: &[u8]) -> Result<()> {
+        let tree = DeviceTree::parse(bytes)
+            .map_err(|error| refuse!("live selected ADT: {error}", %error))?;
         if word(&tree, "chip-id")? != self.soc || word(&tree, "board-id")? != self.board {
-            return Err("live DeviceTree differs from selected restore chip/board identity".into());
+            return Err(refuse!(
+                "live DeviceTree differs from selected restore chip/board identity"
+            ));
         }
         self.cpus.validate_live(&tree)?;
         clpc::validate_live(&tree, &self.hidden_clpc)
@@ -352,17 +375,20 @@ mod tests {
             "top_of_kernel_data": 0x800008000u64, "patches": []
         })
     }
-    fn intake_raw(json: &[u8], original: &[u8], prepared: &[u8]) -> Result<Intake, String> {
-        let manifest = Manifest::parse(json).map_err(|e| format!("{e}"))?;
+    fn intake_raw(json: &[u8], original: &[u8], prepared: &[u8]) -> Result<Intake> {
+        let manifest =
+            Manifest::parse(json).map_err(|error| refuse!("bundle manifest: {error}", %error))?;
         let named = |name: &str| match name {
             ORIGINAL_DEVICE_TREE_FILE => Some(original),
             "devicetree.adt" => Some(prepared),
             _ => None,
         };
-        let verified = manifest.verify(&named).map_err(|e| format!("{e}"))?;
+        let verified = manifest
+            .verify(&named)
+            .map_err(|error| refuse!("bundle verification: {error}", %error))?;
         Intake::from_verified(json, &verified, &named)
     }
-    fn intake(json: &Value, original: &[u8], prepared: &[u8]) -> Result<Intake, String> {
+    fn intake(json: &Value, original: &[u8], prepared: &[u8]) -> Result<Intake> {
         intake_raw(&serde_json::to_vec(json).unwrap(), original, prepared)
     }
 

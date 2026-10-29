@@ -1,7 +1,9 @@
 //! Endpoint bank ownership. Configuration alone cannot back a peer.
 use super::{ConfigSpace, MmioDevice};
+use crate::Result;
 use alloc::{boxed::Box, vec::Vec};
 use core::cell::RefCell;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::LifecycleState, stela_contracts::bus::Width,
 };
@@ -33,37 +35,43 @@ impl Endpoint {
         mappings: Vec<BarMapping>,
         state: LifecycleState,
         access: &mut Access<'_>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         config.check_header_contract(false)?;
         if config
             .read(0xe, Width::Byte)
-            .map_err(|_| "PCIe endpoint has no header type")?
+            .map_err(|_| refuse!("PCIe endpoint has no header type"))?
             & 0x7f
             != 0
         {
-            return Err("PCIe endpoint requires an explicitly described type-zero header");
+            return Err(refuse!(
+                "PCIe endpoint requires an explicitly described type-zero header"
+            ));
         }
         config
             .read(super::config::COMMAND, Width::Half)
-            .map_err(|_| "PCIe endpoint has no command register")?;
+            .map_err(|_| refuse!("PCIe endpoint has no command register"))?;
         if mappings.len() != config.bar_count() {
-            return Err("PCIe endpoint requires exactly one actual bank mapping per BAR");
+            return Err(refuse!(
+                "PCIe endpoint requires exactly one actual bank mapping per BAR"
+            ));
         }
         for (index, mapping) in mappings.iter().enumerate() {
             let bytes = config
                 .bar_bytes(mapping.bar)
-                .ok_or("PCIe mapping names no memory BAR")?;
+                .ok_or(refuse!("PCIe mapping names no memory BAR"))?;
             if mapping.device_offset.checked_add(bytes).is_none()
                 || mappings[..index]
                     .iter()
                     .any(|prior| prior.bar == mapping.bar)
             {
-                return Err("PCIe BAR mapping is duplicate or overflows the actual bank");
+                return Err(refuse!(
+                    "PCIe BAR mapping is duplicate or overflows the actual bank"
+                ));
             }
         }
         let lifecycle = backend
             .lifecycle()
-            .ok_or("PCIe endpoint has no actual lifecycle owner")?;
+            .ok_or(refuse!("PCIe endpoint has no actual lifecycle owner"))?;
         lifecycle.check_lifecycle(state)?;
         lifecycle.set_lifecycle(state, access);
         Ok(Self {
@@ -77,12 +85,12 @@ impl Endpoint {
         })
     }
 
-    pub fn check(&self, state: LifecycleState) -> Result<(), &'static str> {
+    pub fn check(&self, state: LifecycleState) -> Result<()> {
         self.backend
             .try_borrow_mut()
-            .map_err(|_| "PCIe endpoint is in service during lifecycle preflight")?
+            .map_err(|_| refuse!("PCIe endpoint is in service during lifecycle preflight"))?
             .lifecycle()
-            .ok_or("PCIe endpoint lifecycle capability is unavailable")?
+            .ok_or(refuse!("PCIe endpoint lifecycle capability is unavailable"))?
             .check_lifecycle(state)
     }
 

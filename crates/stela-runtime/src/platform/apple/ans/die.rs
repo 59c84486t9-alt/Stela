@@ -5,6 +5,8 @@ use super::{
     commands::{put16, put32, put64},
     namespace::Medium,
 };
+use crate::Result;
+use stela_contracts::refuse;
 
 /// Emulated die: Stela's choice, consumed by IdentifyNamespaces
 /// 0x3db2608..0x3db2748 / 0x3db2878 as vendor YMTC (6), generation
@@ -29,7 +31,7 @@ pub(super) const SANITIZE_COUNTER_BYTES: u32 = 0x10_0000;
 /// one and every counter is zero.
 pub(super) const SANITIZE_COUNTERS: [(u32, u64); 3] = [(0x695, 0), (0x696, 0), (0x697, 0)];
 
-pub(super) fn identify(medium: &Medium, data: &mut [u8]) -> Result<(), &'static str> {
+pub(super) fn identify(medium: &Medium, data: &mut [u8]) -> Result<()> {
     // Emulated die: Stela's choice, consumed by
     // IdentifyNamespaces (0x3db2904..0x3db2974) as the count
     // (minimum three on CGv2) used by DetermineNamespaces.
@@ -57,10 +59,10 @@ pub(super) fn identify(medium: &Medium, data: &mut [u8]) -> Result<(), &'static 
     let bytes = id
         .blocks
         .checked_mul(u64::from(id.block_size))
-        .ok_or("ANS backing byte capacity overflows")?;
+        .ok_or(refuse!("ANS backing byte capacity overflows"))?;
     let gb = bytes.div_ceil(1_000_000_000);
-    let gb =
-        u16::try_from(gb).map_err(|_| "ANS backing capacity exceeds private Identify GB field")?;
+    let gb = u16::try_from(gb)
+        .map_err(|_| refuse!("ANS backing capacity exceeds private Identify GB field"))?;
     put16(data, 0xe06, gb.max(1));
     // Emulated die: Stela's choice, consumed at 0x3db2534,
     // 0x3db2540 and 0x3db29ec..0x3db2a18 as vendor-name
@@ -76,10 +78,10 @@ pub(super) fn identify(medium: &Medium, data: &mut [u8]) -> Result<(), &'static 
 /// have unused pages; exact logical capacity is still namespace NCAP.
 /// Return only fields the consumer reads, leaving unknown output bytes
 /// untouched. No physical NAND operations are exposed by this model.
-pub(super) fn geometry(medium: &Medium) -> Result<[(usize, u32); 16], &'static str> {
+pub(super) fn geometry(medium: &Medium) -> Result<[(usize, u32); 16]> {
     let pages: u64 = medium.namespaces.iter().map(|ns| ns.blocks).sum();
     let blocks = u32::try_from(pages.div_ceil(256))
-        .map_err(|_| "ANS NAND geometry exceeds blocks-per-CAU field")?;
+        .map_err(|_| refuse!("ANS NAND geometry exceeds blocks-per-CAU field"))?;
     Ok([
         (0x04, 1),      // 0x3dfb730: cau-per-die.
         (0x08, 1),      // 0x3dfb610/678: num-bus; clamped to 16.

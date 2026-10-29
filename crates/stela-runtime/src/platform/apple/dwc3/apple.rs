@@ -24,6 +24,8 @@
 //! fifth wire) is not modeled, so enabling any of its sources refuses; its
 //! clear register has nothing pending. Handoff: every field zero, in D0.
 //! These are Stela handoff choices, not captured reset values.
+use crate::Result;
+use stela_contracts::refuse;
 
 /// The reg[1], reg[5] and reg[6] windows' offsets in the core's model.
 pub const CONFIG: u64 = super::PLATFORM_WINDOW_BASE + super::PLATFORM_WINDOW_STRIDE;
@@ -95,7 +97,7 @@ impl Registers {
         Self::index(offset).map_or(0, |n| self.stored[n])
     }
 
-    pub fn read(&self, offset: u64) -> Result<u32, &'static str> {
+    pub fn read(&self, offset: u64) -> Result<u32> {
         let d3 = self.stored(HIBERNATION_CFG) == D3;
         Ok(match offset {
             // No RAM write in flight; no PIPE PHY ready or in LFPS.
@@ -118,27 +120,32 @@ impl Registers {
             TXDETRX_LOCK_ACK => self.stored(TXDETRX_LOCK_REQ),
             _ => match Self::index(offset) {
                 Some(n) => self.stored[n],
-                None => return Err("not an Apple dual-role core register"),
+                None => return Err(refuse!("not an Apple dual-role core register")),
             },
         })
     }
 
-    pub fn write(&mut self, offset: u64, value: u32) -> Result<(), &'static str> {
+    pub fn write(&mut self, offset: u64, value: u32) -> Result<()> {
         match offset {
             HIBERNATION_ENABLE if value & INTERRUPTS != 0 => {
-                return Err("USB power-control interrupt sources are not modeled");
+                return Err(refuse!(
+                    "USB power-control interrupt sources are not modeled"
+                ));
             }
             HIBERNATION_ENABLE => return Ok(()),
             // W1C of interrupt status, none of which is pending.
             HIBERNATION_CLEAR if value & !INTERRUPTS == 0 => return Ok(()),
             HIBERNATION_CFG if !matches!(value, 0 | D3) => {
-                return Err("USB power states other than D0 and D3 are not modeled");
+                return Err(refuse!(
+                    "USB power states other than D0 and D3 are not modeled"
+                ));
             }
             _ => {}
         }
-        let n = Self::index(offset).ok_or("read-only or unmodeled Apple dual-role register")?;
+        let n = Self::index(offset)
+            .ok_or(refuse!("read-only or unmodeled Apple dual-role register"))?;
         if value & !STORED[n].1 != 0 {
-            return Err("unmodeled Apple dual-role register fields");
+            return Err(refuse!("unmodeled Apple dual-role register fields"));
         }
         self.stored[n] = value;
         Ok(())

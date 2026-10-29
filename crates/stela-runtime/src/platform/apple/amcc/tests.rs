@@ -427,6 +427,7 @@ fn native_cache_geometry_refuses_wrapped_or_zero_plane_spans_before_allocating()
             Some(CACHE)
         )
         .unwrap_err()
+        .to_string()
         .contains("geometry wraps")
     );
     assert!(

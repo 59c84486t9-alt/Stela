@@ -15,9 +15,12 @@
 //! (`storage::RestoreRoot`), as block and input I/O do.
 mod security;
 use super::storage::RestoreRoot;
+use crate::Refusal;
+use crate::Result;
 use crate::output;
 use alloc::{format, rc::Rc, string::String, sync::Arc, vec::Vec};
 use core::cell::RefCell;
+use stela_contracts::refuse;
 use stela_drivers::{
     Clock,
     net::{Link, LinkError, Mac},
@@ -108,7 +111,7 @@ pub struct HostNetwork {
 impl HostNetwork {
     /// Try each native adapter until DHCPv4 or IPv6 SLAAC provides a usable
     /// address. A failed adapter keeps its diagnostic while the next is tried.
-    pub fn open(links: Links, clock: Clock) -> Result<Self, String> {
+    pub fn open(links: Links, clock: Clock) -> Result<Self> {
         let security = security::native();
         let mut failures = Vec::new();
         for device in links.devices {
@@ -120,9 +123,8 @@ impl HostNetwork {
             ));
             crate::status::progress(&format!("adapter {location}"));
             let mut seed = [0u8; 8];
-            crate::random::fill(&mut seed).map_err(|_| {
-                String::from("secure host entropy is unavailable for the network stack")
-            })?;
+            crate::random::fill(&mut seed)
+                .map_err(|_| refuse!("secure host entropy is unavailable for the network stack"))?;
             let mut stack = Stack::new(
                 RootLink {
                     device,
@@ -131,7 +133,7 @@ impl HostNetwork {
                 Ticking(clock),
                 u64::from_le_bytes(seed),
             )
-            .map_err(|error| format!("{error}"))?;
+            .map_err(|error| refuse!("host network stack: {error}", %error))?;
             match stack.automatic() {
                 Ok(config) => {
                     output::arguments(format_args!(
@@ -152,9 +154,13 @@ impl HostNetwork {
             }
         }
         if failures.is_empty() {
-            Err(String::from("no native host network adapter is available"))
+            Err(refuse!("no native host network adapter is available"))
         } else {
-            Err(format!("{NO_LEASE} {}", failures.join("; ")))
+            Err(refuse!(
+                "{NO_LEASE} {failures}",
+                NO_LEASE,
+                failures = failures.join("; ")
+            ))
         }
     }
 
@@ -282,14 +288,18 @@ impl stela_runtime::restore::tss::Transport for Shared {
         self.0
             .borrow_mut()
             .post(host, path, headers, content_type, body)
-            .map_err(|error| stela_runtime::restore::Error::Transport(format!("{error}")))
+            .map_err(|error| {
+                stela_runtime::restore::Error::Transport(
+                    refuse!("signing request: {error}", %error),
+                )
+            })
     }
 }
 
 /// The signing transport when the host network did not open: every request
 /// is refused with the reason, so a restore stops at its first signing
 /// request.
-pub struct Offline(pub String);
+pub struct Offline(pub Refusal);
 
 impl stela_runtime::restore::tss::Transport for Offline {
     fn post(
@@ -300,10 +310,9 @@ impl stela_runtime::restore::tss::Transport for Offline {
         _content_type: &str,
         _body: &[u8],
     ) -> stela_runtime::restore::Result<Vec<u8>> {
-        Err(stela_runtime::restore::Error::Transport(format!(
-            "no host network for http://{host}{path}: {}",
-            self.0
-        )))
+        Err(stela_runtime::restore::Error::Transport(
+            refuse!("no host network for http://{host}{path}", host, path).because(self.0.clone()),
+        ))
     }
 }
 
@@ -321,13 +330,13 @@ pub struct GuestNetwork {
 impl GuestNetwork {
     /// The second adapter when the mount's own client (`wants_client`)
     /// keeps the first, otherwise the first.
-    pub fn open(links: &mut Links, wants_client: bool) -> Result<Self, String> {
+    pub fn open(links: &mut Links, wants_client: bool) -> Result<Self> {
         let index = usize::from(wants_client);
         if links.devices.len() <= index {
-            return Err(format!(
-                "the guest network needs host network adapter {} of its own; {} found",
-                index + 1,
-                links.devices.len()
+            return Err(refuse!(
+                "the guest network needs host network adapter {adapter} of its own; {found} found",
+                adapter = index + 1,
+                found = links.devices.len()
             ));
         }
         let device = links.devices.remove(index);

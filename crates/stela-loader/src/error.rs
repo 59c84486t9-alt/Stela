@@ -78,6 +78,17 @@ impl From<Refusal> for Error {
     }
 }
 
+/// The error as a refusal, keeping each context it was read within.
+impl From<Error> for Refusal {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::Refused(refusal) => refusal,
+            Error::Within { context, cause } => context.because(Self::from(*cause)),
+            other => stela_contracts::refuse!("{other}", %other),
+        }
+    }
+}
+
 impl From<Unsupported> for Error {
     fn from(error: Unsupported) -> Self {
         Self::UnsupportedBuild(error)

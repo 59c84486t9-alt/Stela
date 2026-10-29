@@ -1,7 +1,9 @@
 use super::super::control::Space;
 use super::*;
+use crate::Result;
 use alloc::rc::Rc;
 use core::cell::RefCell;
+use stela_contracts::refuse;
 
 #[derive(Default)]
 struct Registers {
@@ -19,15 +21,10 @@ struct Registers {
 }
 struct Backend(Rc<RefCell<Registers>>);
 impl Configuration for Backend {
-    fn read(
-        &mut self,
-        route: u64,
-        address: Address,
-        now: u64,
-    ) -> Result<Completion<Read>, &'static str> {
+    fn read(&mut self, route: u64, address: Address, now: u64) -> Result<Completion<Read>> {
         let mut registers = self.0.borrow_mut();
         if registers.refuse {
-            return Err("fixture requirement unavailable");
+            return Err(refuse!("fixture requirement unavailable"));
         }
         registers.calls += 1;
         let result = if route != 0 {
@@ -63,10 +60,10 @@ impl Configuration for Backend {
         address: Address,
         data: &[u32],
         now: u64,
-    ) -> Result<Completion<u8>, &'static str> {
+    ) -> Result<Completion<u8>> {
         let mut registers = self.0.borrow_mut();
         if registers.refuse {
-            return Err("fixture requirement unavailable");
+            return Err(refuse!("fixture requirement unavailable"));
         }
         registers.calls += 1;
         let result = if route != 0
@@ -89,10 +86,10 @@ impl Configuration for Backend {
             result,
         })
     }
-    fn reset_router(&mut self, route: u64, now: u64) -> Result<Completion<()>, &'static str> {
+    fn reset_router(&mut self, route: u64, now: u64) -> Result<Completion<()>> {
         let mut registers = self.0.borrow_mut();
         if registers.refuse {
-            return Err("fixture requirement unavailable");
+            return Err(refuse!("fixture requirement unavailable"));
         }
         registers.calls += 1;
         let result = if route == 0 {
@@ -115,10 +112,10 @@ impl Configuration for Backend {
             result,
         })
     }
-    fn acknowledge(&mut self, _: u64, _: &Body, now: u64) -> Result<u32, &'static str> {
+    fn acknowledge(&mut self, _: u64, _: &Body, now: u64) -> Result<u32> {
         let mut registers = self.0.borrow_mut();
         if registers.refuse {
-            return Err("fixture requirement unavailable");
+            return Err(refuse!("fixture requirement unavailable"));
         }
         registers.acknowledgments += 1;
         Ok(now as u32)
@@ -127,10 +124,10 @@ impl Configuration for Backend {
         &mut self,
         _: u64,
         credits: usize,
-    ) -> Result<(Vec<Notification>, Option<u64>), &'static str> {
+    ) -> Result<(Vec<Notification>, Option<u64>)> {
         let mut registers = self.0.borrow_mut();
         if registers.refuse_poll {
-            return Err("fixture notification requirement unavailable");
+            return Err(refuse!("fixture notification requirement unavailable"));
         }
         let count = if registers.excess_events {
             registers.events.len()
@@ -139,10 +136,10 @@ impl Configuration for Backend {
         };
         Ok((registers.events.drain(..count).collect(), None))
     }
-    fn reset_transport(&mut self) -> Result<(), &'static str> {
+    fn reset_transport(&mut self) -> Result<()> {
         let mut registers = self.0.borrow_mut();
         if registers.refuse {
-            return Err("fixture requirement unavailable");
+            return Err(refuse!("fixture requirement unavailable"));
         }
         registers.events.clear();
         Ok(())
@@ -189,11 +186,7 @@ fn address() -> Address {
         sequence: 3,
     }
 }
-fn send(
-    router: &mut Router,
-    packet: &Packet,
-    credits: usize,
-) -> Result<Option<Accepted>, &'static str> {
+fn send(router: &mut Router, packet: &Packet, credits: usize) -> Result<Option<Accepted>> {
     let wire = packet.encode(packet.body.pdf()).unwrap();
     router.transmit(Transmit {
         hop: 0,

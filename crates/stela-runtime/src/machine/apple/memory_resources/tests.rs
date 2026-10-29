@@ -181,6 +181,7 @@ fn old_mount_paths_refuse_missing_owners_before_publishing_any_aperture() {
     assert!(
         missing
             .unwrap_err()
+            .to_string()
             .contains("qualified memory, drain and service owner")
     );
     assert!(devices.memory_controller.is_none());

@@ -2,13 +2,15 @@
 //! libimobiledevice fa0f7919 `src/property_list_service.c` sends the XML or
 //! binary plist length before its bytes. This helper preserves opaque payloads;
 //! it does not interpret or invent a guest service response.
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 pub const MAX_PLIST: usize = 1024 * 1024;
 pub const QUERY_TYPE: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Request</key><string>QueryType</string></dict></plist>";
 
-pub fn frame(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
+pub fn frame(bytes: &[u8]) -> Result<Vec<u8>> {
     if bytes.is_empty() || bytes.len() > MAX_PLIST {
-        return Err("plist payload length out of bounds");
+        return Err(refuse!("plist payload length out of bounds"));
     }
     let mut result = Vec::with_capacity(4 + bytes.len());
     result.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
@@ -25,7 +27,7 @@ pub struct Channel {
 impl Channel {
     /// Returns the consumed prefix and at most one complete plist. Call again
     /// on the remaining input to consume coalesced messages with backpressure.
-    pub fn receive(&mut self, bytes: &[u8]) -> Result<(usize, Option<Vec<u8>>), &'static str> {
+    pub fn receive(&mut self, bytes: &[u8]) -> Result<(usize, Option<Vec<u8>>)> {
         let mut consumed = 0;
         while self.used < 4 && consumed < bytes.len() {
             self.prefix[self.used] = bytes[consumed];
@@ -38,7 +40,7 @@ impl Channel {
         if self.length.is_none() {
             let length = u32::from_be_bytes(self.prefix) as usize;
             if length == 0 || length > MAX_PLIST {
-                return Err("plist payload length out of bounds");
+                return Err(refuse!("plist payload length out of bounds"));
             }
             self.length = Some(length);
         }

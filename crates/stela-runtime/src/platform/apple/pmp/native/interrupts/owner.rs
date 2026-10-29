@@ -7,6 +7,7 @@ use super::{Device, Error, Outcome, Placement, SPECIAL, SoftwareConfiguration, r
 use alloc::{boxed::Box, rc::Rc, vec::Vec};
 use core::cell::Cell;
 use stela_contracts::bus::Access;
+use stela_contracts::refuse;
 
 /// Handler invocation, pinned to the sole consumed hardware event.
 /// Cloning this value grants no right to create another dispatch operation.
@@ -38,7 +39,7 @@ pub struct Registration {
     pub flag: bool,
     pub has_handler: bool,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
     pub source_count: Option<u32>,
     pub current: u32,
@@ -91,21 +92,21 @@ struct Core {
 }
 impl Core {
     fn check(&self) -> Result<u32, Error> {
-        if let Some(error) = self.fault {
+        if let Some(error) = self.fault.clone() {
             return Err(error);
         }
         if !self.initialized {
-            return Err(Error::Refused(
-                "native interrupt software initialization has not retired",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native interrupt software initialization has not retired"
+            )));
         }
-        self.count.ok_or(Error::Refused(
-            "native interrupt software initialization has not retired",
-        ))
+        self.count.ok_or(Error::Refused(refuse!(
+            "native interrupt software initialization has not retired"
+        )))
     }
     fn retain<T>(&mut self, result: Result<T, Error>) -> Result<T, Error> {
-        if let Err(error @ Error::Uncertain(_)) = result {
-            self.fault = Some(error);
+        if let Err(error @ Error::Uncertain(_)) = &result {
+            self.fault = Some(error.clone());
         }
         result
     }
@@ -199,9 +200,9 @@ impl Signals<'_> {
                     && !done.enable
             })
         {
-            return Err(Error::Refused(
-                "auxiliary reset requires same live actual callback and retired disable/registration",
-            ));
+            return Err(Error::Refused(refuse!(
+                "auxiliary reset requires same live actual callback and retired disable/registration"
+            )));
         }
         Ok(super::AuxiliaryReset::retired(
             binding.clone(),
@@ -230,9 +231,9 @@ impl Signals<'_> {
             {
                 Ok(done.previous)
             } else {
-                Err(Error::Refused(
-                    "native callback signal cursor is stale or changed",
-                ))
+                Err(Error::Refused(refuse!(
+                    "native callback signal cursor is stale or changed"
+                )))
             };
         }
         if let Some(work) = &self.core.nested {
@@ -243,9 +244,9 @@ impl Signals<'_> {
                 work.work.enable,
             ) != (self.generation, step, source, enable)
             {
-                return Err(Error::Refused(
-                    "native callback signal retains another actual operation",
-                ));
+                return Err(Error::Refused(refuse!(
+                    "native callback signal retains another actual operation"
+                )));
             }
         } else {
             self.core.nested = Some(Nested {
@@ -325,9 +326,9 @@ impl Owner {
         configuration: SoftwareConfiguration,
     ) -> Result<Self, Error> {
         if placement != Placement::t8112(placement.relocation)? || device.placement() != placement {
-            return Err(Error::Refused(
-                "native interrupt owner mapping differs from actual relocated source placement",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native interrupt owner mapping differs from actual relocated source placement"
+            )));
         }
         let identity = Rc::new(());
         Ok(Self {
@@ -359,7 +360,7 @@ impl Owner {
     /// Selected source initialize operation1 (1026008..102618c).
     /// Software P28/P8c is declared separately; no reset hardware word is supplied.
     pub fn initialize(&mut self, access: &mut Access<'_>) -> Result<u32, Error> {
-        if let Some(error) = self.core.fault {
+        if let Some(error) = self.core.fault.clone() {
             return Err(error);
         }
         loop {
@@ -385,7 +386,7 @@ impl Owner {
                     // special callback pair. Reserve host storage now;
                     // this is software allocation, not observed IRQ readiness.
                     self.entries.try_reserve(19).map_err(|_| {
-                        Error::Refused("native interrupt registry allocation failed")
+                        Error::Refused(refuse!("native interrupt registry allocation failed"))
                     })?;
                     self.core.initialized = true;
                     self.init_stage = 4;
@@ -400,7 +401,7 @@ impl Owner {
             current: self.core.current,
             current_enabled: self.core.current_enabled,
             special_active: self.core.special_active,
-            fault: self.core.fault,
+            fault: self.core.fault.clone(),
         }
     }
     pub fn registrations(&self) -> impl Iterator<Item = Registration> + '_ {
@@ -413,9 +414,9 @@ impl Owner {
     fn mutable_registry(&self) -> Result<(), Error> {
         self.core.check()?;
         if self.event.is_some() || self.signal.is_some() {
-            return Err(Error::Refused(
-                "native interrupt operation retains its callback/registry binding",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native interrupt operation retains its callback/registry binding"
+            )));
         }
         Ok(())
     }
@@ -427,9 +428,9 @@ impl Owner {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.source == source) {
             entry.handler = Some(handler);
         } else {
-            self.entries
-                .try_reserve(1)
-                .map_err(|_| Error::Refused("native interrupt registration allocation failed"))?;
+            self.entries.try_reserve(1).map_err(|_| {
+                Error::Refused(refuse!("native interrupt registration allocation failed"))
+            })?;
             self.entries.push(Entry {
                 source,
                 flag: false,
@@ -453,7 +454,9 @@ impl Owner {
                 entry.flag = flags & 0x200 != 0;
             } else if flags & 0x200 != 0 {
                 self.entries.try_reserve(1).map_err(|_| {
-                    Error::Refused("native interrupt registration mode allocation failed")
+                    Error::Refused(refuse!(
+                        "native interrupt registration mode allocation failed"
+                    ))
                 })?;
                 self.entries.push(Entry {
                     source,
@@ -470,13 +473,13 @@ impl Owner {
     pub fn begin_signal(&mut self, source: u32, enable: bool) -> Result<Signal, Error> {
         self.core.check()?;
         if self.signal.is_some() || self.event.is_some() {
-            return Err(Error::Refused(
-                "native interrupt operation already retained; callback must use its Signals context",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native interrupt operation already retained; callback must use its Signals context"
+            )));
         }
-        let serial = self.serial.checked_add(1).ok_or(Error::Refused(
-            "native interrupt signal generation exhausted",
-        ))?;
+        let serial = self.serial.checked_add(1).ok_or(Error::Refused(refuse!(
+            "native interrupt signal generation exhausted"
+        )))?;
         let request = Signal {
             owner: self.identity.clone(),
             serial,
@@ -497,11 +500,15 @@ impl Owner {
         access: &mut Access<'_>,
     ) -> Completion<Outcome> {
         if !Rc::ptr_eq(&request.owner, &self.identity) {
-            return refused(Error::Refused("foreign native interrupt signal token"));
+            return refused(Error::Refused(refuse!(
+                "foreign native interrupt signal token"
+            )));
         }
         if let Some(work) = &mut self.signal {
             if work.request.serial != request.serial {
-                return refused(Error::Refused("stale native interrupt signal token"));
+                return refused(Error::Refused(refuse!(
+                    "stale native interrupt signal token"
+                )));
             }
             match self.core.signal(work, access) {
                 Err(error) => return refused(error),
@@ -521,9 +528,9 @@ impl Owner {
                 },
                 refusal: None,
             },
-            _ => refused(Error::Refused(
-                "native interrupt signal token has no retained operation",
-            )),
+            _ => refused(Error::Refused(refuse!(
+                "native interrupt signal token has no retained operation"
+            ))),
         }
     }
     /// Begin one native interrupt entry (normal or source special route).
@@ -532,13 +539,16 @@ impl Owner {
     pub fn begin_dispatch(&mut self, special: bool) -> Result<(), Error> {
         self.core.check()?;
         if self.event.is_some() || self.signal.is_some() {
-            return Err(Error::Refused(
-                "native interrupt foreground operation already retained",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native interrupt foreground operation already retained"
+            )));
         }
-        let generation = self.event_generation.checked_add(1).ok_or(Error::Refused(
-            "native interrupt event generation exhausted",
-        ))?;
+        let generation = self
+            .event_generation
+            .checked_add(1)
+            .ok_or(Error::Refused(refuse!(
+                "native interrupt event generation exhausted"
+            )))?;
         self.event_generation = generation;
         self.core.live_generation.set(generation);
         self.event = Some(EventWork {
@@ -568,9 +578,9 @@ impl Owner {
         }
         loop {
             let Some(work) = self.event.as_ref() else {
-                return refused(Error::Refused(
-                    "native interrupt dispatch has no actual retained entry",
-                ));
+                return refused(Error::Refused(refuse!(
+                    "native interrupt dispatch has no actual retained entry"
+                )));
             };
             let stage = work.stage;
             let source = work.event.source;
@@ -703,10 +713,10 @@ impl Owner {
                     Completion::Refused(reason) => return Completion::Refused(reason),
                     Completion::Retired { refusal, .. } => {
                         if self.core.nested.is_some() {
-                            self.core.fault = Some(Error::Refused(
-                                "native callback retired with an unfinished signal prefix",
-                            ));
-                            return refused(self.core.fault.unwrap());
+                            self.core.fault = Some(Error::Refused(refuse!(
+                                "native callback retired with an unfinished signal prefix"
+                            )));
+                            return refused(self.core.fault.clone().unwrap());
                         }
                         let work = self.event.as_mut().unwrap();
                         if work.special {
@@ -749,9 +759,11 @@ impl Owner {
     pub fn snapshot_lifecycle_requirement(&self) -> Result<(), Error> {
         self.core.check()?;
         Err(Error::Refused(if self.core.config.save_flags & 1 == 0 {
-            "source native IRQ snapshot lifecycle is disabled (returns8000000b)"
+            refuse!("source native IRQ snapshot lifecycle is disabled (returns8000000b)")
         } else {
-            "native IRQ snapshot lifecycle requires actual retained target/mask/control word storage"
+            refuse!(
+                "native IRQ snapshot lifecycle requires actual retained target/mask/control word storage"
+            )
         }))
     }
 }

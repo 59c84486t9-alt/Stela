@@ -6,8 +6,10 @@
 //! use the same low/high address and repeated data-window sequence for reads
 //! and writes. This owner implements those sequences over kept
 //! bytes. It supplies no PMIC reset, execution, ID, status or Ready value.
+use crate::Result;
 use alloc::vec::Vec;
 use core::ops::Range;
+use stela_contracts::refuse;
 
 const COMMAND_BYTES: usize = 8;
 
@@ -73,20 +75,24 @@ impl FirmwareMemory {
         })
     }
 
-    pub fn check_address(&self, address: u16, data: &[u8]) -> Result<Option<u8>, &'static str> {
+    pub fn check_address(&self, address: u16, data: &[u8]) -> Result<Option<u8>> {
         if address != self.ports.address_low && address != self.ports.address_high {
             return Ok(None);
         }
         if data.len() != 1 {
-            return Err("PMU firmware address ports require separate one-byte writes");
+            return Err(refuse!(
+                "PMU firmware address ports require separate one-byte writes"
+            ));
         }
         if address == self.ports.address_high {
             let Stream::Low(low) = self.stream else {
-                return Err("PMU firmware high address requires a fresh low address");
+                return Err(refuse!(
+                    "PMU firmware high address requires a fresh low address"
+                ));
             };
             let cursor = usize::from(u16::from_le_bytes([low, data[0]]));
             if cursor >= self.bytes.len() {
-                return Err("PMU firmware address is outside retained SRAM");
+                return Err(refuse!("PMU firmware address is outside retained SRAM"));
             }
         }
         Ok(Some(data[0]))
@@ -96,37 +102,38 @@ impl FirmwareMemory {
     /// failed command keeps previous commands. A repeated partial prefix or
     /// a direction change without a new address pair refuses before effects.
     /// No lost-response retry semantics are inferred for completed windows.
-    pub fn prepare(
-        &self,
-        address: u16,
-        bytes: usize,
-        direction: Direction,
-    ) -> Result<Transfer, &'static str> {
+    pub fn prepare(&self, address: u16, bytes: usize, direction: Direction) -> Result<Transfer> {
         let Stream::Window {
             cursor,
             direction: previous,
             tail,
         } = self.stream
         else {
-            return Err("PMU firmware data requires a complete explicit address pair");
+            return Err(refuse!(
+                "PMU firmware data requires a complete explicit address pair"
+            ));
         };
         if previous.is_some_and(|previous| previous != direction) {
-            return Err("PMU firmware data direction requires a new address pair");
+            return Err(refuse!(
+                "PMU firmware data direction requires a new address pair"
+            ));
         }
         let (offset, limit) = match tail {
             false if address == self.ports.data => (0, usize::from(WINDOW_BYTES)),
             true if address == self.ports.data + COMMAND_BYTES as u16 => {
                 (COMMAND_BYTES, COMMAND_BYTES)
             }
-            _ => return Err("PMU firmware data command is out of order"),
+            _ => return Err(refuse!("PMU firmware data command is out of order")),
         };
         if bytes == 0 || bytes > limit {
-            return Err("PMU firmware data exceeds the qualified logical window");
+            return Err(refuse!(
+                "PMU firmware data exceeds the qualified logical window"
+            ));
         }
         let start = cursor + offset;
         let end = start + bytes;
         if end > self.bytes.len() {
-            return Err("PMU firmware transfer exceeds retained SRAM");
+            return Err(refuse!("PMU firmware transfer exceeds retained SRAM"));
         }
         let next = if offset == 0 && bytes == COMMAND_BYTES {
             Stream::Window {

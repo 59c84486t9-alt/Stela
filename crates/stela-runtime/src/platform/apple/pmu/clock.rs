@@ -1,8 +1,10 @@
 //! One declared PMIC upcount owner shared by its SPMI and SMC interfaces.
 use super::RTC_HZ;
+use crate::Result;
 use crate::platform::apple::counter::FREQUENCY_HZ;
 use alloc::rc::Rc;
 use core::cell::Cell;
+use stela_contracts::refuse;
 
 const LIMIT: u64 = 1 << 47;
 
@@ -31,13 +33,17 @@ struct Clock {
 #[derive(Debug, Clone)]
 pub struct RtcClock(Rc<Clock>);
 impl RtcClock {
-    pub fn new(epoch: RtcEpoch) -> Result<Self, &'static str> {
+    pub fn new(epoch: RtcEpoch) -> Result<Self> {
         if epoch.ticks >= LIMIT {
-            return Err("PMU RTC epoch exceeds the qualified 47-bit upcount");
+            return Err(refuse!(
+                "PMU RTC epoch exceeds the qualified 47-bit upcount"
+            ));
         }
         let remaining = counter_ticks(LIMIT - epoch.ticks);
         if epoch.counter.checked_add(remaining).is_none() {
-            return Err("PMU RTC epoch cannot represent its qualified counter horizon");
+            return Err(refuse!(
+                "PMU RTC epoch cannot represent its qualified counter horizon"
+            ));
         }
         Ok(Self(Rc::new(Clock {
             epoch,
@@ -47,20 +53,22 @@ impl RtcClock {
     }
 
     /// Check an Access.now without publishing or changing any owner.
-    pub fn check(&self, now: u64) -> Result<u64, &'static str> {
+    pub fn check(&self, now: u64) -> Result<u64> {
         if let Some(sample) = self.0.sample.get()
             && now < sample.counter
         {
             self.0.regression.set(Some((now, sample.counter)));
-            return Err("PMU RTC counter publication moved backwards");
+            return Err(refuse!("PMU RTC counter publication moved backwards"));
         }
         let elapsed = now
             .checked_sub(self.0.epoch.counter)
-            .ok_or("PMU RTC counter precedes its declared epoch")?;
+            .ok_or(refuse!("PMU RTC counter precedes its declared epoch"))?;
         let elapsed = u128::from(elapsed) * u128::from(RTC_HZ) / u128::from(FREQUENCY_HZ);
         let ticks = u128::from(self.0.epoch.ticks) + elapsed;
         if ticks >= u128::from(LIMIT) {
-            return Err("PMU RTC upcount/alarm wrap behavior is unqualified");
+            return Err(refuse!(
+                "PMU RTC upcount/alarm wrap behavior is unqualified"
+            ));
         }
         Ok(ticks as u64)
     }
@@ -68,7 +76,7 @@ impl RtcClock {
     /// Board service boundary publication, before ASC receive/poll effects.
     /// Refusal preserves the previous sample. This is model time ownership,
     /// never permission to execute on a host worker.
-    pub fn publish(&self, now: u64) -> Result<(), &'static str> {
+    pub fn publish(&self, now: u64) -> Result<()> {
         let ticks = self.check(now)?;
         self.0.sample.set(Some(Sample {
             counter: now,
@@ -85,12 +93,12 @@ impl RtcClock {
 
     /// SMC reads the same published upcount. Missing publication must stop the
     /// service; it cannot be replaced with a successful zero-valued read.
-    pub fn published_ticks(&self) -> Result<u64, &'static str> {
+    pub fn published_ticks(&self) -> Result<u64> {
         self.0
             .sample
             .get()
             .map(|sample| sample.ticks)
-            .ok_or("PMU RTC has no actual counter publication")
+            .ok_or(refuse!("PMU RTC has no actual counter publication"))
     }
 
     /// First counter at which the oscillator reaches a tick in this epoch.

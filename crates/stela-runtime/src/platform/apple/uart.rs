@@ -18,7 +18,9 @@
 //! state is the 8N1, FIFO-enabled, polled console left by the boot firmware.
 //! Transmitted bytes go to the host [`ConsoleSink`] immediately; bytes it cannot
 //! take stay in the 16-byte TX FIFO and are reported as FIFO occupancy.
+use crate::Result;
 use alloc::collections::VecDeque;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
@@ -246,38 +248,44 @@ impl<C: ConsoleSink> S5lUart<C> {
             }
         }
     }
-    fn write_register(&mut self, offset: u64, value: u32) -> Result<(), &'static str> {
+    fn write_register(&mut self, offset: u64, value: u32) -> Result<()> {
         match offset {
             ULCON => {
                 if value & !ULCON_FRAMING != 0 {
-                    return Err("ULCON infra-red, inverted or reserved mode is not modeled");
+                    return Err(refuse!(
+                        "ULCON infra-red, inverted or reserved mode is not modeled"
+                    ));
                 }
                 if value & ULCON_WORD_LENGTH != ULCON_WORD_LENGTH_8_BITS {
-                    return Err("ULCON word lengths other than 8 bits are not modeled");
+                    return Err(refuse!(
+                        "ULCON word lengths other than 8 bits are not modeled"
+                    ));
                 }
                 self.ulcon = value;
             }
             UCON => {
                 if value & !UCON_SUPPORTED != 0 {
-                    return Err(
-                        "UCON break, loopback, auto-baud, transmit stop, software reset or reserved field is not modeled",
-                    );
+                    return Err(refuse!(
+                        "UCON break, loopback, auto-baud, transmit stop, software reset or reserved field is not modeled"
+                    ));
                 }
                 let rx_mode = value & UCON_RECEIVE_MODE;
                 let tx_mode = value >> UCON_TRANSMIT_MODE_SHIFT & UCON_RECEIVE_MODE;
                 if rx_mode > UCON_MODE_INTERRUPT_OR_POLLING
                     || tx_mode > UCON_MODE_INTERRUPT_OR_POLLING
                 {
-                    return Err("UCON DMA or undefined transfer mode is not modeled");
+                    return Err(refuse!(
+                        "UCON DMA or undefined transfer mode is not modeled"
+                    ));
                 }
                 self.ucon = value;
             }
             UFCON => {
                 if value & !(UFCON_STORED | UFCON_RX_RESET | UFCON_TX_RESET) != 0 {
-                    return Err("UFCON reserved field is not modeled");
+                    return Err(refuse!("UFCON reserved field is not modeled"));
                 }
                 if value & UFCON_FIFO_ENABLE == 0 {
-                    return Err("UFCON non-FIFO mode is not modeled");
+                    return Err(refuse!("UFCON non-FIFO mode is not modeled"));
                 }
                 if value & UFCON_RX_RESET != 0 {
                     self.rx.clear();
@@ -289,29 +297,29 @@ impl<C: ConsoleSink> S5lUart<C> {
             }
             UMCON => {
                 if value & !UMCON_SUPPORTED != 0 {
-                    return Err("UMCON reserved field is not modeled");
+                    return Err(refuse!("UMCON reserved field is not modeled"));
                 }
                 self.umcon = value;
             }
             UTRSTAT => {
                 if value & !(UTRSTAT_CLEARABLE | UTRSTAT_READ_ONLY) != 0 {
-                    return Err("UTRSTAT reserved field is not modeled");
+                    return Err(refuse!("UTRSTAT reserved field is not modeled"));
                 }
                 self.status &= !(value & UTRSTAT_CLEARABLE);
             }
             UTXH => {
                 if self.configuration & TRANSFER_CONFIGURATION != TRANSFER_CONFIGURATION {
-                    return Err(
-                        "UART framing/FIFO configuration after power loss or reset is unknown",
-                    );
+                    return Err(refuse!(
+                        "UART framing/FIFO configuration after power loss or reset is unknown"
+                    ));
                 }
                 if field(self.ucon, UCON_TRANSMIT_MODE_SHIFT)
                     != UCON_MODE_INTERRUPT_OR_POLLING as usize
                 {
-                    return Err("UTXH written while UCON transmit mode is disabled");
+                    return Err(refuse!("UTXH written while UCON transmit mode is disabled"));
                 }
                 if self.tx.len() == FIFO_BYTES {
-                    return Err("UTXH written while the transmit FIFO is full");
+                    return Err(refuse!("UTXH written while the transmit FIFO is full"));
                 }
                 self.tx.push_back(value as u8);
                 let peak = self.tx.len();
@@ -319,24 +327,26 @@ impl<C: ConsoleSink> S5lUart<C> {
             }
             UBRDIV => {
                 if value & !UBRDIV_FIELDS != 0 {
-                    return Err("UBRDIV reserved field is not modeled");
+                    return Err(refuse!("UBRDIV reserved field is not modeled"));
                 }
                 self.ubrdiv = Some(value);
             }
-            UERSTAT | UFSTAT | UMSTAT | URXH => return Err("read-only register"),
-            UABRCNT => return Err("UABRCNT auto-baud count is not modeled"),
-            UTXOFFSET | URXOFFSET => return Err("UTXOFFSET/URXOFFSET are not modeled"),
-            UVER => return Err("UVER version value is not known"),
-            _ => return Err("unknown S5L UART register"),
+            UERSTAT | UFSTAT | UMSTAT | URXH => return Err(refuse!("read-only register")),
+            UABRCNT => return Err(refuse!("UABRCNT auto-baud count is not modeled")),
+            UTXOFFSET | URXOFFSET => return Err(refuse!("UTXOFFSET/URXOFFSET are not modeled")),
+            UVER => return Err(refuse!("UVER version value is not known")),
+            _ => return Err(refuse!("unknown S5L UART register")),
         }
         if offset <= UMCON {
             self.configuration |= 1 << (offset / 4);
         }
         Ok(())
     }
-    fn read_register(&mut self, offset: u64) -> Result<u32, &'static str> {
+    fn read_register(&mut self, offset: u64) -> Result<u32> {
         if offset <= UMCON && self.configuration & (1 << (offset / 4)) == 0 {
-            return Err("UART configuration reset value has not been qualified");
+            return Err(refuse!(
+                "UART configuration reset value has not been qualified"
+            ));
         }
         Ok(match offset {
             ULCON => self.ulcon,
@@ -351,28 +361,28 @@ impl<C: ConsoleSink> S5lUart<C> {
             URXH => u32::from(
                 self.rx
                     .pop_front()
-                    .ok_or("URXH read while the receive FIFO is empty")?,
+                    .ok_or(refuse!("URXH read while the receive FIFO is empty"))?,
             ),
             UBRDIV => self
                 .ubrdiv
-                .ok_or("UBRDIV read before the guest programmed it")?,
-            UTXH => return Err("write-only register"),
-            UABRCNT => return Err("UABRCNT auto-baud count is not modeled"),
-            UTXOFFSET | URXOFFSET => return Err("UTXOFFSET/URXOFFSET are not modeled"),
-            UVER => return Err("UVER version value is not known"),
-            _ => return Err("unknown S5L UART register"),
+                .ok_or(refuse!("UBRDIV read before the guest programmed it"))?,
+            UTXH => return Err(refuse!("write-only register")),
+            UABRCNT => return Err(refuse!("UABRCNT auto-baud count is not modeled")),
+            UTXOFFSET | URXOFFSET => return Err(refuse!("UTXOFFSET/URXOFFSET are not modeled")),
+            UVER => return Err(refuse!("UVER version value is not known")),
+            _ => return Err(refuse!("unknown S5L UART register")),
         })
     }
 
-    fn mmio_ready(&self) -> Result<(), &'static str> {
+    fn mmio_ready(&self) -> Result<()> {
         if !self.lifecycle.powered {
-            return Err("UART power domain is off");
+            return Err(refuse!("UART power domain is off"));
         }
         if !self.lifecycle.clocked {
-            return Err("UART clock is gated");
+            return Err(refuse!("UART clock is gated"));
         }
         if self.lifecycle.reset {
-            return Err("UART physical reset is asserted");
+            return Err(refuse!("UART physical reset is asserted"));
         }
         Ok(())
     }
@@ -383,7 +393,7 @@ impl<C: ConsoleSink> S5lUart<C> {
 }
 
 impl<C: ConsoleSink> Lifecycle for S5lUart<C> {
-    fn check_lifecycle(&self, _: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, _: LifecycleState) -> Result<()> {
         Ok(())
     }
 

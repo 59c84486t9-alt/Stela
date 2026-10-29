@@ -5,6 +5,7 @@ use crate::machine::{DeviceError, Lines, Stop, exception::Pstate};
 use crate::memory::domain::{DataOperation, DataRequest};
 use stela_compiler::aarch64::{MemoryTransfer, Operation};
 use stela_compiler::context::memory::FaultAccess;
+use stela_contracts::refuse;
 const PC: u64 = 0x14000;
 const DEVICE: u64 = 0x90000;
 const LDR: u32 = 0xf9400020; // LDR X0,[X1]
@@ -138,9 +139,7 @@ impl Device {
                         ..active
                     },
                 }])
-                .map_err(|e| {
-                    DeviceError::TransferRefused(alloc::format!("clock preflight {e:?}"))
-                })?;
+                .map_err(|e| DeviceError::TransferRefused(refuse!("clock preflight {e}", ?e)))?;
             assert_eq!(paused.paused(0), Some(true));
             self.clock_commits += 1;
             drop(paused);
@@ -155,8 +154,9 @@ impl Device {
                 }
                 Err(error) => {
                     return Ok(ConsumedWrite::Unknown {
-                        error: DeviceError::TransferRefused(alloc::format!(
-                            "clock post-effect {error:?}"
+                        error: DeviceError::TransferRefused(refuse!(
+                            "clock post-effect {error}",
+                            ?error
                         )),
                     });
                 }

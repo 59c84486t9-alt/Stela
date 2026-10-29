@@ -55,7 +55,9 @@
 use super::channel::{Command, Kind, Record};
 use super::event::Event;
 use super::ring::Shared;
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 /// Shared-event record fields.
 const SHARED_ID: u64 = 0x10;
@@ -91,11 +93,13 @@ pub enum Action {
 }
 
 impl Action {
-    pub fn write(self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+    pub fn write(self, memory: &mut dyn Shared) -> Result<()> {
         match self {
             Self::Write32 { address, value } => memory.write(address, &value.to_le_bytes()),
             Self::Write64 { address, value } => memory.write(address, &value.to_le_bytes()),
-            Self::Event(_) => Err("GFX signal event requires retained publication ownership"),
+            Self::Event(_) => Err(refuse!(
+                "GFX signal event requires retained publication ownership"
+            )),
         }
     }
 }
@@ -104,27 +108,31 @@ impl Action {
 /// action sequence and advances its cursor only after each action commits.
 /// Shared/CLPC events precede the firmware stamp, exactly as the original
 /// record handlers do; the driver's stamp and Flag follow at stream end.
-pub fn prepare(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Action>, &'static str> {
+pub fn prepare(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Action>> {
     let expected = match command.kind {
         Kind::RemoteNode => Record::RemoteNode,
         Kind::SharedEventSignal => Record::SharedEventSignal,
         Kind::DashboardSignal => Record::DashboardSignal,
-        other => return Err(other.unexecuted()),
+        other => return Err(other.unexecuted().into()),
     };
     command
         .va
         .checked_add(COMMAND_FLAG + 3)
-        .ok_or("GFX signal command range wraps")?;
+        .ok_or(refuse!("GFX signal command range wraps"))?;
     let stamp = command.stamp(memory)?;
     let stream = command.stream(memory)?;
     stream
         .checked_add(expected.bytes() + 3)
-        .ok_or("GFX signal stream range wraps")?;
+        .ok_or(refuse!("GFX signal stream range wraps"))?;
     if Record::read(memory, stream)? != expected {
-        return Err("GFX signal command's stream does not start with its signal record");
+        return Err(refuse!(
+            "GFX signal command's stream does not start with its signal record"
+        ));
     }
     if Record::read(memory, stream + expected.bytes())? != Record::End {
-        return Err("GFX signal command's stream continues past its signal record");
+        return Err(refuse!(
+            "GFX signal command's stream continues past its signal record"
+        ));
     }
     let mut actions = Vec::new();
     let (stamp_va, stamp_value) = match expected {
@@ -145,11 +153,11 @@ pub fn prepare(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Action>
     let value = memory.read_u32(stream + stamp_value)?;
     firmware
         .checked_add(3)
-        .ok_or("GFX firmware stamp range wraps")?;
+        .ok_or(refuse!("GFX firmware stamp range wraps"))?;
     stamp
         .driver
         .checked_add(3)
-        .ok_or("GFX driver stamp range wraps")?;
+        .ok_or(refuse!("GFX driver stamp range wraps"))?;
     actions.push(Action::Write32 {
         address: firmware,
         value,
@@ -172,7 +180,7 @@ pub fn prepare(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Action>
 /// Synchronous component helper. The production firmware keeps each
 /// prepared action and event publication across DMA faults instead.
 #[cfg(test)]
-pub fn execute(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Event>, &'static str> {
+pub fn execute(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Event>> {
     let actions = prepare(memory, command)?;
     let mut events = Vec::new();
     for action in actions {
@@ -184,11 +192,13 @@ pub fn execute(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Event>,
     Ok(events)
 }
 
-fn remote_node(memory: &mut dyn Shared, record: u64) -> Result<(), &'static str> {
+fn remote_node(memory: &mut dyn Shared, record: u64) -> Result<()> {
     let mut tail = [0; (REMOTE_ZERO.end - REMOTE_ZERO.start) as usize];
     memory.read(record + REMOTE_ZERO.start, &mut tail)?;
     if tail.iter().any(|&byte| byte != 0) {
-        return Err("GFX remote-node record carries bytes past its stamp");
+        return Err(refuse!(
+            "GFX remote-node record carries bytes past its stamp"
+        ));
     }
     Ok(())
 }
@@ -198,19 +208,19 @@ fn shared_event(
     command: &Command,
     record: u64,
     actions: &mut Vec<Action>,
-) -> Result<(), &'static str> {
+) -> Result<()> {
     let event = memory.read_u64(record + SHARED_EVENT)?;
     event
         .checked_add(7)
-        .ok_or("GFX shared-event value range wraps")?;
+        .ok_or(refuse!("GFX shared-event value range wraps"))?;
     let value = memory.read_u64(record + SHARED_VALUE)?;
     if memory.read_u64(event)? >= value {
         return Ok(());
     }
     if memory.read_u64(record + SHARED_MASK)? & MASK_DOORBELLS != 0 {
-        return Err(
-            "GFX shared-event signal rings doorbells (mask bit 3) whose targets are not recovered",
-        );
+        return Err(refuse!(
+            "GFX shared-event signal rings doorbells (mask bit 3) whose targets are not recovered"
+        ));
     }
     let id = memory.read_u64(record + SHARED_ID)?;
     let flag = memory.read_u32(command.va + COMMAND_FLAG)?;
@@ -222,18 +232,14 @@ fn shared_event(
     Ok(())
 }
 
-fn dashboard(
-    memory: &mut dyn Shared,
-    record: u64,
-    actions: &mut Vec<Action>,
-) -> Result<(), &'static str> {
+fn dashboard(memory: &mut dyn Shared, record: u64, actions: &mut Vec<Action>) -> Result<()> {
     for n in 0..4 {
         let mut slot = [0; 2];
         memory.read(record + DASHBOARD_SLOTS + n * 2, &mut slot)?;
         if u16::from_le_bytes(slot) <= DASHBOARD_LAST_SLOT {
-            return Err(
-                "GFX dashboard signal writes a dashboard slot whose table is not recovered",
-            );
+            return Err(refuse!(
+                "GFX dashboard signal writes a dashboard slot whose table is not recovered"
+            ));
         }
     }
     let argument = memory.read_u64(record + DASHBOARD_CLPC)?;
@@ -390,7 +396,7 @@ mod tests {
         let command = Command::read(&mut memory, COMMAND).unwrap();
         assert_eq!(
             execute(&mut memory, &command),
-            Err("GFX 3D command (type 1) is not executed")
+            Err(refuse!("GFX 3D command (type 1) is not executed"))
         );
     }
 }

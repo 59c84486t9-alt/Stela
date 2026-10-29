@@ -7,8 +7,10 @@
 //! same snapshots as DWC3; PHY readiness is a separate prerequisite for USB
 //! signaling and cannot invent attachment. No SuperSpeed/DP/USB4 link is
 //! supported by this initial USB2 profile.
+use crate::Result;
 use alloc::rc::Rc;
 use core::cell::Cell;
+use stela_contracts::refuse;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Orientation {
@@ -81,7 +83,7 @@ impl Port {
     pub(crate) fn changes_since(&self, generation: u64) -> [bool; 4] {
         self.0.get().changed.map(|at| at > generation)
     }
-    pub fn set_connection(&self, connection: Option<Attached>) -> Result<Snapshot, &'static str> {
+    pub fn set_connection(&self, connection: Option<Attached>) -> Result<Snapshot> {
         let previous = self.snapshot();
         if previous.connection == connection {
             return Ok(previous);
@@ -89,7 +91,7 @@ impl Port {
         let generation = previous
             .generation
             .checked_add(1)
-            .ok_or("Type-C connection generation exhausted")?;
+            .ok_or(refuse!("Type-C connection generation exhausted"))?;
         let next = Snapshot {
             generation,
             connection,

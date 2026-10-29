@@ -37,6 +37,8 @@
 
 use super::initdata::Root;
 use super::ring::{self, Kind, Shared};
+use crate::Result;
+use stela_contracts::refuse;
 
 /// Bytes of a firmware event entry.
 pub const ENTRY_BYTES: usize = Kind::FirmwareEvent.entry_bytes();
@@ -96,31 +98,27 @@ pub struct Publication {
 
 impl Publication {
     /// `None` is backpressure: no slot or output has been acquired.
-    pub fn reserve(
-        memory: &mut dyn Shared,
-        root: &Root,
-        event: Event,
-    ) -> Result<Option<Self>, &'static str> {
+    pub fn reserve(memory: &mut dyn Shared, root: &Root, event: Event) -> Result<Option<Self>> {
         let (state, entries) = root.event_ring(memory)?;
         let write_word = state
             .checked_add(WRITE + 3)
-            .ok_or("GFX event ring state range wraps")?
+            .ok_or(refuse!("GFX event ring state range wraps"))?
             - 3;
         ring::scalar_range(write_word, 4)?;
         let read = memory.read_u32(state + READ)?;
         let write = memory.read_u32(write_word)?;
         if read >= ring::ENTRIES || write >= ring::ENTRIES {
-            return Err("GFX firmware event ring index out-of-bounds");
+            return Err(refuse!("GFX firmware event ring index out-of-bounds"));
         }
         if ring::next(write) == read {
             return Ok(None);
         }
         let entry = entries
             .checked_add(u64::from(write) * ENTRY_BYTES as u64)
-            .ok_or("GFX event ring entry range wraps")?;
+            .ok_or(refuse!("GFX event ring entry range wraps"))?;
         entry
             .checked_add(ENTRY_BYTES as u64 - 1)
-            .ok_or("GFX event ring entry range wraps")?;
+            .ok_or(refuse!("GFX event ring entry range wraps"))?;
         Ok(Some(Self {
             entry,
             write_word,
@@ -131,7 +129,7 @@ impl Publication {
         }))
     }
 
-    pub fn commit(&mut self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+    pub fn commit(&mut self, memory: &mut dyn Shared) -> Result<()> {
         if self.published {
             return Ok(());
         }
@@ -148,9 +146,9 @@ impl Publication {
 /// Synchronous component helper; production keeps a `Publication` and
 /// waits for space without re-executing the command that produced the event.
 #[cfg(test)]
-pub fn post(memory: &mut dyn Shared, root: &Root, event: Event) -> Result<(), &'static str> {
+pub fn post(memory: &mut dyn Shared, root: &Root, event: Event) -> Result<()> {
     Publication::reserve(memory, root, event)?
-        .ok_or("GFX firmware event ring is full")?
+        .ok_or(refuse!("GFX firmware event ring is full"))?
         .commit(memory)
 }
 
@@ -305,7 +303,7 @@ pub(crate) mod tests {
         // One more would make write reach read: the ring is full.
         assert_eq!(
             post(&mut memory, &root, Event::Flag(2)),
-            Err("GFX firmware event ring is full")
+            Err(refuse!("GFX firmware event ring is full"))
         );
         memory.put_u32(EVENT_STATE + READ, 0x100);
         assert!(post(&mut memory, &root, Event::Flag(2)).is_err());

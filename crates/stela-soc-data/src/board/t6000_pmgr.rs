@@ -1,6 +1,8 @@
 //! Explicit T6000 source descriptors, independent of public PMGR admission.
 use super::{Node, PowerStates, power_resources};
-use alloc::{format, string::String, vec::Vec};
+use crate::{Refusal, Result};
+use alloc::{string::String, vec::Vec};
+use stela_contracts::refuse;
 use {crate::pmgr::t6000, crate::pmgr::t6000::tunables};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,42 +24,38 @@ pub struct Descriptor {
     pub tuning: tunables::Profile,
     pub power: PowerStates,
     /// Original graph validation, independent of resource word ownership.
-    pub coverage_requirement: Option<String>,
+    pub coverage_requirement: Option<Refusal>,
     pub source_sha256: String,
 }
 impl Descriptor {
     /// Guard facts are independently supplied. In particular platform_revision
     /// is not converted into the native raw revision used to select iBootData.
-    pub fn parse(
-        tree: &[u8],
-        chip: u16,
-        board: u32,
-        platform_revision: u32,
-    ) -> Result<Self, String> {
-        let tuning = tunables::Profile::new(u32::from(chip), board, platform_revision)
-            .map_err(String::from)?;
-        let root = Node::root(tree).ok_or("T6000 requires the complete source ADT")?;
+    pub fn parse(tree: &[u8], chip: u16, board: u32, platform_revision: u32) -> Result<Self> {
+        let tuning = tunables::Profile::new(u32::from(chip), board, platform_revision)?;
+        let root = Node::root(tree).ok_or(refuse!("T6000 requires the complete source ADT"))?;
         let io = root
             .child("arm-io")
-            .ok_or("T6000 source ADT has no arm-io")?;
+            .ok_or(refuse!("T6000 source ADT has no arm-io"))?;
         let node = io
             .child("pmgr")
             .filter(|n| n.compatible("pmgr1,t6000"))
-            .ok_or("T6000 requires its retained original PMGR descriptor")?;
+            .ok_or(refuse!(
+                "T6000 requires its retained original PMGR descriptor"
+            ))?;
         let translate = |offset, bytes| io.translate_range(offset, bytes);
-        let word = |key| -> Result<u32, String> {
+        let word = |key| -> Result<u32> {
             let value: [u8; 4] = node
                 .property(key)
-                .ok_or_else(|| format!("T6000 PMGR has no {key}"))?
+                .ok_or_else(|| refuse!("T6000 PMGR has no {key}", key))?
                 .try_into()
-                .map_err(|_| format!("T6000 PMGR {key} is not a full word"))?;
+                .map_err(|_| refuse!("T6000 PMGR {key} is not a full word", key))?;
             Ok(u32::from_le_bytes(value))
         };
         let raw = node
             .property("reg")
-            .ok_or("T6000 PMGR has no original register list")?;
+            .ok_or(refuse!("T6000 PMGR has no original register list"))?;
         if !raw.len().is_multiple_of(16) {
-            return Err("T6000 PMGR reg has partial pairs".into());
+            return Err(refuse!("T6000 PMGR reg has partial pairs"));
         }
         let mut registers = Vec::new();
         for pair in raw.as_chunks::<16>().0 {
@@ -69,47 +67,51 @@ impl Descriptor {
                 registers.push(None);
                 continue;
             }
-            let physical = translate(offset, bytes)
-                .ok_or("T6000 PMGR register extent crosses its actual bus domain")?;
+            let physical = translate(offset, bytes).ok_or(refuse!(
+                "T6000 PMGR register extent crosses its actual bus domain"
+            ))?;
             registers.push(Some((physical, bytes)));
         }
         let layout = t6000::Layout::new(
             &registers,
             word("bridge-reg-index")? as usize,
             word("#bridges")? as usize,
-        )
-        .map_err(String::from)?;
+        )?;
         if word("bridge-settings-version")? != 1 || word("bridge-counter-version")? != 3 {
-            return Err("T6000 bridge descriptor versions are unqualified".into());
+            return Err(refuse!("T6000 bridge descriptor versions are unqualified"));
         }
         let optional = node
             .property("optional-bridge-mask")
-            .ok_or("T6000 source optional bridge bitmap is missing")?;
-        tunables::check_optional_mask(optional).map_err(String::from)?;
+            .ok_or(refuse!("T6000 source optional bridge bitmap is missing"))?;
+        tunables::check_optional_mask(optional)?;
         // These two original tables are mandatory on this private source
         // path; the public optional parser may admit absent empty tables.
         for property in ["bridge-counter-configs", "device-bridges"] {
             if node.property(property).is_none() {
-                return Err(format!("T6000 bridge table {property} is missing"));
+                return Err(refuse!(
+                    "T6000 bridge table {property} is missing",
+                    property
+                ));
             }
         }
         let records = power_resources::bridges::Records::new(&node, t6000::BRIDGE_COUNT)?;
         let mut bridges = Vec::new();
         for id in 0..t6000::BRIDGE_COUNT {
-            let view = layout.bridge(id).map_err(String::from)?;
+            let view = layout.bridge(id)?;
             let record = records.record(id).expect("validated T6000 bridge ordinal");
             let model = crate::bridge::Layout::t6000(
-                &tuning.fields(id).map_err(String::from)?,
+                &tuning.fields(id)?,
                 record.header,
                 &record.configs,
                 record.axi,
-            )
-            .map_err(String::from)?;
+            )?;
             for (offset, bytes) in model.spans() {
                 if offset.checked_add(bytes).is_none_or(|end| end > view.bytes)
                     || view.physical.checked_add(offset + bytes).is_none()
                 {
-                    return Err("T6000 bridge word exceeds its actual source aperture".into());
+                    return Err(refuse!(
+                        "T6000 bridge word exceeds its actual source aperture"
+                    ));
                 }
             }
             bridges.push(BridgeDescriptor {
@@ -133,7 +135,7 @@ impl Descriptor {
             source_sha256: stela_formats::sha256(tree),
         })
     }
-    pub fn layout(&self) -> Result<t6000::Layout<'_>, &'static str> {
+    pub fn layout(&self) -> Result<t6000::Layout<'_>> {
         t6000::Layout::new(
             &self.registers,
             t6000::BRIDGE_REG_INDEX,

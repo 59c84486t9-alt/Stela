@@ -5,7 +5,9 @@
 //! nub's soc-device-die-offset, then looks up the record ordinal. The
 //! dashboard request/ACK bit is that ordinal, not either source/domain ID.
 //! See docs/research/apple-mcc.md and the pinned original-source tests below.
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 pub mod policy;
 
@@ -21,9 +23,10 @@ pub struct Device {
     pub flags: u32,
 }
 impl Device {
-    pub fn request_bit(self) -> Result<u64, &'static str> {
-        1u64.checked_shl(self.ordinal)
-            .ok_or("PMP source ordinal exceeds one dashboard power vector")
+    pub fn request_bit(self) -> Result<u64> {
+        1u64.checked_shl(self.ordinal).ok_or(refuse!(
+            "PMP source ordinal exceeds one dashboard power vector"
+        ))
     }
     /// AP flags+8 bit1 gates waiting for the separately published ACK. A
     /// source device without this flag still has no implied applied state.
@@ -45,18 +48,18 @@ impl DeviceTable {
         records: &[u8],
         power_groups: &[u8],
         die_offset: Option<&[u8]>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         if records.is_empty()
             || !records.len().is_multiple_of(RECORD_BYTES)
             || records.len() / RECORD_BYTES > SOURCE_IDS as usize
         {
-            return Err("PMP soc-device is not a bounded whole 124-byte source table");
+            return Err(refuse!(
+                "PMP soc-device is not a bounded whole 124-byte source table"
+            ));
         }
-        let power_groups = u64::from_le_bytes(
-            power_groups
-                .try_into()
-                .map_err(|_| "PMP soc-device-ps-group must retain one complete 64-bit bitmap")?,
-        );
+        let power_groups = u64::from_le_bytes(power_groups.try_into().map_err(|_| {
+            refuse!("PMP soc-device-ps-group must retain one complete 64-bit bitmap")
+        })?);
         let die_offset = die_offset
             .map(|bytes| {
                 bytes.try_into().map(u32::from_le_bytes).map_err(
@@ -70,12 +73,16 @@ impl DeviceTable {
                 u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
             });
             if record[0] >= SOURCE_IDS || owned.iter().any(|previous| previous[0] == record[0]) {
-                return Err("PMP soc-device source IDs are out of range or ambiguous");
+                return Err(refuse!(
+                    "PMP soc-device source IDs are out of range or ambiguous"
+                ));
             }
             owned.push(record);
         }
         if owned.len() < 64 && power_groups >> owned.len() != 0 {
-            return Err("PMP power-state group bitmap names an absent source ordinal");
+            return Err(refuse!(
+                "PMP power-state group bitmap names an absent source ordinal"
+            ));
         }
         Ok(Self {
             records: owned,
@@ -109,23 +116,29 @@ impl DeviceTable {
     /// the original AP driver. That placement needs its own instance owner;
     /// it cannot be flattened into one global source table with an invented
     /// stride. A single-die absent property is the original zero default.
-    pub fn resolve(&self, source: u8, die: u32, die_count: u32) -> Result<Device, &'static str> {
+    pub fn resolve(&self, source: u8, die: u32, die_count: u32) -> Result<Device> {
         if die_count == 0 || die >= die_count {
-            return Err("PMP domain die is outside the actual source topology");
+            return Err(refuse!(
+                "PMP domain die is outside the actual source topology"
+            ));
         }
         if die_count > 1 && self.die_offset.is_none() {
-            return Err("PMP multi-die source needs its distinct per-instance owner");
+            return Err(refuse!(
+                "PMP multi-die source needs its distinct per-instance owner"
+            ));
         }
         let source_id = die
             .checked_mul(self.die_offset.unwrap_or(0))
             .and_then(|offset| offset.checked_add(u32::from(source)))
             .filter(|id| *id < SOURCE_IDS)
-            .ok_or("PMP die-qualified source ID exceeds the original 256-entry lookup")?;
+            .ok_or(refuse!(
+                "PMP die-qualified source ID exceeds the original 256-entry lookup"
+            ))?;
         let ordinal = self
             .records
             .iter()
             .position(|row| row[0] == source_id)
-            .ok_or("PMGR source has no matching PMP soc-device record")?;
+            .ok_or(refuse!("PMGR source has no matching PMP soc-device record"))?;
         Ok(self.device(ordinal as u32).unwrap())
     }
 }

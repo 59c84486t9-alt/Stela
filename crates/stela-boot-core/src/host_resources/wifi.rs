@@ -1,7 +1,9 @@
 //! Read-only Intel Wi-Fi variable observations before ExitBootServices. Only
 //! copied observations and immutable LOADER_DATA regions leave this module.
+use crate::Result;
 use crate::handoff_records::Region;
 use sha2::Digest;
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use stela_drivers::net::wifi::intel::platform::{Observation, Stage, Variable};
 use uefi_raw::Status;
@@ -77,8 +79,8 @@ pub fn record(
 pub fn capture_with(
     variable: Variable,
     mut read: impl FnMut(Variable, &mut [u8]) -> Read,
-    allocate: impl FnOnce(usize) -> Result<&'static mut [u8], &'static str>,
-) -> Result<Capture, &'static str> {
+    allocate: impl FnOnce(usize) -> Result<&'static mut [u8]>,
+) -> Result<Capture> {
     let probe = read(variable, &mut []);
     let reported = Some(probe.bytes as u64);
     let failed = |stage, result: &Read| Capture {
@@ -110,7 +112,9 @@ pub fn capture_with(
     };
     let buffer = allocate(length)?;
     if buffer.len() != length {
-        return Err("Wi-Fi capture allocator returned a different buffer length");
+        return Err(refuse!(
+            "Wi-Fi capture allocator returned a different buffer length"
+        ));
     }
     let result = read(variable, buffer);
     if result.status != Status::SUCCESS.0 as u64 || result.bytes > length {
@@ -354,10 +358,10 @@ mod tests {
         let error = capture_with(
             Variable::Step,
             |_, _| reply(Status::BUFFER_TOO_SMALL, 6),
-            |_| Err("actual allocation failure"),
+            |_| Err(refuse!("actual allocation failure")),
         )
         .err()
         .unwrap();
-        assert_eq!(error, "actual allocation failure");
+        assert_eq!(error, refuse!("actual allocation failure"));
     }
 }

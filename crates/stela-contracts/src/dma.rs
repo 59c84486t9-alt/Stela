@@ -1,7 +1,9 @@
 //! Device DMA: guest RAM as bus masters and IOMMU table walks reach it (RAM
 //! only, never device registers), and one stream's view of it through its
 //! IOMMU.
+use crate::Refusal;
 use crate::bus::Access;
+use crate::refuse;
 
 /// Guest RAM by physical address. The boolean methods serve callers that do
 /// not resume a transfer. Stateful DMA owners use the progress methods to
@@ -12,9 +14,9 @@ pub trait Memory {
     /// Validate physical RAM and access permission without transferring
     /// bytes. An unavailable range owner is an explicit refusal.
     fn check_range(&mut self, _physical: u64, _bytes: usize, _write: bool) -> Result<(), DmaError> {
-        Err(DmaError::Unsupported(
-            "DMA RAM range validation is unavailable",
-        ))
+        Err(DmaError::Unsupported(refuse!(
+            "DMA RAM range validation is unavailable"
+        )))
     }
     /// Default atomic adapter for RAM owners whose boolean failure transfers
     /// nothing. Owners with partial effects must override this method.
@@ -39,21 +41,21 @@ pub trait Memory {
 
 /// A fault after exactly `completed` bytes of this transfer. A nonzero prefix
 /// must never be replayed because a later translation or writer failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransferFault {
     pub error: DmaError,
     pub completed: usize,
 }
 
 /// Why a DMA access did not reach memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DmaError {
     /// The IOMMU faulted it and reported the fault with this code.
     Fault(u32),
     /// A table or the target is not RAM.
     Memory,
     /// The stream uses a configuration the model does not implement.
-    Unsupported(&'static str),
+    Unsupported(Refusal),
 }
 
 /// An IOMMU: the physical address a stream reaches at an I/O address.
@@ -153,7 +155,7 @@ impl Port<'_, '_> {
         let page = self.iommu.page();
         if page == 0 && bytes != 0 {
             return Err(TransferFault {
-                error: DmaError::Unsupported("DMA IOMMU page size is zero"),
+                error: DmaError::Unsupported(refuse!("DMA IOMMU page size is zero")),
                 completed: 0,
             });
         }
@@ -163,13 +165,17 @@ impl Port<'_, '_> {
                 error,
                 completed: done,
             };
-            let address = iova
-                .checked_add(done as u64)
-                .ok_or_else(|| fault(DmaError::Unsupported("DMA past the end of the I/O space")))?;
+            let address = iova.checked_add(done as u64).ok_or_else(|| {
+                fault(DmaError::Unsupported(refuse!(
+                    "DMA past the end of the I/O space"
+                )))
+            })?;
             let chunk = (page - address % page).min((bytes - done) as u64) as usize;
-            let last = address
-                .checked_add(chunk as u64 - 1)
-                .ok_or_else(|| fault(DmaError::Unsupported("DMA past the end of the I/O space")))?;
+            let last = address.checked_add(chunk as u64 - 1).ok_or_else(|| {
+                fault(DmaError::Unsupported(refuse!(
+                    "DMA past the end of the I/O space"
+                )))
+            })?;
             let physical = self
                 .iommu
                 .translate(self.memory, self.stream, address, last, write, self.access)
@@ -321,7 +327,9 @@ pub mod test_support {
             ) -> Result<u64, DmaError> {
                 assert_eq!((iova, last), (u64::MAX, u64::MAX));
                 self.calls += 1;
-                Err(DmaError::Unsupported("test IOMMU boundary requirement"))
+                Err(DmaError::Unsupported(refuse!(
+                    "test IOMMU boundary requirement"
+                )))
             }
         }
         let mut iommu = Refusing { calls: 0 };
@@ -335,7 +343,9 @@ pub mod test_support {
             memory: &mut ram,
             access: &mut access,
         };
-        let refused = Err(DmaError::Unsupported("test IOMMU boundary requirement"));
+        let refused = Err(DmaError::Unsupported(refuse!(
+            "test IOMMU boundary requirement"
+        )));
         assert_eq!(port.write(u64::MAX, &[0xa5]), refused);
         let mut buffer = [0x99];
         assert_eq!(port.read(u64::MAX, &mut buffer), refused);
@@ -356,7 +366,9 @@ pub mod test_support {
             memory: &mut ram,
             access: &mut access,
         };
-        let refused = Err(DmaError::Unsupported("DMA past the end of the I/O space"));
+        let refused = Err(DmaError::Unsupported(refuse!(
+            "DMA past the end of the I/O space"
+        )));
         assert_eq!(port.write(u64::MAX - 1, &[0xa5, 0x5a, 0xff]), refused);
         let mut buffer = [0x99; 3];
         assert_eq!(port.read(u64::MAX - 1, &mut buffer), refused);
@@ -400,7 +412,9 @@ pub mod test_support {
             memory: &mut ram,
             access: &mut access,
         };
-        let refused = Err(DmaError::Unsupported("DMA past the end of the I/O space"));
+        let refused = Err(DmaError::Unsupported(refuse!(
+            "DMA past the end of the I/O space"
+        )));
         assert_eq!(port.write(u64::MAX, &[0xa5, 0xff]), refused);
         let mut buffer = [0x99; 2];
         assert_eq!(port.read(u64::MAX, &mut buffer), refused);

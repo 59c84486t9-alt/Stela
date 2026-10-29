@@ -1,6 +1,7 @@
 //! What Stela takes from the firmware before leaving boot services: its
 //! options and guest image from the boot volume, RAM for the heap, stack and
 //! frame arenas, the framebuffer, and the memory map its page tables cover.
+use crate::Result;
 use crate::console::Framebuffer;
 use crate::paging::{LARGE_PAGE, NX, PAGE, PRESENT, Tables, WRITABLE};
 use alloc::vec::Vec;
@@ -10,6 +11,7 @@ use core::{
     sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering},
     time::Duration,
 };
+use stela_contracts::refuse;
 use stela_engine::freestanding::BootArena;
 use uefi::{
     CStr16, Event,
@@ -45,10 +47,10 @@ pub struct Handoff {
     pub storage: Option<crate::storage::Prepared>,
 }
 
-pub(crate) fn pages(count: usize) -> Result<usize, &'static str> {
+pub(crate) fn pages(count: usize) -> Result<usize> {
     boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, count)
         .map(|page| page.as_ptr() as usize)
-        .map_err(|_| "firmware has no memory for Stela")
+        .map_err(|_| refuse!("firmware has no memory for Stela"))
 }
 
 fn configured(volume: &mut FileSystem) -> bool {
@@ -93,7 +95,7 @@ fn configured_volume() -> Option<(FileSystem, Directory)> {
 /// The volume Stela was loaded from. When the firmware names no such volume,
 /// as for an image a boot manager starts from memory, or that volume has no
 /// `stela.cfg`, the first volume with one is used instead.
-pub(crate) fn volume() -> Result<(FileSystem, Directory), &'static str> {
+pub(crate) fn volume() -> Result<(FileSystem, Directory)> {
     let own = boot_volume().map(|(mut volume, root)| {
         let configured = configured(&mut volume);
         ((volume, root), configured)
@@ -105,28 +107,31 @@ pub(crate) fn volume() -> Result<(FileSystem, Directory), &'static str> {
             drop(volume);
             match configured_volume() {
                 Some(volume) => volume,
-                None => boot_volume().ok_or("cannot reopen the boot volume")?,
+                None => boot_volume().ok_or(refuse!("cannot reopen the boot volume"))?,
             }
         }
-        None => configured_volume()
-            .ok_or("no boot volume, and no volume has \\EFI\\stela\\stela.cfg")?,
+        None => configured_volume().ok_or(refuse!(
+            "no boot volume, and no volume has \\EFI\\stela\\stela.cfg"
+        ))?,
     })
 }
 
 /// `stela.cfg`, or nothing when the volume has none.
-pub(crate) fn options(volume: &mut FileSystem) -> Result<Vec<u8>, &'static str> {
+pub(crate) fn options(volume: &mut FileSystem) -> Result<Vec<u8>> {
     if configured(volume) {
-        volume.read(OPTIONS).map_err(|_| "cannot read stela.cfg")
+        volume
+            .read(OPTIONS)
+            .map_err(|_| refuse!("cannot read stela.cfg"))
     } else {
         Ok(Vec::new())
     }
 }
 
 /// `\EFI\stela\source.bin`, the unchanged guest image.
-pub(crate) fn source(volume: &mut FileSystem) -> Result<Vec<u8>, &'static str> {
+pub(crate) fn source(volume: &mut FileSystem) -> Result<Vec<u8>> {
     volume
         .read(SOURCE)
-        .map_err(|_| "cannot read \\EFI\\stela\\source.bin")
+        .map_err(|_| refuse!("cannot read \\EFI\\stela\\source.bin"))
 }
 
 /// Page rights of Stela's own PE image: code RX, constants R, data RW+NX.
@@ -137,9 +142,9 @@ pub(crate) struct Image {
 }
 
 impl Image {
-    pub(crate) fn loaded() -> Result<Self, &'static str> {
+    pub(crate) fn loaded() -> Result<Self> {
         let image = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle())
-            .map_err(|_| "no loaded image")?;
+            .map_err(|_| refuse!("no loaded image"))?;
         let (base, bytes) = image.info();
         let extent = loaded_extent(base as usize, bytes)?;
         let sections = pe::sections(extent.bytes, |offset, out| {
@@ -187,8 +192,8 @@ impl Image {
 }
 
 /// Write-back RAM the firmware reports, sorted and merged.
-pub(crate) fn ram() -> Result<Vec<(usize, usize)>, &'static str> {
-    let map = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "no memory map")?;
+pub(crate) fn ram() -> Result<Vec<(usize, usize)>> {
+    let map = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| refuse!("no memory map"))?;
     let mut ranges: Vec<(usize, usize)> = map
         .entries()
         .filter(|entry| {
@@ -230,7 +235,7 @@ pub(crate) fn tables(
     holes: [usize; 2],
     arenas: &[BootArena],
     screen: Option<&Framebuffer>,
-) -> Result<Tables, &'static str> {
+) -> Result<Tables> {
     let mut ram = ram()?;
     if let Some(screen) = screen {
         let start = screen.base & !(PAGE - 1);
@@ -276,20 +281,21 @@ pub(crate) fn tables(
 pub fn take_over(
     options: Vec<u8>,
     host_firmware: crate::host_firmware::Resources,
-) -> Result<(Handoff, Tables), &'static str> {
+) -> Result<(Handoff, Tables)> {
     // Install mode stages a payload and stops here; otherwise nothing changes.
     let options = crate::payload::run(options)?;
-    let text = core::str::from_utf8(&options).map_err(|_| "stela.cfg is not UTF-8")?;
+    let text = core::str::from_utf8(&options).map_err(|_| refuse!("stela.cfg is not UTF-8"))?;
     if !crate::storage::split(text)?.2.is_empty() {
-        return Err("stela.cfg names options that need --system");
+        return Err(refuse!("stela.cfg names options that need --system"));
     }
     let wifi_platform = host_firmware.wifi_observations();
     // SAFETY: standalone mount keeps identity mappings and this allocator.
     let host_firmware = unsafe { crate::host_firmware::identity_catalog(&host_firmware) }?;
-    let storage = crate::storage::prepare(&options, host_firmware, wifi_platform)?.ok_or(
-        "stela.cfg starts with neither --system nor --host-check and names no install or \
-         storage check",
-    )?;
+    let storage =
+        crate::storage::prepare(&options, host_firmware, wifi_platform)?.ok_or(refuse!(
+            "stela.cfg starts with neither --system nor --host-check and names no install or \
+         storage check"
+        ))?;
     let guard = pages(STACK_PAGES + 1)?;
     let image = Image::loaded()?;
     let screen = Framebuffer::from_firmware();

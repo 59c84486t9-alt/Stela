@@ -5,9 +5,11 @@ use super::{
     CACHE_COUNTS, CACHE_STATUS, Controller, GROUP_QUOTA, Observation, PLANE_STRIDE, PLANES,
     QUOTA_FIELDS, QUOTA_UNITS, Request, RequestKind, Role, State,
 };
+use crate::Result;
 use alloc::vec::Vec;
 use core::cell::Ref;
 use stela_contracts::bus::LifecycleState;
+use stela_contracts::refuse;
 
 const DSIDS: u64 = 256;
 const USE_BASE: u64 = 0xc000;
@@ -74,7 +76,7 @@ impl Controller {
     pub fn initialized_cacheless(
         configuration: super::Configuration,
         lifecycle: LifecycleState,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let controller = Self::initialized(configuration, lifecycle)?;
         {
             let mut state = controller.0.borrow_mut();
@@ -105,22 +107,17 @@ impl Controller {
     /// this API never infers it from an application, PE or numeric port name.
     /// Configuration/lifecycle mutation is excluded while this borrow lives.
     /// It grants no canonical-memory, allocation, completion or DSB permission.
-    pub fn policy(
-        &self,
-        aperture: u8,
-        dsid: u8,
-        group: u8,
-    ) -> Result<PolicyLoan<'_>, &'static str> {
+    pub fn policy(&self, aperture: u8, dsid: u8, group: u8) -> Result<PolicyLoan<'_>> {
         let state = self
             .0
             .try_borrow()
-            .map_err(|_| "MCC resource is being mutated")?;
+            .map_err(|_| refuse!("MCC resource is being mutated"))?;
         state.accessible()?;
         if state.resource != CacheResource::Cacheless {
-            return Err("MCC policy has no actual admitted resource owner");
+            return Err(refuse!("MCC policy has no actual admitted resource owner"));
         }
         if aperture >= state.apertures || group >= super::GROUPS {
-            return Err("MCC policy names an absent aperture/group");
+            return Err(refuse!("MCC policy names an absent aperture/group"));
         }
         Ok(PolicyLoan {
             state,
@@ -177,17 +174,19 @@ pub(super) fn apply(
     role: Role,
     written: u32,
     at: u64,
-) -> Result<(), &'static str> {
+) -> Result<()> {
     let previous = state.words[&(aperture, offset)];
     let broadcast = state.words[&(aperture, super::BROADCAST)];
     if broadcast.known & 1 == 0 {
-        return Err("cacheless MCC broadcast scope is unknown");
+        return Err(refuse!("cacheless MCC broadcast scope is unknown"));
     }
     let broadcast = broadcast.value & 1 != 0;
     let kind = match role {
         Role::Ways(plane) => {
             if written != 0 {
-                return Err("permanently cacheless MCC cannot power nonzero tag/data ways");
+                return Err(refuse!(
+                    "permanently cacheless MCC cannot power nonzero tag/data ways"
+                ));
             }
             RequestKind::Ways {
                 plane,
@@ -202,7 +201,9 @@ pub(super) fn apply(
                 || previous.known & preserved != preserved
                 || (u64::from(written) ^ previous.value) & preserved != 0
             {
-                return Err("cacheless MCC quota policy exceeds/pollutes its source fields");
+                return Err(refuse!(
+                    "cacheless MCC quota policy exceeds/pollutes its source fields"
+                ));
             }
             RequestKind::Quota {
                 group,
@@ -221,13 +222,17 @@ pub(super) fn apply(
             RequestKind::PersistenceAuxiliaryClear { dsid, broadcast }
         }
         Role::DsidCommand(dsid) if written == 2 => RequestKind::Deprioritize { dsid, broadcast },
-        Role::QuotaUse => return Err("write to actual cacheless outer occupancy"),
-        _ => return Err("cacheless MCC policy/command value is not source-qualified"),
+        Role::QuotaUse => return Err(refuse!("write to actual cacheless outer occupancy")),
+        _ => {
+            return Err(refuse!(
+                "cacheless MCC policy/command value is not source-qualified"
+            ));
+        }
     };
     let serial = state
         .serial
         .checked_add(1)
-        .ok_or("MCC request serial exhausted")?;
+        .ok_or(refuse!("MCC request serial exhausted"))?;
     state.words.insert(
         (aperture, offset),
         Observation {

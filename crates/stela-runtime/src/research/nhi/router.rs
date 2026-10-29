@@ -5,7 +5,10 @@
 //! from the required backend. No backend or machine admission is supplied.
 use super::control::{Address, Body, Header, Packet};
 use super::{Accepted, Consumer, Direction, Frame, Options, Transmit};
+use crate::Result;
 use alloc::{boxed::Box, vec::Vec};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 
 pub mod cio;
 
@@ -38,39 +41,34 @@ pub struct Notification {
 /// requested word count and an upstream adapter. No sparse-zero bank,
 /// always-success writes or implied reset completion is supplied here.
 pub trait Configuration {
-    fn read(
-        &mut self,
-        route: u64,
-        address: Address,
-        now: u64,
-    ) -> Result<Completion<Read>, &'static str>;
+    fn read(&mut self, route: u64, address: Address, now: u64) -> Result<Completion<Read>>;
     fn write(
         &mut self,
         route: u64,
         address: Address,
         data: &[u32],
         now: u64,
-    ) -> Result<Completion<u8>, &'static str>;
-    fn reset_router(&mut self, route: u64, now: u64) -> Result<Completion<()>, &'static str>;
+    ) -> Result<Completion<u8>>;
+    fn reset_router(&mut self, route: u64, now: u64) -> Result<Completion<()>>;
     /// PDF3/4 acknowledgments have no automatic response. Validate the
     /// event/ack lifecycle before applying it or returning a completion time.
-    fn acknowledge(&mut self, route: u64, body: &Body, now: u64) -> Result<u32, &'static str>;
+    fn acknowledge(&mut self, route: u64, body: &Body, now: u64) -> Result<u32>;
     /// Return only real events, at most `credits` packets. Keep events while
     /// the AP has no receive descriptors, without acknowledging them early.
     fn notifications(
         &mut self,
         now: u64,
         credits: usize,
-    ) -> Result<(Vec<Notification>, Option<u64>), &'static str>;
+    ) -> Result<(Vec<Notification>, Option<u64>)>;
     /// Physical transport loss/reset, distinct from a routed PDF9 request.
-    fn reset_transport(&mut self) -> Result<(), &'static str>;
+    fn reset_transport(&mut self) -> Result<()>;
 }
 
 pub struct Router {
     backend: Box<dyn Configuration>,
     tx: Option<Options>,
     rx: Option<Options>,
-    terminal: Option<&'static str>,
+    terminal: Option<Refusal>,
     response: Option<Frame>,
 }
 impl Router {
@@ -83,13 +81,15 @@ impl Router {
             response: None,
         }
     }
-    fn frame(packet: Packet, timestamp: u32) -> Result<Frame, &'static str> {
+    fn frame(packet: Packet, timestamp: u32) -> Result<Frame> {
         if !packet.header.reply {
-            return Err("router backend returned a request as an incoming event");
+            return Err(refuse!(
+                "router backend returned a request as an incoming event"
+            ));
         }
         let encoded = packet
             .encode(0)
-            .map_err(|_| "router backend returned an invalid control packet")?;
+            .map_err(|_| refuse!("router backend returned an invalid control packet"))?;
         Frame::new(0, encoded.bytes, encoded.sof, encoded.eof, timestamp, false)
     }
     fn complete(
@@ -97,14 +97,14 @@ impl Router {
         packet: Option<Packet>,
         timestamp: u32,
         credits: &[usize],
-    ) -> Result<Option<Accepted>, &'static str> {
+    ) -> Result<Option<Accepted>> {
         if let Some(packet) = packet {
             match Self::frame(packet, timestamp) {
                 Ok(frame) => self.response = Some(frame),
                 Err(reason) => {
                     // The backend may have committed read-clear/write/reset
                     // effects. Block retry until a real transport reset.
-                    self.terminal = Some(reason);
+                    self.terminal = Some(reason.clone());
                     return Err(reason);
                 }
             }
@@ -139,23 +139,31 @@ impl Consumer for Router {
         hop: usize,
         direction: Direction,
         options: Option<Options>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if hop != 0 {
             return if options.is_none() {
                 Ok(())
             } else {
-                Err("NHI data-plane HopID requires its real adapter consumer")
+                Err(refuse!(
+                    "NHI data-plane HopID requires its real adapter consumer"
+                ))
             };
         }
         if let Some(options) = options {
             if options.e2e {
-                return Err("NHI E2E flow-control packets require their real adapter consumer");
+                return Err(refuse!(
+                    "NHI E2E flow-control packets require their real adapter consumer"
+                ));
             }
             if !options.raw || options.no_snoop || options.isochronous {
-                return Err("NHI control consumer requires raw asynchronous coherent framing");
+                return Err(refuse!(
+                    "NHI control consumer requires raw asynchronous coherent framing"
+                ));
             }
             if direction == Direction::Receive && options.receive_capacity < 256 {
-                return Err("NHI control receive buffer cannot hold a full control frame");
+                return Err(refuse!(
+                    "NHI control receive buffer cannot hold a full control frame"
+                ));
             }
         }
         match direction {
@@ -164,17 +172,22 @@ impl Consumer for Router {
         }
         Ok(())
     }
-    fn transmit(&mut self, frame: Transmit<'_>) -> Result<Option<Accepted>, &'static str> {
-        if let Some(reason) = self.terminal {
+    fn transmit(&mut self, frame: Transmit<'_>) -> Result<Option<Accepted>> {
+        if let Some(reason) = self.terminal.clone() {
             return Err(reason);
         }
         if frame.hop != 0 || self.tx != Some(frame.options) || frame.isochronous {
-            return Err("NHI control transmit is outside its configured channel");
+            return Err(refuse!(
+                "NHI control transmit is outside its configured channel"
+            ));
         }
-        let packet = Packet::decode(frame.bytes, frame.sof, frame.eof)
-            .map_err(|_| "NHI malformed control-frame policy requires a hardware contract")?;
+        let packet = Packet::decode(frame.bytes, frame.sof, frame.eof).map_err(|_| {
+            refuse!("NHI malformed control-frame policy requires a hardware contract")
+        })?;
         if packet.header.reply {
-            return Err("AP sent a response on the router control-request channel");
+            return Err(refuse!(
+                "AP sent a response on the router control-request channel"
+            ));
         }
         let route = packet.header.route;
         if matches!(packet.body, Body::NotificationAck | Body::Error { .. }) {
@@ -188,7 +201,9 @@ impl Consumer for Router {
             packet.body,
             Body::Read { .. } | Body::Write { .. } | Body::Reset
         ) {
-            return Err("AP control packet requires an additional router protocol");
+            return Err(refuse!(
+                "AP control packet requires an additional router protocol"
+            ));
         }
         if self.response.is_some() {
             // One kept control response is the explicit native queue
@@ -250,12 +265,8 @@ impl Consumer for Router {
         };
         self.complete(response, timestamp, frame.receive_credits)
     }
-    fn poll(
-        &mut self,
-        now: u64,
-        receive_credits: &[usize],
-    ) -> Result<(Vec<Frame>, Option<u64>), &'static str> {
-        if let Some(reason) = self.terminal {
+    fn poll(&mut self, now: u64, receive_credits: &[usize]) -> Result<(Vec<Frame>, Option<u64>)> {
+        if let Some(reason) = self.terminal.clone() {
             return Err(reason);
         }
         let credits = if self.rx.is_some() {
@@ -268,20 +279,20 @@ impl Consumer for Router {
         let (notifications, deadline) = self.backend.notifications(now, event_credits)?;
         if notifications.len() > event_credits {
             let reason = "router backend returned more notifications than posted receive credit";
-            self.terminal = Some(reason);
-            return Err(reason);
+            self.terminal = Some(reason.into());
+            return Err(reason.into());
         }
         let mut frames = Vec::with_capacity(notifications.len());
         for event in notifications {
             if !matches!(event.packet.body, Body::Plug { .. } | Body::Error { .. }) {
                 let reason = "router backend returned a non-notification event";
-                self.terminal = Some(reason);
-                return Err(reason);
+                self.terminal = Some(reason.into());
+                return Err(reason.into());
             }
             match Self::frame(event.packet, event.timestamp) {
                 Ok(frame) => frames.push(frame),
                 Err(reason) => {
-                    self.terminal = Some(reason);
+                    self.terminal = Some(reason.clone());
                     return Err(reason);
                 }
             }
@@ -291,7 +302,7 @@ impl Consumer for Router {
         }
         Ok((frames, deadline))
     }
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         self.backend.reset_transport()?;
         self.tx = None;
         self.rx = None;

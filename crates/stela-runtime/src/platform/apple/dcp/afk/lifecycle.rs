@@ -12,6 +12,8 @@
 //! handshake byte to 2; 4/5 clear it to 0. We preserve that behavior.
 //! Unpause names the observed inverse of Pause: the original command names
 //! for 4/5 are not present in this stripped firmware or kernel symbols.
+use crate::Result;
+use stela_contracts::refuse;
 
 pub const PACKET_BYTES: usize = 12;
 
@@ -24,14 +26,18 @@ pub enum Command {
 }
 
 impl Command {
-    pub fn decode(packet: &[u8; PACKET_BYTES]) -> Result<Self, &'static str> {
+    pub fn decode(packet: &[u8; PACKET_BYTES]) -> Result<Self> {
         // AFKEPV2::processSendMessage prepends sequence, flags, interface
         // number and payload length (kernel 0x94c3b6c..0x94c3b84).
         if packet[2..4] != [0, 0] {
-            return Err("DCP AFKEPV2 AP message targets an unpublished interface");
+            return Err(refuse!(
+                "DCP AFKEPV2 AP message targets an unpublished interface"
+            ));
         }
         if packet[4..8] != 4u32.to_le_bytes() {
-            return Err("DCP AFKEPV2 internal packet length is not four bytes");
+            return Err(refuse!(
+                "DCP AFKEPV2 internal packet length is not four bytes"
+            ));
         }
         // Both original handlers dispatch on the low byte, reserving the
         // other three command bytes; they carry no architectural effect.
@@ -40,7 +46,7 @@ impl Command {
             3 => Ok(Self::PauseDone),
             4 => Ok(Self::Unpause),
             5 => Ok(Self::UnpauseDone),
-            _ => Err("DCP AFKEPV2 unknown internal command"),
+            _ => Err(refuse!("DCP AFKEPV2 unknown internal command")),
         }
     }
 

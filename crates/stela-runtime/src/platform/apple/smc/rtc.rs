@@ -1,5 +1,6 @@
 //! Source-checked monotonic PMU key, separate from mutable stored SMC keys.
 use super::code;
+use crate::Result;
 use crate::platform::apple::pmu::RtcClock;
 
 pub(super) const KEY: u32 = code(b"CLKM");
@@ -16,7 +17,7 @@ impl RtcBinding {
             RtcKeyProfile::Hex48Little => (6, code(b"hex_"), 0x94),
         }
     }
-    pub fn value(&self) -> Result<[u8; 6], &'static str> {
+    pub fn value(&self) -> Result<[u8; 6]> {
         let ticks = self.clock.published_ticks()?;
         let bytes = ticks.to_le_bytes();
         Ok(bytes[..6].try_into().expect("six bytes"))

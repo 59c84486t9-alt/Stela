@@ -4,8 +4,10 @@
 //! words starting with `--system`; each option is a flag or a flag and one
 //! value. The spellings are part of the setup/mount contract
 //! (`stela_loader::mount_interface::OPTIONS_REVISION`).
+use crate::Result;
 use alloc::{string::String, vec::Vec};
 use core::fmt;
+use stela_contracts::refuse;
 use stela_loader::{
     boot_selection::{self, BootVolume},
     handoff::BootCommand,
@@ -148,9 +150,9 @@ pub fn number(value: &str) -> Result<u64, Error> {
 
 /// The legacy HTTP-only host/path adapter. URLs that need a transport scheme
 /// must use the original full URL; HTTPS cannot lose its security requirement.
-pub fn split_url(url: &str) -> Result<(&str, &str), &'static str> {
+pub fn split_url(url: &str) -> Result<(&str, &str)> {
     if !url.starts_with("http://") {
-        return Err("only http:// URLs are supported");
+        return Err(refuse!("only http:// URLs are supported"));
     }
     let value = parse_url(url).map_err(Error::message)?;
     Ok((value.authority, value.target))

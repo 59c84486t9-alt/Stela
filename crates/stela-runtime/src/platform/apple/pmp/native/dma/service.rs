@@ -9,6 +9,7 @@ use super::broker::{
 use alloc::{rc::Rc, vec};
 use core::cell::RefCell;
 use stela_contracts::dma::Port;
+use stela_contracts::refuse;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -67,12 +68,12 @@ impl Service {
         {
             let state = self.state.borrow();
             if !state.alive || !state.owners.same(owners) || port.stream != state.route.stream {
-                return Completion::Refused(
-                    "native PMP DMA dispatcher/Port resource identity differs",
-                );
+                return Completion::Refused(refuse!(
+                    "native PMP DMA dispatcher/Port resource identity differs"
+                ));
             }
             if state.dispatching {
-                return Completion::Refused("native PMP DMA service reentry");
+                return Completion::Refused(refuse!("native PMP DMA service reentry"));
             }
             if let Some(job) = &self.pending
                 && state.replies.contains_key(&job.request.serial)
@@ -99,14 +100,18 @@ impl Service {
             Completion::Refused(error) => {
                 state
                     .replies
-                    .insert(job.request.serial, Completion::Refused(error));
+                    .insert(job.request.serial, Completion::Refused(error.clone()));
                 self.pending = Some(job);
                 Completion::Refused(error)
             }
             Completion::Retired { value, refusal } => {
-                state
-                    .replies
-                    .insert(job.request.serial, Completion::Retired { value, refusal });
+                state.replies.insert(
+                    job.request.serial,
+                    Completion::Retired {
+                        value,
+                        refusal: refusal.clone(),
+                    },
+                );
                 Completion::Retired { value: (), refusal }
             }
         }
@@ -125,12 +130,12 @@ impl Service {
             | Op::Effect { descriptor: d, .. } => *d,
         };
         if descriptor.route != self.route() {
-            return Completion::Refused("native PMP DMA queued route changed");
+            return Completion::Refused(refuse!("native PMP DMA queued route changed"));
         }
         if !matches!(&job.op, Op::Map(_)) {
             let state = self.state.borrow();
             let Some(grant) = state.grants.get(&descriptor.id) else {
-                return Completion::Refused("native PMP DMA grant disappeared");
+                return Completion::Refused(refuse!("native PMP DMA grant disappeared"));
             };
             let expected = if matches!(
                 &job.op,
@@ -144,7 +149,7 @@ impl Service {
                 Life::Mapped
             };
             if grant.descriptor != descriptor || grant.life != expected {
-                return Completion::Refused("native PMP DMA grant lifecycle differs");
+                return Completion::Refused(refuse!("native PMP DMA grant lifecycle differs"));
             }
         }
         match &job.op {
@@ -185,10 +190,12 @@ impl Service {
                 let fault = port
                     .read_progress(descriptor.iova + offset, &mut data)
                     .err();
-                if let Some(fault) = fault {
+                if let Some(fault) = &fault {
                     if fault.completed > *bytes {
                         self.state.borrow_mut().alive = false;
-                        return Completion::Refused("native PMP DMA read returned invalid prefix");
+                        return Completion::Refused(refuse!(
+                            "native PMP DMA read returned invalid prefix"
+                        ));
                     }
                     data.truncate(fault.completed);
                 }
@@ -202,10 +209,12 @@ impl Service {
             }
             Op::Write { offset, bytes, .. } => {
                 let fault = port.write_progress(descriptor.iova + offset, bytes).err();
-                let completed = fault.map_or(bytes.len(), |fault| fault.completed);
+                let completed = fault.as_ref().map_or(bytes.len(), |fault| fault.completed);
                 if completed > bytes.len() {
                     self.state.borrow_mut().alive = false;
-                    return Completion::Refused("native PMP DMA write returned invalid prefix");
+                    return Completion::Refused(refuse!(
+                        "native PMP DMA write returned invalid prefix"
+                    ));
                 }
                 Completion::Retired {
                     value: Reply {

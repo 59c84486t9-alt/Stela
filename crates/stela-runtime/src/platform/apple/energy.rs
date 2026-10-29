@@ -18,6 +18,7 @@
 //! both counts zero: accumulators disabled, with no other field set, as a
 //! boot chain that programs none of them would. Configuration then holds
 //! full writes. iBoot's conditional programming is not reproduced.
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -67,7 +68,9 @@ impl MmioDevice for Energy {
 
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
         let value = if !self.described(offset, width) {
-            Err("energy register or width without described meaning")
+            Err(refuse!(
+                "energy register or width without described meaning"
+            ))
         } else if offset == CONTROL {
             Ok(self.control)
         } else {

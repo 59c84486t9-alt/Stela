@@ -1,6 +1,7 @@
 //! Sequential real memory/CPU borrows of one stopped synchronous write owner.
 use super::*;
 use crate::memory::{CanonicalRamService, RegisteredSystemRam};
+use stela_contracts::refuse;
 
 pub(in crate::machine::engine) mod sealed {
     pub trait Sealed {}
@@ -60,9 +61,9 @@ impl<'a> WriteOwners<'a> {
     }
     fn validate(&self) -> Result<(), DeviceError> {
         self.processors.require_native_hold(self.held).map_err(|_| {
-            DeviceError::TransferRefused(
-                "canonical write lost its actual stopped generation".into(),
-            )
+            DeviceError::TransferRefused(refuse!(
+                "canonical write lost its actual stopped generation"
+            ))
         })
     }
 }
@@ -73,9 +74,9 @@ impl CanonicalDeviceWrite for WriteOwners<'_> {
         let memory = self
             .ram
             .try_service()
-            .map_err(|_| DeviceError::TransferRefused("canonical write RAM owner failed".into()))?
+            .map_err(|_| DeviceError::TransferRefused(refuse!("canonical write RAM owner failed")))?
             .ok_or_else(|| {
-                DeviceError::TransferRefused("canonical write RAM gates unavailable".into())
+                DeviceError::TransferRefused(refuse!("canonical write RAM gates unavailable"))
             })?;
         Ok(CanonicalWriteMemory {
             memory,

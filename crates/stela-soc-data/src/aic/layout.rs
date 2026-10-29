@@ -6,7 +6,9 @@
 #[cfg(doc)]
 use super::{AIC2_DIE_STRIDE, AIC2_MAX_IRQ};
 use super::{Aic2Config, CONFIG, INFO1, INFO3, TIMESTAMP_STRIDE, VERSION};
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 /// Absolute offsets of one die's independent register arrays. The caller
 /// must establish all six banks; a die's hardware IRQ state is independent
@@ -86,15 +88,19 @@ impl Aic2Layout {
         })
     }
 
-    pub fn validate(&self, config: &Aic2Config) -> Result<u64, &'static str> {
+    pub fn validate(&self, config: &Aic2Config) -> Result<u64> {
         if self.dies.is_empty()
             || self.dies.len() > usize::from(self.max_dies)
             || self.max_dies > 15
         {
-            return Err("AIC populated dies must fit the nonzero four-bit MAX_DIE capacity");
+            return Err(refuse!(
+                "AIC populated dies must fit the nonzero four-bit MAX_DIE capacity"
+            ));
         }
         if self.dies[0].irq_config != config.irq_config {
-            return Err("AIC IRQ_CFG disagrees with the first die's explicit layout");
+            return Err(refuse!(
+                "AIC IRQ_CFG disagrees with the first die's explicit layout"
+            ));
         }
         // Reserve complete banks, including unused IRQ entries. They are
         // not aliases for another die, timestamp or capability register.
@@ -105,7 +111,7 @@ impl Aic2Layout {
         if config.timestamps != 0 {
             let bytes = TIMESTAMP_STRIDE
                 .checked_mul(config.timestamps as u64)
-                .ok_or("AIC timestamp register extent overflows")?;
+                .ok_or(refuse!("AIC timestamp register extent overflows"))?;
             ranges.push((config.timestamp_base, bytes));
         }
         let bits_bytes = 4 * u64::from(config.max_irq / 32);
@@ -125,11 +131,13 @@ impl Aic2Layout {
         let mut end = 0;
         for (offset, bytes) in ranges {
             if !offset.is_multiple_of(4) || offset < end {
-                return Err("AIC register banks overlap or are not word aligned");
+                return Err(refuse!(
+                    "AIC register banks overlap or are not word aligned"
+                ));
             }
             end = offset
                 .checked_add(bytes)
-                .ok_or("AIC register extent overflows")?;
+                .ok_or(refuse!("AIC register extent overflows"))?;
         }
         Ok(end)
     }

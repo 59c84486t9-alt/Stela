@@ -2,6 +2,8 @@
 //! attaches through them.
 
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 
 impl AppleDevices {
     /// The shared cable state of one Type-C connector.
@@ -16,15 +18,14 @@ impl AppleDevices {
 
     /// Place canonical PHY regions once. ADT aliases inside the core resolve
     /// by physical address; no length concatenation or duplicate storage.
-    pub fn add_atc_phy(
-        &mut self,
-        placement: &stela_soc_data::board::TypecPhy,
-    ) -> Result<(), String> {
+    pub fn add_atc_phy(&mut self, placement: &stela_soc_data::board::TypecPhy) -> Result<()> {
         if placement.phandle == 0
             || placement.port == 0
             || self.phys.iter().any(|phy| phy.phandle == placement.phandle)
         {
-            return Err("ATC PHY has an invalid/duplicate phandle or invalid connector".into());
+            return Err(refuse!(
+                "ATC PHY has an invalid/duplicate phandle or invalid connector"
+            ));
         }
         let id = self.bus.add(Box::new(AtcPhy::new()));
         let pipe = placement.pipe.map(|pipe| (pipe, atc_phy::PIPE));
@@ -38,7 +39,7 @@ impl AppleDevices {
         {
             self.bus
                 .map(id, physical, bytes, offset)
-                .map_err(|error| format!("ATC PHY placement: {error:?}"))?;
+                .map_err(|error| refuse!("ATC PHY placement: {error}", ?error))?;
         }
         self.phys.push(PhyBinding {
             phandle: placement.phandle,
@@ -62,22 +63,23 @@ impl AppleDevices {
         &mut self,
         placement: &stela_soc_data::board::UsbController,
         dart: DartId,
-    ) -> Result<UsbId, String> {
+    ) -> Result<UsbId> {
         self.validate_native_dart("USB", dart, placement.stream as usize)?;
         let binding = self
             .phys
             .iter()
             .find(|phy| phy.phandle == placement.phy && phy.port == placement.port)
             .ok_or_else(|| {
-                format!(
-                    "USB atc-phy-parent {:#x} has no placed PHY on connector {}",
-                    placement.phy, placement.port
+                refuse!(
+                    "USB atc-phy-parent {phy:#x} has no placed PHY on connector {port}",
+                    phy = placement.phy,
+                    port = placement.port
                 )
             })?;
         if binding.pipe != Some(placement.ranges[3]) || binding.events != placement.ranges[4] {
-            return Err(
-                "USB PHY lacks the matching physical pipehandler reset/event windows".into(),
-            );
+            return Err(refuse!(
+                "USB PHY lacks the matching physical pipehandler reset/event windows"
+            ));
         }
         let phy = binding.device;
         let state = self
@@ -99,7 +101,7 @@ impl AppleDevices {
         let (physical, bytes) = placement.ranges[0];
         self.bus
             .map(device, physical, bytes, 0)
-            .map_err(|e| format!("DWC3 placement: {e:?}"))?;
+            .map_err(|e| refuse!("DWC3 placement: {e}", ?e))?;
         for index in [1, 5, 6, 7] {
             let (physical, bytes) = placement.ranges[index];
             self.bus
@@ -109,7 +111,7 @@ impl AppleDevices {
                     bytes,
                     dwc3::PLATFORM_WINDOW_BASE + index as u64 * dwc3::PLATFORM_WINDOW_STRIDE,
                 )
-                .map_err(|e| format!("USB platform window {index}: {e:?}"))?;
+                .map_err(|e| refuse!("USB platform window {index}: {e}", index, ?e))?;
         }
         self.usb_masters.push(UsbMaster {
             device,
@@ -137,7 +139,7 @@ impl AppleDevices {
         &mut self,
         connector: u32,
         connection: Option<typec::Attached>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         self.typec_port(connector).set_connection(connection)?;
         Ok(())
     }
@@ -148,10 +150,10 @@ impl AppleDevices {
     /// the hub on its USB2 port. The keyboard and pointer sit on the hub's
     /// first port, and `cables` names the USB Ethernet adapter and mass
     /// storage devices on the next ones.
-    pub fn attach_input(&mut self, connector: u32, cables: UsbCables) -> Result<(), &'static str> {
+    pub fn attach_input(&mut self, connector: u32, cables: UsbCables) -> Result<()> {
         let UsbCables { disks, network } = cables;
         if 1 + usize::from(network.is_some()) + disks.len() > hub::MAX_PORTS {
-            return Err("the native hub has seven ports");
+            return Err(refuse!("the native hub has seven ports"));
         }
         let network = network.map(Ecm::new).transpose()?;
         let disks = disks
@@ -162,7 +164,7 @@ impl AppleDevices {
             .usb_masters
             .iter_mut()
             .find(|master| master.number == connector)
-            .ok_or("no USB controller on that connector")?;
+            .ok_or(refuse!("no USB controller on that connector"))?;
         let attachments = Attachments {
             input: Peripheral::new(),
             network,
@@ -179,16 +181,16 @@ impl AppleDevices {
         Ok(())
     }
 
-    pub(super) fn usb_network(&mut self) -> Result<&mut Ecm, &'static str> {
+    pub(super) fn usb_network(&mut self) -> Result<&mut Ecm> {
         self.usb_masters
             .iter_mut()
             .find_map(|master| master.peripheral.as_mut()?.ports.network.as_mut())
-            .ok_or("no USB Ethernet adapter is attached")
+            .ok_or(refuse!("no USB Ethernet adapter is attached"))
     }
 
     /// A frame from the host network for the guest's USB Ethernet adapter;
     /// dropped as the adapter's filter and queue decide.
-    pub fn network_deliver(&mut self, frame: &[u8]) -> Result<(), &'static str> {
+    pub fn network_deliver(&mut self, frame: &[u8]) -> Result<()> {
         self.usb_network()?.deliver(frame);
         Ok(())
     }
@@ -221,11 +223,11 @@ impl AppleDevices {
     }
 
     /// One host input change for the attached peripheral.
-    pub fn input(&mut self, input: Input) -> Result<(), &'static str> {
+    pub fn input(&mut self, input: Input) -> Result<()> {
         self.usb_masters
             .iter_mut()
             .find_map(|master| master.peripheral.as_mut())
-            .ok_or("no input peripheral is attached")?
+            .ok_or(refuse!("no input peripheral is attached"))?
             .ports
             .input
             .input(input)
@@ -234,19 +236,19 @@ impl AppleDevices {
     /// The machine's power button went down or up. The SMC reports it to
     /// the AP as a HID button notification once the AP has enabled them;
     /// while the SoC sleeps a press is a wake source instead (`sleep`).
-    pub fn power_button(&mut self, pressed: bool) -> Result<(), &'static str> {
+    pub fn power_button(&mut self, pressed: bool) -> Result<()> {
         if self.smc()?.power_button(pressed) {
             self.wake(smc::WakeSource::PowerButton);
         }
         Ok(())
     }
 
-    pub fn usb_client(&mut self, id: UsbId) -> Result<UsbClient<'_>, &'static str> {
+    pub fn usb_client(&mut self, id: UsbId) -> Result<UsbClient<'_>> {
         let master = self
             .usb_masters
             .iter_mut()
             .find(|master| master.device == id.0)
-            .ok_or("unknown USB controller")?;
+            .ok_or(refuse!("unknown USB controller"))?;
         let reset = self
             .bus
             .device_mut::<Dwc3>(master.device)

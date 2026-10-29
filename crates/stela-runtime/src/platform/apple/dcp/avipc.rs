@@ -14,11 +14,13 @@
 //! acquisition; those operations explicitly refuse instead of inventing
 //! device data. The original event-log controls themselves answer
 //! `kIOReturnUnsupported` (0x103e48..0x103f84).
+use crate::Result;
 use alloc::rc::Rc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use alloc::{format, string::String};
 use core::cell::RefCell;
+use stela_contracts::refuse;
 
 pub const SERVICE_NAME: &str = "dcpav-controller-epic";
 /// Original named endpoint config2ff148..2ff1cc and mailbox mask20e8c.
@@ -38,7 +40,7 @@ pub(super) fn descriptor(name: String) -> super::afk::interface::Descriptor {
 }
 
 impl super::afk::interface::Service for Controller {
-    fn handle(&mut self, packet_type: u8, payload: &[u8]) -> Result<(i32, Vec<u8>), &'static str> {
+    fn handle(&mut self, packet_type: u8, payload: &[u8]) -> Result<(i32, Vec<u8>)> {
         Controller::handle(self, packet_type, payload)
     }
     fn transport_closed(&mut self) {
@@ -154,13 +156,11 @@ impl Controller {
         self.opened = false;
     }
 
-    pub fn handle(
-        &mut self,
-        packet_type: u8,
-        payload: &[u8],
-    ) -> Result<(i32, Vec<u8>), &'static str> {
+    pub fn handle(&mut self, packet_type: u8, payload: &[u8]) -> Result<(i32, Vec<u8>)> {
         if packet_type != COMMAND_PACKET_TYPE {
-            return Err("DCPAVIPC controller packet type is not command 0xc0");
+            return Err(refuse!(
+                "DCPAVIPC controller packet type is not command 0xc0"
+            ));
         }
         let Some(command) = validate(payload) else {
             return Ok((INVALID_MESSAGE, payload.to_vec()));
@@ -204,9 +204,9 @@ impl Controller {
             }
             Command::SetVirtualDeviceMode => {
                 if value() != 0 {
-                    return Err(
-                        "DCPAVIPC SetVirtualDeviceMode requires an unmodeled virtual monitor",
-                    );
+                    return Err(refuse!(
+                        "DCPAVIPC SetVirtualDeviceMode requires an unmodeled virtual monitor"
+                    ));
                 }
                 write_u32(&mut reply, HEADER_BYTES, SUCCESS);
             }
@@ -228,7 +228,9 @@ impl Controller {
                 write_u64(&mut reply, VALUE, 0);
             }
             Command::GetCrcData => {
-                return Err("DCPAVIPC GetCRCData requires unmodeled display CRC acquisition");
+                return Err(refuse!(
+                    "DCPAVIPC GetCRCData requires unmodeled display CRC acquisition"
+                ));
             }
         }
         Ok((0, reply))
@@ -360,12 +362,14 @@ mod tests {
             controller
                 .handle(COMMAND_PACKET_TYPE, &virtual_request)
                 .unwrap_err()
+                .to_string()
                 .contains("SetVirtualDeviceMode")
         );
         assert!(
             controller
                 .handle(COMMAND_PACKET_TYPE, &request(15, 0x30))
                 .unwrap_err()
+                .to_string()
                 .contains("GetCRCData")
         );
         assert!(controller.display.borrow().active());
@@ -406,6 +410,7 @@ mod tests {
             controller
                 .handle(0, &request(7, 32))
                 .unwrap_err()
+                .to_string()
                 .contains("packet type")
         );
     }

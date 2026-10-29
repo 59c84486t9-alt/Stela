@@ -24,6 +24,8 @@
 //! pointers), padded to a multiple of 4. Its output is its out and in-out
 //! pointer arguments in order, then its return value, padded the same way.
 //! A `bool` is one byte. [`Fields`] and [`Packed`] read and write that form.
+use crate::Result;
+use stela_contracts::refuse;
 
 /// One AP-to-coprocessor method of the interface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,38 +109,38 @@ impl<'a> Fields<'a> {
         Self { bytes, at: 0 }
     }
 
-    fn take(&mut self, n: usize) -> Result<&'a [u8], &'static str> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         let end = self
             .at
             .checked_add(n)
             .filter(|&end| end <= self.bytes.len())
-            .ok_or("DCP method input is shorter than its arguments")?;
+            .ok_or(refuse!("DCP method input is shorter than its arguments"))?;
         let field = &self.bytes[self.at..end];
         self.at = end;
         Ok(field)
     }
 
-    pub fn u8(&mut self) -> Result<u8, &'static str> {
+    pub fn u8(&mut self) -> Result<u8> {
         Ok(self.take(1)?[0])
     }
 
-    pub fn bool(&mut self) -> Result<bool, &'static str> {
+    pub fn bool(&mut self) -> Result<bool> {
         Ok(self.u8()? != 0)
     }
 
-    pub fn u32(&mut self) -> Result<u32, &'static str> {
+    pub fn u32(&mut self) -> Result<u32> {
         Ok(u32::from_le_bytes(
             self.take(4)?.try_into().expect("4 bytes"),
         ))
     }
 
-    pub fn u64(&mut self) -> Result<u64, &'static str> {
+    pub fn u64(&mut self) -> Result<u64> {
         Ok(u64::from_le_bytes(
             self.take(8)?.try_into().expect("8 bytes"),
         ))
     }
 
-    pub fn bytes(&mut self, n: usize) -> Result<&'a [u8], &'static str> {
+    pub fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
         self.take(n)
     }
 }
@@ -178,10 +180,10 @@ impl Packed {
 
     /// The bytes, padded with zeros to `length`, or a refusal when the
     /// arguments do not fit it.
-    pub fn finish(mut self, length: u32) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    pub fn finish(mut self, length: u32) -> Result<alloc::vec::Vec<u8>> {
         let length = length as usize;
         if self.0.len() > length {
-            return Err("DCP method output exceeds its recorded size");
+            return Err(refuse!("DCP method output exceeds its recorded size"));
         }
         self.0.resize(length, 0);
         Ok(self.0)

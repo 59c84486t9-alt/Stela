@@ -6,6 +6,7 @@
 use anyhow::{Context, Result, anyhow};
 use reqwest::blocking::Client;
 use std::time::Duration;
+use stela_contracts::refuse;
 use stela_runtime::restore::{
     self, plist,
     plist::{Limits, Value},
@@ -29,7 +30,9 @@ impl tss::Transport for Apple {
         content_type: &str,
         body: &[u8],
     ) -> restore::Result<Vec<u8>> {
-        let failed = |error: reqwest::Error| restore::Error::Transport(format!("{error}"));
+        let failed = |error: reqwest::Error| {
+            restore::Error::Transport(refuse!("TSS request: {error}", %error))
+        };
         let mut request = self
             .0
             .post(format!("http://{host}{path}"))
@@ -41,9 +44,9 @@ impl tss::Transport for Apple {
         let response = request.send().map_err(failed)?;
         let status = response.status();
         if !status.is_success() {
-            return Err(restore::Error::Transport(format!(
-                "HTTP status {}",
-                status.as_u16()
+            return Err(restore::Error::Transport(refuse!(
+                "HTTP status {as_u16}",
+                as_u16 = status.as_u16()
             )));
         }
         Ok(response.bytes().map_err(failed)?.to_vec())

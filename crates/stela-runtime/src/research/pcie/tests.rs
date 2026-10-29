@@ -1,9 +1,11 @@
 use super::config::{MemoryBar, Register};
 use super::port::{APP_CLOCK, LTSSM, Layout, REF_CLOCK};
 use super::*;
+use crate::Result;
 use alloc::rc::Rc;
 use core::cell::RefCell;
 use stela_contracts::interrupt::{AicInput, InterruptLatch};
+use stela_contracts::refuse;
 use {
     stela_contracts::dma::Iommu, stela_contracts::dma::Memory,
     stela_contracts::dma::test_support::Ram,
@@ -38,15 +40,19 @@ fn native() -> (Box<dyn MmioDevice>, Rc<RefCell<NativeState>>) {
     (Box::new(NativeBank(shared.clone())), shared)
 }
 impl Lifecycle for NativeBank {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         let current = self.0.borrow();
         if current.refuse_pause && (!proposed.clocked || proposed.quiesced) {
-            return Err("native endpoint cannot suspend its current external transaction");
+            return Err(refuse!(
+                "native endpoint cannot suspend its current external transaction"
+            ));
         }
         if ((proposed.reset && !current.state.reset) || (!proposed.powered && !proposed.retention))
             && current.owned != 0
         {
-            return Err("native endpoint still owns work before physical reset");
+            return Err(refuse!(
+                "native endpoint still owns work before physical reset"
+            ));
         }
         Ok(())
     }
@@ -778,7 +784,7 @@ fn an_ambiguous_bar_cannot_disappear_and_select_another_native_function() {
     }
     assert_eq!(
         root.memory_route(0xc000_0000, 4),
-        Err("PCIe memory BAR decoders overlap")
+        Err(refuse!("PCIe memory BAR decoders overlap"))
     );
     assert!(
         root.read_memory(0xc000_0000, Width::Word, &mut access)

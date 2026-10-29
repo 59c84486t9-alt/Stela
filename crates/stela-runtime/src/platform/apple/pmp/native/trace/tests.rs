@@ -2,6 +2,7 @@ use super::*;
 use alloc::collections::VecDeque;
 use core::cell::RefCell;
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 
 type WriteLog = Rc<RefCell<Vec<(Request, u64, Vec<u8>)>>>;
 #[derive(Clone)]
@@ -45,7 +46,7 @@ impl Mapping for Bytes {
             .borrow_mut()
             .push((r.clone(), offset, input.to_vec()));
         if input.len() == 24 && self.refuse_body.replace(false) {
-            return Completion::Refused("actual test body destination refused");
+            return Completion::Refused(refuse!("actual test body destination refused"));
         }
         if input.len() == 8 && input != [0u8; 8].as_slice() && self.busy_timestamp.replace(false) {
             return Completion::Busy { deadline: Some(7) };
@@ -55,7 +56,7 @@ impl Mapping for Bytes {
         if input.len() == 24 && self.retired_body.replace(false) {
             return Completion::Retired {
                 value: (),
-                refusal: Some("actual test body committed before diagnostic"),
+                refusal: Some(refuse!("actual test body committed before diagnostic")),
             };
         }
         done(())

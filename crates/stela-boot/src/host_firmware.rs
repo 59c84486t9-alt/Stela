@@ -1,10 +1,12 @@
 //! Host-device resources from the selected boot volume and native UEFI before EBS. Unlike
 //! a Vec/Arc in the loader heap, this fixed wire representation survives engine
 //! relocation. Only immutable bytes in reserved LOADER_DATA pages cross it.
+use crate::Result;
 use crate::{firmware, handoff::Region, layout, output, paging::PAGE};
 use alloc::{format, string::ToString, sync::Arc};
 pub use stela_boot_core::host_resources::Resources;
 use stela_boot_core::host_resources::report;
+use stela_contracts::refuse;
 use stela_drivers::firmware::Catalog;
 use stela_loader::host_firmware::{self as manifest, MAX_MANIFEST_BYTES, Manifest};
 use uefi::{
@@ -25,9 +27,7 @@ struct InfoBuffer([u8; 1024]);
 /// This loader still owns every immutable reserved page and its identity
 /// alias remains mapped for the resulting catalog's lifetime.
 /// The standalone caller runs before EBS, so this emits no phase receipt.
-pub unsafe fn identity_catalog(
-    resources: &Resources,
-) -> Result<Option<Arc<Catalog>>, &'static str> {
+pub unsafe fn identity_catalog(resources: &Resources) -> Result<Option<Arc<Catalog>>> {
     // SAFETY: caller supplied the permanent identity mapping contract.
     unsafe { resources.catalog(|physical| physical, None, output::arguments) }
 }
@@ -35,7 +35,7 @@ pub unsafe fn identity_catalog(
 /// # Safety
 /// The loader supplied this validated wire handoff. Its LOADER_DATA pages
 /// are reserved, and the engine maps them in its permanent shared physmap.
-pub unsafe fn after_ebs(resources: &Resources) -> Result<Option<Arc<Catalog>>, &'static str> {
+pub unsafe fn after_ebs(resources: &Resources) -> Result<Option<Arc<Catalog>>> {
     // SAFETY: the caller's validated loader handoff and permanent physmap.
     let catalog =
         unsafe { resources.catalog(layout::physical, Some("after-ebs"), output::arguments) }?;
@@ -51,13 +51,13 @@ pub unsafe fn after_ebs(resources: &Resources) -> Result<Option<Arc<Catalog>>, &
 /// Resolve each component by enumerating its directory once. UEFI/FAT
 /// case-insensitive matching is accepted only when exactly one entry matches;
 /// a second case alias is refused even on firmware with a case-sensitive driver.
-fn open(root: &mut Directory, relative: &str) -> Result<Option<RegularFile>, &'static str> {
-    let path = CString16::try_from("\\").map_err(|_| "invalid firmware root")?;
+fn open(root: &mut Directory, relative: &str) -> Result<Option<RegularFile>> {
+    let path = CString16::try_from("\\").map_err(|_| refuse!("invalid firmware root"))?;
     let mut directory = root
         .open(&path, FileMode::Read, FileAttribute::empty())
-        .map_err(|_| "cannot open host firmware root")?
+        .map_err(|_| refuse!("cannot open host firmware root"))?
         .into_directory()
-        .ok_or("host firmware root is not a directory")?;
+        .ok_or(refuse!("host firmware root is not a directory"))?;
     let mut parts = relative.split('/').peekable();
     while let Some(part) = parts.next() {
         let mut found = None;
@@ -66,59 +66,57 @@ fn open(root: &mut Directory, relative: &str) -> Result<Option<RegularFile>, &'s
         for index in 0..=MAX_DIRECTORY_ENTRIES {
             let Some(info) = directory
                 .read_entry(&mut buffer.0)
-                .map_err(|_| "cannot enumerate bounded host firmware path")?
+                .map_err(|_| refuse!("cannot enumerate bounded host firmware path"))?
             else {
                 end = true;
                 break;
             };
             if index == MAX_DIRECTORY_ENTRIES {
-                return Err("host firmware directory has too many entries");
+                return Err(refuse!("host firmware directory has too many entries"));
             }
             let name = info.file_name().to_string();
             if name.eq_ignore_ascii_case(part) {
                 if found.is_some() {
-                    return Err("ambiguous host firmware path case aliases");
+                    return Err(refuse!("ambiguous host firmware path case aliases"));
                 }
                 found = Some(name);
             }
         }
         if !end {
-            return Err("host firmware directory has too many entries");
+            return Err(refuse!("host firmware directory has too many entries"));
         }
         let Some(name) = found else {
             return Ok(None);
         };
-        let name =
-            CString16::try_from(name.as_str()).map_err(|_| "host firmware path is not UCS-2")?;
+        let name = CString16::try_from(name.as_str())
+            .map_err(|_| refuse!("host firmware path is not UCS-2"))?;
         let handle = directory
             .open(&name, FileMode::Read, FileAttribute::empty())
-            .map_err(|_| "cannot open present host firmware path")?;
+            .map_err(|_| refuse!("cannot open present host firmware path"))?;
         if parts.peek().is_none() {
             return handle
                 .into_regular_file()
                 .map(Some)
-                .ok_or("host firmware file is a directory");
+                .ok_or(refuse!("host firmware file is a directory"));
         }
         directory = handle
             .into_directory()
-            .ok_or("host firmware parent is not a directory")?;
+            .ok_or(refuse!("host firmware parent is not a directory"))?;
     }
-    Err("empty host firmware path")
+    Err(refuse!("empty host firmware path"))
 }
 
-fn read_file(
-    mut file: RegularFile,
-    expected: Option<usize>,
-    limit: usize,
-) -> Result<Region, &'static str> {
+fn read_file(mut file: RegularFile, expected: Option<usize>, limit: usize) -> Result<Region> {
     let mut info = InfoBuffer([0; 1024]);
     let size = file
         .get_info::<FileInfo>(&mut info.0)
-        .map_err(|_| "cannot read bounded host firmware file metadata")?
+        .map_err(|_| refuse!("cannot read bounded host firmware file metadata"))?
         .file_size();
-    let length = usize::try_from(size).map_err(|_| "host firmware file size overflow")?;
+    let length = usize::try_from(size).map_err(|_| refuse!("host firmware file size overflow"))?;
     if length == 0 || length > limit || expected.is_some_and(|n| n != length) {
-        return Err("host firmware file length is outside its manifest/resource budget");
+        return Err(refuse!(
+            "host firmware file length is outside its manifest/resource budget"
+        ));
     }
     // Size and manifest-wide budgets are checked before this allocation.
     let physical = firmware::pages(length.div_ceil(PAGE))?;
@@ -129,19 +127,19 @@ fn read_file(
     while done < length {
         let count = file
             .read(&mut buffer[done..])
-            .map_err(|_| "cannot read host firmware file")?;
+            .map_err(|_| refuse!("cannot read host firmware file"))?;
         if count == 0 {
-            return Err("host firmware file truncated during read");
+            return Err(refuse!("host firmware file truncated during read"));
         }
         done += count;
     }
     let mut extra = [0];
     if file
         .read(&mut extra)
-        .map_err(|_| "cannot finish host firmware file")?
+        .map_err(|_| refuse!("cannot finish host firmware file"))?
         != 0
     {
-        return Err("host firmware file grew during read");
+        return Err(refuse!("host firmware file grew during read"));
     }
     Ok(Region {
         physical: physical as u64,
@@ -151,7 +149,7 @@ fn read_file(
 
 /// Absence alone is optional. Any unreadable/malformed present manifest or
 /// missing/corrupt resource is a boot refusal, with no alternate-volume search.
-pub fn read(root: &mut Directory) -> Result<Resources, &'static str> {
+pub fn read(root: &mut Directory) -> Result<Resources> {
     let smbios = smbios::capture();
     let mut wifi =
         [stela_boot_core::host_resources::wifi::Capture::default(); VARIABLE_DESCRIPTORS.len()];
@@ -187,14 +185,15 @@ pub fn read(root: &mut Directory) -> Result<Resources, &'static str> {
     // Parse/identity checks and the total budget precede every image allocation.
     for (slot, image) in resources.images.iter_mut().zip(&parsed.images) {
         let path = format!("{}/{}", manifest::DIRECTORY, image.path);
-        let file = open(root, &path)?.ok_or("host firmware manifest names a missing resource")?;
+        let file =
+            open(root, &path)?.ok_or(refuse!("host firmware manifest names a missing resource"))?;
         *slot = read_file(file, Some(image.length), manifest::MAX_IMAGE_BYTES)?;
     }
     // SAFETY: only this loader owns these permanent pages; identity alias is
     // currently mapped by firmware. Drop metadata before engine relocation.
     let catalog =
         unsafe { resources.catalog(|physical| physical, Some("before-ebs"), output::arguments) }?
-            .ok_or("missing host firmware catalog")?;
+            .ok_or(refuse!("missing host firmware catalog"))?;
     let (images, total) = catalog.inventory();
     output::arguments(format_args!(
         "HOST FIRMWARE phase=before-ebs images={images} bytes={total}\n"

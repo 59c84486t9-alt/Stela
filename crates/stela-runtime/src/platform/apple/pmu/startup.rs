@@ -7,9 +7,11 @@
 //! SRAM ownership. Starting requires a further native service/resource owner;
 //! no upload, descriptor, key or status read manufactures that owner.
 use super::{FirmwareStartup, firmware::FirmwareMemory};
+use crate::Result;
 use alloc::{vec, vec::Vec};
 use core::ops::Range;
 use sha2::Digest;
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 mod clock;
 mod integrity;
@@ -45,7 +47,7 @@ pub(super) struct Image {
     metadata: u16,
 }
 impl Image {
-    fn parse(bytes: &[u8], written: &[bool], metadata: u16) -> Result<Self, &'static str> {
+    fn parse(bytes: &[u8], written: &[bool], metadata: u16) -> Result<Self> {
         let end = written
             .iter()
             .rposition(|written| *written)
@@ -54,9 +56,9 @@ impl Image {
             || written[..end].iter().any(|written| !written)
             || end > bytes.len()
         {
-            return Err(
-                "PMIC loader requires a contiguous freshly written image span without holes",
-            );
+            return Err(refuse!(
+                "PMIC loader requires a contiguous freshly written image span without holes"
+            ));
         }
         let bytes = &bytes[..end];
         let header = &bytes[HEADER..HEADER + HEADER_BYTES];
@@ -64,16 +66,22 @@ impl Image {
             u32::from_le_bytes(header[offset..offset + 4].try_into().expect("header word"))
         };
         if word(0) != u32::from_le_bytes(*b"uuid") {
-            return Err("PMIC loader image has no qualified UUID descriptor");
+            return Err(refuse!(
+                "PMIC loader image has no qualified UUID descriptor"
+            ));
         }
         let configuration = word(8) as usize;
         let version = word(12) as usize;
         let metadata_offset = word(0x30) as usize;
         if configuration >= end || version >= end || metadata_offset >= end {
-            return Err("PMIC loader image descriptor lies outside committed bytes");
+            return Err(refuse!(
+                "PMIC loader image descriptor lies outside committed bytes"
+            ));
         }
         if metadata_offset > usize::from(u16::MAX) || metadata_offset as u16 != metadata {
-            return Err("PMIC loader metadata does not match its image descriptor");
+            return Err(refuse!(
+                "PMIC loader metadata does not match its image descriptor"
+            ));
         }
         Ok(Self {
             bytes: end,
@@ -108,7 +116,7 @@ impl Loader {
         profile: FirmwareStartup,
         capacity: usize,
         epoch: Option<PmicEpoch>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         Ok(Self {
             profile,
             phase: Phase::Created,
@@ -119,10 +127,10 @@ impl Loader {
         })
     }
 
-    pub fn check_time(&self, now: u64) -> Result<(), &'static str> {
+    pub fn check_time(&self, now: u64) -> Result<()> {
         self.clock.as_ref().map_or(Ok(()), |clock| clock.check(now))
     }
-    pub fn prepare_time(&mut self, now: u64) -> Result<Option<clock::Advance<'_>>, &'static str> {
+    pub fn prepare_time(&mut self, now: u64) -> Result<Option<clock::Advance<'_>>> {
         self.clock
             .as_mut()
             .map(|clock| clock.prepare(now))
@@ -149,7 +157,7 @@ impl Loader {
                 && u64::from(window.base) < end
         })
     }
-    pub fn read(&self, address: u16, bytes: usize) -> Result<Vec<u8>, &'static str> {
+    pub fn read(&self, address: u16, bytes: usize) -> Result<Vec<u8>> {
         let control = self.control();
         let value = match (address.wrapping_sub(control), bytes) {
             (4, 1)
@@ -208,7 +216,7 @@ impl Loader {
             }
             _ => None,
         };
-        value.map(|value| vec![value]).ok_or("PMIC loader read requires a qualified written control; identity/mode/key/startup service is unqualified")
+        value.map(|value| vec![value]).ok_or(refuse!("PMIC loader read requires a qualified written control; identity/mode/key/startup service is unqualified"))
     }
 
     pub fn prepare(
@@ -217,7 +225,7 @@ impl Loader {
         data: &[u8],
         memory: &FirmwareMemory,
         now: u64,
-    ) -> Result<Write, &'static str> {
+    ) -> Result<Write> {
         let control = self.control();
         let (key, value, lock) = self.key();
         if address == control + 4 && data == [0] {
@@ -255,7 +263,7 @@ impl Loader {
             return Ok(Write::Phase);
         }
         if address == control + 6 && data == [1] && self.phase == Phase::Locked {
-            let clock = self.clock.as_ref().ok_or("PMIC start requires its actual explicitly configured native execution/timer clock owner")?;
+            let clock = self.clock.as_ref().ok_or(refuse!("PMIC start requires its actual explicitly configured native execution/timer clock owner"))?;
             // Original Maverick image1 main 80e..818 configures timer3 with
             // request100000. This validates a real representable native
             // countdown deadline before any startup effect. It does not arm
@@ -272,14 +280,20 @@ impl Loader {
             }
             return Err(match self.profile {
                 FirmwareStartup::Maverick => {
-                    "PMIC start requires initialized native event/timer, channel and shared-service resource owners"
+                    refuse!(
+                        "PMIC start requires initialized native event/timer, channel and shared-service resource owners"
+                    )
                 }
                 FirmwareStartup::Monaco => {
-                    "PMIC start requires initialized native firmware hardware-input/calibration, event/timer and shared-service resource owners"
+                    refuse!(
+                        "PMIC start requires initialized native firmware hardware-input/calibration, event/timer and shared-service resource owners"
+                    )
                 }
             });
         }
-        Err("PMIC protected loader command, width, value or transaction order is unqualified")
+        Err(refuse!(
+            "PMIC protected loader command, width, value or transaction order is unqualified"
+        ))
     }
 
     pub fn commit(&mut self, write: Write) {
@@ -310,13 +324,15 @@ impl Loader {
             }
         }
     }
-    pub fn check_memory(&self, writing: bool) -> Result<(), &'static str> {
+    pub fn check_memory(&self, writing: bool) -> Result<()> {
         if self.phase == Phase::Uploading
             || !writing && matches!(self.phase, Phase::Sealed | Phase::Locked)
         {
             Ok(())
         } else {
-            Err("PMIC loader SRAM access requires its actual protected upload/readback transaction")
+            Err(refuse!(
+                "PMIC loader SRAM access requires its actual protected upload/readback transaction"
+            ))
         }
     }
     pub fn written(&mut self, range: Range<usize>) {

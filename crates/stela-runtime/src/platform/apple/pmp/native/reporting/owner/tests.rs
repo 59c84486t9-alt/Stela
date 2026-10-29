@@ -1,8 +1,10 @@
 use super::super::{getter, resources::Wake};
 use super::*;
+use crate::Result;
 use alloc::vec;
 use core::cell::Cell;
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 
 fn done<T>(value: T) -> Completion<T> {
     Completion::Retired {
@@ -22,7 +24,7 @@ impl Mapping for Ram {
             bytes: wire::REQUEST_BYTES,
         }
     }
-    fn synchronization_granule(&self) -> Result<u64, &'static str> {
+    fn synchronization_granule(&self) -> Result<u64> {
         Ok(64)
     }
     fn write(
@@ -36,7 +38,7 @@ impl Mapping for Ram {
             .copy_from_slice(bytes);
         self.events.borrow_mut().push("write");
         let refusal = if offset == 24 && self.fail_kind.replace(false) {
-            Some("authored post-kind-store diagnostic")
+            Some(refuse!("authored post-kind-store diagnostic"))
         } else {
             None
         };
@@ -154,7 +156,7 @@ impl Wake for Immediate {
         done(())
     }
 }
-fn step(owner: &mut Owner<Host>) -> Result<Progress, &'static str> {
+fn step(owner: &mut Owner<Host>) -> Result<Progress> {
     owner.advance(&mut Access::new(0, 1, &mut InterruptLatch::new()))
 }
 fn receive(owner: &Owner<Host>, payload: u64) -> Completion<()> {
@@ -290,7 +292,10 @@ fn ap_owned_ready_independent_ack_and_retired_kind_prefix_are_real() {
             })),
         )
         .unwrap();
-    assert_eq!(step(&mut owner), Err("authored post-kind-store diagnostic"));
+    assert_eq!(
+        step(&mut owner),
+        Err(refuse!("authored post-kind-store diagnostic"))
+    );
     assert_eq!(owner.used_bytes(), 0x68);
     assert_eq!(owner.record_count(), 0);
     assert_eq!(calls.get(), 0);
@@ -439,7 +444,7 @@ fn retired_getter_diagnostic_keeps_the_observed_value_without_a_second_call() {
             self.calls.set(self.calls.get() + 1);
             Completion::Retired {
                 value: self.value.get(),
-                refusal: Some("authored retired getter diagnostic"),
+                refusal: Some(refuse!("authored retired getter diagnostic")),
             }
         }
     }
@@ -458,7 +463,7 @@ fn retired_getter_diagnostic_keeps_the_observed_value_without_a_second_call() {
         .unwrap();
     let mut reached = false;
     for _ in 0..32 {
-        if step(&mut owner) == Err("authored retired getter diagnostic") {
+        if step(&mut owner) == Err(refuse!("authored retired getter diagnostic")) {
             reached = true;
             break;
         }
@@ -496,7 +501,7 @@ fn backend_identities_refuse_exhaustion_before_any_resource_effect() {
     owner.serial = u64::MAX;
     assert_eq!(
         owner.enter(false),
-        Err("IOReporting job identity exhausted")
+        Err(refuse!("IOReporting job identity exhausted"))
     );
     assert!(owner.resources.events.borrow().is_empty());
     assert!(owner.job.is_none());
@@ -505,7 +510,7 @@ fn backend_identities_refuse_exhaustion_before_any_resource_effect() {
     owner.epoch = u64::MAX;
     assert_eq!(
         owner.enter(false),
-        Err("IOReporting lifecycle epoch exhausted")
+        Err(refuse!("IOReporting lifecycle epoch exhausted"))
     );
     assert!(owner.resources.events.borrow().is_empty());
     owner.epoch = 0;
@@ -513,13 +518,13 @@ fn backend_identities_refuse_exhaustion_before_any_resource_effect() {
     owner.job.as_mut().unwrap().request.operation = u64::MAX;
     assert_eq!(
         step(&mut owner),
-        Err("IOReporting backend operation identity exhausted")
+        Err(refuse!("IOReporting backend operation identity exhausted"))
     );
     assert!(owner.resources.events.borrow().is_empty());
     assert_eq!(owner.job.as_ref().unwrap().request.operation, u64::MAX);
     assert_eq!(
         step(&mut owner),
-        Err("IOReporting backend operation identity exhausted")
+        Err(refuse!("IOReporting backend operation identity exhausted"))
     );
 }
 #[test]

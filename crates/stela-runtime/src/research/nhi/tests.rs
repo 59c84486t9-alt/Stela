@@ -1,7 +1,9 @@
 use super::*;
+use crate::Result;
 use alloc::rc::Rc;
 use core::cell::RefCell;
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 use {
     stela_contracts::dma::Iommu, stela_contracts::dma::Memory,
     stela_contracts::dma::test_support::Ram,
@@ -20,23 +22,18 @@ struct State {
 }
 struct Peer(Rc<RefCell<State>>);
 impl Consumer for Peer {
-    fn configure(
-        &mut self,
-        hop: usize,
-        dir: Direction,
-        options: Option<Options>,
-    ) -> Result<(), &'static str> {
+    fn configure(&mut self, hop: usize, dir: Direction, options: Option<Options>) -> Result<()> {
         let mut state = self.0.borrow_mut();
         if state.refuse_options {
-            return Err("test wire cannot implement requested mode");
+            return Err(refuse!("test wire cannot implement requested mode"));
         }
         state.configured.push((hop, dir, options));
         Ok(())
     }
-    fn transmit(&mut self, frame: Transmit<'_>) -> Result<Option<Accepted>, &'static str> {
+    fn transmit(&mut self, frame: Transmit<'_>) -> Result<Option<Accepted>> {
         let mut state = self.0.borrow_mut();
         if state.refuse_send {
-            return Err("test wire rejected frame before acceptance");
+            return Err(refuse!("test wire rejected frame before acceptance"));
         }
         state.sent.push((
             frame.hop,
@@ -51,14 +48,14 @@ impl Consumer for Peer {
             incoming: Vec::new(),
         }))
     }
-    fn poll(&mut self, _: u64, _: &[usize]) -> Result<(Vec<Frame>, Option<u64>), &'static str> {
+    fn poll(&mut self, _: u64, _: &[usize]) -> Result<(Vec<Frame>, Option<u64>)> {
         let mut state = self.0.borrow_mut();
         Ok((core::mem::take(&mut state.notifications), state.deadline))
     }
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         let mut state = self.0.borrow_mut();
         if state.refuse_reset {
-            return Err("test wire is not quiescent");
+            return Err(refuse!("test wire is not quiescent"));
         }
         state.resets += 1;
         state.notifications.clear();

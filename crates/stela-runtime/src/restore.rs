@@ -20,19 +20,24 @@ pub mod stream;
 pub mod ticket;
 pub mod tss;
 
-use alloc::{boxed::Box, format, string::String};
+use alloc::{
+    boxed::Box,
+    format,
+    string::{String, ToString},
+};
 use plist::Value;
+use stela_contracts::Refusal;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Invalid(&'static str),
     Limit(&'static str),
-    Transport(String),
-    Payload(String),
+    Transport(Refusal),
+    Payload(Refusal),
     /// Preserve the entire bounded message, including updater, arguments,
     /// DataPort and asynchronous context. Never a blank successful response.
     Refused {
-        reason: String,
+        reason: Refusal,
         request: Box<Value>,
     },
 }
@@ -49,12 +54,12 @@ impl Error {
             Self::Limit(what) => format!("over the limit of {what}"),
             Self::Transport(why) => format!("transport: {why}"),
             Self::Payload(why) => format!("payload: {why}"),
-            Self::Refused { reason, .. } => reason.clone(),
+            Self::Refused { reason, .. } => reason.to_string(),
         }
     }
 }
 pub type Result<T> = core::result::Result<T, Error>;
-pub fn refuse(reason: impl Into<String>, request: &Value) -> Error {
+pub fn refuse(reason: impl Into<Refusal>, request: &Value) -> Error {
     Error::Refused {
         reason: reason.into(),
         request: Box::new(request.clone()),

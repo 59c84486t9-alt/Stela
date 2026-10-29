@@ -14,7 +14,9 @@ use super::{
     Entropy,
     message::{self, Frame},
 };
+use crate::Result;
 use alloc::{boxed::Box, vec::Vec};
+use stela_contracts::refuse;
 
 const PING: u8 = 1;
 const STATUS: u8 = 2;
@@ -100,19 +102,23 @@ impl Rom {
         self.image = None;
     }
 
-    fn command(&mut self, frame: Frame) -> Result<Option<Frame>, &'static str> {
+    fn command(&mut self, frame: Frame) -> Result<Option<Frame>> {
         if !self.started {
-            return Err("SEPROM has not started");
+            return Err(refuse!("SEPROM has not started"));
         }
         if self.image.is_some() {
-            return Err("SEPROM image authentication is pending; sepOS is not active");
+            return Err(refuse!(
+                "SEPROM image authentication is pending; sepOS is not active"
+            ));
         }
         if frame.service != message::ROM {
             return Err(match frame.service {
-                message::CONTROL => "SEP control service requires authenticated native sepOS",
-                message::DISCOVERY => "SEP discovery requires authenticated native sepOS",
-                message::BOOT => "SEP shared-memory/timebase boot protocol is not modeled",
-                _ => "SEP application service is not modeled",
+                message::CONTROL => {
+                    refuse!("SEP control service requires authenticated native sepOS")
+                }
+                message::DISCOVERY => refuse!("SEP discovery requires authenticated native sepOS"),
+                message::BOOT => refuse!("SEP shared-memory/timebase boot protocol is not modeled"),
+                _ => refuse!("SEP application service is not modeled"),
             });
         }
         let reply = |opcode, parameter, data| {
@@ -130,7 +136,7 @@ impl Rom {
             PING | STATUS | GENERATE_NONCE | RANDOM | CAPTURE_IBIC
                 if frame.parameter != 0 || frame.data != 0 =>
             {
-                Err("SEPROM command has unsupported parameter or data")
+                Err(refuse!("SEPROM command has unsupported parameter or data"))
             }
             PING => Ok(reply(PONG, 0, 0)),
             STATUS => Ok(reply(STATUS_VALUE, 0, self.state as u32)),
@@ -142,16 +148,16 @@ impl Rom {
             }
             NONCE_WORD => {
                 if frame.data != 0 {
-                    return Err("SEPROM nonce-word data must be zero");
+                    return Err(refuse!("SEPROM nonce-word data must be zero"));
                 }
                 let nonce = self
                     .nonce
                     .as_ref()
-                    .ok_or("SEPROM nonce has not been generated")?;
+                    .ok_or(refuse!("SEPROM nonce has not been generated"))?;
                 let start = usize::from(frame.parameter) * WORD_BYTES;
                 let bytes = nonce
                     .get(start..start + WORD_BYTES)
-                    .ok_or("SEPROM nonce word index is out of range")?;
+                    .ok_or(refuse!("SEPROM nonce word index is out of range"))?;
                 Ok(reply(
                     NONCE_VALUE,
                     0,
@@ -165,26 +171,28 @@ impl Rom {
                 Ok(reply(RANDOM_VALUE, 0, u32::from_le_bytes(bytes)))
             }
             CAPTURE_IBIC => Ok(reply(IBIC_UNAVAILABLE, 0, u32::from(CAPTURE_IBIC))),
-            IBIC_WORD => Err("Stela's SEPROM exposes no Apple iBIC key"),
+            IBIC_WORD => Err(refuse!("Stela's SEPROM exposes no Apple iBIC key")),
             BOOT_TZ0 => {
                 if self.state != State::Rom
                     || frame.data != 0
                     || ![FIRMWARE_SEPI, FIRMWARE_RSEP].contains(&frame.parameter)
                 {
-                    return Err("SEPROM BootTz0 state, firmware type or data is unsupported");
+                    return Err(refuse!(
+                        "SEPROM BootTz0 state, firmware type or data is unsupported"
+                    ));
                 }
                 self.state = State::Tz0;
                 Ok(reply(TZ0_READY, 0, 0))
             }
             BOOT_IMAGE => {
                 if self.state != State::Tz0 {
-                    return Err("SEPROM image load before BootTz0");
+                    return Err(refuse!("SEPROM image load before BootTz0"));
                 }
                 // The lower parameter nibble is the firmware type. Slot
                 // support in the upper nibble is a Sandcat protocol, not
                 // evidence that this ROM can authenticate a slotted image.
                 if ![FIRMWARE_SEPI, FIRMWARE_RSEP].contains(&frame.parameter) || frame.data == 0 {
-                    return Err("SEPROM image type, slot or address is unsupported");
+                    return Err(refuse!("SEPROM image type, slot or address is unsupported"));
                 }
                 self.image = Some(ImageRequest {
                     address: u64::from(frame.data) << IMAGE_PAGE_SHIFT,
@@ -195,25 +203,27 @@ impl Rom {
                 // authentication refusal after reading through dart-sep.
                 Ok(None)
             }
-            SEPART => Err("SEPROM SEPART validation is not modeled"),
-            RESUME => Err("SEPROM resume requires persisted authenticated sepOS state"),
-            TMM => Err("SEPROM TMM manifest authentication is not modeled"),
-            PATCH => Err("SEPROM patch authentication is not modeled"),
-            _ => Err("SEPROM command is not modeled"),
+            SEPART => Err(refuse!("SEPROM SEPART validation is not modeled")),
+            RESUME => Err(refuse!(
+                "SEPROM resume requires persisted authenticated sepOS state"
+            )),
+            TMM => Err(refuse!("SEPROM TMM manifest authentication is not modeled")),
+            PATCH => Err(refuse!("SEPROM patch authentication is not modeled")),
+            _ => Err(refuse!("SEPROM command is not modeled")),
         }
     }
 }
 
 impl Firmware for Rom {
-    fn start(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn start(&mut self, _: &mut Vec<Message>) -> Result<()> {
         if self.started {
-            return Err("SEPROM restart is not modeled");
+            return Err(refuse!("SEPROM restart is not modeled"));
         }
         self.started = true;
         Ok(())
     }
 
-    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<()> {
         let frame = Frame::from_mailbox(message)?;
         if let Some(reply) = self.command(frame)? {
             outbox.push(reply.mailbox());
@@ -228,7 +238,7 @@ mod tests {
 
     struct Sequence(u8);
     impl Entropy for Sequence {
-        fn fill(&mut self, bytes: &mut [u8]) -> Result<(), &'static str> {
+        fn fill(&mut self, bytes: &mut [u8]) -> Result<()> {
             for byte in bytes {
                 *byte = self.0;
                 self.0 = self.0.wrapping_add(1);
@@ -245,12 +255,7 @@ mod tests {
         rom
     }
 
-    fn send(
-        rom: &mut Rom,
-        opcode: u8,
-        parameter: u8,
-        data: u32,
-    ) -> Result<Vec<Frame>, &'static str> {
+    fn send(rom: &mut Rom, opcode: u8, parameter: u8, data: u32) -> Result<Vec<Frame>> {
         let mut outbox = Vec::new();
         rom.receive(
             Frame {
@@ -327,9 +332,9 @@ mod tests {
     fn entropy_failure_does_not_replace_the_previous_nonce_or_send_a_reply() {
         struct Partial;
         impl Entropy for Partial {
-            fn fill(&mut self, bytes: &mut [u8]) -> Result<(), &'static str> {
+            fn fill(&mut self, bytes: &mut [u8]) -> Result<()> {
                 bytes[0] = 99;
-                Err("entropy unavailable")
+                Err(refuse!("entropy unavailable"))
             }
         }
         let mut rom = booted();
@@ -338,7 +343,7 @@ mod tests {
         rom.entropy = Box::new(Partial);
         assert_eq!(
             send(&mut rom, GENERATE_NONCE, 0, 0),
-            Err("entropy unavailable")
+            Err(refuse!("entropy unavailable"))
         );
         assert_eq!(send(&mut rom, NONCE_WORD, 0, 0).unwrap(), before);
         assert!(send(&mut rom, RANDOM, 0, 0).is_err());

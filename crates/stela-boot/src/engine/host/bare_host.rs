@@ -2,6 +2,7 @@
 //! and waiting.
 
 use super::*;
+use stela_contracts::refuse;
 
 /// The engine's handle; mutable native state belongs to this host processor.
 pub struct BareHost<'a> {
@@ -114,9 +115,9 @@ impl Host for BareHost<'_> {
         write: bool,
     ) -> Result<(), stela_engine::machine::engine::DmaError> {
         let ram = state().registered_ram.as_ref().ok_or(
-            stela_engine::machine::engine::DmaError::Unsupported(
-                "canonical DMA RAM owner is not installed",
-            ),
+            stela_engine::machine::engine::DmaError::Unsupported(refuse!(
+                "canonical DMA RAM owner is not installed"
+            )),
         )?;
         ram.check_dma_range(physical, bytes, write)
             .map_err(|_| stela_engine::machine::engine::DmaError::Memory)

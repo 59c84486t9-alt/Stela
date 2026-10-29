@@ -122,6 +122,9 @@
 //! disarmed: capture/wake behavior while the physical clock is stopped is
 //! unchecked. Software pending, current external levels, masks, routes and
 //! timestamp history remain owned. Supply loss and physical reset refuse.
+use crate::Result;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 
 #[cfg(test)]
 use stela_soc_data::aic::AIC2_DIE_STRIDE;
@@ -176,9 +179,9 @@ const EVENT_TYPE_IRQ: u32 = 1 << 16;
 
 use stela_soc_data::aic::Aic2Config;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Aic2Error {
-    InvalidConfig(&'static str),
+    InvalidConfig(Refusal),
     UnknownInput(AicInput),
 }
 
@@ -240,17 +243,16 @@ impl Aic2 {
     /// the last.
     pub fn stacked(config: Aic2Config, dies: u8) -> Result<Self, Aic2Error> {
         let layout = Aic2Layout::stacked(&config, dies).ok_or(Aic2Error::InvalidConfig(
-            "AIC contiguous register layout overflows",
+            refuse!("AIC contiguous register layout overflows"),
         ))?;
-        let last = layout
-            .dies
-            .last()
-            .ok_or(Aic2Error::InvalidConfig("an AIC has at least one die"))?;
+        let last = layout.dies.last().ok_or(Aic2Error::InvalidConfig(refuse!(
+            "an AIC has at least one die"
+        )))?;
         let end = last.hardware_state + 4 * u64::from(config.max_irq / 32);
         if config.event_offset < end {
-            return Err(Aic2Error::InvalidConfig(
-                "the event register must follow the per-die arrays",
-            ));
+            return Err(Aic2Error::InvalidConfig(refuse!(
+                "the event register must follow the per-die arrays"
+            )));
         }
         Self::new_with_layout(config, layout)
     }
@@ -261,20 +263,20 @@ impl Aic2 {
     pub fn new_with_layout(config: Aic2Config, layout: Aic2Layout) -> Result<Self, Aic2Error> {
         let invalid = |reason| Err(Aic2Error::InvalidConfig(reason));
         if config.max_irq == 0 || !config.max_irq.is_multiple_of(32) {
-            return invalid("MAX_IRQ must be a nonzero multiple of 32");
+            return invalid(refuse!("MAX_IRQ must be a nonzero multiple of 32"));
         }
         if config.nr_irq == 0 || config.nr_irq > config.max_irq {
-            return invalid("NR_IRQ must be in 1..=MAX_IRQ");
+            return invalid(refuse!("NR_IRQ must be in 1..=MAX_IRQ"));
         }
         if config.cpus == 0 || config.cpus > 64 {
-            return invalid("the CPU count must be in 1..=64");
+            return invalid(refuse!("the CPU count must be in 1..=64"));
         }
         let all_cpus = u64::MAX >> (64 - config.cpus);
         if config.default_cpus & !all_cpus != 0 {
-            return invalid("a CPU set names a CPU beyond the CPU count");
+            return invalid(refuse!("a CPU set names a CPU beyond the CPU count"));
         }
         if config.irq_config <= CONFIG || !config.irq_config.is_multiple_of(4) {
-            return invalid("the IRQ_CFG array must be a word after CONFIG");
+            return invalid(refuse!("the IRQ_CFG array must be a word after CONFIG"));
         }
         if config.timestamps != 0
             && TIMESTAMP_STRIDE
@@ -282,7 +284,9 @@ impl Aic2 {
                 .and_then(|bytes| config.timestamp_base.checked_add(bytes))
                 .is_none_or(|end| end > config.irq_config)
         {
-            return invalid("the timestamp slots must end before the IRQ_CFG array");
+            return invalid(refuse!(
+                "the timestamp slots must end before the IRQ_CFG array"
+            ));
         }
         let span = layout.validate(&config).map_err(Aic2Error::InvalidConfig)?;
         let words = usize::from(config.max_irq / 32) * layout.dies.len();
@@ -345,9 +349,9 @@ impl Aic2 {
     #[cfg(test)]
     pub fn apply_ext_intr_cfg(&mut self, property: &[u8]) -> Result<(), Aic2Error> {
         if !property.len().is_multiple_of(3) {
-            return Err(Aic2Error::InvalidConfig(
-                "aic-ext-intr-cfg is not a list of triples",
-            ));
+            return Err(Aic2Error::InvalidConfig(refuse!(
+                "aic-ext-intr-cfg is not a list of triples"
+            )));
         }
         // Validate the whole firmware property before applying any entry.
         for entry in property.as_chunks::<3>().0 {
@@ -378,22 +382,26 @@ impl Aic2 {
         usize::from(input.die) * usize::from(self.config.max_irq) + usize::from(input.irq)
     }
 
-    fn check_target(target: u32) -> Result<(), &'static str> {
+    fn check_target(target: u32) -> Result<()> {
         if target & !IRQ_CFG_TARGET != 0 {
-            return Err("IRQ_CFG TARGET has only four bits");
+            return Err(refuse!("IRQ_CFG TARGET has only four bits"));
         }
         if target != 0 {
-            return Err("nonzero IRQ_CFG TARGET destination selectors are unqualified");
+            return Err(refuse!(
+                "nonzero IRQ_CFG TARGET destination selectors are unqualified"
+            ));
         }
         Ok(())
     }
-    fn check_irq_config(value: u32) -> Result<(), &'static str> {
+    fn check_irq_config(value: u32) -> Result<()> {
         if value & !(IRQ_CFG_TARGET | IRQ_CFG_DELAY_IDX) != 0 {
-            return Err("AIC2 IRQ_CFG reserved field is not modeled");
+            return Err(refuse!("AIC2 IRQ_CFG reserved field is not modeled"));
         }
         Self::check_target(value & IRQ_CFG_TARGET)?;
         if value & IRQ_CFG_DELAY_IDX != 0 {
-            return Err("nonzero IRQ_CFG DELAY_IDX delay/priority effects are unqualified");
+            return Err(refuse!(
+                "nonzero IRQ_CFG DELAY_IDX delay/priority effects are unqualified"
+            ));
         }
         Ok(())
     }
@@ -518,7 +526,7 @@ impl Aic2 {
             (1 << count) - 1
         }
     }
-    fn read_register(&mut self, register: Register, cpu: CpuIndex) -> Result<u32, &'static str> {
+    fn read_register(&mut self, register: Register, cpu: CpuIndex) -> Result<u32> {
         Ok(match register {
             Register::Version => u32::from(self.config.version),
             Register::Info1 => {
@@ -540,7 +548,7 @@ impl Aic2 {
             Register::TimestampHigh(slot) => (self.timestamps[slot].counter >> 32) as u32,
             Register::Event => {
                 if cpu >= self.config.cpus {
-                    return Err("event read from a CPU the AIC does not serve");
+                    return Err(refuse!("event read from a CPU the AIC does not serve"));
                 }
                 match self.pending_for(cpu) {
                     Some(irq) => {
@@ -555,11 +563,13 @@ impl Aic2 {
             }
         })
     }
-    fn write_register(&mut self, register: Register, value: u32) -> Result<(), &'static str> {
+    fn write_register(&mut self, register: Register, value: u32) -> Result<()> {
         match register {
             Register::Config => {
                 if value & !CONFIG_ENABLE != 0 {
-                    return Err("AIC2 CONFIG fields other than ENABLE are not modeled");
+                    return Err(refuse!(
+                        "AIC2 CONFIG fields other than ENABLE are not modeled"
+                    ));
                 }
                 self.enabled = value & CONFIG_ENABLE != 0;
             }
@@ -574,27 +584,31 @@ impl Aic2 {
                     Array::SoftwareClear => self.software[word] &= !bits,
                     Array::MaskSet => self.mask[word] |= bits,
                     Array::MaskClear => self.mask[word] &= !bits,
-                    Array::HardwareState => return Err("AIC2 HW_STATE is read-only"),
+                    Array::HardwareState => return Err(refuse!("AIC2 HW_STATE is read-only")),
                 }
             }
             Register::Version | Register::Info1 | Register::Info3 => {
-                return Err("AIC2 capability registers are read-only");
+                return Err(refuse!("AIC2 capability registers are read-only"));
             }
-            Register::Event => return Err("AIC2 event register is read-only"),
+            Register::Event => return Err(refuse!("AIC2 event register is read-only")),
             Register::TimestampConfig(slot) => {
                 if value & !(TIMESTAMP_ENABLE | TIMESTAMP_DIE | TIMESTAMP_IRQ) != 0 {
-                    return Err("AIC2 timestamp configuration reserved field is not modeled");
+                    return Err(refuse!(
+                        "AIC2 timestamp configuration reserved field is not modeled"
+                    ));
                 }
                 if value & TIMESTAMP_ENABLE != 0
                     && ((value & TIMESTAMP_DIE) >> INFO_DIE_SHIFT >= self.layout.dies.len() as u32
                         || value & TIMESTAMP_IRQ >= u32::from(self.config.nr_irq))
                 {
-                    return Err("AIC2 timestamp names an IRQ the model does not have");
+                    return Err(refuse!(
+                        "AIC2 timestamp names an IRQ the model does not have"
+                    ));
                 }
                 self.timestamps[slot].config = value;
             }
             Register::TimestampLow(_) | Register::TimestampHigh(_) => {
-                return Err("AIC2 timestamps are read-only");
+                return Err(refuse!("AIC2 timestamps are read-only"));
             }
         }
         Ok(())
@@ -602,14 +616,16 @@ impl Aic2 {
 }
 
 impl Lifecycle for Aic2 {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         if proposed.reset {
-            return Err("AIC physical reset and interrupt/timestamp restoration are unqualified");
+            return Err(refuse!(
+                "AIC physical reset and interrupt/timestamp restoration are unqualified"
+            ));
         }
         if !proposed.powered {
-            return Err(
-                "AIC supply loss, input wake capture and physical retention are unqualified",
-            );
+            return Err(refuse!(
+                "AIC supply loss, input wake capture and physical retention are unqualified"
+            ));
         }
         if (!proposed.clocked || proposed.quiesced)
             && (self.enabled
@@ -618,9 +634,9 @@ impl Lifecycle for Aic2 {
                     .iter()
                     .any(|slot| slot.config & TIMESTAMP_ENABLE != 0))
         {
-            return Err(
-                "AIC pause with IRQ delivery or timestamp capture armed has unqualified wake behavior",
-            );
+            return Err(refuse!(
+                "AIC pause with IRQ delivery or timestamp capture armed has unqualified wake behavior"
+            ));
         }
         Ok(())
     }
@@ -650,18 +666,18 @@ impl MmioDevice for Aic2 {
         width: Width,
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         if !self.lifecycle.clocked {
-            return Err(fail(
-                "AIC MMIO while its physical clock is stopped is unqualified",
-            ));
+            return Err(fail(refuse!(
+                "AIC MMIO while its physical clock is stopped is unqualified"
+            )));
         }
         if width != Width::Word {
-            return Err(fail("AIC2 registers are 32-bit"));
+            return Err(fail(refuse!("AIC2 registers are 32-bit")));
         }
         let register = self
             .decode(offset)
-            .ok_or_else(|| fail(Self::unknown_reason(offset)))?;
+            .ok_or_else(|| fail(Self::unknown_reason(offset).into()))?;
         let value = self.read_register(register, access.cpu).map_err(fail)?;
         self.update(access);
         Ok(u64::from(value))
@@ -673,23 +689,23 @@ impl MmioDevice for Aic2 {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         if !self.lifecycle.clocked {
-            return Err(fail(
-                "AIC MMIO while its physical clock is stopped is unqualified",
-            ));
+            return Err(fail(refuse!(
+                "AIC MMIO while its physical clock is stopped is unqualified"
+            )));
         }
         if self.lifecycle.quiesced {
-            return Err(fail(
-                "AIC register changes while native service is quiesced are unqualified",
-            ));
+            return Err(fail(refuse!(
+                "AIC register changes while native service is quiesced are unqualified"
+            )));
         }
         if width != Width::Word {
-            return Err(fail("AIC2 registers are 32-bit"));
+            return Err(fail(refuse!("AIC2 registers are 32-bit")));
         }
         let register = self
             .decode(offset)
-            .ok_or_else(|| fail(Self::unknown_reason(offset)))?;
+            .ok_or_else(|| fail(Self::unknown_reason(offset).into()))?;
         self.write_register(register, value as u32).map_err(fail)?;
         self.update(access);
         Ok(())

@@ -6,6 +6,8 @@
 //! preserve the complete recovered software records. They do not implement
 //! native region matching, tag normalization, DMA offset effects or faults,
 //! and expose no MMIO profile or invented absent-property reset image.
+use crate::Result;
+use stela_contracts::refuse;
 
 const PAGE: u64 = 0x4000;
 const ADDRESS_LIMIT: u64 = 1 << 42;
@@ -74,9 +76,11 @@ impl Tagger {
     /// Parse the original complete handoff property, keeping its opaque
     /// word and dead-page value. There is no absent-property constructor:
     /// an original restore DT is not an observed post-mBoot register image.
-    pub fn parse(property: &[u8], inclusive: bool) -> Result<Self, &'static str> {
+    pub fn parse(property: &[u8], inclusive: bool) -> Result<Self> {
         if property.len() != TAG_PROPERTY_BYTES {
-            return Err("gen3 DART tz handoff property must contain exactly 56 bytes");
+            return Err(refuse!(
+                "gen3 DART tz handoff property must contain exactly 56 bytes"
+            ));
         }
         let words: [u32; 14] = core::array::from_fn(|index| {
             u32::from_le_bytes(property[index * 4..index * 4 + 4].try_into().unwrap())
@@ -84,7 +88,9 @@ impl Tagger {
         let select = words[0];
         let config = words[1];
         if select > 1 || config > 7 {
-            return Err("gen3 DART tz selector or region-enable mask exceeds the source contract");
+            return Err(refuse!(
+                "gen3 DART tz selector or region-enable mask exceeds the source contract"
+            ));
         }
         let regions = core::array::from_fn(|index| TagRegion {
             start: words[2 + index * 3],
@@ -94,7 +100,9 @@ impl Tagger {
         for (index, region) in regions.iter().enumerate() {
             if config & (1 << index) == 0 {
                 if region.words() != [0; 3] {
-                    return Err("gen3 DART disabled tz region has nonzero bounds or offset");
+                    return Err(refuse!(
+                        "gen3 DART disabled tz region has nonzero bounds or offset"
+                    ));
                 }
             } else if region.start == 0
                 || region.end == 0
@@ -104,7 +112,9 @@ impl Tagger {
                     .checked_add(u32::from(inclusive))
                     .is_none_or(|end| region.start >= end)
             {
-                return Err("gen3 DART enabled tz region has unsupported bounds or nonzero offset");
+                return Err(refuse!(
+                    "gen3 DART enabled tz region has unsupported bounds or nonzero offset"
+                ));
             }
         }
         Ok(Self {
@@ -138,11 +148,7 @@ impl Tagger {
     /// it never normalizes a DMA address or validates the physical dead-page
     /// value in the property. In particular the original upper comparison
     /// is inclusive after its separate `inclusive-tz-range` adjustment.
-    pub fn validate_dead_index(
-        self,
-        index: u32,
-        level: DeadIndexLevel,
-    ) -> Result<(), &'static str> {
+    pub fn validate_dead_index(self, index: u32, level: DeadIndexLevel) -> Result<()> {
         let (mask, shift) = level.projection();
         for (slot, region) in self.regions.iter().enumerate() {
             if self.config & (1 << slot) == 0 {
@@ -159,7 +165,9 @@ impl Tagger {
                 return Ok(());
             }
         }
-        Err("gen3 DART dead-table index is outside its enabled TZ region projections")
+        Err(refuse!(
+            "gen3 DART dead-table index is outside its enabled TZ region projections"
+        ))
     }
 
     pub fn property(self) -> [u8; TAG_PROPERTY_BYTES] {
@@ -187,26 +195,36 @@ impl Tagger {
         parameters4: u32,
         registers: Option<&TagRegisters>,
         locks_required: bool,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if parameters4 & 4 == 0 {
             return if self.dead_page == 0 {
                 Ok(())
             } else {
-                Err("gen3 DART tz dead page requires native tagger capability")
+                Err(refuse!(
+                    "gen3 DART tz dead page requires native tagger capability"
+                ))
             };
         }
-        let registers = registers.ok_or("gen3 DART tagger register observations are missing")?;
+        let registers = registers.ok_or(refuse!(
+            "gen3 DART tagger register observations are missing"
+        ))?;
         if registers.protect & TAG_PROTECTION != TAG_PROTECTION
             || (locks_required && registers.lock & TAG_PROTECTION != TAG_PROTECTION)
         {
-            return Err("gen3 DART tz configuration is not protected and locked as required");
+            return Err(refuse!(
+                "gen3 DART tz configuration is not protected and locked as required"
+            ));
         }
         if registers.select & 1 != self.select || registers.config & 7 != self.config {
-            return Err("gen3 DART tz selector or enabled regions disagree with the handoff");
+            return Err(refuse!(
+                "gen3 DART tz selector or enabled regions disagree with the handoff"
+            ));
         }
         for (expected, actual) in self.regions.iter().zip(registers.regions) {
             if expected.words() != actual.map(|word| word & REGION_ADDRESS) {
-                return Err("gen3 DART tz region registers disagree with the handoff");
+                return Err(refuse!(
+                    "gen3 DART tz region registers disagree with the handoff"
+                ));
             }
         }
         Ok(())
@@ -247,7 +265,7 @@ pub enum AddressAction {
 }
 
 impl AddressRegion {
-    pub fn construct(request: AddressRequest) -> Result<Self, &'static str> {
+    pub fn construct(request: AddressRequest) -> Result<Self> {
         let (input, output, bytes, control) = match request {
             AddressRequest::Range {
                 input,
@@ -257,12 +275,16 @@ impl AddressRegion {
             AddressRequest::Zero => (0, 0, 0, 2),
         };
         if (input | output | bytes) & (PAGE - 1) != 0 {
-            return Err("gen3 DART address-region construction requires 16 KiB alignment");
+            return Err(refuse!(
+                "gen3 DART address-region construction requires 16 KiB alignment"
+            ));
         }
         // The original final-page calculation uses 32-bit (size - 1).
         // Exactly 4 GiB fits that count; larger sizes would truncate.
         if bytes > 1 << 32 {
-            return Err("gen3 DART address-region size exceeds the recovered constructor width");
+            return Err(refuse!(
+                "gen3 DART address-region size exceeds the recovered constructor width"
+            ));
         }
         // These explicit validation bounds prevent unmodeled truncation;
         // the original local constructor itself checks only alignment.
@@ -272,9 +294,9 @@ impl AddressRegion {
                     .checked_add(bytes)
                     .is_none_or(|end| end > ADDRESS_LIMIT)
             {
-                return Err(
-                    "gen3 DART address-region construction exceeds its recovered address width",
-                );
+                return Err(refuse!(
+                    "gen3 DART address-region construction exceeds its recovered address width"
+                ));
             }
         }
         let start = (input >> 12) as u32;
@@ -300,9 +322,11 @@ impl AddressRegion {
         [self.control, self.start, self.last, self.offset]
     }
 
-    pub fn register_offset(index: usize, parameters_c: u32) -> Result<u64, &'static str> {
+    pub fn register_offset(index: usize, parameters_c: u32) -> Result<u64> {
         if index >= (parameters_c >> 28) as usize {
-            return Err("gen3 DART address-region index exceeds its native record count");
+            return Err(refuse!(
+                "gen3 DART address-region index exceeds its native record count"
+            ));
         }
         Ok(0x4400 + index as u64 * 0x40)
     }
@@ -326,16 +350,20 @@ impl AddressRegion {
         actual: &AddressRegisters,
         protect: u32,
         domain_lock: u32,
-    ) -> Result<AddressAction, &'static str> {
+    ) -> Result<AddressAction> {
         if actual.lock & 1 != 0 {
             return if self.bounds_match(actual) {
                 Ok(AddressAction::Frozen)
             } else {
-                Err("gen3 DART frozen address-region record disagrees with its construction")
+                Err(refuse!(
+                    "gen3 DART frozen address-region record disagrees with its construction"
+                ))
             };
         }
         if (protect | domain_lock) & ADDRESS_PROTECTION != 0 {
-            return Err("gen3 DART address-region construction requires unprotected domain 1");
+            return Err(refuse!(
+                "gen3 DART address-region construction requires unprotected domain 1"
+            ));
         }
         Ok(if self.matches(actual) {
             AddressAction::Verify
@@ -346,16 +374,14 @@ impl AddressRegion {
 
     /// Verify fresh observations after programming and an optional lock.
     /// Barriers, writes and observations belong to the owning boundary.
-    pub fn verify(
-        self,
-        actual: &AddressRegisters,
-        lock_requested: bool,
-    ) -> Result<(), &'static str> {
+    pub fn verify(self, actual: &AddressRegisters, lock_requested: bool) -> Result<()> {
         if actual.enable & 1 == 0
             || (lock_requested && actual.lock & 1 == 0)
             || !self.matches(actual)
         {
-            return Err("gen3 DART address-region publication has not reached its expected state");
+            return Err(refuse!(
+                "gen3 DART address-region publication has not reached its expected state"
+            ));
         }
         Ok(())
     }

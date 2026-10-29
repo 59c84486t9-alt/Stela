@@ -1,8 +1,10 @@
 use super::super::super::scanout::{Mode, PixelFormat};
 use super::super::swap::tests::submission;
 use super::*;
+use crate::Result;
 use alloc::rc::Rc;
 use core::cell::RefCell;
+use stela_contracts::refuse;
 
 const MODE: Mode = Mode {
     width: 4,
@@ -21,7 +23,7 @@ impl Scanout for TestScreen {
     fn mode(&self) -> Mode {
         self.1.unwrap_or(FULL_HD)
     }
-    fn present(&mut self, rows: &[u8]) -> Result<(), &'static str> {
+    fn present(&mut self, rows: &[u8]) -> Result<()> {
         self.0.borrow_mut().push(rows.to_vec());
         Ok(())
     }
@@ -31,7 +33,7 @@ fn methods() -> Methods {
     Methods::new(Box::new(TestScreen::default()))
 }
 
-fn returned(step: Result<Step<Methods>, &'static str>) -> Vec<u8> {
+fn returned(step: Result<Step<Methods>>) -> Vec<u8> {
     match step {
         Ok(Step::Return(bytes)) => bytes,
         Ok(Step::Call { .. }) => panic!("expected a return, got a callback"),
@@ -534,7 +536,7 @@ fn submit_refusal_keeps_accepted_swap(mutate: impl FnOnce(&mut [u8]), reason: &s
         .call(*b"A407", &refused, 0xc)
         .err()
         .expect("unsupported submission refused");
-    assert!(error.contains(reason), "{error}");
+    assert!(error.to_string().contains(reason), "{error}");
     assert_eq!(methods.open_swap, Some(id));
     assert_eq!(methods.planes.as_slice(), planes);
     assert_eq!(methods.frames, frames);
@@ -590,11 +592,11 @@ fn failed_presents_keep_swap_order_until_abort() {
         fn mode(&self) -> Mode {
             MODE
         }
-        fn present(&mut self, rows: &[u8]) -> Result<(), &'static str> {
+        fn present(&mut self, rows: &[u8]) -> Result<()> {
             let mut attempts = self.attempts.borrow_mut();
             *attempts += 1;
             if *attempts == 1 {
-                return Err("sink temporarily unavailable");
+                return Err(refuse!("sink temporarily unavailable"));
             }
             self.frames.borrow_mut().push(rows.to_vec());
             Ok(())
@@ -628,7 +630,10 @@ fn failed_presents_keep_swap_order_until_abort() {
         bytes.fill(0x11);
         true
     };
-    assert_eq!(methods.present(read), Err("sink temporarily unavailable"));
+    assert_eq!(
+        methods.present(read),
+        Err(refuse!("sink temporarily unavailable"))
+    );
     assert!(methods.frame_pending() && !methods.callback_pending());
     assert!(frames.borrow().is_empty());
     methods.present(read).unwrap();

@@ -1,7 +1,9 @@
 //! Trace destination: DMA mappings, source work and native context.
 use super::*;
+use crate::Result;
 use alloc::collections::VecDeque;
 use core::sync::atomic::{Ordering, fence};
+use stela_contracts::refuse;
 pub(super) struct Shared {
     pub init_started: Cell<bool>,
     // Product of the initializer's terminal return. The trace
@@ -55,12 +57,12 @@ impl Shared {
     pub fn started(&self) -> bool {
         self.mailbox.borrow().started()
     }
-    fn wake(&self) -> Result<(), &'static str> {
+    fn wake(&self) -> Result<()> {
         let works = self.work.borrow();
-        let work = works.as_ref().ok_or("trace actual Work absent")?;
+        let work = works.as_ref().ok_or(refuse!("trace actual Work absent"))?;
         runtime(&self.runtime)?.wake(work).map_err(schedule_error)
     }
-    pub fn advance_lifecycle(&self, a: &mut Access<'_>) -> Result<(), &'static str> {
+    pub fn advance_lifecycle(&self, a: &mut Access<'_>) -> Result<()> {
         if let Some(handle) = self.lifecycle.borrow().as_ref() {
             runtime(&self.runtime)?
                 .invoke(handle, a)
@@ -92,7 +94,7 @@ impl trace::Backend for Resources {
         match e {
             trace::Effect::RegisterWork { priority } => {
                 if priority != 15 {
-                    return Completion::Refused("trace source Work priority differs");
+                    return Completion::Refused(refuse!("trace source Work priority differs"));
                 }
                 if self.shared.work.borrow().is_none() {
                     let work = match r.bind_work(
@@ -113,7 +115,9 @@ impl trace::Backend for Resources {
             }
             trace::Effect::BindEndpoint { endpoint } => {
                 if endpoint != trace::ENDPOINT || self.shared.bound.get() {
-                    return Completion::Refused("trace endpoint binding is duplicate or foreign");
+                    return Completion::Refused(refuse!(
+                        "trace endpoint binding is duplicate or foreign"
+                    ));
                 }
                 if !self.shared.started() {
                     return Completion::Busy { deadline: None };
@@ -123,7 +127,9 @@ impl trace::Backend for Resources {
             }
             trace::Effect::RegisterLifecycle { slot } => {
                 if slot != 0 || self.shared.lifecycle.borrow().is_some() {
-                    return Completion::Refused("trace lifecycle slot is duplicate or unsupported");
+                    return Completion::Refused(refuse!(
+                        "trace lifecycle slot is duplicate or unsupported"
+                    ));
                 }
                 match r.register_immediate(
                     "trace actual source lifecycle",
@@ -148,7 +154,9 @@ impl trace::Backend for Resources {
             },
             trace::Effect::Send { endpoint, message } => {
                 if endpoint != trace::ENDPOINT || !self.shared.bound.get() {
-                    return Completion::Refused("trace send lacks actual endpoint binding");
+                    return Completion::Refused(refuse!(
+                        "trace send lacks actual endpoint binding"
+                    ));
                 }
                 if !self.shared.started() {
                     return Completion::Busy { deadline: None };
@@ -171,7 +179,9 @@ impl trace::Backend for Resources {
                 let mut drain = self.shared.drain.borrow_mut();
                 if let Some((prior, _)) = drain.as_ref() {
                     if !prior.same_operation(request) {
-                        return Completion::Refused("trace retained drain request changed");
+                        return Completion::Refused(refuse!(
+                            "trace retained drain request changed"
+                        ));
                     }
                 } else {
                     let i = match current(&self.shared.runtime) {
@@ -287,7 +297,7 @@ impl scheduler::Callback for Worker {
             .work
             .borrow()
             .as_ref()
-            .ok_or("trace actual Work lost")
+            .ok_or(refuse!("trace actual Work lost"))
             .and_then(|w| w.validate_dispatch(i).map_err(schedule_error))
         {
             return Completion::Refused(e);
@@ -298,7 +308,9 @@ impl scheduler::Callback for Worker {
         };
         let mut trace = match cell.try_borrow_mut() {
             Ok(v) => v,
-            Err(_) => return Completion::Refused("trace owner is executing another caller"),
+            Err(_) => {
+                return Completion::Refused(refuse!("trace owner is executing another caller"));
+            }
         };
         if !self.shared.init_complete.get() {
             return Completion::Busy { deadline: None };
@@ -311,7 +323,7 @@ impl scheduler::Callback for Worker {
         match trace.advance_dispatch(a) {
             Ok(trace::Progress::Dispatched { consumed, .. }) => done(u32::from(consumed)),
             Ok(trace::Progress::Busy { deadline }) => Completion::Busy { deadline },
-            Ok(_) => Completion::Refused("trace queued worker returned another phase"),
+            Ok(_) => Completion::Refused(refuse!("trace queued worker returned another phase")),
             Err(e) => Completion::Refused(trace_error(e)),
         }
     }
@@ -351,7 +363,9 @@ impl scheduler::Callback for Initialize {
                 done(0)
             }
             Ok(trace::Progress::Busy { deadline }) => Completion::Busy { deadline },
-            Ok(_) => Completion::Refused("trace source initialization returned wrong phase"),
+            Ok(_) => {
+                Completion::Refused(refuse!("trace source initialization returned wrong phase"))
+            }
             Err(e) => Completion::Refused(trace_error(e)),
         }
     }
@@ -413,7 +427,7 @@ impl scheduler::Callback for Lifecycle {
                 done(0)
             }
             Ok(trace::Progress::Busy { deadline }) => Completion::Busy { deadline },
-            Ok(_) => Completion::Refused("trace source lifecycle returned wrong phase"),
+            Ok(_) => Completion::Refused(refuse!("trace source lifecycle returned wrong phase")),
             Err(e) => Completion::Refused(trace_error(e)),
         }
     }

@@ -1,7 +1,9 @@
 //! Read-only Intel Wi-Fi variable observations before ExitBootServices. Only
 //! copied observations and immutable LOADER_DATA regions leave this module.
+use crate::Result;
 use crate::paging::PAGE;
 use stela_boot_core::host_resources::wifi::{Capture, Read, capture_with};
+use stela_contracts::refuse;
 use stela_drivers::net::wifi::intel::platform::Variable;
 use uefi::{
     CString16, boot,
@@ -46,14 +48,14 @@ fn read(variable: Variable, buffer: &mut [u8]) -> Read {
     }
 }
 
-pub(super) fn capture(variable: Variable) -> Result<Capture, &'static str> {
+pub(super) fn capture(variable: Variable) -> Result<Capture> {
     capture_with(variable, read, |bytes| {
         let page = boot::allocate_pages(
             boot::AllocateType::AnyPages,
             boot::MemoryType::LOADER_DATA,
             bytes.div_ceil(PAGE),
         )
-        .map_err(|_| "firmware has no permanent Wi-Fi observation pages")?;
+        .map_err(|_| refuse!("firmware has no permanent Wi-Fi observation pages"))?;
         // SAFETY: fresh exclusive reserved pages, never freed or given to the
         // guest allocator. The only mutation happens before publishing Capture.
         Ok(unsafe { core::slice::from_raw_parts_mut(page.as_ptr(), bytes) })

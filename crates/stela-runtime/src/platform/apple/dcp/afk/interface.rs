@@ -6,10 +6,12 @@
 //! bytes carry its sequence and reply budget; neither the transport sequence
 //! nor the user context is that command sequence.
 use super::super::rpc::Bus;
+use crate::Result;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 const REPORT: u8 = 0;
 const COMMAND: u8 = 1;
@@ -25,7 +27,7 @@ const OVERRUN: i32 = 0xe000_02e1u32 as i32;
 /// An error is a missing model effect; an i32 is an original wire status.
 /// A refused handle/completion must leave its service effect uncommitted.
 pub(crate) trait Service {
-    fn handle(&mut self, packet_type: u8, payload: &[u8]) -> Result<(i32, Vec<u8>), &'static str>;
+    fn handle(&mut self, packet_type: u8, payload: &[u8]) -> Result<(i32, Vec<u8>)>;
 
     /// Interface close/termination, distinct from kept CPU sleep.
     fn transport_closed(&mut self);
@@ -38,13 +40,10 @@ pub(crate) trait Service {
         None
     }
 
-    fn complete(
-        &mut self,
-        _cookie: u64,
-        _status: i32,
-        _payload: Vec<u8>,
-    ) -> Result<(), &'static str> {
-        Err("DCP AFKEPV2 service has no local command completion owner")
+    fn complete(&mut self, _cookie: u64, _status: i32, _payload: Vec<u8>) -> Result<()> {
+        Err(refuse!(
+            "DCP AFKEPV2 service has no local command completion owner"
+        ))
     }
 }
 
@@ -72,10 +71,13 @@ struct Assembly {
 }
 
 impl Assembly {
-    fn push(&mut self, total: u32, payload: &[u8]) -> Result<Option<Vec<u8>>, &'static str> {
-        let length = usize::try_from(total).map_err(|_| "DCP AFKEPV2 message length overflow")?;
+    fn push(&mut self, total: u32, payload: &[u8]) -> Result<Option<Vec<u8>>> {
+        let length =
+            usize::try_from(total).map_err(|_| refuse!("DCP AFKEPV2 message length overflow"))?;
         if payload.len() > length {
-            return Err("DCP AFKEPV2 fragment exceeds its logical message length");
+            return Err(refuse!(
+                "DCP AFKEPV2 fragment exceeds its logical message length"
+            ));
         }
         // Both originals replace an unfinished assembly when a whole message
         // arrives, or when the declared total changes (AP 0x94c1110..11a0).
@@ -89,11 +91,13 @@ impl Assembly {
             self.total = total;
         }
         if self.bytes.len() + payload.len() > length {
-            return Err("DCP AFKEPV2 fragments exceed their logical message length");
+            return Err(refuse!(
+                "DCP AFKEPV2 fragments exceed their logical message length"
+            ));
         }
         self.bytes
             .try_reserve(payload.len())
-            .map_err(|_| "DCP AFKEPV2 assembly allocation failed")?;
+            .map_err(|_| refuse!("DCP AFKEPV2 assembly allocation failed"))?;
         self.bytes.extend_from_slice(payload);
         if self.bytes.len() == length {
             self.total = 0;
@@ -133,16 +137,16 @@ pub(super) struct Interfaces {
 }
 
 impl Interfaces {
-    pub fn register(
-        &mut self,
-        descriptor: Descriptor,
-        service: Box<dyn Service>,
-    ) -> Result<(), &'static str> {
+    pub fn register(&mut self, descriptor: Descriptor, service: Box<dyn Service>) -> Result<()> {
         if descriptor.number == 0 || descriptor.name.contains('\0') {
-            return Err("DCP AFKEPV2 publication has an invalid interface or name");
+            return Err(refuse!(
+                "DCP AFKEPV2 publication has an invalid interface or name"
+            ));
         }
         if self.services.contains_key(&descriptor.number) {
-            return Err("DCP AFKEPV2 interface number is already registered");
+            return Err(refuse!(
+                "DCP AFKEPV2 interface number is already registered"
+            ));
         }
         self.services.insert(
             descriptor.number,
@@ -176,7 +180,7 @@ impl Interfaces {
         reports
     }
 
-    pub fn reset(&mut self) -> Result<(), &'static str> {
+    pub fn reset(&mut self) -> Result<()> {
         // Cancellation is progress, not a rollback transaction: completed
         // callbacks stay removed if a later owner refuses. Close no session
         // until all cancellations succeed, so retry cannot close it twice.
@@ -218,7 +222,7 @@ impl Interfaces {
     /// Publish one owned request at a time. No later producer can fail after
     /// an earlier publication was removed from its service. A round-robin
     /// cursor prevents a continuously active interface starving the others.
-    pub fn commands(&mut self) -> Result<Vec<(u16, Vec<u8>)>, &'static str> {
+    pub fn commands(&mut self) -> Result<Vec<(u16, Vec<u8>)>> {
         let candidate = self
             .services
             .range(self.next_service..)
@@ -246,7 +250,7 @@ impl Interfaces {
             .len()
             .checked_add(24)
             .and_then(|length| u32::try_from(length).ok())
-            .ok_or("DCP AFKEPV2 local command length overflow")?;
+            .ok_or(refuse!("DCP AFKEPV2 local command length overflow"))?;
         let sequence = (0..=255)
             .map(|offset| interface.next_sequence.wrapping_add(offset))
             .find(|sequence| !interface.commands.contains_key(sequence))
@@ -271,7 +275,7 @@ impl Interfaces {
         fragment: &[u8],
         bus: &mut dyn Bus,
         window: Option<u64>,
-    ) -> Result<Option<Response>, &'static str> {
+    ) -> Result<Option<Response>> {
         if !self.received.as_ref().is_some_and(|received| {
             received.number == number && received.total == total && received.fragment == fragment
         }) {
@@ -304,10 +308,10 @@ impl Interfaces {
         packet: &[u8],
         bus: &mut dyn Bus,
         window: Option<u64>,
-    ) -> Result<Option<Response>, &'static str> {
+    ) -> Result<Option<Response>> {
         let header: &[u8; 16] = packet
             .get(..16)
-            .ok_or("DCP AFKEPV2 interface header is truncated")?
+            .ok_or(refuse!("DCP AFKEPV2 interface header is truncated"))?
             .try_into()
             .expect("header");
         let packet_type = header[8];
@@ -319,7 +323,9 @@ impl Interfaces {
                     // importer (AP94aca68). This native peer has no client
                     // owner for an AP-published service; do not drop its
                     // creation effect through the unmatched-report path.
-                    return Err("DCP AFKEPV2 peer service publication has no importer owner");
+                    return Err(refuse!(
+                        "DCP AFKEPV2 peer service publication has no importer owner"
+                    ));
                 }
                 let Some(interface) = interface else {
                     return Ok(None);
@@ -327,7 +333,7 @@ impl Interfaces {
                 match packet_type {
                     OPEN if header[10] & 1 != 0 => {
                         if interface.terminated {
-                            return Err("DCP AFKEPV2 open after interface termination");
+                            return Err(refuse!("DCP AFKEPV2 open after interface termination"));
                         }
                         interface.peer_open = true;
                     }
@@ -342,14 +348,14 @@ impl Interfaces {
                         interface.terminated = true;
                         interface.service.transport_closed();
                     }
-                    _ => return Err("DCP AFKEPV2 unmodeled interface report"),
+                    _ => return Err(refuse!("DCP AFKEPV2 unmodeled interface report")),
                 }
                 Ok(None)
             }
             COMMAND => {
                 let command = packet
                     .get(16..24)
-                    .ok_or("DCP AFKEPV2 command header is truncated")?;
+                    .ok_or(refuse!("DCP AFKEPV2 command header is truncated"))?;
                 let Some(interface) = interface.filter(|interface| !interface.terminated) else {
                     // Original handleUnknown (AP 0x94c2570) does not map
                     // unowned DMA buffers. Only the command sequence returns.
@@ -369,7 +375,7 @@ impl Interfaces {
             }
             RESPONSE => {
                 if packet.len() < 24 {
-                    return Err("DCP AFKEPV2 response header is truncated");
+                    return Err(refuse!("DCP AFKEPV2 response header is truncated"));
                 }
                 // Original 0x94c0628 removes the pending command by sequence;
                 // unmatched responses at 0x94c069c never invoke a client.
@@ -381,7 +387,9 @@ impl Interfaces {
                     return Ok(None);
                 };
                 if packet[16] & 1 != 0 {
-                    return Err("DCP AFKEPV2 response supplies unrequested DMA buffers");
+                    return Err(refuse!(
+                        "DCP AFKEPV2 response supplies unrequested DMA buffers"
+                    ));
                 }
                 let status = i32::from_le_bytes(packet[20..24].try_into().expect("status"));
                 interface
@@ -390,13 +398,13 @@ impl Interfaces {
                 interface.commands.remove(&sequence);
                 Ok(None)
             }
-            _ => Err("DCP AFKEPV2 invalid interface message category"),
+            _ => Err(refuse!("DCP AFKEPV2 invalid interface message category")),
         }
     }
 }
 
 impl Interface {
-    fn cancel_commands(&mut self) -> Result<(), &'static str> {
+    fn cancel_commands(&mut self) -> Result<()> {
         // Original createErrorResponses (AP 0x94c04bc) settles each pending
         // command with OFFLINE before disconnect completes.
         if let Some(request) = &self.staged {
@@ -439,7 +447,7 @@ impl Response {
         Self { bytes, dma: None }
     }
 
-    pub fn write(&self, bus: &mut dyn Bus) -> Result<(), &'static str> {
+    pub fn write(&self, bus: &mut dyn Bus) -> Result<()> {
         if let Some((address, bytes)) = &self.dma {
             bus.write(*address, bytes)?;
         }
@@ -462,17 +470,17 @@ struct Command {
 }
 
 impl Command {
-    fn decode(packet: &[u8], bus: &mut dyn Bus, window: Option<u64>) -> Result<Self, &'static str> {
+    fn decode(packet: &[u8], bus: &mut dyn Bus, window: Option<u64>) -> Result<Self> {
         let header: [u8; 8] = packet
             .get(..8)
-            .ok_or("DCP AFKEPV2 command header is truncated")?
+            .ok_or(refuse!("DCP AFKEPV2 command header is truncated"))?
             .try_into()
             .expect("header");
         let mut payload = packet[8..].to_vec();
         let buffers = if header[0] & 1 != 0 {
             let buffers: [u8; 24] = payload
                 .get(..24)
-                .ok_or("DCP AFKEPV2 command DMA descriptors are truncated")?
+                .ok_or(refuse!("DCP AFKEPV2 command DMA descriptors are truncated"))?
                 .try_into()
                 .expect("buffers");
             let request_bytes = u32::from_le_bytes(buffers[20..24].try_into().expect("length"));
@@ -480,7 +488,7 @@ impl Command {
                 payload = Vec::new();
                 payload
                     .try_reserve_exact(request_bytes as usize)
-                    .map_err(|_| "DCP AFKEPV2 command allocation failed")?;
+                    .map_err(|_| refuse!("DCP AFKEPV2 command allocation failed"))?;
                 payload.resize(request_bytes as usize, 0);
                 let dva = u64::from_le_bytes(buffers[8..16].try_into().expect("DVA"));
                 bus.read(address(window, dva), &mut payload)?;

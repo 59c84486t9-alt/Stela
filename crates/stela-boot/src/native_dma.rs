@@ -2,8 +2,10 @@
 //! there is no identity-mapping substitute for an unavailable domain.
 #[cfg(feature = "diagnostics")]
 pub(crate) mod diagnostic;
+use crate::Result;
 pub use stela_boot_core::dmar;
 pub use stela_boot_core::firmware_state;
+use stela_contracts::refuse;
 #[cfg(feature = "diagnostics")]
 mod isolation_diagnostic;
 pub use stela_boot_core::{requester, vtd};
@@ -15,7 +17,7 @@ use stela_runtime::pc::acpi;
 /// Before ExitBootServices: every remapping unit the firmware's DMAR and IVRS
 /// tables list. A table Stela cannot read is reported once and the units
 /// past the defect stay unchecked.
-pub(crate) fn firmware_units() -> Result<Units, &'static str> {
+pub(crate) fn firmware_units() -> Result<Units> {
     let mut units = Units::default();
     let Some(rsdp) = crate::storage::rsdp() else {
         return Ok(units);
@@ -32,7 +34,9 @@ pub(crate) fn firmware_units() -> Result<Units, &'static str> {
         match added {
             Ok(()) => {}
             Err(TableError::Capacity) => {
-                return Err("the host lists more IOMMU units than Stela can check");
+                return Err(refuse!(
+                    "the host lists more IOMMU units than Stela can check"
+                ));
             }
             Err(error) => {
                 output::arguments(format_args!(

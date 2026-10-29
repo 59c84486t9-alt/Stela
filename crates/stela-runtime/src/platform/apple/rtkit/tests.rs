@@ -1,4 +1,5 @@
 use super::*;
+use crate::Result;
 use alloc::vec;
 
 const VERSION: u64 = stela_formats::builds::DEFAULT.rtkit_version;
@@ -33,23 +34,23 @@ fn a_physical_reset_clears_enumeration_without_reusing_boot_quiescence() {
 /// Answers every payload with its complement.
 struct Complement;
 impl Endpoint for Complement {
-    fn start(&mut self, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn start(&mut self, outbox: &mut Vec<u64>) -> Result<()> {
         outbox.push(0x5);
         Ok(())
     }
-    fn receive(&mut self, payload: u64, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn receive(&mut self, payload: u64, outbox: &mut Vec<u64>) -> Result<()> {
         outbox.push(!payload);
         Ok(())
     }
 }
 
-fn step(rtkit: &mut RtKit, endpoint: u8, payload: u64) -> Result<Vec<Message>, &'static str> {
+fn step(rtkit: &mut RtKit, endpoint: u8, payload: u64) -> Result<Vec<Message>> {
     let mut outbox = Vec::new();
     rtkit.receive(Message { endpoint, payload }, &mut outbox)?;
     Ok(outbox)
 }
 
-fn mgmt(rtkit: &mut RtKit, kind: u64, fields: u64) -> Result<Vec<Message>, &'static str> {
+fn mgmt(rtkit: &mut RtKit, kind: u64, fields: u64) -> Result<Vec<Message>> {
     step(rtkit, 0, management(kind, fields).payload)
 }
 
@@ -254,7 +255,7 @@ fn the_crashlog_endpoint_starts_silently_and_takes_no_ap_message() {
     let started = mgmt(&mut rtkit, ENDPOINT_CONTROL, 1 << 32 | ENABLE).unwrap();
     assert!(started.is_empty());
     let refusal = step(&mut rtkit, CRASHLOG, 0x1 << 52 | 0x8000).unwrap_err();
-    assert!(refusal.contains("no buffer"), "{refusal}");
+    assert!(refusal.to_string().contains("no buffer"), "{refusal}");
     assert!(mgmt(&mut rtkit, ENDPOINT_CONTROL, 1 << 32 | 3).is_err());
     assert!(
         mgmt(&mut rtkit, ENDPOINT_CONTROL, 1 << 32 | DISABLE)
@@ -411,14 +412,14 @@ struct Board {
     restart: bool,
 }
 impl Endpoint for Board {
-    fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<()> {
         Ok(())
     }
-    fn receive(&mut self, _payload: u64, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn receive(&mut self, _payload: u64, _outbox: &mut Vec<u64>) -> Result<()> {
         self.restart = true;
         Ok(())
     }
-    fn poll(&mut self, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn poll(&mut self, outbox: &mut Vec<u64>) -> Result<()> {
         outbox.append(&mut self.pending);
         Ok(())
     }

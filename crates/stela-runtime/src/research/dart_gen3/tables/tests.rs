@@ -1,5 +1,6 @@
 use super::super::context::{BoundsPolicy, TableLevel};
 use super::*;
+use stela_contracts::refuse;
 use {
     stela_contracts::dma::Port, stela_contracts::dma::test_support::Ram,
     stela_contracts::interrupt::InterruptLatch,
@@ -351,9 +352,9 @@ fn source_software_bounds_do_not_check_aliased_hardware_fill_regions() {
     let mut access = Access::new(0, 0, &mut sink);
     assert_eq!(
         tables.translate(&mut ram, 0, 1 << 40, (1 << 40) + 3, false, &mut access),
-        Err(DmaError::Unsupported(
+        Err(DmaError::Unsupported(refuse!(
             "gen3 DART two-level window spans unqualified upper fill regions"
-        ))
+        )))
     );
     assert_eq!(tables.faults().pending(0), Ok(0));
 }
@@ -564,7 +565,7 @@ fn unrecovered_contexts_and_quiescence_never_fall_through_to_identity_dma() {
     tables.set_quiesced(true);
     assert_eq!(
         tables.translate(&mut ram, 0, 0, 0, false, &mut a),
-        Err(DmaError::Unsupported("gen3 DART DMA is quiesced"))
+        Err(DmaError::Unsupported(refuse!("gen3 DART DMA is quiesced")))
     );
     assert_eq!(tables.faults().pending(0), Ok(0));
 }

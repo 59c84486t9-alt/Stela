@@ -5,6 +5,8 @@
 //! revision3.0. Its native TTBR write at158df8..158e00 still uses PA>>12.
 //! Choosing a software encoding does not check the native mode/revision,
 //! security, filter or context contracts needed for profile admission.
+use crate::Result;
+use stela_contracts::refuse;
 use {crate::platform::apple::dart::descriptor::Format, stela_contracts::dma::DmaError};
 
 const COMPACT_ADDRESS: u64 = 0x0000_0003_ffff_ffc0;
@@ -20,22 +22,28 @@ impl Encoding {
     /// The recovered SPTM handoff and native driver agree on revision3.0.
     /// Other firmware builder encodings remain explicit software forms until
     /// their handoff mode is checked; a compatible string cannot select it.
-    pub fn handoff_revision(revision: u16) -> Result<Self, &'static str> {
+    pub fn handoff_revision(revision: u16) -> Result<Self> {
         match revision {
             0x300 => Ok(Self::Shift4),
-            0x302 | 0x303 => Err("gen3 DART compact descriptor handoff mode is unqualified"),
-            _ => Err("gen3 DART handoff revision is outside the recovered native contract"),
+            0x302 | 0x303 => Err(refuse!(
+                "gen3 DART compact descriptor handoff mode is unqualified"
+            )),
+            _ => Err(refuse!(
+                "gen3 DART handoff revision is outside the recovered native contract"
+            )),
         }
     }
 
     /// The original mBoot builder's choice for the revisions also named by
     /// SPTM's gen3 validator. The SPTM builder itself uses Shift4, so this
     /// is source-specific construction metadata, not native mode admission.
-    pub fn mboot_revision(revision: u16) -> Result<Self, &'static str> {
+    pub fn mboot_revision(revision: u16) -> Result<Self> {
         match revision {
             0x300 => Ok(Self::Shift4),
             0x302 | 0x303 => Ok(Self::Shift8),
-            _ => Err("gen3 DART descriptor revision is outside the recovered source set"),
+            _ => Err(refuse!(
+                "gen3 DART descriptor revision is outside the recovered source set"
+            )),
         }
     }
 
@@ -50,9 +58,9 @@ impl Encoding {
             Self::Shift4 => entry,
             Self::Shift8 => {
                 if entry & !(COMPACT_ADDRESS | ATTRIBUTES) != 0 {
-                    return Err(DmaError::Unsupported(
-                        "gen3 DART compact descriptor contains unmodeled attributes",
-                    ));
+                    return Err(DmaError::Unsupported(refuse!(
+                        "gen3 DART compact descriptor contains unmodeled attributes"
+                    )));
                 }
                 // Both original builders share the attribute/subpage word;
                 // only the PA field changes. Validate before moving it so
@@ -120,7 +128,9 @@ mod tests {
             assert_eq!(Encoding::mboot_revision(revision), Ok(Encoding::Shift8));
             assert_eq!(
                 Encoding::handoff_revision(revision),
-                Err("gen3 DART compact descriptor handoff mode is unqualified")
+                Err(refuse!(
+                    "gen3 DART compact descriptor handoff mode is unqualified"
+                ))
             );
         }
         for revision in [0, 0x101, 0x204, 0x301, 0x304, u16::MAX] {

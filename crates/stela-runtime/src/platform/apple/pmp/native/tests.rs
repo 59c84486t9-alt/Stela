@@ -1,5 +1,6 @@
 use super::*;
 use alloc::format;
+use stela_contracts::refuse;
 use {
     crate::platform::apple::ptd::Ptd, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
@@ -121,7 +122,7 @@ impl Resources for Backend {
         self.calls.push((effect, request.clone()));
         if self.before == Some(effect) {
             self.before = None;
-            return Step::Refused("actual device effect unavailable");
+            return Step::Refused(refuse!("actual device effect unavailable"));
         }
         if self.busy == Some(effect) {
             self.busy = None;
@@ -133,7 +134,7 @@ impl Resources for Backend {
         if self.after == Some(effect) {
             self.after = None;
             return Step::Retired {
-                refusal: Some("later native callback refused"),
+                refusal: Some(refuse!("later native callback refused")),
             };
         }
         Step::Retired { refusal: None }
@@ -311,7 +312,10 @@ fn every_backend_refusal_preserves_prefix_and_post_effect_refusal_never_replays(
         let cursor = owner.committed_prefix();
         let prefix = local.bank().requests();
         assert_eq!(latest(&local, 1), None);
-        assert_eq!(owner.refusal(), Some("actual device effect unavailable"));
+        assert_eq!(
+            owner.refusal().map(Refusal::what),
+            Some("actual device effect unavailable")
+        );
         assert!(owner.begin_startup().is_err());
         let mut bank = local.bank().clone();
         bank.set_lifecycle(

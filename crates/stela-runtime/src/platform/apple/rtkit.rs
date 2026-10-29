@@ -98,11 +98,13 @@
 //! device advance once enumeration is complete. An endpoint whose message
 //! restarts or powers off the machine hands the wrapper that transition.
 use super::asc::{Firmware, Message, TransitionRequest};
+use crate::Result;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::any::Any;
+use stela_contracts::refuse;
 
 pub mod channel;
 
@@ -149,22 +151,26 @@ pub const FIRST_APPLICATION: u8 = 0x20;
 pub trait Endpoint: Any {
     /// A physical reset loses the endpoint session without replying to the
     /// AP. Every endpoint must check its own native ownership first.
-    fn check_reset(&self) -> Result<(), &'static str> {
-        Err("RTKit endpoint volatile-state reset is not modeled")
+    fn check_reset(&self) -> Result<()> {
+        Err(refuse!(
+            "RTKit endpoint volatile-state reset is not modeled"
+        ))
     }
-    fn reset(&mut self) -> Result<(), &'static str> {
-        Err("RTKit endpoint volatile-state reset is not modeled")
+    fn reset(&mut self) -> Result<()> {
+        Err(refuse!(
+            "RTKit endpoint volatile-state reset is not modeled"
+        ))
     }
     /// The AP enabled the endpoint; messages it sends go to `outbox` as
     /// payloads on this endpoint.
-    fn start(&mut self, outbox: &mut Vec<u64>) -> Result<(), &'static str>;
+    fn start(&mut self, outbox: &mut Vec<u64>) -> Result<()>;
     /// The AP sent `payload` to the enabled endpoint.
-    fn receive(&mut self, payload: u64, outbox: &mut Vec<u64>) -> Result<(), &'static str>;
+    fn receive(&mut self, payload: u64, outbox: &mut Vec<u64>) -> Result<()>;
     /// Messages the enabled endpoint sends on its own, such as events
     /// from the board, collected at each device advance. Output already
     /// appended is committed even if a later asynchronous operation fails;
     /// the endpoint must keep only unfinished work for retry.
-    fn poll(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn poll(&mut self, _outbox: &mut Vec<u64>) -> Result<()> {
         Ok(())
     }
     /// A machine transition the endpoint carries out for the AP's last
@@ -224,10 +230,7 @@ fn management(kind: u64, fields: u64) -> Message {
 impl RtKit {
     /// A coprocessor providing `endpoints`, each numbered from
     /// [`FIRST_APPLICATION`] up to 255.
-    pub fn new(
-        endpoints: Vec<(u8, Box<dyn Endpoint>)>,
-        version: u64,
-    ) -> Result<Self, &'static str> {
+    pub fn new(endpoints: Vec<(u8, Box<dyn Endpoint>)>, version: u64) -> Result<Self> {
         Self::with_system_endpoints(endpoints, SystemEndpoints::default(), version)
     }
 
@@ -240,14 +243,14 @@ impl RtKit {
         endpoints: Vec<(u8, Box<dyn Endpoint>)>,
         system: SystemEndpoints,
         version: u64,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let mut map = BTreeMap::new();
         for (number, endpoint) in endpoints {
             if number < FIRST_APPLICATION {
-                return Err("RTKit application endpoints start at 0x20");
+                return Err(refuse!("RTKit application endpoints start at 0x20"));
             }
             if map.insert(number, (endpoint, false)).is_some() {
-                return Err("RTKit endpoint provided twice");
+                return Err(refuse!("RTKit endpoint provided twice"));
             }
         }
         for (number, endpoint) in [(KDEBUG, system.trace), (IOREPORTING, system.reporting)] {
@@ -272,10 +275,7 @@ impl RtKit {
     /// Join native resources after the cold ASC and DART have both
     /// been placed, before the AP begins enumeration. A previously queued
     /// HELLO remains the same message; the session is never restarted/replaced.
-    pub fn attach_cold_system_endpoints(
-        &mut self,
-        system: SystemEndpoints,
-    ) -> Result<(), &'static str> {
+    pub fn attach_cold_system_endpoints(&mut self, system: SystemEndpoints) -> Result<()> {
         if !matches!(self.stage, Stage::Hello | Stage::Quiesced)
             || self.cpu_stopped
             || self.crashlog
@@ -283,7 +283,9 @@ impl RtKit {
             || self.endpoints.contains_key(&KDEBUG)
             || self.endpoints.contains_key(&IOREPORTING)
         {
-            return Err("RTKit native system owners must join once before enumeration");
+            return Err(refuse!(
+                "RTKit native system owners must join once before enumeration"
+            ));
         }
         for (number, endpoint) in [(KDEBUG, system.trace), (IOREPORTING, system.reporting)] {
             if let Some(endpoint) = endpoint {
@@ -345,26 +347,29 @@ impl RtKit {
         self.stage = Stage::RollCall { group, last };
     }
 
-    fn control(&mut self, fields: u64, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn control(&mut self, fields: u64, outbox: &mut Vec<Message>) -> Result<()> {
         if fields & !(CONTROL_ENDPOINT | LOW) != 0 {
-            return Err("RTKit endpoint control field is not modeled");
+            return Err(refuse!("RTKit endpoint control field is not modeled"));
         }
         let number = u8::try_from((fields & CONTROL_ENDPOINT) >> CONTROL_ENDPOINT_SHIFT)
-            .map_err(|_| "RTKit endpoint control of an endpoint above 255")?;
+            .map_err(|_| refuse!("RTKit endpoint control of an endpoint above 255"))?;
         if number == CRASHLOG {
             // The crashlog endpoint sends nothing when started: a native
             // coprocessor requests no crashlog buffer.
             self.crashlog = match fields & LOW {
                 ENABLE => true,
                 DISABLE => false,
-                _ => return Err("RTKit endpoint control other than enable and disable"),
+                _ => {
+                    return Err(refuse!(
+                        "RTKit endpoint control other than enable and disable"
+                    ));
+                }
             };
             return Ok(());
         }
-        let (endpoint, enabled) = self
-            .endpoints
-            .get_mut(&number)
-            .ok_or("RTKit endpoint control of an endpoint the coprocessor does not have")?;
+        let (endpoint, enabled) = self.endpoints.get_mut(&number).ok_or(refuse!(
+            "RTKit endpoint control of an endpoint the coprocessor does not have"
+        ))?;
         match fields & LOW {
             ENABLE => {
                 let mut sent = Vec::new();
@@ -380,17 +385,21 @@ impl RtKit {
                 *enabled = false;
                 Ok(())
             }
-            _ => Err("RTKit endpoint control other than enable and disable"),
+            _ => Err(refuse!(
+                "RTKit endpoint control other than enable and disable"
+            )),
         }
     }
 
-    fn manage(&mut self, payload: u64, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn manage(&mut self, payload: u64, outbox: &mut Vec<Message>) -> Result<()> {
         let kind = (payload & TYPE) >> TYPE_SHIFT;
         let fields = payload & !TYPE;
         match (kind, self.stage) {
             (HELLO_REPLY, Stage::Hello) => {
                 if fields & !HELLO_FLAGS != self.version | self.version << 16 {
-                    return Err("RTKit HELLO_REPLY did not choose the offered version");
+                    return Err(refuse!(
+                        "RTKit HELLO_REPLY did not choose the offered version"
+                    ));
                 }
                 self.roll_call(0, outbox);
                 Ok(())
@@ -401,7 +410,9 @@ impl RtKit {
                         != u64::from(group) << ROLL_CALL_GROUP_SHIFT
                             | if last { ROLL_CALL_LAST } else { 0 }
                 {
-                    return Err("RTKit roll-call answer does not answer the last group");
+                    return Err(refuse!(
+                        "RTKit roll-call answer does not answer the last group"
+                    ));
                 }
                 match self.next_group(Some(group)) {
                     Some(next) => self.roll_call(next, outbox),
@@ -422,7 +433,9 @@ impl RtKit {
                 self.hello(outbox);
                 Ok(())
             }
-            (_, Stage::Quiesced) => Err("RTKit quiesced coprocessor takes only the IOP power wake"),
+            (_, Stage::Quiesced) => Err(refuse!(
+                "RTKit quiesced coprocessor takes only the IOP power wake"
+            )),
             // The AP starts each system endpoint as its roll-call group
             // creates it, before answering the group (restore study ru-s58:
             // the crashlog endpoint's start arrived mid-enumeration).
@@ -447,20 +460,22 @@ impl RtKit {
                 self.power_nap = fields == 1;
                 Ok(())
             }
-            _ => Err("RTKit management message is not modeled in this stage"),
+            _ => Err(refuse!(
+                "RTKit management message is not modeled in this stage"
+            )),
         }
     }
 }
 
 impl Firmware for RtKit {
-    fn check_reset(&self) -> Result<(), &'static str> {
+    fn check_reset(&self) -> Result<()> {
         for (endpoint, _) in self.endpoints.values() {
             endpoint.check_reset()?;
         }
         Ok(())
     }
 
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         self.check_reset()?;
         for (endpoint, enabled) in self.endpoints.values_mut() {
             endpoint
@@ -480,9 +495,11 @@ impl Firmware for RtKit {
         self.power_nap = false;
         Ok(())
     }
-    fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn start(&mut self, outbox: &mut Vec<Message>) -> Result<()> {
         if self.cpu_stopped {
-            return Err("RTKit cold start cannot replace a retained CPU resume");
+            return Err(refuse!(
+                "RTKit cold start cannot replace a retained CPU resume"
+            ));
         }
         if self.quiesced {
             self.stage = Stage::Quiesced;
@@ -492,17 +509,19 @@ impl Firmware for RtKit {
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<(), &'static str> {
+    fn stop(&mut self) -> Result<()> {
         if self.stage != Stage::Ready || !matches!(self.iop_power, 0x201 | 0x202) {
-            return Err("RTKit CPU stop requires a completed retained-sleep handshake");
+            return Err(refuse!(
+                "RTKit CPU stop requires a completed retained-sleep handshake"
+            ));
         }
         self.cpu_stopped = true;
         Ok(())
     }
 
-    fn resume(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn resume(&mut self, outbox: &mut Vec<Message>) -> Result<()> {
         if !self.cpu_stopped {
-            return Err("RTKit CPU resume without a retained halt");
+            return Err(refuse!("RTKit CPU resume without a retained halt"));
         }
         self.cpu_stopped = false;
         self.iop_power = POWER_ON;
@@ -510,26 +529,29 @@ impl Firmware for RtKit {
         Ok(())
     }
 
-    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<()> {
         if self.cpu_stopped {
-            return Err("RTKit message while its CPU is halted");
+            return Err(refuse!("RTKit message while its CPU is halted"));
         }
         if message.endpoint == MANAGEMENT {
             return self.manage(message.payload, outbox);
         }
         if message.endpoint == CRASHLOG {
             return Err(if self.crashlog {
-                "RTKit crashlog endpoint takes no AP message: the coprocessor requested no buffer"
+                refuse!(
+                    "RTKit crashlog endpoint takes no AP message: the coprocessor requested no buffer"
+                )
             } else {
-                "RTKit message to an endpoint the AP has not enabled"
+                refuse!("RTKit message to an endpoint the AP has not enabled")
             });
         }
-        let (endpoint, enabled) = self
-            .endpoints
-            .get_mut(&message.endpoint)
-            .ok_or("RTKit message to an endpoint the coprocessor does not have")?;
+        let (endpoint, enabled) = self.endpoints.get_mut(&message.endpoint).ok_or(refuse!(
+            "RTKit message to an endpoint the coprocessor does not have"
+        ))?;
         if !*enabled {
-            return Err("RTKit message to an endpoint the AP has not enabled");
+            return Err(refuse!(
+                "RTKit message to an endpoint the AP has not enabled"
+            ));
         }
         let mut sent = Vec::new();
         endpoint.receive(message.payload, &mut sent)?;
@@ -542,7 +564,7 @@ impl Firmware for RtKit {
 
     /// Unsolicited messages of the enabled endpoints, once the AP has
     /// enumerated them.
-    fn poll(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn poll(&mut self, outbox: &mut Vec<Message>) -> Result<()> {
         if self.cpu_stopped || self.stage != Stage::Ready {
             return Ok(());
         }

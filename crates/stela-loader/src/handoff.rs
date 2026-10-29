@@ -30,7 +30,7 @@ pub fn installed_command(requested: Option<BootCommand>, boot_args: &str) -> Res
         _ => {
             return Err(refuse!(
                 "boot command {command} does not load an installed macOS System root",
-                command = alloc::format!("{command:?}")
+                ?command
             )
             .into());
         }

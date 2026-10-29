@@ -15,6 +15,7 @@
 //! the backend. No SN201202x body or firmware identity is supplied here and
 //! no board compatible is admitted. CD3217/18 and ccg3pa2 are not substitutes.
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 use crate::platform::apple::spmi::{Command, SlaveError, SpmiSlave};
 
@@ -34,9 +35,9 @@ pub struct Register {
 impl Register {
     pub fn new(bytes: &[u8], reported: usize) -> Result<Self, SlaveError> {
         if bytes.is_empty() || bytes.len() > CAPACITY || reported == 0 || reported > bytes.len() {
-            return Err(SlaveError::Unsupported(
-                "HPM mailbox response extent is unqualified",
-            ));
+            return Err(SlaveError::Unsupported(refuse!(
+                "HPM mailbox response extent is unqualified"
+            )));
         }
         Ok(Self {
             bytes: bytes.to_vec(),
@@ -56,9 +57,9 @@ pub trait Registers: Clone {
     /// An accepted RTPC transition owns its power state and keeps the
     /// mailbox state. Unknown power/retention/output behavior must refuse.
     fn command(&mut self, _command: Command, _now: u64) -> Result<(), SlaveError> {
-        Err(SlaveError::Unsupported(
-            "HPM RTPC command/output state is unqualified",
-        ))
+        Err(SlaveError::Unsupported(refuse!(
+            "HPM RTPC command/output state is unqualified"
+        )))
     }
     fn interrupt_level(&self, _output: u8) -> Option<bool> {
         None
@@ -91,9 +92,9 @@ impl<R: Registers> Mailbox<R> {
         }
     }
     fn selected(&self) -> Result<u8, SlaveError> {
-        self.selected.ok_or(SlaveError::Unsupported(
-            "HPM mailbox has no accepted selector",
-        ))
+        self.selected.ok_or(SlaveError::Unsupported(refuse!(
+            "HPM mailbox has no accepted selector"
+        )))
     }
     fn capture(&mut self, now: u64) -> Result<&Register, SlaveError> {
         let register = self.selected()?;
@@ -106,9 +107,9 @@ impl<R: Registers> Mailbox<R> {
         if address == SELECTOR && bytes.len() == 1 {
             bytes[0] = self.selected()?;
         } else if !self.staged.is_empty() {
-            return Err(SlaveError::Unsupported(
-                "HPM mailbox read while a write body is owned is unqualified",
-            ));
+            return Err(SlaveError::Unsupported(refuse!(
+                "HPM mailbox read while a write body is owned is unqualified"
+            )));
         } else if address == LENGTH && bytes.len() == 1 {
             bytes[0] = self.capture(now)?.reported;
         } else {
@@ -116,22 +117,22 @@ impl<R: Registers> Mailbox<R> {
                 address
                     .checked_sub(READ_DATA)
                     .map(usize::from)
-                    .ok_or(SlaveError::Unsupported(
-                        "HPM mailbox read address is unqualified",
-                    ))?;
+                    .ok_or(SlaveError::Unsupported(refuse!(
+                        "HPM mailbox read address is unqualified"
+                    )))?;
             let end = start
                 .checked_add(bytes.len())
                 .filter(|_| !bytes.is_empty())
-                .ok_or(SlaveError::Unsupported(
-                    "HPM mailbox read extent is unqualified",
-                ))?;
+                .ok_or(SlaveError::Unsupported(refuse!(
+                    "HPM mailbox read extent is unqualified"
+                )))?;
             let data = self
                 .capture(now)?
                 .bytes
                 .get(start..end)
-                .ok_or(SlaveError::Unsupported(
-                    "HPM mailbox read exceeds the native response",
-                ))?;
+                .ok_or(SlaveError::Unsupported(refuse!(
+                    "HPM mailbox read exceeds the native response"
+                )))?;
             bytes.copy_from_slice(data);
         }
         Ok(())
@@ -139,23 +140,23 @@ impl<R: Registers> Mailbox<R> {
     fn write_inner(&mut self, address: u16, bytes: &[u8], now: u64) -> Result<(), SlaveError> {
         if address == SELECTOR {
             let &[register] = bytes else {
-                return Err(SlaveError::Unsupported(
-                    "HPM mailbox selector is exactly one byte",
-                ));
+                return Err(SlaveError::Unsupported(refuse!(
+                    "HPM mailbox selector is exactly one byte"
+                )));
             };
             if register & 0x80 != 0 {
-                return Err(SlaveError::Unsupported(
-                    "HPM mailbox selector uses seven bits",
-                ));
+                return Err(SlaveError::Unsupported(refuse!(
+                    "HPM mailbox selector uses seven bits"
+                )));
             }
             if self.staged.is_empty() {
                 self.registers.select(register, now)?;
                 self.selected = Some(register);
             } else {
                 if self.selected()? != register {
-                    return Err(SlaveError::Unsupported(
-                        "HPM mailbox selector would discard an owned write",
-                    ));
+                    return Err(SlaveError::Unsupported(refuse!(
+                        "HPM mailbox selector would discard an owned write"
+                    )));
                 }
                 self.registers.write(register, &self.staged, now)?;
                 self.staged.clear();
@@ -167,9 +168,9 @@ impl<R: Registers> Mailbox<R> {
                 || bytes.is_empty()
                 || bytes.len() > CAPACITY - self.staged.len()
             {
-                return Err(SlaveError::Unsupported(
-                    "HPM mailbox write is not a contiguous 1..64 byte body",
-                ));
+                return Err(SlaveError::Unsupported(refuse!(
+                    "HPM mailbox write is not a contiguous 1..64 byte body"
+                )));
             }
             self.staged.extend_from_slice(bytes);
         }
@@ -182,7 +183,9 @@ impl<R: Registers> SpmiSlave for Mailbox<R> {
         let mut output = [0; CAPACITY];
         let output = output
             .get_mut(..bytes.len())
-            .ok_or(SlaveError::Unsupported("HPM mailbox read exceeds 64 bytes"))?;
+            .ok_or(SlaveError::Unsupported(refuse!(
+                "HPM mailbox read exceeds 64 bytes"
+            )))?;
         next.read_inner(address, output, now)?;
         bytes.copy_from_slice(output);
         *self = next;
@@ -196,14 +199,14 @@ impl<R: Registers> SpmiSlave for Mailbox<R> {
     }
     fn command(&mut self, command: Command, now: u64) -> Result<(), SlaveError> {
         if !self.staged.is_empty() {
-            return Err(SlaveError::Unsupported(
-                "HPM RTPC while a mailbox body is owned is unqualified",
-            ));
+            return Err(SlaveError::Unsupported(refuse!(
+                "HPM RTPC while a mailbox body is owned is unqualified"
+            )));
         }
         if matches!(command, Command::Reset | Command::Shutdown) {
-            return Err(SlaveError::Unsupported(
-                "HPM mailbox reset/supply state is unqualified",
-            ));
+            return Err(SlaveError::Unsupported(refuse!(
+                "HPM mailbox reset/supply state is unqualified"
+            )));
         }
         let mut next = self.clone();
         next.registers.command(command, now)?;
@@ -247,13 +250,17 @@ mod tests {
             if [9, 0x18].contains(&register) {
                 Ok(())
             } else {
-                Err(SlaveError::Unsupported("fixture has no such register"))
+                Err(SlaveError::Unsupported(refuse!(
+                    "fixture has no such register"
+                )))
             }
         }
         fn read(&mut self, register: u8, _: u64) -> Result<Register, SlaveError> {
             self.reads += 1;
             if register != 9 {
-                return Err(SlaveError::Unsupported("fixture write-only register"));
+                return Err(SlaveError::Unsupported(refuse!(
+                    "fixture write-only register"
+                )));
             }
             Register::new(&self.bytes, self.reported)
         }
@@ -263,7 +270,9 @@ mod tests {
             // that mutation nor its count may escape a failed mailbox call.
             self.bytes[0] = bytes[0];
             if bytes.len() != self.bytes.len() || bytes[0] == 0xff {
-                return Err(SlaveError::Unsupported("fixture body is unqualified"));
+                return Err(SlaveError::Unsupported(refuse!(
+                    "fixture body is unqualified"
+                )));
             }
             self.bytes.copy_from_slice(bytes);
             Ok(())

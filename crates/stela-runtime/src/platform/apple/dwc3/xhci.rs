@@ -60,8 +60,10 @@
 mod slot;
 
 use super::super::typec::Usb2Speed;
+use crate::Result;
 use alloc::{boxed::Box, collections::VecDeque, format, string::String};
 use slot::Slot;
+use stela_contracts::refuse;
 use {crate::platform::usb::Function, stela_contracts::dma::Port};
 
 /// Bytes of the core's address space the host registers occupy.
@@ -521,14 +523,14 @@ impl Xhci {
         self.usbcmd & INTE != 0 && i.iman & (IP | IE) == IP | IE
     }
 
-    pub fn read(&mut self, offset: u64, bytes: u64, now: u64) -> Result<u64, &'static str> {
+    pub fn read(&mut self, offset: u64, bytes: u64, now: u64) -> Result<u64> {
         let dword = |xhci: &mut Self, at: u64| xhci.read_dword(at, now);
         match bytes {
             1 | 2 if offset < CAPLENGTH => {
                 let value = dword(self, offset & !3)?;
                 let shift = (offset & 3) * 8;
                 if (offset & 3) + bytes > 4 {
-                    return Err("xHCI capability read crosses a register");
+                    return Err(refuse!("xHCI capability read crosses a register"));
                 }
                 Ok(u64::from(value >> shift) & ((1 << (bytes * 8)) - 1))
             }
@@ -538,24 +540,22 @@ impl Xhci {
                 let high = dword(self, offset + 4)?;
                 Ok(u64::from(low) | u64::from(high) << 32)
             }
-            _ => Err("xHCI register access width or alignment is not architectural"),
+            _ => Err(refuse!(
+                "xHCI register access width or alignment is not architectural"
+            )),
         }
     }
 
-    pub fn write(
-        &mut self,
-        offset: u64,
-        bytes: u64,
-        value: u64,
-        now: u64,
-    ) -> Result<(), &'static str> {
+    pub fn write(&mut self, offset: u64, bytes: u64, value: u64, now: u64) -> Result<()> {
         match bytes {
             4 if offset.is_multiple_of(4) => self.write_dword(offset, value as u32, now),
             8 if offset.is_multiple_of(8) => match self.qword(offset) {
                 Some(()) => self.write_qword(offset, value),
-                None => Err("64-bit write to a 32-bit xHCI register"),
+                None => Err(refuse!("64-bit write to a 32-bit xHCI register")),
             },
-            _ => Err("xHCI register access width or alignment is not architectural"),
+            _ => Err(refuse!(
+                "xHCI register access width or alignment is not architectural"
+            )),
         }
     }
 
@@ -583,7 +583,7 @@ impl Xhci {
         (self.microframes(now) % MFINDEX_PERIOD) as u32
     }
 
-    fn read_dword(&mut self, offset: u64, now: u64) -> Result<u32, &'static str> {
+    fn read_dword(&mut self, offset: u64, now: u64) -> Result<u32> {
         Ok(match offset {
             0x00 => CAPLENGTH as u32 | HCIVERSION << 16,
             0x04 => HCSPARAMS1,
@@ -610,7 +610,7 @@ impl Xhci {
                 0x30 => self.dcbaap as u32,
                 0x34 => (self.dcbaap >> 32) as u32,
                 0x38 => self.config,
-                _ => return Err("reserved xHCI operational register"),
+                _ => return Err(refuse!("reserved xHCI operational register")),
             },
             at if (PORT_BASE..PORT_BASE + PORT_STRIDE * PORTS as u64).contains(&at) => {
                 let port = &self.ports[((at - PORT_BASE) / PORT_STRIDE) as usize];
@@ -642,12 +642,12 @@ impl Xhci {
             at if (EXTENDED..EXTENDED + 4 * CAPABILITIES.len() as u64).contains(&at) => {
                 CAPABILITIES[((at - EXTENDED) / 4) as usize]
             }
-            at if at < BYTES => return Err("reserved xHCI register"),
-            _ => return Err("offset outside the xHCI register space"),
+            at if at < BYTES => return Err(refuse!("reserved xHCI register")),
+            _ => return Err(refuse!("offset outside the xHCI register space")),
         })
     }
 
-    fn write_qword(&mut self, offset: u64, value: u64) -> Result<(), &'static str> {
+    fn write_qword(&mut self, offset: u64, value: u64) -> Result<()> {
         if offset == OPERATIONAL + 0x18 {
             return self.write_crcr(value, true, true);
         }
@@ -674,7 +674,7 @@ impl Xhci {
     /// CRCR: the pointer and RCS while the ring is stopped; CS and CA stop
     /// or abort a running ring after its current command, which here has
     /// always completed.
-    fn write_crcr(&mut self, value: u64, low: bool, high: bool) -> Result<(), &'static str> {
+    fn write_crcr(&mut self, value: u64, low: bool, high: bool) -> Result<()> {
         if self.command_running {
             // Spec 4.6.1.1-2: with no command in progress, CS and CA both
             // stop the ring with a Command Ring Stopped event naming the
@@ -697,16 +697,16 @@ impl Xhci {
         Ok(())
     }
 
-    fn write_dword(&mut self, offset: u64, value: u32, now: u64) -> Result<(), &'static str> {
+    fn write_dword(&mut self, offset: u64, value: u32, now: u64) -> Result<()> {
         match offset {
-            at if at < CAPLENGTH => Err("xHCI capability registers are read-only"),
+            at if at < CAPLENGTH => Err(refuse!("xHCI capability registers are read-only")),
             at if (OPERATIONAL..PORT_BASE).contains(&at) => match at - OPERATIONAL {
                 0x00 => self.write_usbcmd(value, now),
                 0x04 => {
                     self.usbsts &= !(value & USBSTS_CLEAR);
                     Ok(())
                 }
-                0x08 => Err("xHCI PAGESIZE is read-only"),
+                0x08 => Err(refuse!("xHCI PAGESIZE is read-only")),
                 0x14 => {
                     self.dnctrl = value & 0xffff;
                     Ok(())
@@ -723,15 +723,17 @@ impl Xhci {
                 }
                 0x38 => {
                     if value & !0xff != 0 {
-                        return Err("xHCI CONFIG U3E/CIE need capabilities not advertised");
+                        return Err(refuse!(
+                            "xHCI CONFIG U3E/CIE need capabilities not advertised"
+                        ));
                     }
                     if value as usize > MAX_SLOTS {
-                        return Err("xHCI MaxSlotsEn exceeds MaxSlots");
+                        return Err(refuse!("xHCI MaxSlotsEn exceeds MaxSlots"));
                     }
                     self.config = value;
                     Ok(())
                 }
-                _ => Err("reserved xHCI operational register"),
+                _ => Err(refuse!("reserved xHCI operational register")),
             },
             at if (PORT_BASE..PORT_BASE + PORT_STRIDE * PORTS as u64).contains(&at) => {
                 let n = ((at - PORT_BASE) / PORT_STRIDE) as usize;
@@ -739,21 +741,21 @@ impl Xhci {
                     0x0 => self.write_portsc(n, value),
                     0x4 => {
                         if n == 0 && value & 0xf000_0000 != 0 {
-                            return Err("xHCI USB2 port test modes are not modeled");
+                            return Err(refuse!("xHCI USB2 port test modes are not modeled"));
                         }
                         self.ports[n].pmsc = value;
                         Ok(())
                     }
-                    0x8 => Err("xHCI PORTLI is read-only"),
+                    0x8 => Err(refuse!("xHCI PORTLI is read-only")),
                     _ => {
                         self.ports[n].hlpmc = value;
                         Ok(())
                     }
                 }
             }
-            RUNTIME => Err("xHCI MFINDEX is read-only"),
+            RUNTIME => Err(refuse!("xHCI MFINDEX is read-only")),
             at if (RUNTIME..INTERRUPTER_BASE).contains(&at) => {
-                Err("reserved xHCI runtime register")
+                Err(refuse!("reserved xHCI runtime register"))
             }
             at if (INTERRUPTER_BASE
                 ..INTERRUPTER_BASE + INTERRUPTER_STRIDE * INTERRUPTERS as u64)
@@ -773,11 +775,11 @@ impl Xhci {
                     0x04 => i.imod = value,
                     0x08 => {
                         if value & !0xffff != 0 || value > 1 << ERST_MAX {
-                            return Err("xHCI ERSTSZ exceeds ERST Max");
+                            return Err(refuse!("xHCI ERSTSZ exceeds ERST Max"));
                         }
                         i.erstsz = value;
                     }
-                    0x0c => return Err("reserved xHCI interrupter register"),
+                    0x0c => return Err(refuse!("reserved xHCI interrupter register")),
                     0x10 => {
                         i.erstba = i.erstba & !0xffff_ffff | u64::from(value & !0x3f);
                         i.reload = true;
@@ -796,7 +798,7 @@ impl Xhci {
             }
             DOORBELLS => {
                 if value & 0xff != 0 || value >> 16 != 0 {
-                    return Err("xHCI host controller doorbell names a target");
+                    return Err(refuse!("xHCI host controller doorbell names a target"));
                 }
                 self.command_running = true;
                 self.command_doorbell = true;
@@ -805,27 +807,29 @@ impl Xhci {
             at if (DOORBELLS..DOORBELLS + 4 * (MAX_SLOTS as u64 + 1)).contains(&at) => {
                 self.ring(((at - DOORBELLS) / 4) as usize, value)
             }
-            at if at < BYTES => Err("read-only or reserved xHCI register"),
-            _ => Err("offset outside the xHCI register space"),
+            at if at < BYTES => Err(refuse!("read-only or reserved xHCI register")),
+            _ => Err(refuse!("offset outside the xHCI register space")),
         }
     }
 
-    fn write_usbcmd(&mut self, value: u32, now: u64) -> Result<(), &'static str> {
+    fn write_usbcmd(&mut self, value: u32, now: u64) -> Result<()> {
         if value & !USBCMD_KNOWN != 0 {
-            return Err("xHCI USBCMD feature not advertised (CEM, ETE, TSC, VTIO)");
+            return Err(refuse!(
+                "xHCI USBCMD feature not advertised (CEM, ETE, TSC, VTIO)"
+            ));
         }
         if value & LHCRST != 0 {
-            return Err("xHCI light reset is not advertised");
+            return Err(refuse!("xHCI light reset is not advertised"));
         }
         if value & HCRST != 0 {
             if self.usbsts & HCH == 0 {
-                return Err("xHCI HCRST while running is undefined");
+                return Err(refuse!("xHCI HCRST while running is undefined"));
             }
             self.reset("HCRST");
             return Ok(());
         }
         if value & (CSS | CRS) != 0 && (self.usbsts & HCH == 0 || value & RUN != 0) {
-            return Err("xHCI save/restore requires a halted controller");
+            return Err(refuse!("xHCI save/restore requires a halted controller"));
         }
         // CSS/CRS complete at once: SSS and RSS never read set and no state
         // is lost, so SRE stays clear.
@@ -854,9 +858,9 @@ impl Xhci {
     }
 
     /// PORTSC (spec 4.19, 5.4.8).
-    fn write_portsc(&mut self, n: usize, value: u32) -> Result<(), &'static str> {
+    fn write_portsc(&mut self, n: usize, value: u32) -> Result<()> {
         if value & PIC != 0 {
-            return Err("xHCI port indicators are not advertised");
+            return Err(refuse!("xHCI port indicators are not advertised"));
         }
         let usb3 = n == 1;
         let before = self.ports[n].portsc;
@@ -893,12 +897,18 @@ impl Xhci {
                 RESUME if !usb3 && enabled && pls == U3 => link(RESUME),
                 U0 if !usb3 && enabled && matches!(pls, U3 | RESUME) => link(U0) | PLC,
                 2 if !usb3 && enabled => {
-                    return Err("xHCI USB2 L1 needs hardware LPM, which is not advertised");
+                    return Err(refuse!(
+                        "xHCI USB2 L1 needs hardware LPM, which is not advertised"
+                    ));
                 }
                 // Other U0..U3 and resume writes apply to an Enabled port
                 // in a state they lead from; elsewhere they do nothing.
                 0..=3 | 15 => portsc,
-                _ => return Err("xHCI port link state write is not defined for this port"),
+                _ => {
+                    return Err(refuse!(
+                        "xHCI port link state write is not defined for this port"
+                    ));
+                }
             };
         }
         // A warm reset with no device ends in RxDetect at once.
@@ -965,7 +975,7 @@ impl Xhci {
         &mut self,
         port: &mut Port<'_, '_>,
         mut function: Option<&mut (dyn Function + '_)>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         let now = port.access.now;
         if now >= self.trace.second.saturating_add(SECOND) {
             self.trace.second = now;
@@ -1016,7 +1026,7 @@ impl Xhci {
 
     /// Writes held events in order, each interrupter's to its own ring,
     /// then an Event Ring Full Error where events were lost.
-    fn deliver_pending(&mut self, port: &mut Port<'_, '_>) -> Result<(), &'static str> {
+    fn deliver_pending(&mut self, port: &mut Port<'_, '_>) -> Result<()> {
         let mut blocked = [false; INTERRUPTERS];
         let mut at = 0;
         while at < self.pending.len() {
@@ -1062,12 +1072,7 @@ impl Xhci {
         Ok(())
     }
 
-    fn load_segment(
-        &mut self,
-        port: &mut Port<'_, '_>,
-        n: usize,
-        segment: u32,
-    ) -> Result<(), &'static str> {
+    fn load_segment(&mut self, port: &mut Port<'_, '_>, n: usize, segment: u32) -> Result<()> {
         let i = &mut self.interrupters[n];
         if i.erstsz == 0 {
             i.ring = None;
@@ -1075,11 +1080,13 @@ impl Xhci {
         }
         let mut entry = [0u8; 16];
         port.read(i.erstba + u64::from(segment) * 16, &mut entry)
-            .map_err(|_| "xHCI event ring segment table DMA fault")?;
+            .map_err(|_| refuse!("xHCI event ring segment table DMA fault"))?;
         let base = u64::from_le_bytes(entry[..8].try_into().unwrap()) & !0x3f;
         let size = u32::from_le_bytes(entry[8..12].try_into().unwrap()) & 0xffff;
         if !(16..=4096).contains(&size) {
-            return Err("xHCI event ring segment size outside 16..4096 TRBs");
+            return Err(refuse!(
+                "xHCI event ring segment size outside 16..4096 TRBs"
+            ));
         }
         // The producer cycle flips when the ring wraps to its first segment.
         let cycle = match i.ring {
@@ -1099,23 +1106,18 @@ impl Xhci {
 
     /// The address of segment `segment`'s first TRB in interrupter `n`'s
     /// segment table.
-    fn segment_base(
-        &self,
-        port: &mut Port<'_, '_>,
-        n: usize,
-        segment: u32,
-    ) -> Result<u64, &'static str> {
+    fn segment_base(&self, port: &mut Port<'_, '_>, n: usize, segment: u32) -> Result<u64> {
         let mut base = [0u8; 8];
         port.read(
             self.interrupters[n].erstba + u64::from(segment) * 16,
             &mut base,
         )
-        .map_err(|_| "xHCI event ring segment table DMA fault")?;
+        .map_err(|_| refuse!("xHCI event ring segment table DMA fault"))?;
         Ok(u64::from_le_bytes(base) & !0x3f)
     }
 
     /// Writes one event unless the ring is full; false leaves it pending.
-    fn deliver(&mut self, port: &mut Port<'_, '_>, event: Event) -> Result<bool, &'static str> {
+    fn deliver(&mut self, port: &mut Port<'_, '_>, event: Event) -> Result<bool> {
         let n = event.interrupter;
         let Some(ring) = self.interrupters[n].ring else {
             return Ok(false);
@@ -1139,7 +1141,7 @@ impl Xhci {
             chunk.copy_from_slice(&word.to_le_bytes());
         }
         port.write(at, &bytes)
-            .map_err(|_| "xHCI event ring DMA fault")?;
+            .map_err(|_| refuse!("xHCI event ring DMA fault"))?;
         if last {
             self.load_segment(port, n, following)?;
         } else if let Some(ring) = &mut self.interrupters[n].ring {
@@ -1159,14 +1161,14 @@ impl Xhci {
         &mut self,
         port: &mut Port<'_, '_>,
         mut function: Option<&mut (dyn Function + '_)>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         for _ in 0..COMMANDS_PER_SERVICE {
             if !self.command_running {
                 return Ok(());
             }
             let mut bytes = [0u8; 16];
             port.read(self.command, &mut bytes)
-                .map_err(|_| "xHCI command ring DMA fault")?;
+                .map_err(|_| refuse!("xHCI command ring DMA fault"))?;
             let word = |n: usize| u32::from_le_bytes(bytes[n * 4..n * 4 + 4].try_into().unwrap());
             let control = word(3);
             if (control & CYCLE != 0) != self.command_cycle {
@@ -1239,7 +1241,7 @@ impl Xhci {
                         // bandwidth percentage; byte 0 is reserved.
                         let context = [0, 100, 100, 0];
                         port.write(parameter & !0xf, &context)
-                            .map_err(|_| "xHCI port bandwidth context DMA fault")?;
+                            .map_err(|_| refuse!("xHCI port bandwidth context DMA fault"))?;
                         (SUCCESS, 0)
                     }
                 }

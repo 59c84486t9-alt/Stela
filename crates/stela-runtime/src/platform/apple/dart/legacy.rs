@@ -21,8 +21,11 @@
 //! This module does not check those board configurations by constructing a
 //! successful-looking superset. Translation is cacheless and DMA synchronous.
 use super::{Profile, SMMU_BYTES, SMMU_OFFSET, descriptor::Format, legacy_umms};
+use crate::Result;
 use alloc::{rc::Rc, vec, vec::Vec};
 use core::cell::RefCell;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -102,9 +105,9 @@ pub(super) struct Dart {
 }
 
 impl Dart {
-    pub(super) fn bind_shared_irq(&mut self, irq: &super::SharedIrq) -> Result<(), &'static str> {
+    pub(super) fn bind_shared_irq(&mut self, irq: &super::SharedIrq) -> Result<()> {
         if self.irq != Some(irq.input) {
-            return Err("DART shared IRQ does not match its physical input");
+            return Err(refuse!("DART shared IRQ does not match its physical input"));
         }
         if self.level
             || self
@@ -112,7 +115,7 @@ impl Dart {
                 .as_ref()
                 .is_some_and(|(levels, _)| levels.borrow().iter().any(|&level| level))
         {
-            return Err("an asserted DART IRQ source cannot be rebound");
+            return Err(refuse!("an asserted DART IRQ source cannot be rebound"));
         }
         self.shared_fault = Some(irq.source());
         Ok(())
@@ -173,12 +176,14 @@ impl Dart {
         self.profile == Profile::T6000
     }
 
-    pub(super) fn enable_smmu(&mut self) -> Result<(), &'static str> {
+    pub(super) fn enable_smmu(&mut self) -> Result<()> {
         if !self.supports_smmu() {
-            return Err("legacy DART paired SMMU capture format is unsupported");
+            return Err(refuse!(
+                "legacy DART paired SMMU capture format is unsupported"
+            ));
         }
         if self.smmu.is_some() {
-            return Err("DART already has a paired SMMU instance");
+            return Err(refuse!("DART already has a paired SMMU instance"));
         }
         self.smmu = Some(legacy_umms::Umms::default());
         Ok(())
@@ -275,35 +280,35 @@ impl Dart {
         write: bool,
     ) -> Result<u64, DmaError> {
         if let Some(reason) = self.unavailable() {
-            return Err(DmaError::Unsupported(reason));
+            return Err(DmaError::Unsupported(reason.into()));
         }
         if self.quiesced {
-            return Err(DmaError::Unsupported("DART DMA is quiesced"));
+            return Err(DmaError::Unsupported(refuse!("DART DMA is quiesced")));
         }
         if input_sid >= self.streams {
-            return Err(DmaError::Unsupported(
-                "DART incoming stream is outside the native profile",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "DART incoming stream is outside the native profile"
+            )));
         }
         let sid = usize::from(self.remap[input_sid]);
         if sid >= self.streams {
-            return Err(DmaError::Unsupported(
-                "DART remap target is outside the native profile",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "DART remap target is outside the native profile"
+            )));
         }
         if self.enabled & (1 << sid) == 0 {
             return Err(DmaError::Fault(NO_TTBR));
         }
         let tcr = self.tcr[sid];
         if tcr & (TRANSLATE | BYPASS) == TRANSLATE | BYPASS {
-            return Err(DmaError::Unsupported(
-                "DART simultaneous translation and bypass",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "DART simultaneous translation and bypass"
+            )));
         }
         if self.apf && tcr & BYPASS_APF == 0 {
-            return Err(DmaError::Unsupported(
-                "legacy DART address permission filtering",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "legacy DART address permission filtering"
+            )));
         }
         if tcr & BYPASS != 0 {
             return Ok(iova);
@@ -324,12 +329,14 @@ impl Dart {
             T6000_PA_BITS
         };
         if root >> pa_bits != 0 {
-            return Err(DmaError::Unsupported(
-                "DART root address exceeds its native profile",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "DART root address exceeds its native profile"
+            )));
         }
         if root & (self.page() - 1) != 0 {
-            return Err(DmaError::Unsupported("unaligned legacy DART root table"));
+            return Err(DmaError::Unsupported(refuse!(
+                "unaligned legacy DART root table"
+            )));
         }
         let first = self.entry(memory, root, iova >> (self.page_shift + bits))?;
         if first & VALID == 0 {
@@ -387,24 +394,24 @@ impl Dart {
             let candidate =
                 self.walk(memory, input, iova, last, write)
                     .map_err(|error| match error {
-                        DmaError::Fault(_) => DmaError::Unsupported(
-                            "T6000 context route has a faulting incoming SID alternative",
-                        ),
-                        DmaError::Memory => DmaError::Unsupported(
-                            "T6000 context route has an inaccessible table alternative",
-                        ),
+                        DmaError::Fault(_) => DmaError::Unsupported(refuse!(
+                            "T6000 context route has a faulting incoming SID alternative"
+                        )),
+                        DmaError::Memory => DmaError::Unsupported(refuse!(
+                            "T6000 context route has an inaccessible table alternative"
+                        )),
                         other => other,
                     })?;
             if physical.is_some_and(|previous| previous != candidate) {
-                return Err(DmaError::Unsupported(
-                    "T6000 context route incoming SID alternatives diverge",
-                ));
+                return Err(DmaError::Unsupported(refuse!(
+                    "T6000 context route incoming SID alternatives diverge"
+                )));
             }
             physical = Some(candidate);
         }
-        physical.ok_or(DmaError::Unsupported(
-            "T6000 context route has no current incoming SID preimage",
-        ))
+        physical.ok_or(DmaError::Unsupported(refuse!(
+            "T6000 context route has no current incoming SID preimage"
+        )))
     }
 
     fn signal(&mut self, access: &mut Access<'_>) {
@@ -425,10 +432,12 @@ impl Dart {
         }
     }
 
-    fn acknowledge_error(&mut self, value: u32) -> Result<(), &'static str> {
+    fn acknowledge_error(&mut self, value: u32) -> Result<()> {
         if self.profile != Profile::T6000 {
             if value != 0 && value & FLAG == 0 {
-                return Err("legacy DART code-only fault acknowledgement is not specified");
+                return Err(refuse!(
+                    "legacy DART code-only fault acknowledgement is not specified"
+                ));
             }
             if value & FLAG != 0 {
                 self.error = 0;
@@ -440,14 +449,16 @@ impl Dart {
             // captured word (SPTM270bb83c..bb840). It does not establish
             // FLAG-only or stale/modified metadata acknowledgement effects.
             if value != self.error {
-                return Err("T6000 DART acknowledgement is not its captured fault snapshot");
+                return Err(refuse!(
+                    "T6000 DART acknowledgement is not its captured fault snapshot"
+                ));
             }
             self.error = 0;
         } else if value != 0 {
             // SPTM270bbc64..bbc9c writes one selected code and reads back.
             // Validate the entire write before changing the first capture.
             if value & !T6000_ERROR_ACK_CODES != 0 || value.count_ones() != 1 {
-                return Err("unknown T6000 DART code acknowledgement");
+                return Err(refuse!("unknown T6000 DART code acknowledgement"));
             }
             if self.error & value != 0 {
                 self.error &= !value;
@@ -478,9 +489,9 @@ impl Iommu for Dart {
         let result = self.walk(memory, stream, iova, last, write);
         if let Err(DmaError::Fault(code)) = result {
             if stream < self.streams && usize::from(self.remap[stream]) != stream {
-                return Err(DmaError::Unsupported(
-                    "legacy DART remapped fault source-versus-context SID provenance",
-                ));
+                return Err(DmaError::Unsupported(refuse!(
+                    "legacy DART remapped fault source-versus-context SID provenance"
+                )));
             }
             if self.error & FLAG == 0 {
                 self.error = FLAG
@@ -505,18 +516,20 @@ impl MmioDevice for Dart {
     }
 
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(self.name(), offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(self.name(), offset, width, Direction::Read, reason);
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(fail("legacy DART registers are aligned 32-bit words"));
+            return Err(fail(refuse!(
+                "legacy DART registers are aligned 32-bit words"
+            )));
         }
         if let Some(reason) = self.unavailable() {
-            return Err(fail(reason));
+            return Err(fail(reason.into()));
         }
         if (SMMU_OFFSET..SMMU_OFFSET + SMMU_BYTES).contains(&offset) {
             return self
                 .smmu
                 .as_ref()
-                .ok_or_else(|| fail("legacy DART has no paired UMMS instance"))?
+                .ok_or_else(|| fail(refuse!("legacy DART has no paired UMMS instance")))?
                 .read(offset - SMMU_OFFSET)
                 .map(u64::from)
                 .map_err(fail);
@@ -552,21 +565,21 @@ impl MmioDevice for Dart {
                 )
             }
             _ if (TCR..TCR + 16 * 4).contains(&offset) => {
-                let sid = self
-                    .sid_register(offset, TCR, 4)
-                    .ok_or_else(|| fail("legacy DART stream is outside the native profile"))?;
+                let sid = self.sid_register(offset, TCR, 4).ok_or_else(|| {
+                    fail(refuse!("legacy DART stream is outside the native profile"))
+                })?;
                 self.tcr[sid]
             }
             _ if (TTBR..TTBR + 16 * 16).contains(&offset) => {
-                let sid = self
-                    .sid_register(offset, TTBR, 16)
-                    .ok_or_else(|| fail("legacy DART stream is outside the native profile"))?;
+                let sid = self.sid_register(offset, TTBR, 16).ok_or_else(|| {
+                    fail(refuse!("legacy DART stream is outside the native profile"))
+                })?;
                 self.ttbr[sid][((offset - TTBR) % 16 / 4) as usize]
             }
             _ => {
-                return Err(fail(
-                    "unknown legacy DART register or unsupported capture/filter view",
-                ));
+                return Err(fail(refuse!(
+                    "unknown legacy DART register or unsupported capture/filter view"
+                )));
             }
         };
         Ok(u64::from(value))
@@ -580,19 +593,21 @@ impl MmioDevice for Dart {
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
         let name = self.name();
-        let fail = |reason| refuse(name, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(name, offset, width, Direction::Write, reason);
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(fail("legacy DART registers are aligned 32-bit words"));
+            return Err(fail(refuse!(
+                "legacy DART registers are aligned 32-bit words"
+            )));
         }
         if let Some(reason) = self.unavailable() {
-            return Err(fail(reason));
+            return Err(fail(reason.into()));
         }
         let value = value as u32;
         if (SMMU_OFFSET..SMMU_OFFSET + SMMU_BYTES).contains(&offset) {
             return self
                 .smmu
                 .as_mut()
-                .ok_or_else(|| fail("legacy DART has no paired UMMS instance"))?
+                .ok_or_else(|| fail(refuse!("legacy DART has no paired UMMS instance")))?
                 .write(offset - SMMU_OFFSET, value)
                 .map_err(fail);
         }
@@ -602,20 +617,20 @@ impl MmioDevice for Dart {
             // an idle command word before polling. There is no queued work
             // or translation cache to cancel in this native profile.
             COMMAND if self.profile == Profile::T6000 && value == 0 => {}
-            COMMAND => return Err(fail("unknown legacy DART stream command")),
+            COMMAND => return Err(fail(refuse!("unknown legacy DART stream command"))),
             SELECT => self.select = value & self.mask(),
             ERROR => self.acknowledge_error(value).map_err(fail)?,
             CONFIG => {
                 if value & !LOCK != 0 {
-                    return Err(fail("unknown legacy DART CONFIG bits"));
+                    return Err(fail(refuse!("unknown legacy DART CONFIG bits")));
                 }
                 self.locked |= value & LOCK != 0;
             }
             ENABLED => {
                 if self.locked {
-                    return Err(fail(
-                        "legacy DART enabled-stream lock coverage is not specified",
-                    ));
+                    return Err(fail(refuse!(
+                        "legacy DART enabled-stream lock coverage is not specified"
+                    )));
                 }
                 self.enabled = value & self.mask();
             }
@@ -629,7 +644,9 @@ impl MmioDevice for Dart {
             }
             _ if (REMAP..REMAP + 16).contains(&offset) => {
                 if self.locked {
-                    return Err(fail("legacy DART remap lock coverage is not specified"));
+                    return Err(fail(refuse!(
+                        "legacy DART remap lock coverage is not specified"
+                    )));
                 }
                 let sid = (offset - REMAP) as usize;
                 if value
@@ -637,38 +654,38 @@ impl MmioDevice for Dart {
                     .iter()
                     .any(|&sid| usize::from(sid) >= self.streams)
                 {
-                    return Err(fail(
-                        "legacy DART remap target is outside the native profile",
-                    ));
+                    return Err(fail(refuse!(
+                        "legacy DART remap target is outside the native profile"
+                    )));
                 }
                 self.remap[sid..sid + 4].copy_from_slice(&value.to_le_bytes());
             }
             _ if (TCR..TCR + 16 * 4).contains(&offset) => {
-                let sid = self
-                    .sid_register(offset, TCR, 4)
-                    .ok_or_else(|| fail("legacy DART stream is outside the native profile"))?;
+                let sid = self.sid_register(offset, TCR, 4).ok_or_else(|| {
+                    fail(refuse!("legacy DART stream is outside the native profile"))
+                })?;
                 if value & SMMU_CONTEXT != 0 {
-                    return Err(fail("legacy DART SMMU stream context selection"));
+                    return Err(fail(refuse!("legacy DART SMMU stream context selection")));
                 }
                 if value & !TCR_KNOWN != 0 {
-                    return Err(fail("unknown legacy DART TCR bits"));
+                    return Err(fail(refuse!("unknown legacy DART TCR bits")));
                 }
                 if !self.locked {
                     self.tcr[sid] = value;
                 }
             }
             _ if (TTBR..TTBR + 16 * 16).contains(&offset) => {
-                let sid = self
-                    .sid_register(offset, TTBR, 16)
-                    .ok_or_else(|| fail("legacy DART stream is outside the native profile"))?;
+                let sid = self.sid_register(offset, TTBR, 16).ok_or_else(|| {
+                    fail(refuse!("legacy DART stream is outside the native profile"))
+                })?;
                 if !self.locked {
                     self.ttbr[sid][((offset - TTBR) % 16 / 4) as usize] = value;
                 }
             }
             _ => {
-                return Err(fail(
-                    "unknown legacy DART register or unsupported capture/filter view",
-                ));
+                return Err(fail(refuse!(
+                    "unknown legacy DART register or unsupported capture/filter view"
+                )));
             }
         }
         self.signal(access);

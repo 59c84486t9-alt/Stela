@@ -1,5 +1,6 @@
 use super::fixture_support::*;
 use super::power_resources::PMGR_DEVICE;
+use stela_contracts::refuse;
 
 use super::*;
 
@@ -242,6 +243,7 @@ fn rtbuddy_endpoint_selection_uses_protocol_and_rejects_ambiguity() {
         rtbuddy_nub(&Node::root(&duplicate).unwrap(), "GFX")
             .err()
             .unwrap()
+            .to_string()
             .contains("ambiguous")
     );
     let child = encode(
@@ -256,6 +258,7 @@ fn rtbuddy_endpoint_selection_uses_protocol_and_rejects_ambiguity() {
         rtbuddy_nub(&Node::root(&data).unwrap(), "GFX")
             .err()
             .unwrap()
+            .to_string()
             .contains("remote-only")
     );
 }
@@ -270,7 +273,7 @@ fn rtbuddy_nubs_the_ap_does_not_wait_for_refuse() {
     for flag in UNAWAITED_NUB {
         let data = encode(&[("name", &name), (flag, &set)], &[]);
         let error = awaited_nub(&Node::root(&data).unwrap(), "PMP").unwrap_err();
-        assert!(error.contains(flag));
+        assert!(error.to_string().contains(flag));
     }
 }
 
@@ -409,6 +412,7 @@ fn a_board_takes_its_chip_and_pes_from_the_device_tree() {
     assert!(
         cpus(0x8122, "Apple M3", &layout_of(&layout))
             .unwrap_err()
+            .to_string()
             .contains("CPU slots")
     );
     assert_eq!(dram_base(0x8112), Ok(0x8_0000_0000));
@@ -453,6 +457,7 @@ fn the_m6_kernel_bounds_its_cpus() {
     assert!(
         cpus(0x8152, "Apple M6", &layout_of(&j873g))
             .unwrap_err()
+            .to_string()
             .contains("MAX_CPUS")
     );
 }
@@ -473,14 +478,16 @@ fn a_board_without_evidence_refuses() {
     // A SoC without a row.
     assert_eq!(
         cpus(0x8101, "Apple A14", &one),
-        Err("ApChipID 0x8101 (Apple A14) has no public MIDR part".into())
+        Err(refuse!(
+            "ApChipID 0x8101 (Apple A14) has no public MIDR part"
+        ))
     );
     assert!(cpus(0x8112, "Apple M2 Pro", &one).is_err());
     assert!(cpus(0x8112, "Apple M2", &[]).is_err());
     // The M6's M cores and a second die's affinity.
     assert_eq!(
         cpus(0x8152, "Apple M6", &layout_of(&[(b'M', 0)])),
-        Err("Apple M6 cluster type M has no public MIDR part".into())
+        Err(refuse!("Apple M6 cluster type M has no public MIDR part"))
     );
     assert!(cpus(0x6031, "Apple M3 Max", &layout_of(&[(b'P', 0x1000)])).is_err());
 }
@@ -623,7 +630,7 @@ fn a_device_tree_places_the_board_or_says_why_it_cannot() {
     assert_eq!(m1.lockdown, found.lockdown);
     assert_eq!(
         board(&tree(0x8103, "Apple M1", MODELED)),
-        Err("/arm-io/aic is not aic,1, the modeled device".into())
+        Err(refuse!("/arm-io/aic is not aic,1, the modeled device"))
     );
     assert_eq!(
         board(&tree(
@@ -631,11 +638,13 @@ fn a_device_tree_places_the_board_or_says_why_it_cannot() {
             "Apple M2",
             ["uart-2", "wdt,s5l8960x", "aic,2"]
         )),
-        Err("/arm-io/uart0 is not uart-1,samsung, the modeled device".into())
+        Err(refuse!(
+            "/arm-io/uart0 is not uart-1,samsung, the modeled device"
+        ))
     );
     assert_eq!(
         board(&tree(0x8122, "Apple M3", MODELED)),
-        Err("/arm-io/aic is not aic,3, the modeled device".into())
+        Err(refuse!("/arm-io/aic is not aic,3, the modeled device"))
     );
     assert!(board(&[0; 4]).is_err());
 }
@@ -806,19 +815,21 @@ fn a_board_places_its_darts_and_the_aes_engine_behind_one() {
     );
     assert_eq!(
         parse(m4(&three[..4], 5, &u32s(&[0x48]))),
-        Err("/arm-io/aes aes-version 5 has 2 register ranges".into())
+        Err(refuse!("/arm-io/aes aes-version 5 has 2 register ranges"))
     );
     assert_eq!(
         parse(m4(&three, 3, &u32s(&[0x48]))),
-        Err("/arm-io/aes aes-version 3 has 3 register ranges".into())
+        Err(refuse!("/arm-io/aes aes-version 3 has 3 register ranges"))
     );
     assert_eq!(
         parse(m4(&three, 5, &u32s(&[0x48, 0]))),
-        Err("/arm-io/aes sioaesdisablegid1-offset is not one 32-bit cell".into())
+        Err(refuse!(
+            "/arm-io/aes sioaesdisablegid1-offset is not one 32-bit cell"
+        ))
     );
     assert_eq!(
         parse(m4(&three, 5, &u32s(&[0x44]))),
-        Err("/arm-io/aes: AES key-disable words overlap".into())
+        Err(refuse!("/arm-io/aes: AES key-disable words overlap"))
     );
     assert_eq!(
         board(&tree_with_io(
@@ -828,7 +839,9 @@ fn a_board_places_its_darts_and_the_aes_engine_behind_one() {
             &[],
             &[sio, aes(0x99)]
         )),
-        Err("/arm-io/aes iommu-parent 0x99 is no modeled DART's mapper".into())
+        Err(refuse!(
+            "/arm-io/aes iommu-parent 0x99 is no modeled DART's mapper"
+        ))
     );
     let bytes = tree_with_io(
         0x8112,
@@ -859,6 +872,7 @@ fn a_board_places_its_darts_and_the_aes_engine_behind_one() {
     assert!(
         aes_engine(&io, &flat_fixture_extent(&Some), &routes)
             .unwrap_err()
+            .to_string()
             .contains("ambiguous")
     );
     routes[0] = good.clone();
@@ -866,6 +880,7 @@ fn a_board_places_its_darts_and_the_aes_engine_behind_one() {
     assert!(
         aes_engine(&io, &flat_fixture_extent(&Some), &routes)
             .unwrap_err()
+            .to_string()
             .contains("ambiguous")
     );
     routes.pop();
@@ -874,6 +889,7 @@ fn a_board_places_its_darts_and_the_aes_engine_behind_one() {
     assert!(
         aes_engine(&io, &flat_fixture_extent(&Some), &routes)
             .unwrap_err()
+            .to_string()
             .contains("SID set")
     );
     routes[0] = good.clone();
@@ -881,6 +897,7 @@ fn a_board_places_its_darts_and_the_aes_engine_behind_one() {
     assert!(
         aes_engine(&io, &flat_fixture_extent(&Some), &routes)
             .unwrap_err()
+            .to_string()
             .contains("outside the native profile")
     );
     routes[0] = good.clone();
@@ -888,6 +905,7 @@ fn a_board_places_its_darts_and_the_aes_engine_behind_one() {
     assert!(
         aes_engine(&io, &flat_fixture_extent(&Some), &routes)
             .unwrap_err()
+            .to_string()
             .contains("multi-instance")
     );
     routes[0].instances.clear();
@@ -897,7 +915,9 @@ fn a_board_places_its_darts_and_the_aes_engine_behind_one() {
     let pmp = dart(&dapf, &[0x3b30_0000, 0x4000, 0x3b30_4000, 0x4000]);
     assert_eq!(
         board(&tree_with_io(0x8112, "Apple M2", MODELED, &[], &[pmp])),
-        Err("/arm-io/dart-sio has no n-apfs-instance-0 slice count".into())
+        Err(refuse!(
+            "/arm-io/dart-sio has no n-apfs-instance-0 slice count"
+        ))
     );
     let three = dart(
         &[dapf.as_slice(), &dapf[16..]].concat(),
@@ -912,7 +932,9 @@ fn a_board_places_its_darts_and_the_aes_engine_behind_one() {
     );
     assert_eq!(
         board(&tree_with_io(0x8112, "Apple M2", MODELED, &[], &[three])),
-        Err("/arm-io/dart-sio has unsupported instance kinds, numbering or APF topology".into())
+        Err(refuse!(
+            "/arm-io/dart-sio has unsupported instance kinds, numbering or APF topology"
+        ))
     );
 }
 
@@ -1424,7 +1446,7 @@ fn core_requirements_keep_unknown_m6_capabilities_explicit() {
     assert!(topology::validate(&processors).is_ok());
     assert_eq!(
         cpus(0x8152, "Apple M6", &processors),
-        Err("Apple M6 cluster type M has no public MIDR part".into())
+        Err(refuse!("Apple M6 cluster type M has no public MIDR part"))
     );
 }
 
@@ -1444,7 +1466,7 @@ fn cpu_binding_rejects_aliasing_affinities_before_synthetic_type_bits() {
     ];
     assert_eq!(
         cpus(0x8112, "Apple M2", &processors),
-        Err("duplicate CPU affinity reg 0x0".into())
+        Err(refuse!("duplicate CPU affinity reg 0x0"))
     );
 }
 #[test]

@@ -53,7 +53,7 @@ impl Property {
         require!(
             !name.is_empty() && name.len() < PROPERTY_NAME_BYTES && !name.contains('\0'),
             "property name {name} does not fit the 32-byte ADT name field",
-            name = alloc::format!("{name:?}")
+            ?name
         );
         require!(
             value.len() <= LENGTH_MASK as usize,

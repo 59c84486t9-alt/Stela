@@ -1,4 +1,6 @@
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 
 /// The J473 `/arm-io/aes`: version 3, one key-disable word.
 fn j473_aes() -> stela_soc_data::aes::Config {
@@ -478,7 +480,7 @@ fn pmgr_serial_reset_preflights_nor_before_clearing_other_controllers() {
     d.write(0, supply, 4, 0x40f, 0).unwrap();
     let before = d.read(0, supply, 4, 0).unwrap();
     assert!(matches!(d.write(0, supply, 4, 0x8000040f, 0),
-            Err(DeviceError::Refused(reason)) if reason.contains("incomplete NOR")));
+            Err(DeviceError::Refused(reason)) if reason.to_string().contains("incomplete NOR")));
     assert_eq!(d.read(0, supply, 4, 0), Ok(before));
     assert_eq!(d.read(0, uart, 4, 0), Ok(3));
     assert_eq!(d.read(0, i2c + 0x1c, 4, 0), Ok(0));
@@ -509,9 +511,11 @@ struct CheckedPowerBank {
     committed: Vec<LifecycleState>,
 }
 impl stela_contracts::bus::Lifecycle for CheckedPowerBank {
-    fn check_lifecycle(&self, state: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, state: LifecycleState) -> Result<()> {
         if self.reject && (!state.powered || state.reset) {
-            Err("native bank destructive transition remains unqualified")
+            Err(refuse!(
+                "native bank destructive transition remains unqualified"
+            ))
         } else {
             Ok(())
         }
@@ -670,7 +674,7 @@ fn pmgr_all_native_banks_preflight_before_register_or_dart_effects() {
     let before = d.read(0, supply, 4, 0).unwrap();
     let failure = d.write(0, supply, 4, 0x3f0, 0).unwrap_err();
     assert!(
-        matches!(failure, DeviceError::Refused(reason) if reason.contains("checked-native") && reason.contains("unqualified"))
+        matches!(failure, DeviceError::Refused(reason) if reason.to_string().contains("checked-native") && reason.to_string().contains("unqualified"))
     );
     assert_eq!(d.read(0, supply, 4, 0), Ok(before));
     assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(1));
@@ -878,6 +882,7 @@ fn failed_smmu_placement_does_not_attach_or_publish_a_view() {
                 }
             )
             .unwrap_err()
+            .to_string()
             .contains("no supported paired SMMU")
         );
         assert!(!d.bus.device::<Dart>(legacy).unwrap().has_smmu());
@@ -1466,7 +1471,7 @@ fn ans_dma_and_sart_idle_share_the_nvme_aperture_without_aliasing() {
     let quiesced = devices.read(0, SUPPLY, 4, 0).unwrap();
     let failure = devices.write(0, SUPPLY, 4, 0x8000_040f, 0).unwrap_err();
     assert!(
-        matches!(failure, DeviceError::Refused(reason) if reason.contains("ANS physical reset"))
+        matches!(failure, DeviceError::Refused(reason) if reason.to_string().contains("ANS physical reset"))
     );
     assert_eq!(devices.read(0, SUPPLY, 4, 0), Ok(quiesced));
     assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
@@ -1679,7 +1684,9 @@ fn gfx_native_control_cannot_bind_over_another_mounted_bank() {
         devices.bus.map(foreign, base, bytes, 0).unwrap();
         assert_eq!(
             devices.add_gfx(&placement, stela_formats::builds::DEFAULT),
-            Err("GFX native ASC control is not wholly owned by its mounted SGX bank".into())
+            Err(refuse!(
+                "GFX native ASC control is not wholly owned by its mounted SGX bank"
+            ))
         );
         assert!(devices.gfx_masters.is_empty());
         assert_eq!(devices.bus.route(base, Width::Word), Ok((foreign, 0)));
@@ -1848,7 +1855,7 @@ fn gfx_firmware_reads_its_initdata_through_the_uat_the_sgx_mmu_roots() {
     let before = devices.read(0, SUPPLY, 4, 0).unwrap();
     let failure = devices.write(0, SUPPLY, 4, 0x8000_040f, 0).unwrap_err();
     assert!(
-        matches!(failure, DeviceError::Refused(reason) if reason.contains("SGX physical reset"))
+        matches!(failure, DeviceError::Refused(reason) if reason.to_string().contains("SGX physical reset"))
     );
     assert_eq!(devices.read(0, SUPPLY, 4, 0), Ok(before));
     assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
@@ -1988,7 +1995,7 @@ fn native_dma_constructors_preflight_every_owner_before_publication() {
         fn mode(&self) -> ScanoutMode {
             panic!("DCP used scanout before owner preflight")
         }
-        fn present(&mut self, _: &[u8]) -> Result<(), &'static str> {
+        fn present(&mut self, _: &[u8]) -> Result<()> {
             unreachable!()
         }
     }
@@ -2011,6 +2018,7 @@ fn native_dma_constructors_preflight_every_owner_before_publication() {
                 None
             )
             .unwrap_err()
+            .to_string()
             .contains("DART")
         );
         assert!(
@@ -2034,11 +2042,17 @@ fn native_dma_constructors_preflight_every_owner_before_publication() {
                 stela_formats::builds::DEFAULT
             )
             .unwrap_err()
+            .to_string()
             .contains("DART")
         );
         let mut usb = usb_placement();
         usb.stream = input as u32;
-        assert!(d.add_usb(&usb, dart).unwrap_err().contains("DART"));
+        assert!(
+            d.add_usb(&usb, dart)
+                .unwrap_err()
+                .to_string()
+                .contains("DART")
+        );
         assert!(d.masters.is_empty() && d.dcp_masters.is_empty() && d.usb_masters.is_empty());
         for address in [AES, WRAPPER + 0x8114, usb.ranges[0].0 + 0x20] {
             assert!(d.read(0, address, 4, 0).is_err());
@@ -2102,6 +2116,7 @@ fn native_dma_constructors_preflight_every_owner_before_publication() {
                 stela_formats::builds::DEFAULT
             )
             .unwrap_err()
+            .to_string()
             .contains("DCP surface")
         );
         assert!(d.coprocessors.is_empty() && d.dcp_masters.is_empty());
@@ -2143,7 +2158,7 @@ fn mounted_dcpext_kept_pm_gates_suppress_real_surface_dma_and_scanout() {
                 format: ScanoutFormat::Bgra8888,
             }
         }
-        fn present(&mut self, rows: &[u8]) -> Result<(), &'static str> {
+        fn present(&mut self, rows: &[u8]) -> Result<()> {
             assert_eq!(rows, [1, 2, 3, 255]);
             *self.0.borrow_mut() += 1;
             Ok(())
@@ -2318,7 +2333,7 @@ fn dcpext_enumerates_its_rtkit_and_the_display_regions_refuse() {
                 format: ScanoutFormat::Bgra8888,
             }
         }
-        fn present(&mut self, _rows: &[u8]) -> Result<(), &'static str> {
+        fn present(&mut self, _rows: &[u8]) -> Result<()> {
             Ok(())
         }
     }
@@ -2767,7 +2782,7 @@ fn routes_the_console_and_refuses_other_registers() {
     );
     assert!(matches!(
         devices.read(0, UART + 0x3c, 4, 0),
-        Err(DeviceError::Refused(reason)) if reason.contains("UVER")
+        Err(DeviceError::Refused(reason)) if reason.to_string().contains("UVER")
     ));
     assert!(!devices.lines(0, 0).irq);
     assert_eq!(devices.take_reset(), None);
@@ -2842,7 +2857,7 @@ fn places_an_aic1_and_routes_uart_wires_to_it() {
     assert!(!devices.lines(0, 0).irq, "the event read masked the IRQ");
     assert!(matches!(
         devices.read(0, AIC + 0x5008, 4, 0),
-        Err(DeviceError::Refused(reason)) if reason.contains("per-CPU")
+        Err(DeviceError::Refused(reason)) if reason.to_string().contains("per-CPU")
     ));
 }
 
@@ -2946,6 +2961,7 @@ fn version_5_aes_places_its_dkey_range_after_the_key_disable_words() {
         devices
             .add_aes(&ranges[..2], config, None, (dart, 1), None)
             .unwrap_err()
+            .to_string()
             .contains("has 3 register ranges, not 2")
     );
     devices
@@ -3009,6 +3025,7 @@ fn sep_native_nonzero_routes_read_firmware_and_preflight_owner_capacity() {
         assert!(
             add(&mut d, absent, input)
                 .unwrap_err()
+                .to_string()
                 .contains("not a mounted DART")
         );
         d.add_aic(0x23b100000, 16, AicLayout::V1).unwrap();
@@ -3017,6 +3034,7 @@ fn sep_native_nonzero_routes_read_firmware_and_preflight_owner_capacity() {
         assert!(
             add(&mut d, foreign, input)
                 .unwrap_err()
+                .to_string()
                 .contains("not a mounted DART")
         );
         let owner = d
@@ -3031,10 +3049,16 @@ fn sep_native_nonzero_routes_read_firmware_and_preflight_owner_capacity() {
                 None,
             )
             .unwrap()[0];
-        assert!(add(&mut d, owner, 16).unwrap_err().contains("capacity"));
+        assert!(
+            add(&mut d, owner, 16)
+                .unwrap_err()
+                .to_string()
+                .contains("capacity")
+        );
         assert!(
             add(&mut d, owner, usize::MAX)
                 .unwrap_err()
+                .to_string()
                 .contains("capacity")
         );
         assert!(d.sep_masters.is_empty());
@@ -3241,7 +3265,7 @@ fn sep_rom_accepts_firmware_under_stela_policy_and_reaches_os_active() {
         },
     );
     assert!(
-        matches!(refusal, Err(DeviceError::TransferRefused(reason)) if reason.contains("payload type is malformed"))
+        matches!(refusal, Err(DeviceError::TransferRefused(reason)) if reason.to_string().contains("payload type is malformed"))
     );
 }
 fn usb_placement() -> stela_soc_data::board::UsbController {
@@ -3331,7 +3355,7 @@ fn mounted_usb_dma_service_failure_is_protected_from_survey_substitution() {
     for now in [0, 10] {
         let error = d.transfer(0, &mut ram, now).unwrap_err();
         assert!(
-            matches!(error, DeviceError::TransferRefused(ref reason) if reason.starts_with("USB device advance:"))
+            matches!(error, DeviceError::TransferRefused(ref reason) if reason.to_string().starts_with("USB device advance:"))
         );
     }
     let mut untouched = [0; 16];
@@ -3431,6 +3455,7 @@ fn phy_phandles_distinguish_standalone_views_on_the_same_connector() {
         devices
             .add_atc_phy(&auxiliary)
             .unwrap_err()
+            .to_string()
             .contains("phandle")
     );
     assert_eq!(devices.phys.len(), 2);
@@ -3451,6 +3476,7 @@ fn phy_phandles_distinguish_standalone_views_on_the_same_connector() {
         devices
             .add_usb(&placement, dart)
             .unwrap_err()
+            .to_string()
             .contains("pipehandler")
     );
     placement.phy = first.phandle;
@@ -3479,6 +3505,7 @@ fn usb_requires_phy_binding_and_kept_phy_pauses_preserve_sessions() {
     assert!(
         d.add_usb(&placement, dart)
             .unwrap_err()
+            .to_string()
             .contains("no placed PHY")
     );
     let phy = add_usb_phy(&mut d);
@@ -3488,6 +3515,7 @@ fn usb_requires_phy_binding_and_kept_phy_pauses_preserve_sessions() {
     assert!(
         d.add_usb(&placement, dart)
             .unwrap_err()
+            .to_string()
             .contains("pipehandler")
     );
     d.phys[0].pipe = saved_pipe;

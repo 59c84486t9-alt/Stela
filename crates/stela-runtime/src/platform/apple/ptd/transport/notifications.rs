@@ -3,8 +3,10 @@
 //! through RTKit-local IRQ 1+r, encoded in namespace 0x10000. These are not AP
 //! AIC numbers or ASC messages. See docs/research/apple-mcc.md.
 use super::{NotificationOwner, Ptd, ROUTES, Range};
+use crate::Result;
 use alloc::rc::Rc;
 use stela_contracts::bus::LifecycleState;
+use stela_contracts::refuse;
 use stela_soc_data::ptd::Geometry;
 
 /// Original native descriptor geometry, independently cross-checked by the
@@ -61,13 +63,17 @@ impl LocalNotifications {
     /// Admit exactly one native recipient before any publication. Aliases keep
     /// this admission for the bank's whole lifetime, including after an
     /// abandoned recipient. Dropping a native owner is not a checked reset.
-    pub(crate) fn claim_pmp_recipient(&self) -> Result<(), &'static str> {
+    pub(crate) fn claim_pmp_recipient(&self) -> Result<()> {
         let mut state = self.0.0.borrow_mut();
         if state.pmp_recipient_admitted {
-            return Err("PTD actual bank already admitted its native PMP recipient");
+            return Err(refuse!(
+                "PTD actual bank already admitted its native PMP recipient"
+            ));
         }
         if state.serial != 0 {
-            return Err("native PMP recipient must precede actual PTD publication admission");
+            return Err(refuse!(
+                "native PMP recipient must precede actual PTD publication admission"
+            ));
         }
         state.pmp_recipient_admitted = true;
         Ok(())
@@ -113,10 +119,12 @@ impl Ptd {
         geometry: Geometry,
         ranges: &[Range],
         lifecycle: LifecycleState,
-    ) -> Result<(Self, LocalNotifications), &'static str> {
+    ) -> Result<(Self, LocalNotifications)> {
         let entries = profile.entries();
         if entries as usize > geometry.entries() {
-            return Err("native PTD implemented entries exceed its physical update alias");
+            return Err(refuse!(
+                "native PTD implemented entries exceed its physical update alias"
+            ));
         }
         Self::new_local(entries, ranges, lifecycle)
     }
@@ -129,9 +137,11 @@ impl Ptd {
         entries: u32,
         ranges: &[Range],
         lifecycle: LifecycleState,
-    ) -> Result<(Self, LocalNotifications), &'static str> {
+    ) -> Result<(Self, LocalNotifications)> {
         if entries != LOCAL_ENTRIES {
-            return Err("PMP-local PTD notification geometry is not qualified");
+            return Err(refuse!(
+                "PMP-local PTD notification geometry is not qualified"
+            ));
         }
         Self::new_local(entries, ranges, lifecycle)
     }
@@ -140,7 +150,7 @@ impl Ptd {
         entries: u32,
         ranges: &[Range],
         lifecycle: LifecycleState,
-    ) -> Result<(Self, LocalNotifications), &'static str> {
+    ) -> Result<(Self, LocalNotifications)> {
         let bank = Self::initialized(entries, ranges, lifecycle, [None; ROUTES])?;
         bank.0.borrow_mut().notification_owner = NotificationOwner::PmpLocal;
         let notifications = LocalNotifications(bank.clone());

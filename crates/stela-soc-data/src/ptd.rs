@@ -1,7 +1,9 @@
 //! PTD publication-bank and update-alias geometry from the original AP/PMP
 //! contract. This validates physical extents without granting transport or
 //! controller-effect permission. See `docs/research/apple-mcc.md`.
+use crate::Result;
 use alloc::string::String;
+use stela_contracts::refuse;
 
 /// The shared publication bank and its AP/PMP update alias.
 pub const PTD_BYTES: u64 = 0x20000;
@@ -23,18 +25,21 @@ pub struct Geometry {
 }
 
 impl Geometry {
-    pub fn new(bank: (u64, u64), updates: (u64, u64)) -> Result<Self, &'static str> {
+    pub fn new(bank: (u64, u64), updates: (u64, u64)) -> Result<Self> {
         const ENTRY_BYTES: u64 = 16;
         const UPDATE_BYTES: u64 = 8;
-        let bank_end = bank.0.checked_add(bank.1).ok_or("PTD bank end overflows")?;
+        let bank_end = bank
+            .0
+            .checked_add(bank.1)
+            .ok_or(refuse!("PTD bank end overflows"))?;
         let update_start = bank
             .0
             .checked_add(UPDATE_OFFSET)
-            .ok_or("PTD update start overflows")?;
+            .ok_or(refuse!("PTD update start overflows"))?;
         let update_end = updates
             .0
             .checked_add(updates.1)
-            .ok_or("PTD update end overflows")?;
+            .ok_or(refuse!("PTD update end overflows"))?;
         if bank.1 != PTD_BYTES
             || !bank.0.is_multiple_of(ENTRY_BYTES)
             || updates.0 != update_start
@@ -42,16 +47,20 @@ impl Geometry {
             || !updates.1.is_multiple_of(UPDATE_BYTES)
             || update_end > bank_end
         {
-            return Err("PTD update alias does not match its actual complete publication bank");
+            return Err(refuse!(
+                "PTD update alias does not match its actual complete publication bank"
+            ));
         }
         let entries = usize::try_from(updates.1 / UPDATE_BYTES)
-            .map_err(|_| "PTD capacity exceeds host width")?;
+            .map_err(|_| refuse!("PTD capacity exceeds host width"))?;
         if entries > MAX_ENTRIES
             || (entries as u64)
                 .checked_mul(ENTRY_BYTES)
                 .is_none_or(|bytes| bytes > UPDATE_OFFSET)
         {
-            return Err("PTD entries exceed publication or interrupt-routing capacity");
+            return Err(refuse!(
+                "PTD entries exceed publication or interrupt-routing capacity"
+            ));
         }
         Ok(Self {
             physical: bank.0,

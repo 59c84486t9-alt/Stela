@@ -15,8 +15,10 @@ use super::{
     keys::{ROOT_BYTES, Roots},
     store::{Backend, Nonces, Volatile, persist::HostStore},
 };
+use crate::Result;
 use alloc::{boxed::Box, vec, vec::Vec};
 use sha2::Digest;
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use stela_drivers::block::{BlockDevice, Shared};
 use zeroize::Zeroizing;
@@ -54,15 +56,17 @@ fn record(machine: &[u8; ROOT_BYTES], group: &[u8; ROOT_BYTES]) -> Zeroizing<Vec
 
 /// Check the record's magic and checksum; the roots themselves bind to the
 /// ECID only when opened for use ([`parse`]).
-fn well_formed(bytes: &[u8]) -> Result<(), &'static str> {
+fn well_formed(bytes: &[u8]) -> Result<()> {
     let sum: [u8; 32] = Sha256::digest(&bytes[..8 + 2 * ROOT_BYTES]).into();
     if &bytes[..8] != MAGIC || bytes[8 + 2 * ROOT_BYTES..RECORD_BYTES] != sum {
-        return Err("the SEP state area is neither blank nor a Stela SEP roots record");
+        return Err(refuse!(
+            "the SEP state area is neither blank nor a Stela SEP roots record"
+        ));
     }
     Ok(())
 }
 
-fn parse(bytes: &[u8], ecid: u64) -> Result<Roots, &'static str> {
+fn parse(bytes: &[u8], ecid: u64) -> Result<Roots> {
     well_formed(bytes)?;
     let root =
         |at: usize| -> [u8; ROOT_BYTES] { bytes[at..at + ROOT_BYTES].try_into().expect("root") };
@@ -72,9 +76,9 @@ fn parse(bytes: &[u8], ecid: u64) -> Result<Roots, &'static str> {
 /// Whether `roots`, the first [`ROOTS_BYTES`] of an area, are blank (an area
 /// never used); a valid roots record is `false` and anything else refuses.
 /// Setup uses it to keep a SEP's state and to find a foreign area.
-pub fn blank(roots: &[u8]) -> Result<bool, &'static str> {
+pub fn blank(roots: &[u8]) -> Result<bool> {
     if roots.len() < RECORD_BYTES {
-        return Err("the SEP roots area is shorter than a roots record");
+        return Err(refuse!("the SEP roots area is shorter than a roots record"));
     }
     if roots.iter().all(|&b| b == 0) {
         return Ok(true);
@@ -82,7 +86,7 @@ pub fn blank(roots: &[u8]) -> Result<bool, &'static str> {
     well_formed(roots).map(|()| false)
 }
 
-fn fresh_roots(entropy: &mut dyn Entropy) -> Result<[Root; 2], &'static str> {
+fn fresh_roots(entropy: &mut dyn Entropy) -> Result<[Root; 2]> {
     let mut machine = Zeroizing::new([0; ROOT_BYTES]);
     let mut group = Zeroizing::new([0; ROOT_BYTES]);
     entropy.fill(&mut *machine)?;
@@ -95,11 +99,7 @@ fn fresh_roots(entropy: &mut dyn Entropy) -> Result<[Root; 2], &'static str> {
 /// `unique-chip-id`, bound into the key hierarchy ([`Roots`]); it is not
 /// stored in the roots record (it is public and comes from `/chosen` on every
 /// boot), so the roots record alone cannot reconstruct the keys.
-pub fn open(
-    location: Location,
-    ecid: u64,
-    entropy: &mut dyn Entropy,
-) -> Result<Opened, &'static str> {
+pub fn open(location: Location, ecid: u64, entropy: &mut dyn Entropy) -> Result<Opened> {
     let (disk, first) = match location {
         Location::Volatile => {
             let [machine, group] = fresh_roots(entropy)?;
@@ -113,7 +113,9 @@ pub fn open(
     let probe = disk.window(first, 1).map_err(fault)?;
     let block = u64::from(probe.identity().block_size);
     if block == 0 || !BYTES.is_multiple_of(block) || !(ROOTS_BYTES as u64).is_multiple_of(block) {
-        return Err("the machine-state partition's blocks do not divide the SEP state area");
+        return Err(refuse!(
+            "the machine-state partition's blocks do not divide the SEP state area"
+        ));
     }
     let roots_blocks = ROOTS_BYTES as u64 / block;
     let mut roots_area = disk.window(first, roots_blocks).map_err(fault)?;
@@ -123,8 +125,8 @@ pub fn open(
     debug_assert!(BYTES - ROOTS_BYTES as u64 >= 2 * BANK_BYTES as u64);
     let mut bytes = Zeroizing::new(vec![0; ROOTS_BYTES]);
     roots_area.read(0, &mut bytes).map_err(fault)?;
-    let store =
-        HostStore::new(Box::new(banks)).map_err(|_| "the SEP store banks do not fit their area")?;
+    let store = HostStore::new(Box::new(banks))
+        .map_err(|_| refuse!("the SEP store banks do not fit their area"))?;
     let backend: Box<dyn Backend> = Box::new(store);
     if bytes.iter().all(|&b| b == 0) {
         let [machine, group] = fresh_roots(entropy)?;
@@ -135,7 +137,7 @@ pub fn open(
         roots_area
             .write(0, &record(&machine, &group))
             .and_then(|()| roots_area.flush())
-            .map_err(|_| "the SEP roots record could not be written")?;
+            .map_err(|_| refuse!("the SEP roots record could not be written"))?;
         return Ok((nonces, true));
     }
     let roots = parse(&bytes, ecid)?;
@@ -149,7 +151,7 @@ mod tests {
 
     const ECID: u64 = 0xa5a5_0001;
 
-    fn entropy(bytes: &mut [u8]) -> Result<(), &'static str> {
+    fn entropy(bytes: &mut [u8]) -> Result<()> {
         for (n, byte) in bytes.iter_mut().enumerate() {
             *byte = n as u8 ^ 0x5a;
         }

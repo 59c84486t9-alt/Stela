@@ -5,7 +5,9 @@
 //! power-state registers. See docs/research/pmgr-lifecycle.md for source windows.
 //! Association does not establish initial state or implement a lifecycle sink.
 use super::{Domain, DomainId, Node, PowerOwner, PowerStates, ResourceInventory};
-use alloc::{format, string::String, vec::Vec};
+use crate::Result;
+use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Binding {
@@ -62,7 +64,7 @@ pub(super) fn resolve(
     domains: &[Domain],
     inventory: &ResourceInventory<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
-) -> Result<Vec<Requirement>, String> {
+) -> Result<Vec<Requirement>> {
     // A fallback list containing another PMGR profile does not establish
     // this exact physical association.
     if pmgr
@@ -119,9 +121,9 @@ pub(super) fn resolve(
                 continue;
             }
             if candidate.replace(resource).is_some() {
-                return Err(format!(
-                    "PMGR implicit physical owner {:#x} has ambiguous resource views",
-                    binding.physical
+                return Err(refuse!(
+                    "PMGR implicit physical owner {physical:#x} has ambiguous resource views",
+                    physical = binding.physical
                 ));
             }
         }
@@ -132,7 +134,7 @@ pub(super) fn resolve(
     Ok(requirements)
 }
 
-pub(super) fn power_requirements(states: &PowerStates) -> Result<Vec<Vec<DomainId>>, String> {
+pub(super) fn power_requirements(states: &PowerStates) -> Result<Vec<Vec<DomainId>>> {
     let mut power = states
         .resources
         .iter()
@@ -148,9 +150,9 @@ pub(super) fn power_requirements(states: &PowerStates) -> Result<Vec<Vec<DomainI
                 domain.id == binding.domain && domain.address == Some(binding.register)
             });
         if !valid {
-            return Err(
-                "PMGR implicit ownership differs from the qualified physical inventory".into(),
-            );
+            return Err(refuse!(
+                "PMGR implicit ownership differs from the qualified physical inventory"
+            ));
         }
         let gates = &mut power[requirement.resource];
         gates.push(binding.domain);
@@ -200,7 +202,7 @@ pub(in crate::board) mod fixture_support {
         T8112
             .iter()
             .map(|binding| Domain {
-                name: String::new(),
+                name: alloc::string::String::new(),
                 id: binding.domain,
                 address: Some(binding.register),
                 parents: [None; 4],
@@ -212,7 +214,7 @@ pub(in crate::board) mod fixture_support {
         bytes: &[u8],
         compatible: &str,
         domains: Vec<Domain>,
-    ) -> Result<PowerStates, String> {
+    ) -> Result<PowerStates> {
         let pmgr_bytes = encode(
             &[("name", b"pmgr"), ("compatible", compatible.as_bytes())],
             &[],

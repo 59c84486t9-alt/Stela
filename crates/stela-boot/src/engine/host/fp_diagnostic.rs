@@ -4,9 +4,11 @@
 mod helper;
 
 use super::{BareHost, native_return, state};
+use crate::Result;
 use crate::output;
 use core::{arch::global_asm, mem::offset_of, ptr};
 use stela_compiler::{GuestState, block::BlockExit, context::ExecutionContext};
+use stela_contracts::refuse;
 use stela_engine::machine::FaultCause;
 use stela_engine::machine::Host;
 use stela_engine::machine::NativeExit;
@@ -376,7 +378,7 @@ fn pointer(image: &Image, start: usize) -> u64 {
 /// published. The current physical Host/GS/root, code arena and private stack
 /// remain installed until all four returns complete. Source-only until
 /// a fresh run checks every case and its meaningful FP pointer seed.
-pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
+pub(crate) fn check(host: &mut BareHost<'_>) -> Result<()> {
     let bodies = [
         (
             ptr::addr_of!(stela_native_fp_normal),
@@ -393,13 +395,13 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
         let bytes = (end as usize)
             .checked_sub(start as usize)
             .filter(|&bytes| bytes != 0 && bytes < 4096)
-            .ok_or("native FP fixture source extent differs")?;
+            .ok_or(refuse!("native FP fixture source extent differs"))?;
         // SAFETY: exact mapped read-only image symbols delimit the authored
         // body, including only baseline instructions and its true RET/UD2.
         let body = unsafe { core::slice::from_raw_parts(start, bytes) };
         let code = host
             .install(body)
-            .map_err(|_| "native FP fixture arena full")?;
+            .map_err(|_| refuse!("native FP fixture arena full"))?;
         for context_abi in [0, 1] {
             let mut guest = GuestState::default();
             let mut context = ExecutionContext::default();
@@ -422,7 +424,9 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
                 fp_errors: u64::MAX,
             };
             if state().native || state().recorded.is_some() {
-                return Err("native FP fixture entered with a live preceding frame");
+                return Err(refuse!(
+                    "native FP fixture entered with a live preceding frame"
+                ));
             }
             state().native = true;
             let entered = super::rdtsc();
@@ -452,7 +456,9 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
                 || fdp != ptr::addr_of!(ZERO) as u64
                 || fop != 0x435
             {
-                return Err("native FP fixture lacks exact meaningful x87 pointer sentinels");
+                return Err(refuse!(
+                    "native FP fixture lacks exact meaningful x87 pointer sentinels"
+                ));
             }
             if guest != expected_guest
                 || (
@@ -466,7 +472,9 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
                 || probe.fp_errors != 0
                 || !same_legacy(&probe.expected, &probe.returned)
             {
-                return Err("native FP caller state or real callee execution differs");
+                return Err(refuse!(
+                    "native FP caller state or real callee execution differs"
+                ));
             }
             if faulting {
                 if !matches!(result, NativeExit::Fault(fault) if fault.offset == bytes - 2
@@ -475,7 +483,9 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
                     && fault.registers.get(7) == Some(ptr::from_mut(&mut guest) as u64)
                     && (context_abi == 0 || fault.registers.get(6) == Some(ptr::from_mut(&mut context) as u64)))
                 {
-                    return Err("native FP fixture did not enter actual #UD recovery");
+                    return Err(refuse!(
+                        "native FP fixture did not enter actual #UD recovery"
+                    ));
                 }
             } else if result
                 != (NativeExit::Exit {
@@ -483,7 +493,7 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
                     kind: RETURN_RDX,
                 })
             {
-                return Err("native FP full native return ABI differs");
+                return Err(refuse!("native FP full native return ABI differs"));
             }
         }
     }

@@ -15,12 +15,14 @@
 //!
 //! While the engine runs ([`TaggedRoots`]), the loader's root has a TLB
 //! context of its own, so a driver call keeps the engine's translations.
+use crate::Result;
 use crate::output;
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::{
     arch::asm,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use stela_contracts::refuse;
 use stela_drivers::{
     Handoff,
     block::{
@@ -432,7 +434,7 @@ pub unsafe fn open(
     usb_disks: &[String],
     wifi: Option<&stela_drivers::probe::WifiConfig>,
     external: Option<usize>,
-) -> Result<Opened, String> {
+) -> Result<Opened> {
     let Partitions {
         targets,
         medium,
@@ -445,8 +447,9 @@ pub unsafe fn open(
         .iter()
         .find(|serial| targets.iter().any(|target| &target.serial == *serial))
     {
-        return Err(format!(
-            "host disk {serial} is both a USB storage disk and a partition target"
+        return Err(refuse!(
+            "host disk {serial} is both a USB storage disk and a partition target",
+            serial
         ));
     }
     // SAFETY: the caller owns the handoff's DMA pages and controllers.
@@ -535,8 +538,15 @@ pub unsafe fn open(
         .chain(log.map(|guid| (Named::Host(guid), Optional::Log)))
         .collect();
     let describe = |named: &Named, error: storage::StorageError| match named {
-        Named::Disk(target) => format!("{}:{}: {error}", target.serial, target.partition),
-        Named::Unique(guid) | Named::Host(guid) => format!("partition {guid}: {error}"),
+        Named::Disk(target) => refuse!(
+            "{serial}:{partition}: {error}",
+            serial = target.serial.as_str(),
+            partition = %target.partition,
+            %error
+        ),
+        Named::Unique(guid) | Named::Host(guid) => {
+            refuse!("partition {guid}: {error}", %guid, %error)
+        }
     };
     let mut opened = loop {
         named.truncate(required);
@@ -599,9 +609,9 @@ pub unsafe fn open(
         .iter()
         .map(|serial| {
             storage::take(&mut devices.disks, serial)
-                .map_err(|error| format!("USB storage {serial}: {error}"))
+                .map_err(|error| refuse!("USB storage {serial}: {error}", serial, %error))
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>>>()?;
     // With `--external-disks`, every disk left, in probe order, up to the
     // hub's free ports; the rest are reported.
     if let Some(ports) = external {

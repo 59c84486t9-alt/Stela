@@ -8,7 +8,9 @@
 //! VAfffffff0270ca10c requires the three implementation ranges. Source
 //! hashes/coordinates remain in the immutable j314s-single-core-topology audit.
 //! No source hash selects production behavior and no capacity is inferred here.
-use alloc::{format, string::String, vec::Vec};
+use crate::Result;
+use alloc::{format, vec::Vec};
+use stela_contracts::refuse;
 use stela_engine::machine::CpuProfile;
 use stela_loader::apple_device_tree::{
     DeviceTree,
@@ -69,39 +71,43 @@ impl<'a> BspRoster<'a> {
     /// Host, which the caller must keep through subsequent execution. This
     /// view does not bind a runtime WorkerOwner, loan a frame or authorize RAM.
     #[cfg(target_arch = "x86_64")]
-    pub fn current(capture: &'a Capture, worker: usize) -> Result<Self, String> {
+    pub fn current(capture: &'a Capture, worker: usize) -> Result<Self> {
         Self::observed(capture, worker, current_apic()?)
     }
-    fn observed(capture: &'a Capture, worker: usize, current: u32) -> Result<Self, String> {
+    fn observed(capture: &'a Capture, worker: usize, current: u32) -> Result<Self> {
         let processors = capture
             .processors
             .get(..capture.processor_count as usize)
-            .ok_or("assigned topology has an invalid captured processor count")?;
-        let physical =
-            native::select(processors).map_err(|e| format!("assigned BSP source roster: {e:?}"))?;
-        let selected = physical
-            .get(..capture.core_count as usize)
-            .ok_or("assigned topology has more captured cores than physical cores")?;
+            .ok_or(refuse!(
+                "assigned topology has an invalid captured processor count"
+            ))?;
+        let physical = native::select(processors)
+            .map_err(|e| refuse!("assigned BSP source roster: {e}", ?e))?;
+        let selected = physical.get(..capture.core_count as usize).ok_or(refuse!(
+            "assigned topology has more captured cores than physical cores"
+        ))?;
         if physical.len() != capture.physical_count as usize
             || selected
                 .iter()
                 .enumerate()
                 .any(|(slot, &index)| capture.selected[slot] as usize != index)
         {
-            return Err(
-                "assigned topology differs from the retained physical-core selection".into(),
-            );
+            return Err(refuse!(
+                "assigned topology differs from the retained physical-core selection"
+            ));
         }
         let index = *selected
             .first()
-            .ok_or("assigned topology has no retained BSP")?;
+            .ok_or(refuse!("assigned topology has no retained BSP"))?;
         let source = processors[index];
         if source.flags & native::BSP == 0
             || !source.available()
             || source.apic_id != u64::from(current)
             || !capture.snapshots[0].matches(source)
         {
-            return Err("assigned topology requires the actual executing captured BSP".into());
+            return Err(refuse!(
+                "assigned topology requires the actual executing captured BSP"
+            ));
         }
         Ok(Self {
             capture,
@@ -133,7 +139,7 @@ impl RetainedRoster for BspRoster<'_> {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn current_apic() -> Result<u32, String> {
+fn current_apic() -> Result<u32> {
     use core::arch::x86_64::__cpuid_count;
     // CPUID is unprivileged. Reuse the canonical captured APIC decoder; this
     // observation establishes current identity, not native capability admission.
@@ -149,7 +155,7 @@ fn current_apic() -> Result<u32, String> {
         }
     })
     .apic_id()
-    .ok_or("assigned BSP has no actual CPUID APIC identity".into())
+    .ok_or(refuse!("assigned BSP has no actual CPUID APIC identity"))
 }
 
 /// Keep the maximum/vendor records together with the leaves they
@@ -227,8 +233,9 @@ impl<'a> Source<'a> {
         prepared: &[u8],
         identity: SourceIdentity,
         boot_reg: u32,
-    ) -> Result<Self, String> {
-        let tree = DeviceTree::parse(prepared).map_err(|e| format!("assigned source ADT: {e}"))?;
+    ) -> Result<Self> {
+        let tree = DeviceTree::parse(prepared)
+            .map_err(|error| refuse!("assigned source ADT: {error}", %error))?;
         let resources = BspSource::t6000(original, prepared, identity, boot_reg)?;
         Ok(Self {
             resources,
@@ -246,10 +253,10 @@ impl<'a> Source<'a> {
         identity: SourceIdentity,
         boot_reg: u32,
         workers: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         live.require_no_harvesting_override()?;
         let tree = DeviceTree::parse(live.bytes())
-            .map_err(|e| format!("assigned live source ADT: {e}"))?;
+            .map_err(|error| refuse!("assigned live source ADT: {error}", %error))?;
         let resources =
             BspSource::t6000_assigned(original, live.bytes(), identity, boot_reg, 1, workers)?;
         Ok(Self {
@@ -268,12 +275,12 @@ impl<'a> Source<'a> {
         live: &LiveTree,
         identity: SourceIdentity,
         boot_reg: u32,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         live.require_no_harvesting_override()?;
         let tree = DeviceTree::parse(live.bytes())
-            .map_err(|e| format!("assigned live source ADT: {e}"))?;
+            .map_err(|error| refuse!("assigned live source ADT: {error}", %error))?;
         let immutable = DeviceTree::parse(original)
-            .map_err(|e| format!("assigned immutable source ADT: {e}"))?;
+            .map_err(|error| refuse!("assigned immutable source ADT: {error}", %error))?;
         let resources = BspSource::t8112(original, live.bytes(), identity, boot_reg, 0)?;
         Ok(Self {
             resources,
@@ -293,7 +300,7 @@ impl<'a> Source<'a> {
         identity: SourceIdentity,
         boot_reg: u32,
         workers: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let mut source = Self::t8112(original, live, identity, boot_reg)?;
         source.resources =
             BspSource::t8112_assigned(original, live.bytes(), identity, boot_reg, 0, workers)?;
@@ -304,7 +311,7 @@ impl<'a> Source<'a> {
         &'s self,
         roster: &'s dyn RetainedRoster,
         profile: CpuProfile,
-    ) -> Result<Prepared<'s>, String> {
+    ) -> Result<Prepared<'s>> {
         self.prepare_with_classes(
             roster,
             profile,
@@ -317,7 +324,7 @@ impl<'a> Source<'a> {
         roster: &'s dyn RetainedRoster,
         profile: CpuProfile,
         capture: &Capture,
-    ) -> Result<Prepared<'s>, String> {
+    ) -> Result<Prepared<'s>> {
         let classes = Self::host_classes(roster, capture)?;
         self.prepare_with_classes(roster, profile, &classes)
     }
@@ -325,7 +332,7 @@ impl<'a> Source<'a> {
     fn host_classes(
         roster: &dyn RetainedRoster,
         capture: &Capture,
-    ) -> Result<Vec<native::CoreClass>, String> {
+    ) -> Result<Vec<native::CoreClass>> {
         roster
             .cores()
             .iter()
@@ -335,23 +342,24 @@ impl<'a> Source<'a> {
                     .selected
                     .get(worker)
                     .filter(|_| worker < capture.core_count as usize)
-                    .ok_or("assigned worker has no captured core class")?
+                    .ok_or(refuse!("assigned worker has no captured core class"))?
                     as usize;
                 let processor = capture
                     .processors
                     .get(index)
-                    .ok_or("assigned worker has no captured processor")?;
+                    .ok_or(refuse!("assigned worker has no captured processor"))?;
                 let snapshot = &capture.snapshots[worker];
                 if u64::from(core.apic) != processor.apic_id || !snapshot.matches(*processor) {
-                    return Err("assigned core class differs from its processor identity");
+                    return Err(refuse!(
+                        "assigned core class differs from its processor identity"
+                    ));
                 }
                 Ok(snapshot.core_class())
             })
-            .collect::<Result<Vec<_>, &str>>()
-            .map_err(String::from)
+            .collect()
     }
 
-    fn guest_classes(&self) -> Result<Vec<native::CoreClass>, String> {
+    fn guest_classes(&self) -> Result<Vec<native::CoreClass>> {
         let resources = self.resources.resources();
         resources
             .slots
@@ -361,7 +369,7 @@ impl<'a> Source<'a> {
                     .kinds
                     .iter()
                     .find(|kind| Some(kind.id) == slot.kind)
-                    .ok_or("assigned source core kind is unknown")?;
+                    .ok_or(refuse!("assigned source core kind is unknown"))?;
                 Ok(match kind.cluster_type {
                     b'P' => native::CoreClass::Performance,
                     b'E' => native::CoreClass::Efficiency,
@@ -377,20 +385,20 @@ impl<'a> Source<'a> {
         &self,
         roster: &dyn RetainedRoster,
         capture: &Capture,
-    ) -> Result<Vec<usize>, String> {
+    ) -> Result<Vec<usize>> {
         let boot = self
             .resources
             .resources()
             .slots
             .iter()
             .position(|slot| slot.reg == self.boot_reg)
-            .ok_or("assigned source omits the original boot PE")?;
+            .ok_or(refuse!("assigned source omits the original boot PE"))?;
         let placement = native::placement(
             &self.guest_classes()?,
             &Self::host_classes(roster, capture)?,
             boot,
         )
-        .map_err(|error| format!("assigned host core placement: {error:?}"))?;
+        .map_err(|error| refuse!("assigned host core placement: {error}", ?error))?;
         Ok(placement
             .iter()
             .map(|index| roster.cores()[*index].worker)
@@ -402,12 +410,14 @@ impl<'a> Source<'a> {
         roster: &'s dyn RetainedRoster,
         profile: CpuProfile,
         host: &[native::CoreClass],
-    ) -> Result<Prepared<'s>, String> {
+    ) -> Result<Prepared<'s>> {
         use sha2::Digest;
         use stela_crypto::Sha256;
         let resources = self.resources.resources();
         if resources.slots.len() != roster.cores().len() {
-            return Err("assigned source and actual started worker cardinality differ".into());
+            return Err(refuse!(
+                "assigned source and actual started worker cardinality differ"
+            ));
         }
         let mut nodes = Vec::with_capacity(resources.slots.len());
         let mut assignments = Vec::with_capacity(resources.slots.len());
@@ -415,10 +425,10 @@ impl<'a> Source<'a> {
             .slots
             .iter()
             .position(|slot| slot.reg == self.boot_reg)
-            .ok_or("assigned source omits the original boot PE")?;
+            .ok_or(refuse!("assigned source omits the original boot PE"))?;
         let guest = self.guest_classes()?;
         let placement = native::placement(&guest, host, boot)
-            .map_err(|error| format!("assigned host core placement: {error:?}"))?;
+            .map_err(|error| refuse!("assigned host core placement: {error}", ?error))?;
         for (ordinal, slot) in resources.slots.iter().enumerate() {
             // Source PE order keeps PMGR's cluster ordinal coupling; only
             // the host worker assigned to each source slot changes.
@@ -427,27 +437,31 @@ impl<'a> Source<'a> {
                 .kinds
                 .iter()
                 .find(|kind| Some(kind.id) == slot.kind)
-                .ok_or("assigned source core kind is unknown")?;
+                .ok_or(refuse!("assigned source core kind is unknown"))?;
             let cluster = resources
                 .clusters
                 .iter()
                 .find(|cluster| cluster.id == slot.cluster)
-                .ok_or("assigned source cluster is unknown")?;
+                .ok_or(refuse!("assigned source cluster is unknown"))?;
             nodes.push(NodeBinding {
                 slot: slot.id,
                 name: self.resources.name_for(slot.id)?,
                 midr: kind.midr,
-                cache: cluster.cache.ok_or("assigned source cache is unknown")?,
+                cache: cluster
+                    .cache
+                    .ok_or(refuse!("assigned source cache is unknown"))?,
                 interrupt: slot
                     .interrupt
-                    .ok_or("assigned source interrupt owner is unknown")?,
-                start: slot.start.ok_or("assigned source start owner is unknown")?,
+                    .ok_or(refuse!("assigned source interrupt owner is unknown"))?,
+                start: slot
+                    .start
+                    .ok_or(refuse!("assigned source start owner is unknown"))?,
                 core_power: slot
                     .power
-                    .ok_or("assigned source power identity is unknown")?,
+                    .ok_or(refuse!("assigned source power identity is unknown"))?,
                 cluster_power: cluster
                     .power
-                    .ok_or("assigned source complex power identity is unknown")?,
+                    .ok_or(refuse!("assigned source complex power identity is unknown"))?,
             });
             assignments.push(Assignment {
                 worker: worker.worker,
@@ -496,12 +510,12 @@ impl Prepared<'_> {
     /// worker identity independently of the projected guest logical index.
     pub fn worker_bindings(
         &self,
-    ) -> Result<Vec<stela_engine::machine::engine::publication::WorkerBinding>, String> {
+    ) -> Result<Vec<stela_engine::machine::engine::publication::WorkerBinding>> {
         use stela_engine::machine::engine::publication::WorkerBinding;
         use stela_engine::machine::engine::publication::WorkerId;
         self.plan
             .revalidate()
-            .map_err(|e| format!("assigned worker route is stale: {e:?}"))?;
+            .map_err(|e| refuse!("assigned worker route is stale: {e}", ?e))?;
         Ok(self
             .plan
             .pes()
@@ -514,21 +528,32 @@ impl Prepared<'_> {
     }
     /// Lookup only; original error/start inputs never manufacture an assigned
     /// PE. The same owner revision must still be current at adoption.
-    pub fn join(&self, reg: u32) -> Result<&Join, String> {
+    pub fn join(&self, reg: u32) -> Result<&Join> {
         self.plan
             .revalidate()
-            .map_err(|e| format!("assigned route is stale: {e:?}"))?;
+            .map_err(|e| refuse!("assigned route is stale: {e}", ?e))?;
         self.joins
             .iter()
             .find(|join| join.reg == reg)
-            .ok_or_else(|| format!("source PE {reg:#x} is outside the actual assigned plan"))
+            .ok_or_else(|| {
+                refuse!(
+                    "source PE {reg:#x} is outside the actual assigned plan",
+                    reg
+                )
+            })
     }
 }
-fn word(tree: &DeviceTree, path: &str, field: &str) -> Result<u32, String> {
+fn word(tree: &DeviceTree, path: &str, field: &str) -> Result<u32> {
     tree.property(path, field)
         .filter(|p| !p.placeholder)
         .and_then(|p| p.as_u32())
-        .ok_or_else(|| format!("assigned topology requires complete {path}/{field}"))
+        .ok_or_else(|| {
+            refuse!(
+                "assigned topology requires complete {path}/{field}",
+                path,
+                field
+            )
+        })
 }
 fn matching_count(actual: &CountField<'_>, expected: &CountField<'_>) -> bool {
     actual.path == expected.path
@@ -552,7 +577,7 @@ pub fn prepare<'a>(
     tree: &DeviceTree,
     source: &SourceBindings<'_>,
     profile: CpuProfile,
-) -> Result<Prepared<'a>, String> {
+) -> Result<Prepared<'a>> {
     prepare_assigned(
         roster,
         owner,
@@ -578,7 +603,7 @@ pub fn prepare_assigned<'a>(
     tree: &DeviceTree,
     source: &SourceBindings<'_>,
     mut profile: CpuProfile,
-) -> Result<Prepared<'a>, String> {
+) -> Result<Prepared<'a>> {
     for expected in &COUNT_FIELDS {
         if source
             .counts
@@ -587,9 +612,10 @@ pub fn prepare_assigned<'a>(
             .count()
             != 1
         {
-            return Err(format!(
-                "assigned topology requires the same-plan {}/{} count rule",
-                expected.path, expected.property
+            return Err(refuse!(
+                "assigned topology requires the same-plan {path}/{property} count rule",
+                path = expected.path,
+                property = expected.property
             ));
         }
     }
@@ -598,14 +624,20 @@ pub fn prepare_assigned<'a>(
     if source.counts.iter().any(|field| {
         field.property == "cpu-cluster-count" && tree.property(field.path, field.property).is_none()
     }) {
-        return Err("assigned topology cannot add an unqualified cpu-cluster-count".into());
+        return Err(refuse!(
+            "assigned topology cannot add an unqualified cpu-cluster-count"
+        ));
     }
     let aic_phandle = word(tree, "/arm-io/aic", "AAPL,phandle")?;
     let pmgr_phandle = word(tree, "/arm-io/pmgr", "AAPL,phandle")?;
-    let plan = Plan::build(roster, owner, assignments)
-        .map_err(|e| format!("assigned topology requires actual retained resources: {e:?}"))?;
+    let plan = Plan::build(roster, owner, assignments).map_err(|e| {
+        refuse!(
+            "assigned topology requires actual retained resources: {e}",
+            ?e
+        )
+    })?;
     if profile.chip != plan.chip() {
-        return Err("assigned runtime profile and resource chip differ".into());
+        return Err(refuse!("assigned runtime profile and resource chip differ"));
     }
     let mut joins = Vec::with_capacity(plan.pes().len());
     for pe in plan.pes() {
@@ -613,7 +645,7 @@ pub fn prepare_assigned<'a>(
             .nodes
             .iter()
             .find(|b| b.slot == pe.slot)
-            .ok_or("assigned PE has no actual source CPU binding")?;
+            .ok_or(refuse!("assigned PE has no actual source CPU binding"))?;
         let path = format!("/cpus/{}", binding.name);
         let source_index = tree
             .node("/cpus")
@@ -622,20 +654,24 @@ pub fn prepare_assigned<'a>(
                     .iter()
                     .position(|node| node.name() == Some(binding.name))
             })
-            .ok_or("assigned PE has no unique original CPU index")?;
+            .ok_or(refuse!("assigned PE has no unique original CPU index"))?;
         if profile.processors.get(source_index) != Some(&pe.identity) {
-            return Err("assigned PE identity differs from the actual source board profile".into());
+            return Err(refuse!(
+                "assigned PE identity differs from the actual source board profile"
+            ));
         }
         let parent = word(tree, &path, "interrupt-parent")?;
         if parent == 0 || parent != aic_phandle {
-            return Err(
-                "assigned CPU error input has a different actual interrupt provider".into(),
-            );
+            return Err(refuse!(
+                "assigned CPU error input has a different actual interrupt provider"
+            ));
         }
         let raw = tree
             .property(&path, "function-enable_core")
             .filter(|p| !p.placeholder && p.value.len() == 12)
-            .ok_or("assigned CPU has no complete original enable_core function")?;
+            .ok_or(refuse!(
+                "assigned CPU has no complete original enable_core function"
+            ))?;
         let cells = raw.value.as_chunks::<4>().0;
         let function = Function {
             phandle: u32::from_le_bytes(cells[0]),
@@ -647,7 +683,7 @@ pub fn prepare_assigned<'a>(
             || function.selector != 0x436f7265
             || !function.argument.is_power_of_two()
         {
-            return Err("assigned CPU has an empty source start protocol".into());
+            return Err(refuse!("assigned CPU has an empty source start protocol"));
         }
         joins.push(Join {
             plan: plan.identity(),
@@ -672,10 +708,10 @@ pub fn prepare_assigned<'a>(
     let mut projected = tree.clone();
     let receipt = Projection::prepare(&plan, &projected, source)
         .and_then(|projection| projection.apply(&mut projected))
-        .map_err(|e| format!("assigned firmware topology: {e}"))?;
+        .map_err(|error| refuse!("assigned firmware topology: {error}", %error))?;
     profile.processors = plan.pes().iter().map(|pe| pe.identity).collect();
     plan.revalidate()
-        .map_err(|e| format!("assigned topology became stale: {e:?}"))?;
+        .map_err(|e| refuse!("assigned topology became stale: {e}", ?e))?;
     Ok(Prepared {
         plan,
         tree: projected,

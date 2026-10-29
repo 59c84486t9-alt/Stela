@@ -11,8 +11,10 @@
 //! anti-rollback needs a monotonic secret the host does not have; this adapter
 //! provides durability and torn-write/older-bank protection only.
 use super::{Backend, Head};
-use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
+use crate::Result;
+use alloc::{boxed::Box, vec, vec::Vec};
 use sha2::Digest;
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use stela_drivers::block::BlockDevice;
 
@@ -56,9 +58,9 @@ fn parse(bank: &[u8]) -> Option<Head> {
     })
 }
 
-fn build(head: &Head) -> Result<Vec<u8>, &'static str> {
+fn build(head: &Head) -> Result<Vec<u8>> {
     if head.record.len() > MAX_RECORD {
-        return Err("SEP nonce record exceeds the host bank");
+        return Err(refuse!("SEP nonce record exceeds the host bank"));
     }
     let mut bank = vec![0u8; BANK_BYTES];
     bank[..MAGIC.len()].copy_from_slice(MAGIC);
@@ -82,17 +84,21 @@ pub struct HostStore {
 impl HostStore {
     /// Bind to a partition whose geometry can hold two banks. First
     /// provisioning and reopening are the store's decision ([`super::Nonces`]).
-    pub fn new(device: Box<dyn BlockDevice>) -> Result<Self, String> {
+    pub fn new(device: Box<dyn BlockDevice>) -> Result<Self> {
         let identity = device.identity();
         let block = identity.block_size as usize;
         if block == 0 || !BANK_BYTES.is_multiple_of(block) {
-            return Err(format!(
-                "xART partition block size {block} does not divide a {BANK_BYTES}-byte bank"
+            return Err(refuse!(
+                "xART partition block size {block} does not divide a {BANK_BYTES}-byte bank",
+                block,
+                BANK_BYTES
             ));
         }
         let blocks_per_bank = (BANK_BYTES / block) as u64;
         if identity.read_only || identity.blocks < blocks_per_bank * BANKS {
-            return Err("the xART partition is read-only or smaller than two banks".into());
+            return Err(refuse!(
+                "the xART partition is read-only or smaller than two banks"
+            ));
         }
         Ok(Self {
             device,
@@ -107,17 +113,17 @@ impl HostStore {
         self.device
     }
 
-    fn read_bank(&mut self, index: u64) -> Result<Vec<u8>, &'static str> {
+    fn read_bank(&mut self, index: u64) -> Result<Vec<u8>> {
         let mut bank = vec![0u8; BANK_BYTES];
         self.device
             .read(index * self.blocks_per_bank, &mut bank)
-            .map_err(|_| "SEP nonce store bank read failed")?;
+            .map_err(|_| refuse!("SEP nonce store bank read failed"))?;
         Ok(bank)
     }
 }
 
 impl Backend for HostStore {
-    fn load(&mut self) -> Result<Option<Head>, &'static str> {
+    fn load(&mut self) -> Result<Option<Head>> {
         let mut best: Option<(u64, u64, Head)> = None;
         let mut any_bytes = false;
         for index in 0..BANKS {
@@ -134,9 +140,9 @@ impl Backend for HostStore {
                 self.newest = Some((generation, index));
                 Ok(Some(head))
             }
-            None if any_bytes => {
-                Err("the xART partition is neither blank nor a valid SEP nonce store")
-            }
+            None if any_bytes => Err(refuse!(
+                "the xART partition is neither blank nor a valid SEP nonce store"
+            )),
             None => {
                 self.newest = None;
                 Ok(None)
@@ -144,22 +150,26 @@ impl Backend for HostStore {
         }
     }
 
-    fn commit(&mut self, expected: u64, next: Head) -> Result<(), &'static str> {
+    fn commit(&mut self, expected: u64, next: Head) -> Result<()> {
         if self.newest.map_or(0, |(g, _)| g) != expected {
-            return Err("SEP nonce store durable head does not match the expected generation");
+            return Err(refuse!(
+                "SEP nonce store durable head does not match the expected generation"
+            ));
         }
         if next.generation != expected + 1 {
-            return Err("SEP nonce store commit must advance the generation by one");
+            return Err(refuse!(
+                "SEP nonce store commit must advance the generation by one"
+            ));
         }
         // Write the idle bank, so a torn write cannot destroy the live one.
         let target = self.newest.map_or(0, |(_, index)| index ^ 1);
         let bank = build(&next)?;
         self.device
             .write(target * self.blocks_per_bank, &bank)
-            .map_err(|_| "SEP nonce store bank write failed")?;
+            .map_err(|_| refuse!("SEP nonce store bank write failed"))?;
         self.device
             .flush()
-            .map_err(|_| "SEP nonce store bank flush failed")?;
+            .map_err(|_| refuse!("SEP nonce store bank flush failed"))?;
         self.newest = Some((next.generation, target));
         Ok(())
     }
@@ -175,7 +185,7 @@ mod tests {
     fn roots() -> Roots {
         Roots::provisioned([9; 32], [8; 32], 0xa5a5_0003).unwrap()
     }
-    fn entropy(bytes: &mut [u8]) -> Result<(), &'static str> {
+    fn entropy(bytes: &mut [u8]) -> Result<()> {
         bytes.fill(0x5a);
         Ok(())
     }
@@ -244,7 +254,9 @@ mod tests {
         let mut foreign = disk();
         foreign.bytes[100] = 0x42;
         let mut backend = HostStore::new(Box::new(foreign)).unwrap();
-        assert!(matches!(backend.load(), Err(reason) if reason.contains("neither blank")));
+        assert!(
+            matches!(backend.load(), Err(reason) if reason.to_string().contains("neither blank"))
+        );
         assert!(HostStore::new(Box::new(RamDisk::new("small", 4, 512))).is_err());
         assert!(HostStore::new(Box::new(RamDisk::new("odd", 1024, 3000))).is_err());
     }

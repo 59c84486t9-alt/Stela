@@ -8,6 +8,7 @@ pub mod signature;
 
 use alloc::vec::Vec;
 use sha2::Digest;
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
@@ -53,13 +54,13 @@ pub fn snapshot(port: &mut Port<'_, '_>, address: u64, maximum: u64) -> Result<S
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(measurement.bytes as usize)
-        .map_err(|_| DmaError::Unsupported("SEP firmware snapshot allocation failed"))?;
+        .map_err(|_| DmaError::Unsupported(refuse!("SEP firmware snapshot allocation failed")))?;
     bytes.resize(measurement.bytes as usize, 0);
     port.read(address, &mut bytes)?;
     if <[u8; 32]>::from(Sha256::digest(&bytes)) != measurement.sha256 {
-        return Err(DmaError::Unsupported(
-            "SEP firmware changed during DMA inspection",
-        ));
+        return Err(DmaError::Unsupported(refuse!(
+            "SEP firmware changed during DMA inspection"
+        )));
     }
     Ok(Snapshot { measurement, bytes })
 }
@@ -73,15 +74,15 @@ pub fn measure(
 ) -> Result<Measurement, DmaError> {
     let bad = DmaError::Unsupported;
     if !(HEADER_BYTES as u64..=MAX_IMAGE_BYTES).contains(&maximum) {
-        return Err(bad("SEP firmware bound is invalid"));
+        return Err(bad(refuse!("SEP firmware bound is invalid")));
     }
     address
         .checked_add(maximum)
-        .ok_or(bad("SEP firmware range overflows"))?;
+        .ok_or(bad(refuse!("SEP firmware range overflows")))?;
     let mut header = [0; HEADER_BYTES];
     port.read(address, &mut header)?;
     if header[0] != SEQUENCE {
-        return Err(bad("SEP firmware is not a DER sequence"));
+        return Err(bad(refuse!("SEP firmware is not a DER sequence")));
     }
     let width = if header[1] & 0x80 == 0 {
         0
@@ -89,11 +90,13 @@ pub fn measure(
         usize::from(header[1] & 0x7f)
     };
     if header[1] == 0x80 || width > MAX_LENGTH_BYTES {
-        return Err(bad("SEP firmware DER length is indefinite or oversized"));
+        return Err(bad(refuse!(
+            "SEP firmware DER length is indefinite or oversized"
+        )));
     }
     let header_bytes = (HEADER_BYTES + width) as u64;
     if header_bytes > maximum {
-        return Err(bad("SEP firmware DER header exceeds its bound"));
+        return Err(bad(refuse!("SEP firmware DER header exceeds its bound")));
     }
     let length = if width == 0 {
         u64::from(header[1])
@@ -101,32 +104,32 @@ pub fn measure(
         let mut length = [0; MAX_LENGTH_BYTES];
         port.read(address + HEADER_BYTES as u64, &mut length[..width])?;
         if length[0] == 0 {
-            return Err(bad("SEP firmware DER length is not minimal"));
+            return Err(bad(refuse!("SEP firmware DER length is not minimal")));
         }
         let value = length[..width]
             .iter()
             .fold(0u64, |n, &b| n * 256 + u64::from(b));
         if value < 128 {
-            return Err(bad("SEP firmware DER long length is not minimal"));
+            return Err(bad(refuse!("SEP firmware DER long length is not minimal")));
         }
         value
     };
     let bytes = header_bytes
         .checked_add(length)
         .filter(|&n| n <= maximum)
-        .ok_or(bad("SEP firmware DER extent exceeds its bound"))?;
+        .ok_or(bad(refuse!("SEP firmware DER extent exceeds its bound")))?;
     let mut magic = [0; HEADER_BYTES + MAGIC_BYTES as usize];
     if length < magic.len() as u64 {
-        return Err(bad("SEP firmware DER payload has no magic"));
+        return Err(bad(refuse!("SEP firmware DER payload has no magic")));
     }
     port.read(address + header_bytes, &mut magic)?;
     if magic[..HEADER_BYTES] != [IA5, MAGIC_BYTES] {
-        return Err(bad("SEP firmware magic is not an IA5 string"));
+        return Err(bad(refuse!("SEP firmware magic is not an IA5 string")));
     }
     let container = match &magic[HEADER_BYTES..] {
         b"IMG4" => Container::Img4,
         b"IM4P" => Container::Im4p,
-        _ => return Err(bad("SEP firmware magic is unsupported")),
+        _ => return Err(bad(refuse!("SEP firmware magic is unsupported"))),
     };
     let mut hash = Sha256::new();
     let mut chunk = [0; CHUNK];
@@ -288,8 +291,8 @@ mod tests {
                 assert!(matches!(
                     result,
                     Err(DmaError::Unsupported(
-                        "SEP firmware changed during DMA inspection"
-                    ))
+                        reason
+                    )) if reason == refuse!("SEP firmware changed during DMA inspection")
                 ));
             } else {
                 let snapshot = result.unwrap();

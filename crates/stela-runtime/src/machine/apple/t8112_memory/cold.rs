@@ -4,15 +4,17 @@
 //! Neither case nor clear words certify Apple hardware/private PMP readiness.
 use super::super::AppleDevices;
 use super::super::memory_resources::t8112;
+use crate::Result;
 use crate::platform::apple::pmgr;
 use crate::platform::apple::pmgr::Pmgr;
+use stela_contracts::refuse;
 use stela_soc_data::board::Board;
 use stela_soc_data::board::MemoryCache;
 use stela_soc_data::board::MemoryController;
 use stela_soc_data::board::PowerOwner;
 use stela_soc_data::board::PowerStates;
 
-use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use stela_contracts::Chip;
 use stela_contracts::bus::LifecycleState;
 use stela_contracts::bus::Width;
@@ -39,9 +41,11 @@ pub struct Configuration {
     selection: ZeroWayConfiguration,
 }
 impl Configuration {
-    pub fn clear_software_controls(selection: ZeroWayConfiguration) -> Result<Self, String> {
+    pub fn clear_software_controls(selection: ZeroWayConfiguration) -> Result<Self> {
         if selection != ZeroWayConfiguration::DisableArgument {
-            return Err("cold T8112 memory requires the source-checked -disable_mcc policy".into());
+            return Err(refuse!(
+                "cold T8112 memory requires the source-checked -disable_mcc policy"
+            ));
         }
         Ok(Self { selection })
     }
@@ -80,7 +84,7 @@ impl Plan {
         ram: &Arc<RegisteredSystemRam>,
         programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         Self::prepare_board(
             board,
             ram,
@@ -98,7 +102,7 @@ impl Plan {
         ram: &Arc<RegisteredSystemRam>,
         programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         Self::prepare_board(
             board,
             ram,
@@ -114,23 +118,25 @@ impl Plan {
         programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
         policy: LifecyclePolicy,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         if board.cpus.chip != Chip::AppleM2 {
-            return Err("cold T8112 memory does not qualify this CPU family".into());
+            return Err(refuse!(
+                "cold T8112 memory does not qualify this CPU family"
+            ));
         }
         Self::prepare_resources_with_policy(
             board
                 .memory_controller
                 .as_ref()
-                .ok_or("cold T8112 memory has no live AMCC descriptor")?,
+                .ok_or(refuse!("cold T8112 memory has no live AMCC descriptor"))?,
             board
                 .memory_cache
                 .as_ref()
-                .ok_or("cold T8112 memory has no live MCC descriptor")?,
+                .ok_or(refuse!("cold T8112 memory has no live MCC descriptor"))?,
             board
                 .power_states
                 .as_ref()
-                .ok_or("cold T8112 memory has no full source power graph")?,
+                .ok_or(refuse!("cold T8112 memory has no full source power graph"))?,
             ram,
             programmed,
             configuration,
@@ -146,7 +152,7 @@ impl Plan {
         ram: &Arc<RegisteredSystemRam>,
         programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         Self::prepare_resources_with_policy(
             controller,
             cache,
@@ -166,18 +172,20 @@ impl Plan {
         programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
         policy: LifecyclePolicy,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         if configuration.selection != ZeroWayConfiguration::DisableArgument {
-            return Err("cold T8112 memory cannot infer an empty cache configuration".into());
+            return Err(refuse!(
+                "cold T8112 memory cannot infer an empty cache configuration"
+            ));
         }
         geometry(controller, cache, ram, programmed)?;
         let shared = controller.apertures[0] + cache.cache.shared.0;
         let domains = power_domains(states, shared)?;
         let lifecycle = if domains.is_empty() {
             if matches!(policy, LifecyclePolicy::RequireDomains) {
-                return Err(
-                    "cold T8112 MCC has no qualified physical power/clock dependencies".into(),
-                );
+                return Err(refuse!(
+                    "cold T8112 MCC has no qualified physical power/clock dependencies"
+                ));
             }
             LifecycleInput::UnswitchedApFrontend(UnswitchedApFrontend::certify(
                 states, shared, ram,
@@ -201,47 +209,53 @@ impl Plan {
         &self,
         controller: Option<&MemoryController>,
         cache: Option<&MemoryCache>,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         if controller != Some(&self.controller) || cache != Some(&self.cache) {
-            return Err("cold T8112 memory differs from the actual live board descriptors".into());
+            return Err(refuse!(
+                "cold T8112 memory differs from the actual live board descriptors"
+            ));
         }
         Ok(())
     }
 
     /// The mount's later lifecycle connection must use this SAME source graph,
     /// including admission, ancestors and aliases, not only equal apertures.
-    pub fn validate_power(&self, states: Option<&PowerStates>) -> Result<(), String> {
+    pub fn validate_power(&self, states: Option<&PowerStates>) -> Result<()> {
         if states != Some(&self.source_power) {
-            return Err(
-                "cold T8112 memory differs from the actual live power dependency graph".into(),
-            );
+            return Err(refuse!(
+                "cold T8112 memory differs from the actual live power dependency graph"
+            ));
         }
         Ok(())
     }
 
     /// Call after PMGR placement and before power connection/display aliases.
     /// All guest/native/DMA publishers remain excluded throughout cold setup.
-    pub fn install(self, devices: &mut AppleDevices) -> Result<(), String> {
+    pub fn install(self, devices: &mut AppleDevices) -> Result<()> {
         if devices.power_configured
             || devices.memory_controller.is_some()
             || devices.memory_publication.is_some()
         {
-            return Err("cold T8112 memory requires an unconnected unoccupied memory mount".into());
+            return Err(refuse!(
+                "cold T8112 memory requires an unconnected unoccupied memory mount"
+            ));
         }
         let pmgr_id = devices
             .pmgr
-            .ok_or("cold T8112 memory requires the actual placed PMGR")?;
+            .ok_or(refuse!("cold T8112 memory requires the actual placed PMGR"))?;
         let pmgr = devices
             .bus
             .device::<Pmgr>(pmgr_id)
-            .ok_or("cold T8112 memory has a foreign PMGR owner")?;
+            .ok_or(refuse!("cold T8112 memory has a foreign PMGR owner"))?;
         if self
             .source_power
             .registers
             .iter()
             .any(|&address| pmgr.domain_state(address).is_none())
         {
-            return Err("cold T8112 memory PMGR omits part of the retained source graph".into());
+            return Err(refuse!(
+                "cold T8112 memory PMGR omits part of the retained source graph"
+            ));
         }
         let lifecycle = match &self.lifecycle {
             LifecycleInput::Switched(domains) => {
@@ -250,12 +264,16 @@ impl Plan {
                     .map(|&address| {
                         if devices.bus.route(address, Width::Word).ok() != Some((pmgr_id, address))
                         {
-                            return Err(format!(
-                                "MCC lifecycle domain {address:#x} has no actual PMGR route"
+                            return Err(refuse!(
+                                "MCC lifecycle domain {address:#x} has no actual PMGR route",
+                                address
                             ));
                         }
                         pmgr.domain_state(address).ok_or_else(|| {
-                            format!("MCC lifecycle domain {address:#x} has no actual PMGR state")
+                            refuse!(
+                                "MCC lifecycle domain {address:#x} has no actual PMGR state",
+                                address
+                            )
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -287,24 +305,20 @@ impl Plan {
             ],
             lifecycle,
             self.ram,
-        )
-        .map_err(String::from)?;
-        let locks = memory
-            .initialize_amcc_locks(self.controller, self.programmed, lifecycle)
-            .map_err(String::from)?;
+        )?;
+        let locks = memory.initialize_amcc_locks(self.controller, self.programmed, lifecycle)?;
         let cache = EmptyResource::initialized(
             locks,
             self.configuration.selection,
             SoftwareImage::zeroed_control_image(),
-        )
-        .map_err(String::from)?;
+        )?;
         devices.add_t8112_empty_memory_resources(memory, cache)
     }
 }
 
 /// Reuse the same ancestor/alias/implicit-power closure as powerconnect.
 /// No sinks are claimed complete while deriving these metadata dependencies.
-fn power_domains(states: &PowerStates, shared: u64) -> Result<Vec<u64>, String> {
+fn power_domains(states: &PowerStates, shared: u64) -> Result<Vec<u64>> {
     let resources = states
         .resources
         .iter()
@@ -317,9 +331,9 @@ fn power_domains(states: &PowerStates, shared: u64) -> Result<Vec<u64>, String> 
             .iter()
             .any(|&id| states.resources[id].admission == coverage::Admission::Unavailable)
     {
-        return Err(
-            "cold T8112 MCC shared reg0 has no positively placed source power resource".into(),
-        );
+        return Err(refuse!(
+            "cold T8112 MCC shared reg0 has no positively placed source power resource"
+        ));
     }
     let power = states.power_requirements()?;
     let consumers = states
@@ -336,15 +350,15 @@ fn power_domains(states: &PowerStates, shared: u64) -> Result<Vec<u64>, String> 
         })
         .collect::<Vec<_>>();
     let coverage = coverage::analyze(&states.domains, &consumers)
-        .map_err(|error| format!("cold T8112 source power graph: {error:?}"))?;
+        .map_err(|error| refuse!("cold T8112 source power graph: {error}", ?error))?;
     if coverage.len() != states.registers.len()
         || coverage
             .iter()
             .any(|domain| !states.registers.contains(&domain.address))
     {
-        return Err(
-            "cold T8112 source graph differs from its complete physical register set".into(),
-        );
+        return Err(refuse!(
+            "cold T8112 source graph differs from its complete physical register set"
+        ));
     }
     let domains = coverage
         .iter()
@@ -360,11 +374,7 @@ fn power_domains(states: &PowerStates, shared: u64) -> Result<Vec<u64>, String> 
 }
 
 impl UnswitchedApFrontend {
-    fn certify(
-        states: &PowerStates,
-        shared: u64,
-        ram: &Arc<RegisteredSystemRam>,
-    ) -> Result<Self, String> {
+    fn certify(states: &PowerStates, shared: u64, ram: &Arc<RegisteredSystemRam>) -> Result<Self> {
         // Original 26A434 J473 MCC/arm-io and shared-reg error-handler alias
         // have no consumer gate arrays. arm-io gate functions are provider
         // recipes; private MCC dynamic gating remains a separate protocol.
@@ -373,19 +383,21 @@ impl UnswitchedApFrontend {
         // closure. Require literal absence of inputs in EVERY same-owner alias,
         // including implicit power; unresolved/virtual inputs are not absence.
         if !power_domains(states, shared)?.is_empty() {
-            return Err("unswitched AP frontend has physical PMGR inputs".into());
+            return Err(refuse!("unswitched AP frontend has physical PMGR inputs"));
         }
         let power = states.power_requirements()?;
         for (id, resource) in states.resources.iter().enumerate() {
             if resource.owner == Some(PowerOwner::Mmio(shared))
                 && (!resource.activated_clocks().is_empty() || !power[id].is_empty())
             {
-                return Err("unswitched AP frontend has source clock/power inputs".into());
+                return Err(refuse!(
+                    "unswitched AP frontend has source clock/power inputs"
+                ));
             }
         }
-        let generation = ram
-            .generation()
-            .map_err(|status| format!("unswitched AP frontend RAM is not live: {status:?}"))?;
+        let generation = ram.generation().map_err(|status| {
+            refuse!("unswitched AP frontend RAM is not live: {status}", ?status)
+        })?;
         Ok(Self {
             generation,
             shared,
@@ -398,18 +410,19 @@ impl UnswitchedApFrontend {
         controller: &MemoryController,
         cache: &MemoryCache,
         ram: &Arc<RegisteredSystemRam>,
-    ) -> Result<LifecycleState, String> {
+    ) -> Result<LifecycleState> {
         if self.shared != controller.apertures[0] + cache.cache.shared.0
             || !Arc::ptr_eq(&self.ram, ram)
         {
-            return Err("unswitched AP frontend differs from its certified backing".into());
+            return Err(refuse!(
+                "unswitched AP frontend differs from its certified backing"
+            ));
         }
-        if ram
-            .generation()
-            .map_err(|status| format!("unswitched AP frontend RAM is not live: {status:?}"))?
-            != self.generation
+        if ram.generation().map_err(|status| {
+            refuse!("unswitched AP frontend RAM is not live: {status}", ?status)
+        })? != self.generation
         {
-            return Err("unswitched AP frontend RAM generation changed".into());
+            return Err(refuse!("unswitched AP frontend RAM generation changed"));
         }
         // State of the newly owned Stela RAM frontend with no AP PMGR inputs.
         // This is NOT an observed Apple MCC state or private power-protocol ACK.
@@ -430,16 +443,20 @@ fn geometry(
     cache: &MemoryCache,
     ram: &RegisteredSystemRam,
     programmed: stela_soc_data::amcc::Programmed,
-) -> Result<(), String> {
+) -> Result<()> {
     let [physical] = controller.apertures[..] else {
-        return Err("cold T8112 AMCC requires its one original aperture".into());
+        return Err(refuse!(
+            "cold T8112 AMCC requires its one original aperture"
+        ));
     };
     if programmed[1..].iter().any(Option::is_some) {
-        return Err("cold T8112 AMCC cannot discard a programmed non-CTRR-A lock group".into());
+        return Err(refuse!(
+            "cold T8112 AMCC cannot discard a programmed non-CTRR-A lock group"
+        ));
     }
     let dcs = physical
         .checked_add(DCS_OFFSET)
-        .ok_or("cold T8112 aperture wraps")?;
+        .ok_or(refuse!("cold T8112 aperture wraps"))?;
     if !physical.is_multiple_of(PLANE_STRIDE)
         || !dcs.is_multiple_of(t8112::CHANNEL_STRIDE)
         || controller.layout.planes != PLANES
@@ -454,51 +471,56 @@ fn geometry(
                 t8112::CHANNELS,
             )
     {
-        return Err("cold T8112 AMCC/cache/DCS geometry differs from the source profile".into());
+        return Err(refuse!(
+            "cold T8112 AMCC/cache/DCS geometry differs from the source profile"
+        ));
     }
     let geometry = Geometry::new(
         (cache.ptd.physical, stela_soc_data::ptd::PTD_BYTES),
         cache.ptd_updates,
-    )
-    .map_err(String::from)?;
+    )?;
     if geometry.entries() != PTD_ENTRIES
         || cache.ptd_entries != PTD_ENTRIES
         || cache.ptd.ranges.is_empty()
         || cache.ptd.ranges.len() != cache.ptd.interrupts.len()
     {
-        return Err("cold T8112 PTD source capacity or routes are incomplete".into());
+        return Err(refuse!(
+            "cold T8112 PTD source capacity or routes are incomplete"
+        ));
     }
     let dcs_end = dcs
         .checked_add(cache.channels.1)
-        .ok_or("cold T8112 DCS wraps")?;
+        .ok_or(refuse!("cold T8112 DCS wraps"))?;
     let ptd_end = cache
         .ptd
         .physical
         .checked_add(stela_soc_data::ptd::PTD_BYTES)
-        .ok_or("cold T8112 PTD wraps")?;
+        .ok_or(refuse!("cold T8112 PTD wraps"))?;
     if physical < ptd_end && cache.ptd.physical < dcs_end {
-        return Err("cold T8112 AMCC/DCS union overlaps PTD".into());
+        return Err(refuse!("cold T8112 AMCC/DCS union overlaps PTD"));
     }
     for (start, _, bytes) in ram.placements() {
         let end = start
             .checked_add(bytes as u64)
-            .ok_or("cold canonical RAM wraps")?;
+            .ok_or(refuse!("cold canonical RAM wraps"))?;
         if physical < end && start < dcs_end || cache.ptd.physical < end && start < ptd_end {
-            return Err("cold T8112 MMIO overlaps its actual canonical RAM".into());
+            return Err(refuse!("cold T8112 MMIO overlaps its actual canonical RAM"));
         }
     }
     for (start, bytes) in programmed.into_iter().flatten() {
         let end = start
             .checked_add(bytes)
-            .ok_or("cold AMCC lock region wraps")?;
+            .ok_or(refuse!("cold AMCC lock region wraps"))?;
         if bytes == 0 || !start.is_multiple_of(1 << 14) || !bytes.is_multiple_of(1 << 14) {
-            return Err("cold AMCC lock region is empty or not source-page aligned".into());
+            return Err(refuse!(
+                "cold AMCC lock region is empty or not source-page aligned"
+            ));
         }
         let mut cursor = start;
         for (source, _, bytes) in ram.placements() {
             let top = source
                 .checked_add(bytes as u64)
-                .ok_or("cold canonical RAM wraps")?;
+                .ok_or(refuse!("cold canonical RAM wraps"))?;
             if source <= cursor && cursor < top {
                 cursor = end.min(top);
             }
@@ -507,7 +529,9 @@ fn geometry(
             }
         }
         if cursor != end {
-            return Err("cold AMCC lock region is outside the actual canonical RAM".into());
+            return Err(refuse!(
+                "cold AMCC lock region is outside the actual canonical RAM"
+            ));
         }
     }
     Ok(())

@@ -12,8 +12,10 @@
 //! The model converts each surface's pixel format to the scanout's and honors
 //! its row stride; a format the model cannot convert is refused explicitly
 //! rather than presented as garbage.
+use crate::Result;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 /// A 32-bit pixel format: the scanout's (an 8-bit one) or a surface's the
 /// model converts from. The DCP driver's default framebuffer is 8-bit at the
@@ -78,7 +80,7 @@ pub trait Scanout {
     /// to the mode. Called once per completed swap, before the swap completes.
     /// An error leaves presentation uncommitted; the owner may retry the same
     /// swap. Validate fallible inputs before publishing host-visible pixels.
-    fn present(&mut self, rows: &[u8]) -> Result<(), &'static str>;
+    fn present(&mut self, rows: &[u8]) -> Result<()>;
 }
 
 /// A host framebuffer's 32-bit pixel given as one bit mask per channel: the
@@ -97,15 +99,17 @@ pub struct ChannelMasks {
 impl ChannelMasks {
     /// The layout of `red`, `green` and `blue`. Each mask must be one
     /// contiguous run of at most 16 bits, and no two masks may overlap.
-    pub fn new(red: u32, green: u32, blue: u32) -> Result<Self, &'static str> {
+    pub fn new(red: u32, green: u32, blue: u32) -> Result<Self> {
         if red & green != 0 || red & blue != 0 || green & blue != 0 {
-            return Err("framebuffer channel masks overlap");
+            return Err(refuse!("framebuffer channel masks overlap"));
         }
         let channel = |mask: u32| {
             let shift = mask.trailing_zeros();
             let width = mask.count_ones();
             if mask == 0 || width > 16 || (mask >> shift).trailing_ones() != width {
-                Err("framebuffer channel mask is not one contiguous run of 1 to 16 bits")
+                Err(refuse!(
+                    "framebuffer channel mask is not one contiguous run of 1 to 16 bits"
+                ))
             } else {
                 Ok((shift as u8, width as u8))
             }
@@ -198,12 +202,14 @@ impl Layer {
         source: Rect,
         destination: Rect,
         premultiplied: bool,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         if !source.inside(surface.width, surface.height) {
-            return Err("layer source rectangle is empty or outside its surface");
+            return Err(refuse!(
+                "layer source rectangle is empty or outside its surface"
+            ));
         }
         if destination.width == 0 || destination.height == 0 {
-            return Err("layer destination rectangle is empty");
+            return Err(refuse!("layer destination rectangle is empty"));
         }
         Ok(Self {
             surface,
@@ -290,13 +296,13 @@ pub fn compose(
     layers: &[Layer],
     mode: Mode,
     mut read: impl FnMut(u64, &mut [u8]) -> bool,
-) -> Result<Vec<u8>, &'static str> {
+) -> Result<Vec<u8>> {
     let width = mode.width as usize;
     let mut frame = [0, 0, 0, 0xff].repeat(width * mode.height as usize);
     let (red, blue) = mode
         .format
         .red_blue()
-        .ok_or("scanout mode is not an 8-bit format")?;
+        .ok_or(refuse!("scanout mode is not an 8-bit format"))?;
     let mut row = Vec::new();
     let mut drawn: Vec<([usize; 2], [usize; 2])> = Vec::new();
     for layer in layers {
@@ -317,9 +323,9 @@ pub fn compose(
                 .checked_mul(surface.stride.into())
                 .and_then(|offset| offset.checked_add(u64::from(source.x) * 4))
                 .and_then(|offset| surface.iova.checked_add(offset))
-                .ok_or("layer row address overflows")?;
+                .ok_or(refuse!("layer row address overflows"))?;
             if !read(iova, &mut row) {
-                return Err("surface row is not reachable through its DART");
+                return Err(refuse!("surface row is not reachable through its DART"));
             }
             let out = &mut frame[(y * width + xs[0]) * 4..(y * width + xs[1]) * 4];
             if unscaled && copies {

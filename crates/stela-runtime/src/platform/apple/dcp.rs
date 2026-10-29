@@ -41,6 +41,7 @@ pub mod swap;
 use super::asc::{Firmware, Message, TransitionRequest};
 use super::rtkit::{Endpoint, RtKit};
 use super::scanout::{Scanout, Surface};
+use crate::Result;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -48,6 +49,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use stela_contracts::dma::Port;
+use stela_contracts::refuse;
 use stela_formats::builds::Build;
 
 /// The RTKit endpoint numbers the J473AP DCPEXT advertises to the AP. 0x37 is
@@ -210,26 +212,28 @@ type Shared = Rc<RefCell<rpc::Link<iomfb::Methods>>>;
 struct Iomfb(Shared);
 
 impl Endpoint for Iomfb {
-    fn check_reset(&self) -> Result<(), &'static str> {
+    fn check_reset(&self) -> Result<()> {
         let link = self.0.borrow();
         if !link.retained_idle() {
-            return Err("DCP physical reset with unfinished RPC or scanout ownership");
+            return Err(refuse!(
+                "DCP physical reset with unfinished RPC or scanout ownership"
+            ));
         }
         link.service().check_reset()
     }
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         self.check_reset()?;
         let mut link = self.0.borrow_mut();
         link.reset()?;
         link.service_mut().reset();
         Ok(())
     }
-    fn start(&mut self, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn start(&mut self, outbox: &mut Vec<u64>) -> Result<()> {
         outbox.push(self.0.borrow_mut().start()?);
         Ok(())
     }
 
-    fn receive(&mut self, payload: u64, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn receive(&mut self, payload: u64, _outbox: &mut Vec<u64>) -> Result<()> {
         self.0.borrow_mut().receive(payload);
         Ok(())
     }
@@ -240,18 +244,18 @@ impl Endpoint for Iomfb {
 struct AfkEndpoint(Rc<RefCell<afk::Afk>>);
 
 impl Endpoint for AfkEndpoint {
-    fn check_reset(&self) -> Result<(), &'static str> {
+    fn check_reset(&self) -> Result<()> {
         self.0.borrow().check_reset()
     }
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         self.0.borrow_mut().reset()
     }
-    fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<()> {
         self.0.borrow_mut().start();
         Ok(())
     }
 
-    fn receive(&mut self, payload: u64, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn receive(&mut self, payload: u64, outbox: &mut Vec<u64>) -> Result<()> {
         self.0.borrow_mut().receive(payload, outbox)
     }
 }
@@ -260,15 +264,15 @@ impl Endpoint for AfkEndpoint {
 struct PortBus<'p, 'a, 'b>(&'p mut Port<'a, 'b>);
 
 impl rpc::Bus for PortBus<'_, '_, '_> {
-    fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
+    fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<()> {
         self.0
             .read(address, buffer)
-            .map_err(|_| "DCP shared-memory read faulted through dart-dcpext")
+            .map_err(|_| refuse!("DCP shared-memory read faulted through dart-dcpext"))
     }
-    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), &'static str> {
+    fn write(&mut self, address: u64, data: &[u8]) -> Result<()> {
         self.0
             .write(address, data)
-            .map_err(|_| "DCP shared-memory write faulted through dart-dcpext")
+            .map_err(|_| refuse!("DCP shared-memory write faulted through dart-dcpext"))
     }
 }
 
@@ -288,11 +292,7 @@ impl Coprocessor {
     /// 32 bits, which lie in that window. `build` is the booted macOS build,
     /// whose link interface version the coprocessor speaks.
     #[cfg(test)]
-    pub fn new(
-        scanout: Box<dyn Scanout>,
-        window: Option<u64>,
-        build: &Build,
-    ) -> Result<Self, &'static str> {
+    pub fn new(scanout: Box<dyn Scanout>, window: Option<u64>, build: &Build) -> Result<Self> {
         Self::for_external(scanout, window, ExternalIdentity::Unnumbered, build)
     }
 
@@ -304,7 +304,7 @@ impl Coprocessor {
         window: Option<u64>,
         identity: ExternalIdentity,
         build: &Build,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         Self::with_identity(iomfb::Methods::new(scanout), window, identity, build)
     }
 
@@ -313,7 +313,7 @@ impl Coprocessor {
         window: Option<u64>,
         identity: ExternalIdentity,
         build: &Build,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let descriptor = avipc::descriptor(identity.interface_name()?);
         let display = methods.display_state();
         let link = Rc::new(RefCell::new(rpc::Link::new(
@@ -327,7 +327,7 @@ impl Coprocessor {
             .collect();
         afk.iter()
             .find(|afk| afk.borrow().endpoint == avipc::ENDPOINT)
-            .ok_or("DCPAVIPC controller transport is not provided")?
+            .ok_or(refuse!("DCPAVIPC controller transport is not provided"))?
             .borrow_mut()
             .register(descriptor, Box::new(avipc::Controller::new(display)))?;
         let mut endpoints: Vec<(u8, Box<dyn Endpoint>)> = afk
@@ -387,7 +387,7 @@ impl Coprocessor {
     /// Read the oldest submitted swap's surface through `port` (the display
     /// pipe's DART, where the AP mapped it), present it and queue the swap's
     /// completion callback, which leaves at the next link DMA step.
-    pub fn present(&mut self, port: &mut Port<'_, '_>) -> Result<(), &'static str> {
+    pub fn present(&mut self, port: &mut Port<'_, '_>) -> Result<()> {
         let mut link = self.link.borrow_mut();
         link.service_mut()
             .present(|iova, bytes| port.read(iova, bytes).is_ok())
@@ -395,22 +395,24 @@ impl Coprocessor {
 }
 
 impl Firmware for Coprocessor {
-    fn check_reset(&self) -> Result<(), &'static str> {
+    fn check_reset(&self) -> Result<()> {
         self.rtkit.check_reset()
     }
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         self.rtkit.reset()
     }
-    fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn start(&mut self, outbox: &mut Vec<Message>) -> Result<()> {
         self.rtkit.start(outbox)
     }
-    fn stop(&mut self) -> Result<(), &'static str> {
+    fn stop(&mut self) -> Result<()> {
         if !self.retained_idle() {
-            return Err("DCP CPU stop with unfinished RPC, scanout or AFK work");
+            return Err(refuse!(
+                "DCP CPU stop with unfinished RPC, scanout or AFK work"
+            ));
         }
         self.rtkit.stop()
     }
-    fn resume(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn resume(&mut self, outbox: &mut Vec<Message>) -> Result<()> {
         let previous = self.rtkit.iop_power();
         self.rtkit.resume(outbox)?;
         // Firmware 0x232fc restores the saved running state after its
@@ -421,14 +423,18 @@ impl Firmware for Coprocessor {
         }
         Ok(())
     }
-    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<()> {
         if message.endpoint == 0 && message.payload >> 52 & 0xf == 6 {
             let fields = message.payload & !(0xf << 52);
             if fields == 0 {
-                return Err("DCP IOP memory-loss power transition is not modeled");
+                return Err(refuse!(
+                    "DCP IOP memory-loss power transition is not modeled"
+                ));
             }
             if matches!(fields, 0x201 | 0x202) && !self.retained_idle() {
-                return Err("DCP IOP sleep with unfinished RPC, scanout or AFK work");
+                return Err(refuse!(
+                    "DCP IOP sleep with unfinished RPC, scanout or AFK work"
+                ));
             }
         }
         let previous = self.rtkit.iop_power();
@@ -444,11 +450,7 @@ impl Firmware for Coprocessor {
     fn dma_pending(&self) -> bool {
         self.link.borrow().pending() || self.afk.iter().any(|afk| afk.borrow().pending())
     }
-    fn dma(
-        &mut self,
-        port: &mut Port<'_, '_>,
-        outbox: &mut Vec<Message>,
-    ) -> Result<(), &'static str> {
+    fn dma(&mut self, port: &mut Port<'_, '_>, outbox: &mut Vec<Message>) -> Result<()> {
         let mut sent = Vec::new();
         for afk in &self.afk {
             let mut afk = afk.borrow_mut();
@@ -464,7 +466,7 @@ impl Firmware for Coprocessor {
         }));
         result
     }
-    fn poll(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn poll(&mut self, outbox: &mut Vec<Message>) -> Result<()> {
         self.rtkit.poll(outbox)
     }
     fn take_transition(&mut self) -> Option<TransitionRequest> {

@@ -4,14 +4,15 @@
 //! group's hardware store. This component supplies neither command consumption
 //! nor event housekeeping/ACK, native startup, IRQ admission or cache capacity.
 use super::policy::{GROUPS, HardwareUpdate, Inputs, Policy};
+use crate::Result;
 use alloc::rc::Rc;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     crate::platform::apple::ptd::transport::notifications::LocalNotifications,
     stela_contracts::bus::Access, stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,
     stela_soc_data::ptd::Range, stela_soc_data::ptd::UPDATE_OFFSET,
 };
-
-type Error = &'static str;
 
 /// Exact backing identity, not execution/completion permission. The
 /// cache constructs it once; moving that cache preserves the same identity.
@@ -44,9 +45,9 @@ impl Binding {
 /// The production adapter borrows EmptyResource and checks its real lifecycle.
 pub trait Bank {
     fn identity(&self) -> &Identity;
-    fn validate(&self) -> Result<(), Error>;
-    fn read_quota(&mut self, group: u8) -> Result<u32, Error>;
-    fn write_quota(&mut self, group: u8, value: u32, access: &mut Access<'_>) -> Result<(), Error>;
+    fn validate(&self) -> Result<()>;
+    fn read_quota(&mut self, group: u8) -> Result<u32>;
+    fn write_quota(&mut self, group: u8, value: u32, access: &mut Access<'_>) -> Result<()>;
 }
 
 /// Selected range/counts and initialized native register/context mode.
@@ -102,7 +103,7 @@ pub struct Publisher {
     cursor: Option<Cursor>,
     allocated: bool,
     progress: Progress,
-    failed: Option<Error>,
+    failed: Option<Refusal>,
 }
 impl Publisher {
     pub fn new(
@@ -111,16 +112,18 @@ impl Publisher {
         rows: &[u8],
         mut inputs: Inputs,
         configuration: Configuration,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self> {
         if !binding.identity.same(bank.identity()) {
-            return Err("native quota bank differs from its actual binding");
+            return Err(refuse!("native quota bank differs from its actual binding"));
         }
         bank.validate()?;
         if configuration.suppression != Some(0) {
-            return Err("native quota hardware-write suppression mode is unqualified");
+            return Err(refuse!(
+                "native quota hardware-write suppression mode is unqualified"
+            ));
         }
         if !(1..=8).contains(&configuration.response_words) || configuration.ack_words != 1 {
-            return Err("native quota response/ACK format is not qualified");
+            return Err(refuse!("native quota response/ACK format is not qualified"));
         }
         let range = binding
             .local
@@ -128,13 +131,17 @@ impl Publisher {
             .ranges()
             .into_iter()
             .find(|range| range.id == configuration.response_range)
-            .ok_or("native quota response range has no actual PTD owner")?;
+            .ok_or(refuse!(
+                "native quota response range has no actual PTD owner"
+            ))?;
         if Some(range.count)
             != configuration
                 .response_words
                 .checked_add(configuration.ack_words)
         {
-            return Err("native quota response counts differ from the actual PTD range");
+            return Err(refuse!(
+                "native quota response counts differ from the actual PTD range"
+            ));
         }
         // Parse/check rows before borrowing any real seed. Input seed numbers
         // are replaced by reads from this exact bank, not trusted as RAM.
@@ -146,7 +153,9 @@ impl Publisher {
             (1u32 << (configuration.response_words * 4)) - 1
         };
         if active & !covered != 0 {
-            return Err("native quota response range does not cover every source group");
+            return Err(refuse!(
+                "native quota response range does not cover every source group"
+            ));
         }
         let mut old_targets = [None; GROUPS];
         for (group, old) in old_targets.iter_mut().enumerate() {
@@ -188,45 +197,49 @@ impl Publisher {
     pub(super) fn response_words(&self) -> u32 {
         self.configuration.response_words
     }
-    pub(super) fn check_bank_identity(&self, bank: &impl Bank) -> Result<(), Error> {
+    pub(super) fn check_bank_identity(&self, bank: &impl Bank) -> Result<()> {
         if self.binding.identity.same(bank.identity()) {
             Ok(())
         } else {
-            Err("native quota callback borrowed another actual cache owner")
+            Err(refuse!(
+                "native quota callback borrowed another actual cache owner"
+            ))
         }
     }
     /// The sole MC service now keeps the source restart/event, including
     /// every existing dirty word. Defaults or commands may supersede startup's
     /// allocation before final publication; no effect completes here.
-    pub(super) fn begin_service_pass(&mut self) -> Result<(), Error> {
-        if let Some(reason) = self.failed {
+    pub(super) fn begin_service_pass(&mut self) -> Result<()> {
+        if let Some(reason) = self.failed.clone() {
             return Err(reason);
         }
         if self.cursor.is_some() {
-            return Err("native quota publication prefix is still retained");
+            return Err(refuse!("native quota publication prefix is still retained"));
         }
         self.allocated = false;
         Ok(())
     }
-    pub(super) fn idle(&self) -> Result<(), Error> {
-        if let Some(reason) = self.failed {
+    pub(super) fn idle(&self) -> Result<()> {
+        if let Some(reason) = self.failed.clone() {
             return Err(reason);
         }
         if self.cursor.is_some() {
-            return Err("native quota publication prefix is still retained");
+            return Err(refuse!("native quota publication prefix is still retained"));
         }
         if self.allocated {
-            return Err("native quota allocation still awaits final publication");
+            return Err(refuse!(
+                "native quota allocation still awaits final publication"
+            ));
         }
         Ok(())
     }
     /// Only call after source new-data consumption. A lane supplies no
     /// command ID, hardware completion, capacity or independently owned effect.
-    pub fn set_request(&mut self, group: u8, lane: u16) -> Result<bool, Error> {
+    pub fn set_request(&mut self, group: u8, lane: u16) -> Result<bool> {
         self.idle()?;
         self.policy.set_request(group, lane)
     }
-    pub fn allocate(&mut self) -> Result<(), Error> {
+    pub fn allocate(&mut self) -> Result<()> {
         self.idle()?;
         self.policy.allocate()?;
         self.allocated = true;
@@ -236,7 +249,7 @@ impl Publisher {
     /// real publisher. After advance completes, the service must perform any
     /// reached metric registrations before allocating. This does not mark it
     /// running, drain work, or authorize native command consumption.
-    pub fn start_defaults(&mut self) -> Result<(), Error> {
+    pub fn start_defaults(&mut self) -> Result<()> {
         self.idle()?;
         self.policy.start_defaults()?;
         self.cursor = Some(Cursor::new(false));
@@ -248,12 +261,12 @@ impl Publisher {
     /// allocation. Startup additionally registers reached metrics between the
     /// defaults publisher and allocator. This does not execute
     /// or certify the caller's independently owned lifecycle/housekeeping.
-    pub fn publish_pending(&mut self) -> Result<(), Error> {
-        if let Some(reason) = self.failed {
+    pub fn publish_pending(&mut self) -> Result<()> {
+        if let Some(reason) = self.failed.clone() {
             return Err(reason);
         }
         if self.cursor.is_some() {
-            return Err("native quota publication prefix is still retained");
+            return Err(refuse!("native quota publication prefix is still retained"));
         }
         self.allocated = false;
         self.cursor = Some(Cursor::new(false));
@@ -261,12 +274,14 @@ impl Publisher {
     }
     /// Start the final event publisher AFTER its independently owned source
     /// housekeeping. This component cannot check that other effect or ACK.
-    pub fn publish_allocated(&mut self) -> Result<(), Error> {
-        if let Some(reason) = self.failed {
+    pub fn publish_allocated(&mut self) -> Result<()> {
+        if let Some(reason) = self.failed.clone() {
             return Err(reason);
         }
         if self.cursor.is_some() || !self.allocated {
-            return Err("native quota final publication has no completed allocation");
+            return Err(refuse!(
+                "native quota final publication has no completed allocation"
+            ));
         }
         self.publish_pending()
     }
@@ -276,22 +291,24 @@ impl Publisher {
     /// Source op1 has two real passes: publish/program the rebuilt defaults,
     /// then allocate. The caller must perform source event housekeeping before
     /// starting final publication with publish_allocated. Neither emits an ACK.
-    pub fn set_budget_payload(&mut self, payload: u64) -> Result<(), Error> {
+    pub fn set_budget_payload(&mut self, payload: u64) -> Result<()> {
         self.idle()?;
         self.policy.set_budget_payload(payload);
         if let Err(reason) = self.policy.defaults() {
-            self.failed = Some(reason);
+            self.failed = Some(reason.clone());
             return Err(reason);
         }
         self.cursor = Some(Cursor::new(true));
         Ok(())
     }
-    pub fn advance(&mut self, bank: &mut impl Bank, access: &mut Access<'_>) -> Result<(), Error> {
-        if let Some(reason) = self.failed {
+    pub fn advance(&mut self, bank: &mut impl Bank, access: &mut Access<'_>) -> Result<()> {
+        if let Some(reason) = self.failed.clone() {
             return Err(reason);
         }
         if !self.binding.identity.same(bank.identity()) {
-            return Err("native quota callback borrowed another actual cache owner");
+            return Err(refuse!(
+                "native quota callback borrowed another actual cache owner"
+            ));
         }
         while let Some(cursor) = self.cursor.as_ref() {
             bank.validate()?;
@@ -323,10 +340,12 @@ impl Publisher {
                             response.packed(),
                             access,
                         )
-                        .map_err(|_| "native quota actual PTD response publication refused")?;
+                        .map_err(|_| {
+                            refuse!("native quota actual PTD response publication refused")
+                        })?;
                     self.progress.response_publications = count;
                     if let Err(reason) = self.policy.complete_response(response) {
-                        self.failed = Some(reason);
+                        self.failed = Some(reason.clone());
                         return Err(reason);
                     }
                 }
@@ -342,7 +361,7 @@ impl Publisher {
                     && self.old_targets[index] == Some(update.scaled_units())
                 {
                     if let Err(reason) = self.policy.complete_hardware(update) {
-                        self.failed = Some(reason);
+                        self.failed = Some(reason.clone());
                         return Err(reason);
                     }
                 } else {
@@ -392,7 +411,7 @@ impl Publisher {
                 let store = self.cursor.as_mut().unwrap().store.take().unwrap();
                 self.progress.programmed_words = count;
                 if let Err(reason) = self.policy.complete_hardware(store.update) {
-                    self.failed = Some(reason);
+                    self.failed = Some(reason.clone());
                     return Err(reason);
                 }
             }
@@ -403,8 +422,8 @@ impl Publisher {
         Ok(())
     }
 }
-fn next(count: u64) -> Result<u64, Error> {
-    count
-        .checked_add(1)
-        .ok_or("native quota publication accounting exhausted before effect")
+fn next(count: u64) -> Result<u64> {
+    count.checked_add(1).ok_or(refuse!(
+        "native quota publication accounting exhausted before effect"
+    ))
 }

@@ -4,12 +4,14 @@
 //! ([`open`]), and the system engine writes on to the same clusters, wherever
 //! they lie, through Stela's own drivers ([`resume`]), so the stick keeps the
 //! whole run.
+use crate::Result;
 use crate::{
     engine::{bundle::Bytes, translations},
     output::{self, Log},
     status,
 };
 use alloc::{boxed::Box, format, string::String};
+use stela_contracts::refuse;
 use stela_drivers::block::{BlockDevice, BlockError, Features, Identity, Shared, Transport};
 use stela_loader::mount_interface::BOOT_LOG_FILE;
 use stela_runtime::pc::{
@@ -37,15 +39,15 @@ const BLOCK: u32 = 512;
 /// return that partition's GUID, which the system engine opens it by.
 pub fn open() -> Option<Guid> {
     status::begin("Opening the boot log on the USB");
-    let opened = firmware_file()
-        .map_err(String::from)
-        .and_then(|(device, partition)| {
-            let mut device: Box<dyn BlockDevice> = Box::new(device);
-            let writer = Writer::open(&mut *device).map_err(|error| format!("{error}"))?;
-            report(&writer, "firmware");
-            output::add_log(writer, device, Log::Firmware).map_err(|error| format!("{error}"))?;
-            Ok(partition)
-        });
+    let opened = firmware_file().and_then(|(device, partition)| {
+        let mut device: Box<dyn BlockDevice> = Box::new(device);
+        let writer = Writer::open(&mut *device)
+            .map_err(|error| refuse!("firmware boot log: {error}", %error))?;
+        report(&writer, "firmware");
+        output::add_log(writer, device, Log::Firmware)
+            .map_err(|error| refuse!("firmware boot log output: {error}", %error))?;
+        Ok(partition)
+    });
     finish(opened).flatten()
 }
 
@@ -58,7 +60,7 @@ pub fn resume(partition: Box<dyn BlockDevice>) {
 
 /// End the step: the log is kept, or why not, which the boot goes on
 /// without.
-fn finish<T>(opened: Result<T, String>) -> Option<T> {
+fn finish<T>(opened: Result<T>) -> Option<T> {
     match opened {
         Ok(value) => {
             status::done(BOOT_LOG_FILE);
@@ -100,28 +102,29 @@ fn shared<P: ProtocolPointer + ?Sized>(handle: Handle) -> Option<ScopedProtocol<
     .ok()
 }
 
-fn firmware_file() -> Result<(FileDevice, Option<Guid>), &'static str> {
+fn firmware_file() -> Result<(FileDevice, Option<Guid>)> {
     let device = shared::<LoadedImage>(boot::image_handle())
-        .ok_or("no loaded image")?
+        .ok_or(refuse!("no loaded image"))?
         .device()
-        .ok_or("Stela was not loaded from a volume")?;
+        .ok_or(refuse!("Stela was not loaded from a volume"))?;
     let mut volume =
-        shared::<SimpleFileSystem>(device).ok_or("Stela's volume has no file system")?;
+        shared::<SimpleFileSystem>(device).ok_or(refuse!("Stela's volume has no file system"))?;
     let mut root = volume
         .open_volume()
-        .map_err(|_| "Stela's volume cannot be opened")?;
-    let path = CString16::try_from(BOOT_LOG_FILE).map_err(|_| "the log's path is not UCS-2")?;
+        .map_err(|_| refuse!("Stela's volume cannot be opened"))?;
+    let path =
+        CString16::try_from(BOOT_LOG_FILE).map_err(|_| refuse!("the log's path is not UCS-2"))?;
     let mut file = root
         .open(&path, FileMode::ReadWrite, FileAttribute::empty())
         .ok()
         .and_then(|file| file.into_regular_file())
-        .ok_or("Stela's volume has no \\EFI\\stela\\boot.log")?;
+        .ok_or(refuse!("Stela's volume has no \\EFI\\stela\\boot.log"))?;
     let size = file
         .get_boxed_info::<FileInfo>()
-        .map_err(|_| "the log file's size cannot be read")?
+        .map_err(|_| refuse!("the log file's size cannot be read"))?
         .file_size();
     if size < LOG_BYTES {
-        return Err("\\EFI\\stela\\boot.log is shorter than the log");
+        return Err(refuse!("\\EFI\\stela\\boot.log is shorter than the log"));
     }
     let identity = Identity {
         transport: Transport::Firmware,
@@ -143,22 +146,26 @@ fn firmware_file() -> Result<(FileDevice, Option<Guid>), &'static str> {
     ))
 }
 
-fn engine_file(partition: Box<dyn BlockDevice>) -> Result<(), String> {
+fn engine_file(partition: Box<dyn BlockDevice>) -> Result<()> {
     let block = u64::from(partition.identity().block_size);
-    let mut volume = Fat32::open(Bytes::new(partition)).map_err(|error| format!("{error}"))?;
+    let mut volume = Fat32::open(Bytes::new(partition))
+        .map_err(|error| refuse!("boot log volume: {error}", %error))?;
     let file = volume
         .file(&BOOT_LOG_FILE.replace('\\', "/"))
-        .map_err(|error| format!("{error}"))?;
-    let runs = boot_log::file_runs(&file, block, LOG_BYTES).map_err(|error| format!("{error}"))?;
+        .map_err(|error| refuse!("boot log file: {error}", %error))?;
+    let runs = boot_log::file_runs(&file, block, LOG_BYTES)
+        .map_err(|error| refuse!("boot log file runs: {error}", %error))?;
     let partition = volume.into_inner().into_inner();
     let mut device: Box<dyn BlockDevice> = Box::new(
         Shared::new(partition)
             .runs(runs)
-            .map_err(|error| format!("{error}"))?,
+            .map_err(|error| refuse!("boot log device: {error}", %error))?,
     );
-    let writer = Writer::resume(&mut *device).map_err(|error| format!("{error}"))?;
+    let writer = Writer::resume(&mut *device)
+        .map_err(|error| refuse!("boot log resume: {error}", %error))?;
     report(&writer, "USB driver");
-    output::add_log(writer, device, Log::Usb).map_err(|error| format!("{error}"))
+    output::add_log(writer, device, Log::Usb)
+        .map_err(|error| refuse!("USB boot log output: {error}", %error))
 }
 
 /// The log file as blocks, through the firmware's file system.

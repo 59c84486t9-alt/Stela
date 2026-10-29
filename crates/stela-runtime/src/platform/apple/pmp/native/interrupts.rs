@@ -13,6 +13,8 @@ mod owner;
 use super::platform::owner::Completion;
 pub use auxiliary::{AuxiliaryHandler, AuxiliaryReset, AuxiliaryTarget};
 pub use owner::{Event, Handler, Owner, Registration, Signal, Signals, Snapshot};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::MmioDevice,
     stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -20,10 +22,10 @@ use {
 
 pub const SPECIAL: u32 = 0x0800_0000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// No effect retired. A missing required owner must return this variant.
-    Refused(&'static str),
+    Refused(Refusal),
     /// MMIO may have retired; the owner permanently prevents access replay.
     Uncertain(MmioError),
 }
@@ -40,12 +42,12 @@ impl Placement {
     pub fn t8112(relocation: u64) -> Result<Self, Error> {
         let address = 0x23b0c0000u64
             .checked_add(relocation)
-            .ok_or(Error::Refused(
-                "native interrupt mapping relocation overflow",
-            ))?;
-        address
-            .checked_add(0x20000)
-            .ok_or(Error::Refused("native interrupt aperture overflow"))?;
+            .ok_or(Error::Refused(refuse!(
+                "native interrupt mapping relocation overflow"
+            )))?;
+        address.checked_add(0x20000).ok_or(Error::Refused(refuse!(
+            "native interrupt aperture overflow"
+        )))?;
         Ok(Self {
             address,
             bytes: 0x20000,
@@ -109,9 +111,9 @@ impl<M: MmioDevice, R: Route> Device for Mapped<M, R> {
                 .checked_add(4)
                 .is_none_or(|end| end > self.placement.bytes)
         {
-            return Err(Error::Refused(
-                "native interrupt word read exceeds declared mapped aperture",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native interrupt word read exceeds declared mapped aperture"
+            )));
         }
         self.device
             .read(offset, Width::Word, access)
@@ -124,9 +126,9 @@ impl<M: MmioDevice, R: Route> Device for Mapped<M, R> {
                 .checked_add(4)
                 .is_none_or(|end| end > self.placement.bytes)
         {
-            return Err(Error::Refused(
-                "native interrupt word write exceeds declared mapped aperture",
-            ));
+            return Err(Error::Refused(refuse!(
+                "native interrupt word write exceeds declared mapped aperture"
+            )));
         }
         self.device
             .write(offset, Width::Word, u64::from(value), access)
@@ -162,7 +164,9 @@ pub enum Outcome {
 pub(super) fn refused(error: Error) -> Completion<Outcome> {
     Completion::Refused(match error {
         Error::Refused(reason) => reason,
-        Error::Uncertain(_) => "native interrupt device retirement uncertain; replay refused",
+        Error::Uncertain(_) => {
+            refuse!("native interrupt device retirement uncertain; replay refused")
+        }
     })
 }
 

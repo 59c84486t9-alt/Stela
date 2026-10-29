@@ -703,7 +703,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Err(DeviceError::Refused(detail) | DeviceError::TransferRefused(detail)) => {
                 Err(Failure::Stop(
                     MemoryStatus::Unsupported,
-                    self.scalable_device(address, physical, write, detail),
+                    self.scalable_device(address, physical, write, detail.to_string()),
                 ))
             }
         }

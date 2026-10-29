@@ -24,9 +24,12 @@
 pub mod install;
 pub mod sequencer;
 
+use crate::Result;
 use alloc::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -163,21 +166,23 @@ impl Pmgr {
     /// Pure request preview used to check every consumer before the
     /// machine commits this PMGR register. Read-only ACTUAL/PARENT_OFF bits
     /// in a guest RMW are not lifecycle inputs.
-    pub fn preview(&self, address: u64, value: u32) -> Result<DomainTransition, &'static str> {
+    pub fn preview(&self, address: u64, value: u32) -> Result<DomainTransition> {
         self.prepare(address, value)
             .map(|(_, transition)| transition)
     }
 
-    fn prepare(&self, address: u64, value: u32) -> Result<(u32, DomainTransition), &'static str> {
+    fn prepare(&self, address: u64, value: u32) -> Result<(u32, DomainTransition)> {
         let old = self
             .registers
             .get(&address)
             .copied()
-            .ok_or("PMGR register is not a modeled power state")?;
+            .ok_or(refuse!("PMGR register is not a modeled power state"))?;
         if self.refused.contains(&address)
             && value & (TARGET | DEV_DISABLE | RESET) != old & (TARGET | DEV_DISABLE | RESET)
         {
-            return Err("PMGR lifecycle has required consumers without connected sinks");
+            return Err(refuse!(
+                "PMGR lifecycle has required consumers without connected sinks"
+            ));
         }
         let next = write_state(old, value, self.lifecycle.contains(&address))?;
         Ok((
@@ -234,15 +239,19 @@ fn encode(state: u8) -> Option<u32> {
         .then(|| u32::from(state) | u32::from(state) << ACTUAL_SHIFT)
 }
 
-fn write_state(old: u32, value: u32, lifecycle: bool) -> Result<u32, &'static str> {
+fn write_state(old: u32, value: u32, lifecycle: bool) -> Result<u32> {
     if value & !KNOWN != 0 {
-        return Err("PMGR power-state reserved field is not modeled");
+        return Err(refuse!("PMGR power-state reserved field is not modeled"));
     }
     if !lifecycle && value & RESET != 0 {
-        return Err("PMGR device reset is not connected to the device models");
+        return Err(refuse!(
+            "PMGR device reset is not connected to the device models"
+        ));
     }
     if !lifecycle && value & DEV_DISABLE != 0 {
-        return Err("PMGR DEV_DISABLE quiescing is not connected to the device models");
+        return Err(refuse!(
+            "PMGR DEV_DISABLE quiescing is not connected to the device models"
+        ));
     }
     let target = (value & TARGET) as u8;
     if value & RESET != 0
@@ -250,13 +259,16 @@ fn write_state(old: u32, value: u32, lifecycle: bool) -> Result<u32, &'static st
             || old & ACTUAL != u32::from(ACTIVE) << ACTUAL_SHIFT
             || value & DEV_DISABLE == 0)
     {
-        return Err("PMGR reset requires an active, quiesced domain");
+        return Err(refuse!("PMGR reset requires an active, quiesced domain"));
     }
     if old & RESET != 0 && target != ACTIVE {
-        return Err("PMGR power change while reset is held is not modeled");
+        return Err(refuse!(
+            "PMGR power change while reset is held is not modeled"
+        ));
     }
-    let mut new =
-        encode(target).ok_or("PMGR power states other than 0, 4 and 15 are not modeled")?;
+    let mut new = encode(target).ok_or(refuse!(
+        "PMGR power states other than 0, 4 and 15 are not modeled"
+    ))?;
     let old_actual = ((old & ACTUAL) >> ACTUAL_SHIFT) as u8;
     let mut flags = old & (WAS_PWRGATED | WAS_CLKGATED) & !value;
     if target != old_actual {
@@ -275,14 +287,14 @@ impl MmioDevice for Pmgr {
         NAME
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         if width != Width::Word {
-            return Err(fail("PMGR registers are 32-bit"));
+            return Err(fail(refuse!("PMGR registers are 32-bit")));
         }
         let value = self
             .registers
             .get(&offset)
-            .ok_or_else(|| fail("PMGR register is not a modeled power state"))?;
+            .ok_or_else(|| fail(refuse!("PMGR register is not a modeled power state")))?;
         Ok(u64::from(*value))
     }
     fn write(
@@ -292,9 +304,9 @@ impl MmioDevice for Pmgr {
         value: u64,
         _: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         if width != Width::Word {
-            return Err(fail("PMGR registers are 32-bit"));
+            return Err(fail(refuse!("PMGR registers are 32-bit")));
         }
         let (next, transition) = self.prepare(offset, value as u32).map_err(fail)?;
         *self

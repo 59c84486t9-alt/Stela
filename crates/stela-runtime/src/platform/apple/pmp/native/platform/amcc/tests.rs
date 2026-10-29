@@ -8,6 +8,7 @@ use super::super::owner::Completion;
 use super::*;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
+use stela_contracts::refuse;
 use {
     crate::platform::apple::ptd::Ptd,
     crate::platform::apple::ptd::transport::notifications::LocalNotifications,
@@ -20,7 +21,7 @@ use {
 struct NoProviders;
 impl Backend for NoProviders {
     fn call(&mut self, _: &Request, _: &Call, _: &mut Access<'_>) -> Completion<Value> {
-        Completion::Refused("authored actual provider absent")
+        Completion::Refused(refuse!("authored actual provider absent"))
     }
 }
 fn d() -> Descriptor {

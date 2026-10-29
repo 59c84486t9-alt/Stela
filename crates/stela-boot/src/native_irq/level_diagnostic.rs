@@ -6,6 +6,7 @@ use super::{
     ioapic::{self, Devices},
     madt::{self, Routing},
 };
+use crate::Result;
 use alloc::{boxed::Box, format, string::String, sync::Arc};
 use core::{
     arch::asm,
@@ -13,6 +14,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use sha2::Digest;
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use stela_drivers::{
     Clock,
@@ -67,16 +69,16 @@ pub(crate) struct Prepared {
 impl Prepared {
     /// Enclosed by the source-bound TCG/Q35/SMM-off fixture validation,
     /// before EBS. Only ACPI/PCI reads; no interrupt takeover occurs here.
-    pub(crate) fn prepare(rsdp: u64, fadt: &[u8]) -> Result<Self, String> {
+    pub(crate) fn prepare(rsdp: u64, fadt: &[u8]) -> Result<Self> {
         // SAFETY: firmware RSDP/tables remain mapped before EBS.
         let madt =
-            unsafe { acpi::find(rsdp, b"APIC") }.map_err(|e| format!("fixture MADT: {e:?}"))?;
+            unsafe { acpi::find(rsdp, b"APIC") }.map_err(|e| refuse!("fixture MADT: {e}", ?e))?;
         if core::arch::x86_64::__cpuid(0x8000_0000).eax < 0x8000_0008 {
-            return Err(String::from("fixture lacks actual CPU physical-width leaf"));
+            return Err(refuse!("fixture lacks actual CPU physical-width leaf"));
         }
         let physical_bits = (core::arch::x86_64::__cpuid(0x8000_0008).eax & 255) as u8;
         let routing = Routing::parse(madt, physical_bits)
-            .map_err(|e| format!("fixture MADT route: {e:?}"))?;
+            .map_err(|e| refuse!("fixture MADT route: {e}", ?e))?;
         if routing.units.len() != 1
             || routing.units[0]
                 != (madt::Unit {
@@ -85,16 +87,14 @@ impl Prepared {
                     gsi_base: 0,
                 })
         {
-            return Err(String::from(
-                "level fixture requires exact actual Q35 IOAPIC",
-            ));
+            return Err(refuse!("level fixture requires exact actual Q35 IOAPIC"));
         }
         let sci = routing
             .sci(fadt)
-            .map_err(|e| format!("fixture SCI route: {e:?}"))?;
+            .map_err(|e| refuse!("fixture SCI route: {e}", ?e))?;
         let legacy = u32::from_le_bytes(
             fadt.get(40..44)
-                .ok_or("short FADT DSDT")?
+                .ok_or(refuse!("short FADT DSDT"))?
                 .try_into()
                 .unwrap(),
         ) as u64;
@@ -104,18 +104,18 @@ impl Prepared {
             .unwrap_or(0);
         let address = if extended == 0 { legacy } else { extended };
         if address == 0 {
-            return Err(String::from("fixture DSDT missing"));
+            return Err(refuse!("fixture DSDT missing"));
         }
         // SAFETY: `address` is the FADT's DSDT pointer, which the firmware identity map covers
         // after EBS.
-        let dsdt = unsafe { acpi::table(address) }.map_err(|e| format!("fixture DSDT: {e:?}"))?;
+        let dsdt = unsafe { acpi::table(address) }.map_err(|e| refuse!("fixture DSDT: {e}", ?e))?;
         let dsdt_hash = Sha256::digest(dsdt).into();
         if dsdt.len() != 8098
             || &dsdt[..4] != b"DSDT"
             || ![DSDT_HASH, INTEL_DSDT_HASH, OWNED_CONFIG_DSDT_HASH].contains(&dsdt_hash)
         {
-            return Err(String::from(
-                "fixture actual DSDT differs from ACPICA route receipt",
+            return Err(refuse!(
+                "fixture actual DSDT differs from ACPICA route receipt"
             ));
         }
         let unit = routing.units[0];
@@ -134,55 +134,50 @@ impl Prepared {
     }
     /// Consume the same original Function returned after real DMA and MSI
     /// retirement. No normal driver probing can occur before this returns.
-    pub(crate) fn run(
-        self,
-        mut function: Function,
-        base: u64,
-        clock: Clock,
-    ) -> Result<String, String> {
+    pub(crate) fn run(self, mut function: Function, base: u64, clock: Clock) -> Result<String> {
         // Recheck the mapped table after EBS, immediately before line
         // ownership. The capture/receipt cannot authorize a changed live input.
         if Sha256::digest(self.dsdt).as_slice() != self.dsdt_hash {
-            return Err(String::from("fixture DSDT changed before INTx ownership"));
+            return Err(refuse!("fixture DSDT changed before INTx ownership"));
         }
         let platform = super::NativePlatform(());
         platform
             .check_cpu()
-            .map_err(|e| format!("level CPU: {e:?}"))?;
+            .map_err(|e| refuse!("level CPU: {e}", ?e))?;
         let svr = super::controller().read(0xf0);
         if svr == u32::MAX || svr & (1 << 12) != 0 {
-            return Err(String::from("level fixture requires actual EOI broadcast"));
+            return Err(refuse!("level fixture requires actual EOI broadcast"));
         }
         // SAFETY: the fixture's IOAPIC page is mapped uncached for this boot and owned by this
         // diagnostic.
         let registers = unsafe { ioapic::Mmio::new(self.unit.base as usize) }
-            .map_err(|e| format!("IOAPIC mapping: {e:?}"))?;
+            .map_err(|e| refuse!("IOAPIC mapping: {e}", ?e))?;
         // SAFETY: exact previously checked Q35 single-BSP fixture, kept
         // UC IOAPIC page, EOI broadcast on, no firmware/SMM/other owner.
         let unit =
             unsafe { ioapic::Unit::attach(registers, platform, self.unit.id, self.unit.gsi_base) }
-                .map_err(|e| format!("IOAPIC attach: {e:?}"))?;
+                .map_err(|e| refuse!("IOAPIC attach: {e}", ?e))?;
         self.routing
             .owner(LINE, &[(self.unit, unit.pins())])
-            .map_err(|e| format!("live IOAPIC GSI owner: {e:?}"))?;
+            .map_err(|e| refuse!("live IOAPIC GSI owner: {e}", ?e))?;
         if function.address.bus != 0
             || function.address.device != 2
             || function.address.function != 0
             || function.vendor != 0x1234
             || function.device != 0x11e8
         {
-            return Err(String::from("level fixture original EDU owner mismatch"));
+            return Err(refuse!("level fixture original EDU owner mismatch"));
         }
         if function.config().read8(0x3d) != 1
             || function.config().read16(4) & (4 | INTX_DISABLE) != INTX_DISABLE
         {
-            return Err(String::from("EDU INTA/MSI-retired state mismatch"));
+            return Err(refuse!("EDU INTA/MSI-retired state mismatch"));
         }
         let interrupts = function.interrupts();
-        let msi = interrupts.msi.ok_or("EDU MSI metadata missing")?;
+        let msi = interrupts.msi.ok_or(refuse!("EDU MSI metadata missing"))?;
         if function.config().read16(u16::from(msi.offset) + 2) & 1 != 0 || interrupts.msix.is_some()
         {
-            return Err(String::from("EDU MSI remains active before INTx"));
+            return Err(refuse!("EDU MSI remains active before INTx"));
         }
         let edu = Arc::new(Edu {
             base: base as usize,
@@ -196,7 +191,7 @@ impl Prepared {
         let second: Arc<dyn Handler> = Arc::new(Member(edu.clone(), 2));
         let handlers = Arc::new(
             SharedHandlers::new(alloc::vec![first, second])
-                .map_err(|e| format!("shared group: {e:?}"))?,
+                .map_err(|e| refuse!("shared group: {e}", ?e))?,
         );
         // SAFETY: full DSDT hash proves the independent ACPICA routing
         // input, live direct EDU INTA agrees, boot virtio is reset/stopped and
@@ -210,11 +205,11 @@ impl Prepared {
                 }),
             )
         }
-        .map_err(|e| format!("IOAPIC line claim: {e:?}"))?;
+        .map_err(|e| refuse!("IOAPIC line claim: {e}", ?e))?;
         let mut registration = super::service()
-            .map_err(|e| format!("level service: {e:?}"))?
+            .map_err(|e| refuse!("level service: {e}", ?e))?
             .request(Box::new(pin), handlers.clone())
-            .map_err(|e| format!("level request: {e:?}"))?;
+            .map_err(|e| refuse!("level request: {e}", ?e))?;
         let vector = registration.vector();
         // SAFETY: the level handler group is registered and interrupts are masked again right after
         // the wait.
@@ -238,36 +233,39 @@ impl Prepared {
             || edu.bad.load(Ordering::Relaxed) != 0
             || registration.handled() != Ok(2)
         {
-            return Err(format!(
-                "actual level proof failed complete={complete} first={} second={} remote={} bad={} handled={:?}",
-                edu.first.load(Ordering::Acquire),
-                edu.second.load(Ordering::Acquire),
-                edu.remote.load(Ordering::Relaxed),
-                edu.bad.load(Ordering::Relaxed),
-                registration.handled()
+            return Err(refuse!(
+                "actual level proof failed complete={complete} first={first} second={second} \
+                 remote={remote} bad={bad} handled={handled}",
+                complete,
+                first = edu.first.load(Ordering::Acquire),
+                second = edu.second.load(Ordering::Acquire),
+                remote = edu.remote.load(Ordering::Relaxed),
+                bad = edu.bad.load(Ordering::Relaxed),
+                handled = ?registration.handled()
             ));
         }
         registration
             .retire()
-            .map_err(|e| format!("level retirement: {e:?}"))?;
+            .map_err(|e| refuse!("level retirement: {e}", ?e))?;
         let state = unit
             .state(LINE.gsi)
-            .map_err(|e| format!("retired IOAPIC: {e:?}"))?;
+            .map_err(|e| refuse!("retired IOAPIC: {e}", ?e))?;
         if !state.masked
             || state.remote_irr
             || state.delivery_pending
             || Arc::strong_count(&handlers) != 1
             || Arc::strong_count(&edu) != 3
         {
-            return Err(format!(
-                "level release proof failed state={state:?} handlers={} edu={}",
-                Arc::strong_count(&handlers),
-                Arc::strong_count(&edu)
+            return Err(refuse!(
+                "level release proof failed state={state} handlers={handlers} edu={edu}",
+                ?state,
+                handlers = Arc::strong_count(&handlers),
+                edu = Arc::strong_count(&edu)
             ));
         }
         drop(handlers);
         if Arc::strong_count(&edu) != 1 {
-            return Err(String::from("shared members retained after group release"));
+            return Err(refuse!("shared members retained after group release"));
         }
         edu.write(0x60, 3);
         // SAFETY: the level handler group is registered and interrupts are masked again right after
@@ -284,7 +282,7 @@ impl Prepared {
         }
         edu.write(0x64, u32::MAX);
         if late || unit.quarantine_count() != 0 {
-            return Err(String::from("level delivery survived retirement"));
+            return Err(refuse!("level delivery survived retirement"));
         }
         Ok(format!(
             "INTx gsi=22 high+shared+level vector={vector:#x} first=2 second=1 hold→EOI→retrigger=verified RemoteIRR=observed/drained group_refs=released late_delivery=absent DSDT={:x} MADT={:x} FADT={:x} SCI_gsi={} SCI_polarity={:?} SCI_trigger={:?}",

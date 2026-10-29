@@ -2,6 +2,7 @@ use super::*;
 use alloc::{boxed::Box, collections::VecDeque, rc::Rc, vec, vec::Vec};
 use core::cell::RefCell;
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 
 #[test]
 fn mapped_bounds_refuse_before_borrowing_the_supplied_view() {
@@ -77,7 +78,9 @@ impl Device for Actual {
         let mut s = self.0.borrow_mut();
         if s.refuse_write_once == Some(offset) {
             s.refuse_write_once = None;
-            return Err(Error::Refused("authored effect-free unavailable write"));
+            return Err(Error::Refused(refuse!(
+                "authored effect-free unavailable write"
+            )));
         }
         s.effects.push((offset, Some(value)));
         Ok(())
@@ -220,7 +223,7 @@ impl Handler for Callback {
         Completion::Retired {
             value: (),
             refusal: if core::mem::take(&mut self.retired_refusal) {
-                Some("authored callback retired")
+                Some(refuse!("authored callback retired"))
             } else {
                 None
             },
@@ -258,7 +261,7 @@ fn pending_read_clears_before_busy_callback() {
     assert!(o.configure_registration(64, 0x100).is_err());
     assert!(matches!(
         o.advance_dispatch(&mut a),
-        Completion::Refused("authored callback retired")
+        Completion::Refused(reason) if reason == refuse!("authored callback retired")
     ));
     assert_eq!(
         retired(o.advance_dispatch(&mut a)),
@@ -412,7 +415,7 @@ fn unretired_source_producer_cannot_turn_image_flags_into_callback_reset() {
     for _ in 0..2 {
         assert!(matches!(
             o.advance_dispatch(&mut a),
-            Completion::Refused("auxiliary IRQ registration producer has not retired")
+            Completion::Refused(reason) if reason == refuse!("auxiliary IRQ registration producer has not retired")
         ));
     }
     assert!(effects.borrow().is_empty());

@@ -16,6 +16,8 @@
 //! Its empty error slot and disabled counter status are native state,
 //! not mirrors of the paired TRAD fault. Nonzero counter control, hardware
 //! lock, metadata and capture payloads remain explicit requirements.
+use crate::Result;
+use stela_contracts::refuse;
 
 const BUILD_PARAMS: u64 = 0;
 const CONFIG: u64 = 0x20;
@@ -42,9 +44,11 @@ impl Performance {
         }
     }
 
-    pub(super) fn disable(&mut self, value: u32) -> Result<(), &'static str> {
+    pub(super) fn disable(&mut self, value: u32) -> Result<()> {
         if value != 0 {
-            return Err("T6000 DART enabled performance event/count/overflow semantics");
+            return Err(refuse!(
+                "T6000 DART enabled performance event/count/overflow semantics"
+            ));
         }
         *self = Self::Disabled;
         Ok(())
@@ -56,9 +60,11 @@ impl Performance {
         }
     }
 
-    pub(super) fn acknowledge(&mut self, value: u32, mask: u32) -> Result<(), &'static str> {
+    pub(super) fn acknowledge(&mut self, value: u32, mask: u32) -> Result<()> {
         if value & !mask != 0 {
-            return Err("unknown T6000 DART performance acknowledgement bits");
+            return Err(refuse!(
+                "unknown T6000 DART performance acknowledgement bits"
+            ));
         }
         // No event is enabled and no overflow is pending. A valid W1C cannot
         // create an event, enable counting or acknowledge an ordinary fault.
@@ -91,35 +97,41 @@ impl Umms {
         self.performance = Performance::Disabled;
     }
 
-    pub(super) fn read(&self, offset: u64) -> Result<u32, &'static str> {
+    pub(super) fn read(&self, offset: u64) -> Result<u32> {
         match offset {
             // No context/capture store and no hardware configuration lock.
             BUILD_PARAMS => Ok(0),
             CONFIG => self
                 .automatic_clock_gating
                 .map(|enabled| if enabled { AUTO_CLOCK_GATING } else { 0 })
-                .ok_or("T6000 UMMS CONFIG reset value requires reprogramming or qualification"),
+                .ok_or(refuse!(
+                    "T6000 UMMS CONFIG reset value requires reprogramming or qualification"
+                )),
             // Context activation is refused before DMA; the UMMS error slot
             // is empty. A TRAD translation fault belongs to TRAD40 instead.
             ERROR => Ok(0),
             PERF_CONTROL => Ok(self.performance.control()),
             PERF_STATUS => Ok(self.performance.status()),
-            0x44 | 0x48 | 0x4c | 0x50 | 0x58 | 0x60 | 0x64 => {
-                Err("T6000 UMMS auxiliary fault/capture field encoding is unqualified")
-            }
-            0x1004 | 0x1020 => Err("T6000 UMMS performance configuration encoding is unqualified"),
-            SELECT_WINDOW | 0x2000..=0x3ffc => {
-                Err("cacheless T6000 UMMS has no capture selector or payload")
-            }
-            _ => Err("unknown T6000 UMMS register"),
+            0x44 | 0x48 | 0x4c | 0x50 | 0x58 | 0x60 | 0x64 => Err(refuse!(
+                "T6000 UMMS auxiliary fault/capture field encoding is unqualified"
+            )),
+            0x1004 | 0x1020 => Err(refuse!(
+                "T6000 UMMS performance configuration encoding is unqualified"
+            )),
+            SELECT_WINDOW | 0x2000..=0x3ffc => Err(refuse!(
+                "cacheless T6000 UMMS has no capture selector or payload"
+            )),
+            _ => Err(refuse!("unknown T6000 UMMS register")),
         }
     }
 
-    pub(super) fn write(&mut self, offset: u64, value: u32) -> Result<(), &'static str> {
+    pub(super) fn write(&mut self, offset: u64, value: u32) -> Result<()> {
         match offset {
             CONFIG => {
                 if value & !AUTO_CLOCK_GATING != 0 {
-                    return Err("T6000 UMMS hardware lock or unknown CONFIG effects");
+                    return Err(refuse!(
+                        "T6000 UMMS hardware lock or unknown CONFIG effects"
+                    ));
                 }
                 // All work is synchronous: automatic clock gating only gates
                 // idle internal work, not functional MMIO or a parent clock.
@@ -130,14 +142,18 @@ impl Umms {
             // Original SPTM270bb324..bb358 selects one error code and does
             // a write/readback. With no UMMS-stage error it remains empty.
             ERROR if value & !ERROR_CODES == 0 && value.count_ones() == 1 => Ok(()),
-            ERROR => Err("unqualified T6000 UMMS fault acknowledgement encoding"),
+            ERROR => Err(refuse!(
+                "unqualified T6000 UMMS fault acknowledgement encoding"
+            )),
             PERF_CONTROL => self.performance.disable(value),
             PERF_STATUS => self.performance.acknowledge(value, PERF_OVERFLOW),
-            BUILD_PARAMS => Err("T6000 UMMS capture capability is read-only"),
-            SELECT_WINDOW | 0x2000..=0x3ffc => {
-                Err("cacheless T6000 UMMS has no capture selector or payload")
-            }
-            _ => Err("unknown T6000 UMMS writable register or unqualified field effects"),
+            BUILD_PARAMS => Err(refuse!("T6000 UMMS capture capability is read-only")),
+            SELECT_WINDOW | 0x2000..=0x3ffc => Err(refuse!(
+                "cacheless T6000 UMMS has no capture selector or payload"
+            )),
+            _ => Err(refuse!(
+                "unknown T6000 UMMS writable register or unqualified field effects"
+            )),
         }
     }
 }

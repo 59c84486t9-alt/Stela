@@ -9,6 +9,7 @@ pub mod control;
 
 use super::Error;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 use {stela_contracts::bus::Width, stela_contracts::dma::Port};
 
 const ROW_BYTES: usize = 24;
@@ -88,18 +89,20 @@ impl TunableProgram {
         physical_span: u64,
     ) -> Result<Self, Error> {
         if byte_len > MAX_TABLE_BYTES || !byte_len.is_multiple_of(ROW_BYTES as u32) {
-            return Err(Error::Unsupported(
-                "SIO tunable table length is not qualified",
-            ));
+            return Err(Error::Unsupported(refuse!(
+                "SIO tunable table length is not qualified"
+            )));
         }
         table_iova
             .checked_add(u64::from(byte_len))
-            .ok_or(Error::Unsupported("SIO tunable table exceeds I/O space"))?;
+            .ok_or(Error::Unsupported(refuse!(
+                "SIO tunable table exceeds I/O space"
+            )))?;
         let end = physical_base
             .checked_add(physical_span)
-            .ok_or(Error::Unsupported(
-                "SIO tunable physical range exceeds address space",
-            ))?;
+            .ok_or(Error::Unsupported(refuse!(
+                "SIO tunable physical range exceeds address space"
+            )))?;
         let mut data = alloc::vec![0; byte_len as usize];
         // Port is RAM-only; it cannot silently convert a guest register
         // aperture into successful table data. No MMIO effect has started.
@@ -116,7 +119,11 @@ impl TunableProgram {
             let width = match width {
                 4 => Width::Word,
                 8 => Width::Double,
-                _ => return Err(Error::Unsupported("SIO tunable width is not qualified")),
+                _ => {
+                    return Err(Error::Unsupported(refuse!(
+                        "SIO tunable width is not qualified"
+                    )));
+                }
             };
             let address = physical_base
                 .checked_add(u64::from(offset))
@@ -126,9 +133,9 @@ impl TunableProgram {
                         .checked_add(width.bytes())
                         .is_some_and(|last| last <= end)
                 })
-                .ok_or(Error::Unsupported(
-                    "SIO tunable exceeds its aligned physical range",
-                ))?;
+                .ok_or(Error::Unsupported(refuse!(
+                    "SIO tunable exceeds its aligned physical range"
+                )))?;
             rows.push(Row {
                 address,
                 width,
@@ -149,7 +156,9 @@ impl TunableProgram {
     /// routing it. Reentrant service cannot claim or execute it a second time.
     pub fn begin_effect(&mut self) -> Result<Option<Effect>, Error> {
         if self.in_flight.is_some() {
-            return Err(Error::Unsupported("SIO setup effect is already in flight"));
+            return Err(Error::Unsupported(refuse!(
+                "SIO setup effect is already in flight"
+            )));
         }
         let Some(row) = self.rows.get(self.row) else {
             return Ok(None);
@@ -172,7 +181,9 @@ impl TunableProgram {
         self.sequence = self
             .sequence
             .checked_add(1)
-            .ok_or(Error::Unsupported("SIO setup effect sequence is exhausted"))?;
+            .ok_or(Error::Unsupported(refuse!(
+                "SIO setup effect sequence is exhausted"
+            )))?;
         self.in_flight = Some(effect);
         Ok(Some(effect))
     }

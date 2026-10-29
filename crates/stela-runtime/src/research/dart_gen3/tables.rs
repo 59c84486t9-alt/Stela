@@ -9,8 +9,10 @@ use super::context::{Context, Geometry, PAGE_BYTES as PAGE};
 use super::descriptor::Encoding;
 use super::handoff::Handoff;
 use super::streams::{self, Command, Snapshot};
+use crate::Result;
 use crate::platform::apple::dart::gen3::fault::{Capture, Code, Level, Record};
 use alloc::{vec, vec::Vec};
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::dma::DmaError, stela_contracts::dma::Iommu,
     stela_contracts::dma::Memory,
@@ -42,14 +44,14 @@ pub struct Tables {
 }
 
 impl Tables {
-    pub fn new(streams: usize) -> Result<Self, &'static str> {
+    pub fn new(streams: usize) -> Result<Self> {
         Self::with_encoding(streams, Encoding::Shift4)
     }
 
     /// Bind the original builder's explicit RAM encoding. Native revision
     /// and mode validation belong to the profile owner; this constructor
     /// does not infer them from software context or expose an MMIO profile.
-    pub fn with_encoding(streams: usize, encoding: Encoding) -> Result<Self, &'static str> {
+    pub fn with_encoding(streams: usize, encoding: Encoding) -> Result<Self> {
         let faults = Capture::new(streams)?;
         Ok(Self {
             streams: vec![Stream::default(); streams],
@@ -62,7 +64,7 @@ impl Tables {
     /// Set only the recovered zero-context translation configurations. The
     /// register owner must enforce protection and supply lifecycle before
     /// calling; this does not implement missing register-security domains.
-    pub fn configure(&mut self, sid: usize, config: u32, ttbr: u32) -> Result<(), &'static str> {
+    pub fn configure(&mut self, sid: usize, config: u32, ttbr: u32) -> Result<()> {
         self.configure_stream(sid, config, ttbr, None)
     }
 
@@ -74,9 +76,11 @@ impl Tables {
         config: u32,
         ttbr: u32,
         context: Context,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if Geometry::from_tcr(config) != context.geometry() {
-            return Err("gen3 DART TCR geometry disagrees with its validated context");
+            return Err(refuse!(
+                "gen3 DART TCR geometry disagrees with its validated context"
+            ));
         }
         self.configure_stream(sid, config, ttbr, Some(context))
     }
@@ -84,14 +88,11 @@ impl Tables {
     /// Use the original native-client root validation for RAM
     /// walks. This still exposes no native MMIO profile: filter, security,
     /// fault metadata and publication completion remain independent gates.
-    pub fn configure_handoff(
-        &mut self,
-        sid: usize,
-        ttbr: u32,
-        handoff: Handoff,
-    ) -> Result<(), &'static str> {
+    pub fn configure_handoff(&mut self, sid: usize, ttbr: u32, handoff: Handoff) -> Result<()> {
         if self.encoding != handoff.encoding() {
-            return Err("gen3 DART RAM encoding disagrees with the qualified handoff");
+            return Err(refuse!(
+                "gen3 DART RAM encoding disagrees with the qualified handoff"
+            ));
         }
         self.configure_stream(sid, handoff.config(), ttbr, Some(handoff.context()))
     }
@@ -102,36 +103,39 @@ impl Tables {
         config: u32,
         ttbr: u32,
         context: Option<Context>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if config & !(TRANSLATE | CONTEXT) != 0 {
-            return Err("gen3 DART stream context, remap or filter configuration is unsupported");
+            return Err(refuse!(
+                "gen3 DART stream context, remap or filter configuration is unsupported"
+            ));
         }
         if ttbr & !(TTBR_VALID | TTBR_ADDRESS) != 0 {
-            return Err("gen3 DART TTBR contains unmodeled fields");
+            return Err(refuse!("gen3 DART TTBR contains unmodeled fields"));
         }
-        let stream = self
-            .streams
-            .get_mut(sid)
-            .ok_or("gen3 DART configuration SID is outside its native bounds")?;
+        let stream = self.streams.get_mut(sid).ok_or(refuse!(
+            "gen3 DART configuration SID is outside its native bounds"
+        ))?;
         stream.config = config;
         stream.ttbr = ttbr;
         stream.context = context;
         Ok(())
     }
 
-    pub fn set_enabled(&mut self, sid: usize, enabled: bool) -> Result<(), &'static str> {
+    pub fn set_enabled(&mut self, sid: usize, enabled: bool) -> Result<()> {
         self.streams
             .get_mut(sid)
-            .ok_or("gen3 DART enable SID is outside its native bounds")?
+            .ok_or(refuse!("gen3 DART enable SID is outside its native bounds"))?
             .enabled = enabled;
         Ok(())
     }
 
     /// The original readable set-side words. Clear-side readback is not
     /// inferred from an ignored posted-write drain read in the source.
-    pub fn read_streams(&self, offset: u64) -> Result<u32, &'static str> {
+    pub fn read_streams(&self, offset: u64) -> Result<u32> {
         if streams::word(offset, streams::DISABLE).is_ok() {
-            return Err("gen3 DART clear-side stream readback is unqualified");
+            return Err(refuse!(
+                "gen3 DART clear-side stream readback is unqualified"
+            ));
         }
         let word = streams::word(offset, streams::ENABLE)?;
         streams::validate(self.streams.len(), word, 0)?;
@@ -147,7 +151,7 @@ impl Tables {
 
     /// Execute a native set/clear word without changing unselected streams,
     /// translation bindings or pending faults. Validate every bit first.
-    pub fn stream_command(&mut self, command: Command) -> Result<(), &'static str> {
+    pub fn stream_command(&mut self, command: Command) -> Result<()> {
         streams::validate(self.streams.len(), command.word(), command.bits())?;
         let first = command.word() * 32;
         let last = self.streams.len().min(first + 32);
@@ -181,9 +185,11 @@ impl Tables {
     /// Execute the original set-side restore of saved words. This
     /// ORs their bits; it does not replace or clear newly enabled streams.
     /// The register owner must restore/check other state before calling.
-    pub fn restore_enables(&mut self, snapshot: &Snapshot) -> Result<(), &'static str> {
+    pub fn restore_enables(&mut self, snapshot: &Snapshot) -> Result<()> {
         if snapshot.streams() != self.streams.len() {
-            return Err("gen3 DART saved enable state belongs to a different SID geometry");
+            return Err(refuse!(
+                "gen3 DART saved enable state belongs to a different SID geometry"
+            ));
         }
         for (word, bits) in snapshot.words().iter().copied().enumerate() {
             self.stream_command(Command::decode(streams::ENABLE + word as u64 * 4, bits)?)?;
@@ -206,7 +212,7 @@ impl Tables {
         &self.faults
     }
 
-    pub fn acknowledge_faults(&mut self, word: usize, bits: u32) -> Result<(), &'static str> {
+    pub fn acknowledge_faults(&mut self, word: usize, bits: u32) -> Result<()> {
         self.faults.acknowledge(word, bits)
     }
 
@@ -219,18 +225,21 @@ impl Tables {
         write: bool,
     ) -> Result<u64, WalkError> {
         if self.quiesced {
-            return Err(DmaError::Unsupported("gen3 DART DMA is quiesced").into());
+            return Err(DmaError::Unsupported(refuse!("gen3 DART DMA is quiesced")).into());
         }
-        let stream = self.streams.get(sid).ok_or(DmaError::Unsupported(
-            "gen3 DART incoming stream is outside its native bounds",
-        ))?;
+        let stream = self.streams.get(sid).ok_or(DmaError::Unsupported(refuse!(
+            "gen3 DART incoming stream is outside its native bounds"
+        )))?;
         if !stream.enabled {
-            return Err(
-                DmaError::Unsupported("gen3 DART disabled-stream fault classification").into(),
-            );
+            return Err(DmaError::Unsupported(refuse!(
+                "gen3 DART disabled-stream fault classification"
+            ))
+            .into());
         }
         if stream.config & TRANSLATE == 0 {
-            return Err(DmaError::Unsupported("gen3 DART untranslated or bypass stream").into());
+            return Err(
+                DmaError::Unsupported(refuse!("gen3 DART untranslated or bypass stream")).into(),
+            );
         }
         let indices = match stream.context {
             Some(context) => context.transfer(iova, last),

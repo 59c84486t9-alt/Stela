@@ -1,8 +1,11 @@
 use super::*;
+use crate::Result;
 use alloc::{sync::Arc, vec};
 use std::alloc::{Layout, alloc, dealloc};
 use std::ptr::NonNull;
 use stela_compiler::TargetCpu;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use stela_engine::memory::backing::AccessKind;
 use stela_engine::memory::backing::AccessPermissions;
 use stela_engine::memory::backing::MemoryBacking;
@@ -133,7 +136,7 @@ struct Prepared<'a> {
 impl sealed::Backing for Owned {}
 impl sealed::Prepared for Prepared<'_> {}
 impl ApertureBacking for Owned {
-    type Error = &'static str;
+    type Error = Refusal;
     type Prepared<'a> = Prepared<'a>;
     fn state(&self) -> BackingState {
         BackingState {
@@ -159,10 +162,10 @@ impl ApertureBacking for Owned {
         active_bytes: u64,
     ) -> Result<Prepared<'_>, Self::Error> {
         if before != &self.state() {
-            return Err("actual owner changed");
+            return Err(refuse!("actual owner changed"));
         }
         if self.fail {
-            return Err("native mapping preflight refused");
+            return Err(refuse!("native mapping preflight refused"));
         }
         let view = (active_bytes != 0).then(|| {
             MemoryView::new(
@@ -326,7 +329,7 @@ fn reads_and_failed_or_abandoned_preflight_never_advance_completion() {
     component.backing.fail = true;
     assert!(matches!(
         component.write(word | 1),
-        Err(WriteError::Backing("native mapping preflight refused"))
+        Err(WriteError::Backing(reason)) if reason == refuse!("native mapping preflight refused")
     ));
     assert_eq!(component.read().unwrap(), word);
     assert_eq!(component.backing().state(), before);
@@ -1040,7 +1043,7 @@ mod original {
                     Box::new(move |bytes: &mut [u8]| {
                         random
                             .read_exact(bytes)
-                            .map_err(|_| "actual host entropy source failed")?;
+                            .map_err(|_| refuse!("actual host entropy source failed"))?;
                         supplied.set(supplied.get() + 1);
                         Ok(())
                     }),
@@ -1106,7 +1109,9 @@ mod original {
                     .push(serde_json::json!({"address":address,"bytes":bytes,
                         "write":false,"result":format!("{:?}", result.as_ref().map(|_| ()))}));
                 self.collect_irqs();
-                return result.map_err(|error| DeviceError::Refused(format!("{error:?}")));
+                return result.map_err(|error| {
+                    DeviceError::Refused(refuse!("device read: {error}", ?error))
+                });
             }
             let mut value = [0; 8];
             if !self
@@ -1145,7 +1150,9 @@ mod original {
                     .push(serde_json::json!({"address":address,"bytes":bytes,
                         "write":true,"result":format!("{result:?}")}));
                 self.collect_irqs();
-                return result.map_err(|error| DeviceError::Refused(format!("{error:?}")));
+                return result.map_err(|error| {
+                    DeviceError::Refused(refuse!("device write: {error}", ?error))
+                });
             }
             if !self
                 .ram
@@ -1171,7 +1178,9 @@ mod original {
             use stela_contracts::bus::Access;
             self.peripherals
                 .advance(&mut Access::new(cpu, now, &mut self.interrupts))
-                .map_err(|error| DeviceError::TransferRefused(format!("{error:?}")))?;
+                .map_err(|error| {
+                    DeviceError::TransferRefused(refuse!("peripheral advance: {error}", ?error))
+                })?;
             self.collect_irqs();
             if self
                 .sep

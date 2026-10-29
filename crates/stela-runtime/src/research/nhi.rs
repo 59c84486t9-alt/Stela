@@ -8,9 +8,12 @@
 //! capability template, CIO readiness or machine admission is supplied here.
 //! DMA completion is a separate phase so a fault cannot replay an
 //! already accepted frame. Payload and timestamp precede completion ownership.
+use crate::Result;
 use alloc::{boxed::Box, collections::BTreeSet, vec, vec::Vec};
 pub use ring::Direction;
 use ring::{Descriptor, Ring, Transfer};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction as AccessDirection,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -96,9 +99,11 @@ impl Frame {
         eof: u8,
         timestamp: u32,
         crc_error: bool,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         if bytes.is_empty() || bytes.len() > 4096 || sof > 15 || eof > 15 {
-            return Err("NHI native frame length or PDF is outside its wire encoding");
+            return Err(refuse!(
+                "NHI native frame length or PDF is outside its wire encoding"
+            ));
         }
         Ok(Self {
             hop,
@@ -143,30 +148,26 @@ pub trait Consumer {
         hop: usize,
         direction: Direction,
         options: Option<Options>,
-    ) -> Result<(), &'static str>;
+    ) -> Result<()>;
     /// `None` applies real peer backpressure without consuming the frame or
     /// changing protocol state. A later poll/deadline may make it ready.
-    fn transmit(&mut self, frame: Transmit<'_>) -> Result<Option<Accepted>, &'static str>;
-    fn poll(
-        &mut self,
-        now: u64,
-        receive_credits: &[usize],
-    ) -> Result<(Vec<Frame>, Option<u64>), &'static str>;
-    fn reset(&mut self) -> Result<(), &'static str>;
+    fn transmit(&mut self, frame: Transmit<'_>) -> Result<Option<Accepted>>;
+    fn poll(&mut self, now: u64, receive_credits: &[usize]) -> Result<(Vec<Frame>, Option<u64>)>;
+    fn reset(&mut self) -> Result<()>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Dma(DmaError),
-    Unsupported(&'static str),
+    Unsupported(Refusal),
 }
 impl From<DmaError> for Error {
     fn from(error: DmaError) -> Self {
         Self::Dma(error)
     }
 }
-impl From<&'static str> for Error {
-    fn from(reason: &'static str) -> Self {
+impl From<Refusal> for Error {
+    fn from(reason: Refusal) -> Self {
         Self::Unsupported(reason)
     }
 }
@@ -184,7 +185,7 @@ pub struct Nhi {
     last_raised: Vec<Option<u64>>,
     powered: bool,
     cursor: usize,
-    terminal: Option<&'static str>,
+    terminal: Option<Refusal>,
 }
 impl Nhi {
     pub fn new(
@@ -192,14 +193,14 @@ impl Nhi {
         tx: Vec<AicInput>,
         rx: Vec<AicInput>,
         consumer: Box<dyn Consumer>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let count = tx.len();
         if count == 0
             || count > 16
             || rx.len() != count
             || profile.capability_words[0] & 0x3ff != count as u32
         {
-            return Err("NHI capability/IRQ ring count is inconsistent");
+            return Err(refuse!("NHI capability/IRQ ring count is inconsistent"));
         }
         let l = profile.layout;
         let mut ranges = vec![
@@ -209,7 +210,9 @@ impl Nhi {
             (l.throttle, count as u64 * 8),
         ];
         if l.stride < 24 || l.stride & 3 != 0 || profile.shared_tx_buffers == 0 {
-            return Err("NHI layout or shared transmit buffer budget is invalid");
+            return Err(refuse!(
+                "NHI layout or shared transmit buffer budget is invalid"
+            ));
         }
         for base in [l.tx, l.rx] {
             for hop in 0..count {
@@ -217,9 +220,9 @@ impl Nhi {
                     base.checked_add(
                         l.stride
                             .checked_mul(hop as u64)
-                            .ok_or("NHI layout overflow")?,
+                            .ok_or(refuse!("NHI layout overflow"))?,
                     )
-                    .ok_or("NHI layout overflow")?,
+                    .ok_or(refuse!("NHI layout overflow"))?,
                     24,
                 ));
             }
@@ -228,16 +231,18 @@ impl Nhi {
         let mut end = 0;
         for (base, bytes) in ranges {
             if base & 3 != 0 || base < end {
-                return Err("NHI layout overlaps or is unaligned");
+                return Err(refuse!("NHI layout overlaps or is unaligned"));
             }
-            end = base.checked_add(bytes).ok_or("NHI layout overflow")?;
+            end = base
+                .checked_add(bytes)
+                .ok_or(refuse!("NHI layout overflow"))?;
             if end > REGISTER_BYTES {
-                return Err("NHI layout exceeds its aperture");
+                return Err(refuse!("NHI layout exceeds its aperture"));
             }
         }
         let lines: Vec<_> = tx.into_iter().chain(rx).collect();
         if lines.iter().copied().collect::<BTreeSet<_>>().len() != lines.len() {
-            return Err("NHI dedicated interrupts alias");
+            return Err(refuse!("NHI dedicated interrupts alias"));
         }
         Ok(Self {
             profile,
@@ -257,11 +262,7 @@ impl Nhi {
     }
     /// Physical power input from the owning ACIO complex. Power-on is not CIO
     /// readiness. A power cut resets the native owner before losing rings.
-    pub fn set_powered(
-        &mut self,
-        powered: bool,
-        access: &mut Access<'_>,
-    ) -> Result<(), &'static str> {
+    pub fn set_powered(&mut self, powered: bool, access: &mut Access<'_>) -> Result<()> {
         if self.powered && !powered {
             self.reset(access)?;
         }
@@ -269,7 +270,7 @@ impl Nhi {
         self.update_lines(access);
         Ok(())
     }
-    pub fn reset(&mut self, access: &mut Access<'_>) -> Result<(), &'static str> {
+    pub fn reset(&mut self, access: &mut Access<'_>) -> Result<()> {
         self.consumer.reset()?;
         for ring in self.tx.iter_mut().chain(&mut self.rx) {
             *ring = Ring::new();
@@ -345,15 +346,15 @@ impl Nhi {
             })
             .collect()
     }
-    fn enqueue(&mut self, frames: Vec<Frame>) -> Result<(), &'static str> {
+    fn enqueue(&mut self, frames: Vec<Frame>) -> Result<()> {
         let mut credits = self.receive_credits();
         for frame in &frames {
             if let Some(credit) = credits.get_mut(frame.hop).filter(|credit| **credit != 0) {
                 *credit -= 1;
             } else {
                 let reason = "native NHI consumer returned a frame without posted receive credit";
-                self.terminal = Some(reason);
-                return Err(reason);
+                self.terminal = Some(reason.into());
+                return Err(reason.into());
             }
         }
         for frame in frames {
@@ -378,10 +379,10 @@ impl Nhi {
     /// the same native frame twice. The IOMMU owns its fault-reporting effects.
     pub fn service_dma(&mut self, port: &mut Port<'_, '_>) -> Result<(), Error> {
         if !self.powered {
-            return Err("NHI DMA while powered off".into());
+            return Err(refuse!("NHI DMA while powered off").into());
         }
-        if let Some(reason) = self.terminal {
-            return Err(reason.into());
+        if let Some(reason) = &self.terminal {
+            return Err(reason.clone().into());
         }
         let total = self.tx.len() * 2;
         let mut done = 0;
@@ -422,7 +423,9 @@ impl Nhi {
                 Direction::Transmit => {
                     let options = r.active.unwrap();
                     if descriptor.isochronous() && !options.isochronous {
-                        return Err("NHI isochronous descriptor on an asynchronous ring".into());
+                        return Err(
+                            refuse!("NHI isochronous descriptor on an asynchronous ring").into(),
+                        );
                     }
                     let mut bytes = vec![0; descriptor.length()];
                     port.read(descriptor.address, &mut bytes)?;
@@ -457,7 +460,9 @@ impl Nhi {
                         && (options.parameter & (1 << frame.eof) == 0
                             || options.parameter & (1 << (16 + frame.sof)) == 0)
                     {
-                        return Err("native NHI frame violates configured PDF framing".into());
+                        return Err(
+                            refuse!("native NHI frame violates configured PDF framing").into()
+                        );
                     }
                     let length = frame.bytes.len().min(r.capacity());
                     let transfer = Transfer {
@@ -502,12 +507,7 @@ impl Nhi {
         }
         None
     }
-    fn options(
-        &self,
-        direction: Direction,
-        hop: usize,
-        flags: u32,
-    ) -> Result<Options, &'static str> {
+    fn options(&self, direction: Direction, hop: usize, flags: u32) -> Result<Options> {
         let allowed = ENABLE
             | RAW
             | NO_SNOOP
@@ -518,14 +518,14 @@ impl Nhi {
                 E2E_HOP
             };
         if flags & !allowed != 0 {
-            return Err("NHI ring option field without a model");
+            return Err(refuse!("NHI ring option field without a model"));
         }
         let e2e_tx_hop = ((flags & E2E_HOP) >> 12) as u16;
         if direction == Direction::Receive
             && flags & E2E != 0
             && usize::from(e2e_tx_hop) >= self.tx.len()
         {
-            return Err("NHI E2E transmit HopID is outside the controller");
+            return Err(refuse!("NHI E2E transmit HopID is outside the controller"));
         }
         let r = &self.rings(direction)[hop];
         Ok(Options {
@@ -539,23 +539,25 @@ impl Nhi {
             receive_capacity: r.capacity(),
         })
     }
-    fn flags(&mut self, direction: Direction, hop: usize, flags: u32) -> Result<(), &'static str> {
+    fn flags(&mut self, direction: Direction, hop: usize, flags: u32) -> Result<()> {
         let options = self.options(direction, hop, flags)?;
         let r = &self.rings(direction)[hop];
         if r.active.is_some() && flags & ENABLE != 0 {
             return if r.flags == flags {
                 Ok(())
             } else {
-                Err("NHI live ring reconfiguration requires disable")
+                Err(refuse!("NHI live ring reconfiguration requires disable"))
             };
         }
         if r.transfer.is_some() || !r.incoming.is_empty() {
-            return Err("NHI ring has an accepted frame in flight");
+            return Err(refuse!("NHI ring has an accepted frame in flight"));
         }
         let active = if flags & ENABLE != 0 {
             r.validate_configuration()?;
             if direction == Direction::Receive && !(1..=256).contains(&r.capacity) {
-                return Err("NHI receive maximum-frame-size encoding is not qualified");
+                return Err(refuse!(
+                    "NHI receive maximum-frame-size encoding is not qualified"
+                ));
             }
             if direction == Direction::Transmit {
                 let used: u64 = self
@@ -568,7 +570,9 @@ impl Nhi {
                 if r.parameter == 0
                     || used + u64::from(r.parameter) > u64::from(self.profile.shared_tx_buffers)
                 {
-                    return Err("NHI shared transmit buffer allocation exceeds its profile");
+                    return Err(refuse!(
+                        "NHI shared transmit buffer allocation exceeds its profile"
+                    ));
                 }
             }
             Some(options)
@@ -610,7 +614,7 @@ impl Nhi {
         field: u64,
         width: Width,
         value: u64,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if field == 16 && width == Width::Word {
             return self.flags(direction, hop, value as u32);
         }
@@ -637,7 +641,7 @@ impl Nhi {
             // Validate both word halves before changing either one.
             for index in posted.into_iter().chain(consumed) {
                 if index >= r.count && !(index == 0 && r.count == 0) {
-                    return Err("NHI index is outside the descriptor ring");
+                    return Err(refuse!("NHI index is outside the descriptor ring"));
                 }
             }
             if let Some(index) = posted {
@@ -649,7 +653,9 @@ impl Nhi {
             return Ok(());
         }
         if r.active.is_some() || r.transfer.is_some() {
-            return Err("NHI descriptor configuration requires a disabled ring");
+            return Err(refuse!(
+                "NHI descriptor configuration requires a disabled ring"
+            ));
         }
         match (field, width) {
             (0, Width::Double) => r.base = value,
@@ -664,7 +670,7 @@ impl Nhi {
                 r.capacity = value as u16
             }
             (20, Width::Word) => r.parameter = value as u32,
-            _ => return Err("NHI ring register or width without a model"),
+            _ => return Err(refuse!("NHI ring register or width without a model")),
         }
         Ok(())
     }
@@ -675,9 +681,9 @@ impl MmioDevice for Nhi {
         NAME
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, AccessDirection::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, AccessDirection::Read, reason);
         if !self.powered {
-            return Err(fail("NHI MMIO while powered off"));
+            return Err(fail(refuse!("NHI MMIO while powered off")));
         }
         if width == Width::Word {
             if offset == 0 || offset == 4 {
@@ -711,7 +717,7 @@ impl MmioDevice for Nhi {
         {
             return Ok(value);
         }
-        Err(fail("NHI register or width without a model"))
+        Err(fail(refuse!("NHI register or width without a model")))
     }
     fn write(
         &mut self,
@@ -720,12 +726,12 @@ impl MmioDevice for Nhi {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, AccessDirection::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, AccessDirection::Write, reason);
         if !self.powered {
-            return Err(fail("NHI MMIO while powered off"));
+            return Err(fail(refuse!("NHI MMIO while powered off")));
         }
         if value & !width.mask() != 0 {
-            return Err(fail("NHI write exceeds the access width"));
+            return Err(fail(refuse!("NHI write exceeds the access width")));
         }
         let valid = if self.lines.len() == 32 {
             u32::MAX
@@ -747,8 +753,8 @@ impl MmioDevice for Nhi {
                 .checked_sub(self.profile.layout.throttle)
                 .filter(|d| d.is_multiple_of(4) && d / 4 < self.lines.len() as u64)
         {
-            self.throttle[(delta / 4) as usize] =
-                u16::try_from(value).map_err(|_| fail("NHI throttle field without a model"))?;
+            self.throttle[(delta / 4) as usize] = u16::try_from(value)
+                .map_err(|_| fail(refuse!("NHI throttle field without a model")))?;
         } else if width == Width::Word
             && let Some(delta) = offset.checked_sub(PDF_VIEW).filter(|d| {
                 d.is_multiple_of(self.profile.layout.stride)
@@ -757,14 +763,18 @@ impl MmioDevice for Nhi {
         {
             let r = &mut self.rx[(delta / self.profile.layout.stride) as usize];
             if r.active.is_some() && u64::from(r.pdf) != value {
-                return Err(fail("NHI live PDF reconfiguration requires disable"));
+                return Err(fail(refuse!(
+                    "NHI live PDF reconfiguration requires disable"
+                )));
             }
             r.pdf = value as u32;
         } else if let Some((direction, hop, field)) = self.locate(offset) {
             self.ring_write(direction, hop, field, width, value)
                 .map_err(fail)?;
         } else {
-            return Err(fail("NHI register, field or width without a model"));
+            return Err(fail(refuse!(
+                "NHI register, field or width without a model"
+            )));
         }
         self.update_lines(access);
         Ok(())
@@ -773,7 +783,7 @@ impl MmioDevice for Nhi {
         if !self.powered {
             return Ok(None);
         }
-        if let Some(reason) = self.terminal {
+        if let Some(reason) = self.terminal.clone() {
             return Err(refuse(NAME, 0, Width::Word, AccessDirection::Read, reason));
         }
         let credits = self.receive_credits();

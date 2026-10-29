@@ -15,6 +15,7 @@ use super::super::{
     Entropy,
     der::{self, Cursor},
 };
+use crate::Result;
 use alloc::{vec, vec::Vec};
 use hmac::{Hmac, Mac};
 use p256::{
@@ -26,6 +27,7 @@ use p256::{
         subtle::{Choice, ConditionallySelectable},
     },
 };
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use zeroize::Zeroizing;
 
@@ -44,13 +46,9 @@ pub(super) struct ReferenceKey {
 }
 
 impl ReferenceKey {
-    pub(super) fn create(
-        root: &[u8; 32],
-        kind: u32,
-        entropy: &mut dyn Entropy,
-    ) -> Result<Vec<u8>, &'static str> {
+    pub(super) fn create(root: &[u8; 32], kind: u32, entropy: &mut dyn Entropy) -> Result<Vec<u8>> {
         if !matches!(kind, 4 | 5) {
-            return Err("SEP reference-key type is not implemented");
+            return Err(refuse!("SEP reference-key type is not implemented"));
         }
         let mut seed = [0; SEED_BYTES];
         entropy.fill(&mut seed)?;
@@ -74,7 +72,7 @@ impl ReferenceKey {
 
     /// Open the complete constructor reply, as `aks_sik_attest` submits it.
     /// Validate its MAC before deriving any private scalar or permitting use.
-    pub(super) fn open(root: &[u8; 32], bytes: &[u8]) -> Result<Self, &'static str> {
+    pub(super) fn open(root: &[u8; 32], bytes: &[u8]) -> Result<Self> {
         let mut outer = Cursor(bytes);
         let mut fields = Cursor(outer.take(17)?.value);
         outer.end()?;
@@ -82,36 +80,40 @@ impl ReferenceKey {
         fields.end()?;
         let mut fields = Cursor(descriptor);
         if der::unsigned(field(&mut fields, b"bc", 2)?)? != [CLASS as u8] {
-            return Err("SEP reference-key class is not implemented");
+            return Err(refuse!("SEP reference-key class is not implemented"));
         }
         let kind = match der::unsigned(field(&mut fields, b"kt", 2)?)? {
             [4] => 4,
             [5] => 5,
-            _ => return Err("SEP reference-key type is not implemented"),
+            _ => return Err(refuse!("SEP reference-key type is not implemented")),
         };
         let mac = field(&mut fields, b"mac", 4)?;
         let public = field(&mut fields, b"pub", 4)?;
         if der::unsigned(field(&mut fields, b"rko", 2)?)? != [OPTIONS as u8] {
-            return Err("SEP reference-key options are not implemented");
+            return Err(refuse!("SEP reference-key options are not implemented"));
         }
         let seed: [u8; SEED_BYTES] = field(&mut fields, b"salt", 4)?
             .try_into()
-            .map_err(|_| "SEP reference-key seed has the wrong length")?;
+            .map_err(|_| refuse!("SEP reference-key seed has the wrong length"))?;
         if der::unsigned(field(&mut fields, b"v", 2)?)? != [VERSION] {
-            return Err("SEP reference-key version is not implemented");
+            return Err(refuse!("SEP reference-key version is not implemented"));
         }
         fields.end()?;
         if public.len() != 32 || mac.len() != 32 {
-            return Err("SEP reference-key point or MAC has the wrong length");
+            return Err(refuse!(
+                "SEP reference-key point or MAC has the wrong length"
+            ));
         }
         authenticator(root, &metadata(kind, &seed, public))
             .verify_slice(mac)
-            .map_err(|_| "SEP reference-key authentication failed")?;
+            .map_err(|_| refuse!("SEP reference-key authentication failed"))?;
         let key = Self {
             secret: derive(root, kind, &seed)?,
         };
         if key.compact_public() != public {
-            return Err("SEP reference-key point does not match its sealed scalar");
+            return Err(refuse!(
+                "SEP reference-key point does not match its sealed scalar"
+            ));
         }
         Ok(key)
     }
@@ -127,12 +129,12 @@ impl ReferenceKey {
 
     /// The AP has already SHA-256-hashed the CSR input. Return the original
     /// AKS operation's DER OCTET STRING holding a DER ECDSA signature.
-    pub(super) fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>, &'static str> {
+    pub(super) fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>> {
         use p256::ecdsa::signature::hazmat::PrehashSigner;
         let signing = p256::ecdsa::SigningKey::from(&self.secret);
         let signature: p256::ecdsa::Signature = signing
             .sign_prehash(digest)
-            .map_err(|_| "SEP reference-key digest signing failed")?;
+            .map_err(|_| refuse!("SEP reference-key digest signing failed"))?;
         Ok(tagged(4, signature.to_der().as_bytes()))
     }
 
@@ -143,7 +145,7 @@ impl ReferenceKey {
     }
 }
 
-fn derive(root: &[u8; 32], kind: u32, seed: &[u8; SEED_BYTES]) -> Result<SecretKey, &'static str> {
+fn derive(root: &[u8; 32], kind: u32, seed: &[u8; SEED_BYTES]) -> Result<SecretKey> {
     for counter in 0..MAX_ATTEMPTS {
         let mut mac = Hmac::<Sha256>::new_from_slice(root).expect("HMAC accepts 256-bit roots");
         mac.update(SCALAR_DOMAIN);
@@ -166,10 +168,11 @@ fn derive(root: &[u8; 32], kind: u32, seed: &[u8; SEED_BYTES]) -> Result<SecretK
                 &scalar, &negated, negate,
             ));
             let bytes = Zeroizing::new(normalized.to_repr());
-            return SecretKey::from_bytes(&bytes).map_err(|_| "SEP compact scalar is invalid");
+            return SecretKey::from_bytes(&bytes)
+                .map_err(|_| refuse!("SEP compact scalar is invalid"));
         }
     }
-    Err("SEP reference-key scalar derivation exhausted")
+    Err(refuse!("SEP reference-key scalar derivation exhausted"))
 }
 
 fn authenticator(root: &[u8; 32], metadata: &[u8]) -> Hmac<Sha256> {
@@ -190,10 +193,12 @@ fn metadata(kind: u32, seed: &[u8; SEED_BYTES], public: &[u8]) -> Vec<u8> {
     ])
 }
 
-fn field<'a>(fields: &mut Cursor<'a>, name: &[u8], tag: u32) -> Result<&'a [u8], &'static str> {
+fn field<'a>(fields: &mut Cursor<'a>, name: &[u8], tag: u32) -> Result<&'a [u8]> {
     let mut pair = Cursor(fields.take(16)?.value);
     if pair.take(12)?.value != name {
-        return Err("SEP reference-key dictionary has missing, repeated or unordered fields");
+        return Err(refuse!(
+            "SEP reference-key dictionary has missing, repeated or unordered fields"
+        ));
     }
     let value = pair.take(tag)?.value;
     pair.end()?;
@@ -473,12 +478,12 @@ pub(super) mod tests {
         let mut entropy = |bytes: &mut [u8]| {
             calls += 1;
             bytes.fill(7);
-            Err("injected entropy failure")
+            Err(refuse!("injected entropy failure"))
         };
         assert!(ReferenceKey::create(&[1; 32], 7, &mut entropy).is_err());
         assert_eq!(
             ReferenceKey::create(&[1; 32], 5, &mut entropy).unwrap_err(),
-            "injected entropy failure"
+            refuse!("injected entropy failure")
         );
         assert_eq!(calls, 1);
     }

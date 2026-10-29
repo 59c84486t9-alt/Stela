@@ -1,5 +1,7 @@
 //! Immutable AP register-coverage requirements of checked AGX families.
 use super::generation::{Family, MMU_ENABLE};
+use crate::Result;
+use stela_contracts::refuse;
 /// The GPC registers' offsets in the family's GPC block.
 const GPC_PERFORMANCE_STATE: u64 = 0;
 const GPC_HOST_INTERRUPT_ENABLE: u64 = 0x10;
@@ -29,7 +31,7 @@ pub fn gifaf_status(family: &Family) -> Option<u64> {
 
 /// Check that `banks` (`(physical base, bytes, register offset)`) cover
 /// every register the model serves for `family`, which must be modeled.
-pub fn covers(family: &Family, banks: &[(u64, u64, u64)]) -> Result<(), &'static str> {
+pub fn covers(family: &Family, banks: &[(u64, u64, u64)]) -> Result<()> {
     let gpc = family.model()?.gpc;
     let fixed = [
         gpc + GPC_PERFORMANCE_STATE,
@@ -69,6 +71,6 @@ pub fn covers(family: &Family, banks: &[(u64, u64, u64)]) -> Result<(), &'static
     if registers.all(covered) {
         Ok(())
     } else {
-        Err("the sgx banks leave a modeled register unmapped")
+        Err(refuse!("the sgx banks leave a modeled register unmapped"))
     }
 }

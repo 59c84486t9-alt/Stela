@@ -14,7 +14,7 @@ default = ["std"]
 # Host-side native hardware-reference runners; never enables guest OS services.
 test-support = ["stela-engine/test-support"]
 native-profile = ["stela-contracts/native-profile", "stela-engine/native-profile"]
-std = ["stela-soc-data/std", "stela-engine/std", "anyhow/std", "stela-contracts/std", "stela-formats/std", "serde/std", "serde_json/std", "stela-compiler/std", "dep:tempfile", "dep:libc"]
+std = ["stela-soc-data/std", "stela-engine/std", "stela-contracts/std", "stela-formats/std", "serde/std", "serde_json/std", "stela-compiler/std", "dep:tempfile", "dep:libc"]
 
 [dependencies]
 stela-soc-data = { path = "../stela-soc-data", default-features = false }
@@ -23,7 +23,6 @@ stela-contracts = { path = "../stela-contracts", default-features = false }
 stela-crypto = { path = "../stela-crypto" }
 stela-tls = { path = "../stela-tls" }
 stela-formats = { path = "../stela-formats", default-features = false }
-anyhow = { version = "1", default-features = false }
 serde.workspace = true
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 tempfile = { workspace = true, optional = true }
@@ -52,6 +51,7 @@ smoltcp = { version = "0.14", default-features = false, features = ["alloc", "me
 httparse = { version = "1.10", default-features = false }
 
 [dev-dependencies]
+anyhow = "1"
 stela-soc-data = { path = "../stela-soc-data", features = ["test-support"] }
 stela-engine = { path = "../stela-engine", features = ["test-support"] }
 stela-formats = { path = "../stela-formats", features = ["test-support"] }

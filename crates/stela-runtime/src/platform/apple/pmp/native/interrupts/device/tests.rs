@@ -3,6 +3,7 @@ use super::*;
 use alloc::{boxed::Box, vec};
 use core::cell::Cell;
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 
 // Authored NEW profile, not a production/reset default.
 fn configuration(count: u32) -> Configuration {
@@ -171,8 +172,8 @@ fn absent_foreign_abandoned_and_dropped_line_owners_cannot_become_zero_inputs() 
     assert!(matches!(
         wire.set_level(&foreign, true),
         Err(Error::Refused(
-            "native hardware line controller has been abandoned"
-        ))
+            reason
+        )) if reason == refuse!("native hardware line controller has been abandoned")
     ));
 }
 
@@ -195,8 +196,8 @@ fn multiple_inputs_assert_line_but_ambiguous_claim_refuses_atomically() {
     assert!(matches!(
         Device::read(&mut view, 0xc000, &mut a),
         Err(Error::Refused(
-            "native IRQ priority among multiple actual pending sources is unqualified"
-        ))
+            reason
+        )) if reason == refuse!("native IRQ priority among multiple actual pending sources is unqualified")
     ));
     assert_eq!(controller.snapshot().unwrap(), before);
     owner0.set(false);
@@ -340,7 +341,7 @@ fn driver_keeps_unmask_prefix_until_the_real_producer_is_bound() {
     let signal = native.begin_signal(64, true).unwrap();
     assert!(matches!(
         native.advance_signal(&signal, &mut a),
-        Completion::Refused("native source requires its actual live peripheral owner and line")
+        Completion::Refused(reason) if reason == refuse!("native source requires its actual live peripheral owner and line")
     ));
     assert_eq!(controller.snapshot().unwrap().applied_sequence, 2); // control enable, then target store.
     assert_eq!(controller.snapshot().unwrap().masks[2], 1);

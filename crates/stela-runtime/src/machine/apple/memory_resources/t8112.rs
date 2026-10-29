@@ -9,9 +9,11 @@
 //! native PMP services, DVFS completion or an AP AIC wire. The PMP's PTD duties
 //! the drivers wait for are modeled behaviorally (`pmp::duties`).
 use super::dcs::NativeDcs;
+use crate::Result;
 use crate::platform::apple::dcs::native::ChannelProgress;
 pub use crate::platform::apple::dcs::native::{CHANNEL_STRIDE, CHANNELS, ChannelConfiguration};
 use crate::platform::apple::pmp::duties::Duties;
+use stela_contracts::refuse;
 use stela_soc_data::board::MemoryCache;
 
 use crate::platform::apple::ptd::Ptd;
@@ -61,11 +63,11 @@ impl Prepared {
         configuration: Vec<ChannelConfiguration>,
         lifecycle: LifecycleState,
         ram: Arc<RegisteredSystemRam>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let (physical, bytes, channels) = descriptor.channels;
         let end = physical
             .checked_add(bytes)
-            .ok_or("T8112 DCS extent overflows")?;
+            .ok_or(refuse!("T8112 DCS extent overflows"))?;
         let geometry = Geometry::new(
             (descriptor.ptd.physical, stela_soc_data::ptd::PTD_BYTES),
             descriptor.ptd_updates,
@@ -74,29 +76,37 @@ impl Prepared {
             .ptd
             .physical
             .checked_add(stela_soc_data::ptd::PTD_BYTES)
-            .ok_or("T8112 PTD extent overflows")?;
+            .ok_or(refuse!("T8112 PTD extent overflows"))?;
         if channels != CHANNELS || bytes != DCS_BYTES || !physical.is_multiple_of(CHANNEL_STRIDE) {
-            return Err("T8112 DCS placement is not eight complete source-stride channels");
+            return Err(refuse!(
+                "T8112 DCS placement is not eight complete source-stride channels"
+            ));
         }
         if geometry.entries() != ALIAS_ENTRIES || descriptor.ptd_entries != geometry.entries() {
-            return Err("T8112 PTD physical capacity differs from its source update alias");
+            return Err(refuse!(
+                "T8112 PTD physical capacity differs from its source update alias"
+            ));
         }
         if descriptor.ptd.ranges.is_empty()
             || descriptor.ptd.ranges.len() != descriptor.ptd.interrupts.len()
         {
-            return Err("T8112 PTD ranges omit their original interrupt resources");
+            return Err(refuse!(
+                "T8112 PTD ranges omit their original interrupt resources"
+            ));
         }
         if physical < bank_end && descriptor.ptd.physical < end {
-            return Err("T8112 DCS and PTD physical ownership overlaps");
+            return Err(refuse!("T8112 DCS and PTD physical ownership overlaps"));
         }
         for (source, _, bytes) in ram.placements() {
             let ram_end = source
                 .checked_add(bytes as u64)
-                .ok_or("canonical RAM extent overflows")?;
+                .ok_or(refuse!("canonical RAM extent overflows"))?;
             if (physical < ram_end && source < end)
                 || (descriptor.ptd.physical < ram_end && source < bank_end)
             {
-                return Err("T8112 MMIO placement overlaps its canonical guest RAM");
+                return Err(refuse!(
+                    "T8112 MMIO placement overlaps its canonical guest RAM"
+                ));
             }
         }
         let dcs = NativeDcs::initialized(configuration, lifecycle, Arc::clone(&ram))?;
@@ -126,7 +136,7 @@ impl Prepared {
         controller: stela_soc_data::board::MemoryController,
         programmed: stela_soc_data::amcc::Programmed,
         lifecycle: LifecycleState,
-    ) -> Result<amcc::LockResource, &'static str> {
+    ) -> Result<amcc::LockResource> {
         amcc::LockResource::initialized(self, controller, programmed, lifecycle)
     }
     pub fn publication_bank(&self) -> &Ptd {
@@ -154,7 +164,7 @@ impl Prepared {
         &self,
         physical: u64,
         bytes: u64,
-    ) -> Result<(u64, u64, u64), &'static str> {
+    ) -> Result<(u64, u64, u64)> {
         self.publication_layout().display_view(physical, bytes)
     }
     pub fn requires_ram_read(&self, offset: u64, width: Width) -> bool {
@@ -168,9 +178,11 @@ impl Prepared {
         offset: u64,
         width: Width,
         memory: &CanonicalRamService<'_>,
-    ) -> Result<u64, &'static str> {
+    ) -> Result<u64> {
         if !self.requires_ram_read(offset, width) {
-            return Err("T8112 canonical read is not a source DCS drain word");
+            return Err(refuse!(
+                "T8112 canonical read is not a source DCS drain word"
+            ));
         }
         // SAFETY: caller keeps the complete live canonical ownership contract.
         unsafe { self.dcs.read_ram_drain(offset, width, memory) }
@@ -185,9 +197,11 @@ impl Prepared {
         value: u64,
         now: u64,
         memory: &CanonicalRamService<'_>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if !self.requires_ram_read(offset, width) {
-            return Err("T8112 canonical write is not a source DCS drain word");
+            return Err(refuse!(
+                "T8112 canonical write is not a source DCS drain word"
+            ));
         }
         // SAFETY: caller keeps the same live closed producer set and RAM hold.
         unsafe { self.dcs.write_ram_drain(offset, width, value, now, memory) }
@@ -214,16 +228,16 @@ impl Prepared {
         offset: u64,
         bytes: u8,
         access: &mut Access<'_>,
-    ) -> Result<[u64; 2], &'static str> {
+    ) -> Result<[u64; 2]> {
         if let Some(entry) = self.paired_entry(offset, bytes) {
             self.start_duties(access)
-                .map_err(|_| "the PMP's PTD duties could not start")?;
+                .map_err(|_| refuse!("the PMP's PTD duties could not start"))?;
             let entry = self.ptd.consume_entry(entry, access)?;
             return Ok([entry.value, entry.metadata]);
         }
         let (offset, width) = self
             .status_pair(offset, bytes)
-            .ok_or("unqualified T8112 PTD whole-pair read")?;
+            .ok_or(refuse!("unqualified T8112 PTD whole-pair read"))?;
         let value = self.ptd.interrupt_snapshot(offset, width)?;
         Ok(if bytes == 8 {
             [value.low, value.high]
@@ -255,7 +269,7 @@ impl Prepared {
     }
 }
 impl Lifecycle for Prepared {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         self.dcs.check_lifecycle(proposed)?;
         self.ptd.check_lifecycle(proposed)
     }
@@ -312,22 +326,19 @@ impl MmioDevice for Prepared {
 impl crate::machine::apple::AppleDevices {
     /// Place the supplied DCS/PTD storage without changing AMCC locks or
     /// admitting the remaining cache/PMP/IRQ requirements of a whole mount.
-    pub fn add_t8112_memory_resources(
-        &mut self,
-        owner: Prepared,
-    ) -> Result<(), alloc::string::String> {
+    pub fn add_t8112_memory_resources(&mut self, owner: Prepared) -> Result<()> {
         if self.memory_publication.is_some()
             || self
                 .memory_controller
                 .is_some_and(|id| super::resource_for(&self.bus, id).is_some())
         {
-            return Err("memory publication storage is already installed".into());
+            return Err(refuse!("memory publication storage is already installed"));
         }
         let bindings = owner.bindings();
         let id = self
             .bus
             .install(alloc::boxed::Box::new(owner), &bindings)
-            .map_err(|error| alloc::format!("T8112 DCS/PTD placement: {error:?}"))?;
+            .map_err(|error| refuse!("T8112 DCS/PTD placement: {error}", ?error))?;
         self.memory_publication = Some(id);
         Ok(())
     }

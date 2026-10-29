@@ -12,7 +12,9 @@
 //! doc, never an invented value. This is the spec-first boundary; the
 //! registers the restored_external boot touches are closed from its
 //! trace, not guessed here.
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -36,13 +38,13 @@ impl Region {
 
     /// One physical owner for a complete set of possibly contained aliases.
     /// Child DART/ASC routes are held by the bus, not implemented here.
-    pub fn physical(views: Vec<(&'static str, u64, u64)>) -> Result<Self, &'static str> {
+    pub fn physical(views: Vec<(&'static str, u64, u64)>) -> Result<Self> {
         if views.is_empty()
             || views.iter().any(|(name, base, bytes)| {
                 name.is_empty() || *bytes == 0 || base.checked_add(*bytes).is_none()
             })
         {
-            return Err("display physical views are empty or overflow");
+            return Err(refuse!("display physical views are empty or overflow"));
         }
         Ok(Self {
             name: "display apertures",

@@ -16,12 +16,14 @@ use core::{
     cell::Cell,
     sync::atomic::{Ordering, fence},
 };
+use stela_contracts::Refusal;
 use stela_contracts::bus::Access;
+use stela_contracts::refuse;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    Contract(&'static str),
-    Backend(&'static str),
+    Contract(Refusal),
+    Backend(Refusal),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MetricKind {
@@ -162,10 +164,12 @@ impl Field {
         let index = (self.start / 64) as usize;
         let offset = index
             .checked_mul(16)
-            .ok_or(Error::Contract("MC metric field offset overflow"))?;
-        let bytes = group.get(offset..offset + 8).ok_or(Error::Contract(
-            "MC metric field exceeds actual64-byte group",
-        ))?;
+            .ok_or(Error::Contract(refuse!("MC metric field offset overflow")))?;
+        let bytes = group
+            .get(offset..offset + 8)
+            .ok_or(Error::Contract(refuse!(
+                "MC metric field exceeds actual64-byte group"
+            )))?;
         let value = u64::from_le_bytes(bytes.try_into().unwrap());
         let mask = u64::MAX.wrapping_shr(self.width.wrapping_neg() & 63);
         Ok(value.wrapping_shr(self.start & 63) & mask)
@@ -260,7 +264,7 @@ pub struct Owner<B: Backend> {
     callback: Option<Job>,
     stopping: bool,
     drained: bool,
-    fault: Option<&'static str>,
+    fault: Option<Refusal>,
 }
 impl<B: Backend> Owner<B> {
     pub fn initialized_source(config: Configuration, backend: B) -> Self {
@@ -314,7 +318,9 @@ impl<B: Backend> Owner<B> {
         Ok(self
             .counters
             .get(group as usize)
-            .ok_or(Error::Contract("MC metric group exceeds source32 slots"))?[kind.index()]
+            .ok_or(Error::Contract(refuse!(
+                "MC metric group exceeds source32 slots"
+            )))?[kind.index()]
         .clone())
     }
     /// Source1004204 row+30 registration metadata. It becomes present only
@@ -324,7 +330,9 @@ impl<B: Backend> Owner<B> {
         self.associations
             .get(group as usize)
             .copied()
-            .ok_or(Error::Contract("MC metric group exceeds source32 slots"))
+            .ok_or(Error::Contract(refuse!(
+                "MC metric group exceeds source32 slots"
+            )))
     }
     /// Source W32 increments have already been derived from sole Samples
     /// by the service; only this source software accumulation occurs here.
@@ -332,7 +340,9 @@ impl<B: Backend> Owner<B> {
         let counters = self
             .counters
             .get(group as usize)
-            .ok_or(Error::Contract("MC metric group exceeds source32 slots"))?;
+            .ok_or(Error::Contract(refuse!(
+                "MC metric group exceeds source32 slots"
+            )))?;
         for (c, increment) in counters.iter().zip(increments) {
             c.0.set(c.value().wrapping_add(u64::from(increment)))
         }
@@ -344,18 +354,18 @@ impl<B: Backend> Owner<B> {
         }
     }
     fn reserve(&self) -> Result<u64, Error> {
-        if let Some(reason) = self.fault {
+        if let Some(reason) = self.fault.clone() {
             return Err(Error::Contract(reason));
         }
-        self.serial.checked_add(1).ok_or(Error::Contract(
-            "MC metric operation serial exhausted before effects",
-        ))
+        self.serial.checked_add(1).ok_or(Error::Contract(refuse!(
+            "MC metric operation serial exhausted before effects"
+        )))
     }
     fn idle_control(&self) -> Result<(), Error> {
         if self.control.is_some() {
-            Err(Error::Contract(
-                "MC metric control operation already retained",
-            ))
+            Err(Error::Contract(refuse!(
+                "MC metric control operation already retained"
+            )))
         } else {
             Ok(())
         }
@@ -363,7 +373,9 @@ impl<B: Backend> Owner<B> {
     pub fn begin_initialize(&mut self) -> Result<(), Error> {
         self.idle_control()?;
         if self.initialized {
-            return Err(Error::Contract("MC metric queue already initialized"));
+            return Err(Error::Contract(refuse!(
+                "MC metric queue already initialized"
+            )));
         }
         let serial = self.reserve()?;
         self.serial = serial;
@@ -385,14 +397,14 @@ impl<B: Backend> Owner<B> {
     pub fn begin_register(&mut self, active: u32) -> Result<(), Error> {
         self.idle_control()?;
         if !self.initialized {
-            return Err(Error::Contract(
-                "MC metric registration requires actual queue initialization",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC metric registration requires actual queue initialization"
+            )));
         }
         if self.active.is_some_and(|old| old != active) {
-            return Err(Error::Contract(
-                "MC source active group mask changed after registration",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC source active group mask changed after registration"
+            )));
         }
         let serial = self.reserve()?;
         let mut ops = Vec::new();
@@ -436,16 +448,18 @@ impl<B: Backend> Owner<B> {
     /// sole work.pending cell. Scheduled returns before callback execution.
     pub fn submit_after_housekeeping(&mut self) -> Result<bool, Error> {
         if !self.initialized {
-            return Err(Error::Contract(
-                "MC metrics submission requires actual registered queue",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC metrics submission requires actual registered queue"
+            )));
         }
         if self.mc_pending {
             return Ok(false);
         }
         self.idle_control()?;
         if self.stopping {
-            return Err(Error::Contract("MC metric source queue is draining"));
+            return Err(Error::Contract(refuse!(
+                "MC metric source queue is draining"
+            )));
         }
         let serial = self.reserve()?;
         self.serial = serial;
@@ -464,14 +478,14 @@ impl<B: Backend> Owner<B> {
     pub fn begin_event_trace(&mut self, event: EventTrace) -> Result<(), Error> {
         self.idle_control()?;
         if self.callback.is_some() {
-            return Err(Error::Contract(
-                "MC event trace requires serialization with retained executing callback",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC event trace requires serialization with retained executing callback"
+            )));
         }
         if !self.initialized {
-            return Err(Error::Contract(
-                "MC event trace requires actual queue initialization",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC event trace requires actual queue initialization"
+            )));
         }
         let serial = self.reserve()?;
         let (event, args) = match event {
@@ -482,9 +496,9 @@ impl<B: Backend> Owner<B> {
                 requested_bytes,
             } => {
                 if group >= 32 || requested_bytes & 0x1ffff != 0 || requested_bytes >> 17 > 0xfff {
-                    return Err(Error::Contract(
-                        "MC event trace request exceeds source group/lane encoding",
-                    ));
+                    return Err(Error::Contract(refuse!(
+                        "MC event trace request exceeds source group/lane encoding"
+                    )));
                 }
                 (
                     self.config
@@ -506,9 +520,9 @@ impl<B: Backend> Owner<B> {
     pub fn begin_stop(&mut self) -> Result<(), Error> {
         self.idle_control()?;
         if !self.initialized {
-            return Err(Error::Contract(
-                "MC metrics stop requires actual queue initialization",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC metrics stop requires actual queue initialization"
+            )));
         }
         let serial = self.reserve()?;
         self.serial = serial;
@@ -554,16 +568,16 @@ impl<B: Backend> Owner<B> {
         samples: &dyn SamplesView,
         access: &mut Access<'_>,
     ) -> Result<Progress, Error> {
-        if let Some(reason) = self.fault {
+        if let Some(reason) = self.fault.clone() {
             return Err(Error::Contract(reason));
         }
         let Some(mut job) = self.control.take() else {
             return if self.drained {
                 Ok(Progress::Drained)
             } else {
-                Err(Error::Contract(
-                    "MC metrics have no retained foreground work",
-                ))
+                Err(Error::Contract(refuse!(
+                    "MC metrics have no retained foreground work"
+                )))
             };
         };
         let result = self.run(&mut job, samples, access);
@@ -579,8 +593,8 @@ impl<B: Backend> Owner<B> {
                 Ok(terminal)
             }
             other => {
-                if let Err(Error::Contract(reason)) = other {
-                    self.fault = Some(reason);
+                if let Err(Error::Contract(reason)) = &other {
+                    self.fault = Some(reason.clone());
                 }
                 self.control = Some(job);
                 other.map(|p| p.unwrap_or(Progress::Busy { deadline: None }))
@@ -597,41 +611,39 @@ impl<B: Backend> Owner<B> {
         samples: &dyn SamplesView,
         access: &mut Access<'_>,
     ) -> Result<Progress, Error> {
-        if let Some(reason) = self.fault {
+        if let Some(reason) = self.fault.clone() {
             return Err(Error::Contract(reason));
         }
         if !self.initialized {
-            return Err(Error::Contract(
-                "MC callback before actual queue initialization",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC callback before actual queue initialization"
+            )));
         }
-        let work = self
-            .bound_work
-            .as_ref()
-            .ok_or(Error::Contract("MC callback has no bound native Work"))?;
-        let actual = self
-            .backend
-            .work()
-            .ok_or(Error::Contract("MC backend lost bound native Work"))?;
+        let work = self.bound_work.as_ref().ok_or(Error::Contract(refuse!(
+            "MC callback has no bound native Work"
+        )))?;
+        let actual = self.backend.work().ok_or(Error::Contract(refuse!(
+            "MC backend lost bound native Work"
+        )))?;
         if !actual.same_work(work) || work.validate_dispatch(invocation).is_err() {
-            return Err(Error::Contract(
-                "MC callback requires actual same Work invocation",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC callback requires actual same Work invocation"
+            )));
         }
         if self
             .last_dispatch
             .as_ref()
             .is_some_and(|prior| prior.same_dispatch(invocation))
         {
-            return Err(Error::Contract(
-                "MC callback source return already retired for this invocation",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC callback source return already retired for this invocation"
+            )));
         }
         if let Some(prior) = self.dispatch_identity.as_ref() {
             if !prior.same_dispatch(invocation) {
-                return Err(Error::Contract(
-                    "MC callback invocation changed across retained prefix",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "MC callback invocation changed across retained prefix"
+                )));
             }
         } else {
             if self
@@ -639,26 +651,25 @@ impl<B: Backend> Owner<B> {
                 .as_ref()
                 .is_some_and(|job| job.terminal != Progress::Drained)
             {
-                return Err(Error::Contract(
-                    "MC callback serialized behind retained foreground operation",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "MC callback serialized behind retained foreground operation"
+                )));
             }
             // Preflight before installing invocation or callback software state.
             let job = self.callback_job()?;
             self.callback = Some(job);
             self.dispatch_identity = Some(invocation.clone());
         }
-        let mut job = self
-            .callback
-            .take()
-            .ok_or(Error::Contract("MC callback invocation lost source job"))?;
+        let mut job = self.callback.take().ok_or(Error::Contract(refuse!(
+            "MC callback invocation lost source job"
+        )))?;
         let result = self.run(&mut job, samples, access);
         if matches!(result, Ok(Some(Progress::CallbackComplete))) {
             self.dispatch_identity = None;
             self.last_dispatch = Some(invocation.clone());
         } else {
-            if let Err(Error::Contract(reason)) = result {
-                self.fault = Some(reason);
+            if let Err(Error::Contract(reason)) = &result {
+                self.fault = Some(reason.clone());
             }
             self.callback = Some(job);
         }
@@ -671,10 +682,9 @@ impl<B: Backend> Owner<B> {
         access: &mut Access<'_>,
     ) -> Result<Option<Progress>, Error> {
         while !job.ops.is_empty() {
-            let next = job
-                .cursor
-                .checked_add(1)
-                .ok_or(Error::Contract("MC metric cursor exhausted before effects"))?;
+            let next = job.cursor.checked_add(1).ok_or(Error::Contract(refuse!(
+                "MC metric cursor exhausted before effects"
+            )))?;
             let op = job.ops.pop_front().unwrap();
             let request = Request {
                 owner: self.identity.clone(),
@@ -699,41 +709,44 @@ impl<B: Backend> Owner<B> {
                             effect,
                             Effect::BindWork { .. } | Effect::RegisterWork | Effect::Wake
                         ) {
-                            let actual = self.backend.work().ok_or(Error::Contract(
-                                "MC actual Work effect retired without bound resource",
-                            ))?;
+                            let actual = self.backend.work().ok_or(Error::Contract(refuse!(
+                                "MC actual Work effect retired without bound resource"
+                            )))?;
                             if let Some(bound) = self.bound_work.as_ref() {
                                 if !actual.same_work(bound) {
-                                    return Err(Error::Contract("MC backend replaced bound Work"));
+                                    return Err(Error::Contract(refuse!(
+                                        "MC backend replaced bound Work"
+                                    )));
                                 }
                             } else if matches!(effect, Effect::BindWork { .. }) {
                                 self.bound_work = Some(actual.clone());
                             } else {
-                                return Err(Error::Contract(
-                                    "MC native work used before source BindWork",
-                                ));
+                                return Err(Error::Contract(refuse!(
+                                    "MC native work used before source BindWork"
+                                )));
                             }
                             if matches!(effect, Effect::RegisterWork) {
                                 let queue = actual
                                     .registered_queue()
-                                    .map_err(|_| Error::Contract("MC Work scheduler abandoned"))?
-                                    .ok_or(Error::Contract(
-                                        "MC actual work registration did not occur",
-                                    ))?;
-                                if queue
-                                    .configuration()
-                                    .map_err(|_| Error::Contract("MC queue scheduler abandoned"))?
-                                    != super::super::scheduler::QueueConfiguration::mc_metrics()
+                                    .map_err(|_| {
+                                        Error::Contract(refuse!("MC Work scheduler abandoned"))
+                                    })?
+                                    .ok_or(Error::Contract(refuse!(
+                                        "MC actual work registration did not occur"
+                                    )))?;
+                                if queue.configuration().map_err(|_| {
+                                    Error::Contract(refuse!("MC queue scheduler abandoned"))
+                                })? != super::super::scheduler::QueueConfiguration::mc_metrics()
                                 {
-                                    return Err(Error::Contract(
-                                        "MC actual registered queue differs from source configuration",
-                                    ));
+                                    return Err(Error::Contract(refuse!(
+                                        "MC actual registered queue differs from source configuration"
+                                    )));
                                 }
                             }
                             if matches!(effect, Effect::Wake) && !actual.pending() {
-                                return Err(Error::Contract(
-                                    "MC Wake retired without scheduling actual Work",
-                                ));
+                                return Err(Error::Contract(refuse!(
+                                    "MC Wake retired without scheduling actual Work"
+                                )));
                             }
                         }
                         retired_refusal = refusal;
@@ -770,9 +783,9 @@ impl<B: Backend> Owner<B> {
                     if self.service_word == 0 && self.statistics_word != 0 {
                         let geometry = samples.geometry();
                         if geometry.groups > 32 {
-                            return Err(Error::Contract(
-                                "MC metric callback geometry exceeds source32 groups",
-                            ));
+                            return Err(Error::Contract(refuse!(
+                                "MC metric callback geometry exceeds source32 groups"
+                            )));
                         }
                         job.groups = Some(geometry.groups);
                         job.scale = Some(
@@ -793,13 +806,13 @@ impl<B: Backend> Owner<B> {
                         let a = self.config.fields[0].read(data)? as u32;
                         let b = self.config.fields[1].read(data)? as u32;
                         if job.groups != Some(geometry.groups) {
-                            return Err(Error::Contract(
-                                "MC metric sample geometry changed during retained callback",
-                            ));
+                            return Err(Error::Contract(refuse!(
+                                "MC metric sample geometry changed during retained callback"
+                            )));
                         }
-                        let scale = job
-                            .scale
-                            .ok_or(Error::Contract("MC metric initial callback scale absent"))?;
+                        let scale = job.scale.ok_or(Error::Contract(refuse!(
+                            "MC metric initial callback scale absent"
+                        )))?;
                         let a = scale.wrapping_mul(a);
                         let b = scale.wrapping_mul(b);
                         let denominator = geometry

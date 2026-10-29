@@ -1,4 +1,5 @@
 //! Native USB bus peers. No guest code execution or translator callbacks.
+use crate::Result;
 pub mod control;
 pub mod ecm;
 pub mod hid;
@@ -38,13 +39,8 @@ pub enum Reply {
 /// `data` carries OUT bytes, or provides space for an IN packet. A NAK has
 /// no payload effect. DMA failures remain errors; they are never a USB ACK.
 pub trait BusPeer {
-    fn reset(&mut self) -> Result<(), &'static str>;
-    fn packet(
-        &mut self,
-        endpoint: u8,
-        token: Token,
-        data: &mut [u8],
-    ) -> Result<Reply, &'static str>;
+    fn reset(&mut self) -> Result<()>;
+    fn packet(&mut self, endpoint: u8, token: Token, data: &mut [u8]) -> Result<Reply>;
 }
 
 /// A device on a host controller's port: the bus transactions of

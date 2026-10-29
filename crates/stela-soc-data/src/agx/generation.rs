@@ -31,6 +31,8 @@
 //! admitted only with an identification a source states ([`Gpu::identity`]).
 
 use super::Identity;
+use crate::Result;
+use stela_contracts::refuse;
 
 /// How `readChipInfo` reads the GPU's size from the identification words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -575,10 +577,10 @@ pub fn compatible_admitted(compatible: &str) -> bool {
 impl Family {
     /// What the models need of this family, when its interface is modeled;
     /// otherwise why it is not.
-    pub fn model(&self) -> Result<&'static Model, &'static str> {
+    pub fn model(&self) -> Result<&'static Model> {
         match self.interface {
             Interface::Modeled(model) => Ok(model),
-            Interface::Unrecovered(reason) => Err(reason),
+            Interface::Unrecovered(reason) => Err(reason.into()),
         }
     }
 }
@@ -586,13 +588,13 @@ impl Family {
 impl Gpu {
     /// The identification the model reports, when the GPU's whole interface
     /// is modeled; otherwise why it is not.
-    pub fn admitted(&self) -> Result<Identity, &'static str> {
+    pub fn admitted(&self) -> Result<Identity> {
         self.family.model()?;
-        let identity = self
-            .identity
-            .ok_or("no source states the GPU's identification registers")?;
+        let identity = self.identity.ok_or(refuse!(
+            "no source states the GPU's identification registers"
+        ))?;
         if !self.family.generations.contains(&identity.generation) {
-            return Err("the GPU's generation is not one its kext accepts");
+            return Err(refuse!("the GPU's generation is not one its kext accepts"));
         }
         Ok(identity)
     }
@@ -637,9 +639,11 @@ mod tests {
         assert_eq!(G15G.model(), Ok(&G15G_MODEL));
         assert_eq!(
             by_chip(0x8122).unwrap().admitted(),
-            Err("no source states the GPU's identification registers")
+            Err(refuse!(
+                "no source states the GPU's identification registers"
+            ))
         );
-        assert_eq!(G15S.model(), Err(NOT_CHECKED));
+        assert_eq!(G15S.model(), Err(NOT_CHECKED.into()));
         assert!(by_chip(0x9999).is_none());
         // M1 Pro, Max and Ultra share one compatible, admitted as a whole.
         assert!(compatible_admitted("gpu,t6000"));

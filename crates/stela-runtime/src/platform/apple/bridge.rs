@@ -34,7 +34,10 @@
 //! Stela's existing T8112 model hands off zero idle/disabled configuration, without conditional iBoot
 //! tuning. Header flag variants, other layouts and unknown registers refuse.
 use super::regfile::Held;
+use crate::Result;
 use alloc::{collections::BTreeSet, vec::Vec};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -54,7 +57,7 @@ impl Bridge {
         header: [u8; 4],
         configs: &[[u8; CONFIG_BYTES]],
         axi: Option<[u8; 4]>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         Ok(Self {
             layout: Layout::new(fields, header, configs, axi)?,
             values: Held::default(),
@@ -71,7 +74,7 @@ impl Bridge {
         configs: &[[u8; CONFIG_BYTES]],
         axi: Option<[u8; 4]>,
         image: &[(u64, Width, u64)],
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let fields = profile.fields(id)?;
         // Native M1 version3 programming zero-extends the whole side byte at
         // kernel 0x2b3a674, then computes base + 0x60*side. J314s
@@ -85,13 +88,19 @@ impl Bridge {
         for &(offset, width, value) in image {
             let role = model.role(offset, width)?;
             if matches!(role, Role::Initialize(_)) {
-                return Err("T6000 bridge command image has no qualified readback");
+                return Err(refuse!(
+                    "T6000 bridge command image has no qualified readback"
+                ));
             }
             if value & !width.mask() != 0 || !known.insert(offset) {
-                return Err("T6000 bridge image has an oversized or duplicate word");
+                return Err(refuse!(
+                    "T6000 bridge image has an oversized or duplicate word"
+                ));
             }
             if model.layout.is_counter_enable(offset) && value != 0 {
-                return Err("T6000 bridge handoff has enabled unowned counter effects");
+                return Err(refuse!(
+                    "T6000 bridge handoff has enabled unowned counter effects"
+                ));
             }
             model.values.set(offset, value);
         }
@@ -103,7 +112,7 @@ impl Bridge {
     pub fn spans(&self) -> Vec<(u64, u64)> {
         self.layout.spans()
     }
-    fn role(&self, offset: u64, width: Width) -> Result<Role, &'static str> {
+    fn role(&self, offset: u64, width: Width) -> Result<Role> {
         self.layout.role(offset, width)
     }
 }
@@ -116,30 +125,32 @@ impl MmioDevice for Bridge {
         NAME
     }
     fn read(&mut self, o: u64, w: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |r| refuse(NAME, o, w, Direction::Read, r);
+        let fail = |r: Refusal| refuse(NAME, o, w, Direction::Read, r);
         match self.role(o, w).map_err(fail)? {
             Role::Configuration => {
                 if self.known.as_ref().is_some_and(|known| !known.contains(&o)) {
-                    return Err(fail("T6000 bridge configuration handoff word is unknown"));
+                    return Err(fail(refuse!(
+                        "T6000 bridge configuration handoff word is unknown"
+                    )));
                 }
                 Ok(self.values.get(o))
             }
-            Role::Initialize(_) => Err(fail(
-                "bridge initialization command readback is not established",
-            )),
+            Role::Initialize(_) => Err(fail(refuse!(
+                "bridge initialization command readback is not established"
+            ))),
             Role::Sample(empty) => {
                 if let Some(known) = &self.known {
                     if !known.contains(&o) {
-                        return Err(fail("T6000 bridge sample handoff word is unknown"));
+                        return Err(fail(refuse!("T6000 bridge sample handoff word is unknown")));
                     }
                     if self
                         .layout
                         .counter_enables()
                         .any(|enable| !known.contains(&enable) || self.values.get(enable) != 0)
                     {
-                        return Err(fail(
-                            "T6000 bridge sample has no qualified disabled counter state",
-                        ));
+                        return Err(fail(refuse!(
+                            "T6000 bridge sample has no qualified disabled counter state"
+                        )));
                     }
                     return Ok(self.values.get(o));
                 }
@@ -148,26 +159,26 @@ impl MmioDevice for Bridge {
         }
     }
     fn write(&mut self, o: u64, w: Width, v: u64, _: &mut Access<'_>) -> Result<(), MmioError> {
-        let fail = |r| refuse(NAME, o, w, Direction::Write, r);
+        let fail = |r: Refusal| refuse(NAME, o, w, Direction::Write, r);
         match self.role(o, w).map_err(fail)? {
             Role::Configuration => {
                 if self.known.is_some() && self.layout.is_counter_enable(o) && v != 0 {
-                    return Err(fail(
-                        "T6000 bridge native counter event effects are not connected",
-                    ));
+                    return Err(fail(refuse!(
+                        "T6000 bridge native counter event effects are not connected"
+                    )));
                 }
                 if let Some(known) = &self.known
                     && let Some(mask) = self.layout.tuning_mask(o)
                 {
                     if !known.contains(&o) && mask != u32::MAX {
-                        return Err(fail(
-                            "T6000 bridge masked write requires its unknown preserved fields",
-                        ));
+                        return Err(fail(refuse!(
+                            "T6000 bridge masked write requires its unknown preserved fields"
+                        )));
                     }
                     if known.contains(&o) && (self.values.get(o) ^ v) & !u64::from(mask) != 0 {
-                        return Err(fail(
-                            "T6000 bridge write changes fields outside the qualified tuning masks",
-                        ));
+                        return Err(fail(refuse!(
+                            "T6000 bridge write changes fields outside the qualified tuning masks"
+                        )));
                     }
                 }
                 self.values.set(o, v & w.mask());
@@ -177,19 +188,19 @@ impl MmioDevice for Bridge {
             }
             Role::Initialize(mask) => {
                 if self.known.is_some() && v != 0 {
-                    return Err(fail(
-                        "T6000 bridge native counter reset retirement is not qualified",
-                    ));
+                    return Err(fail(refuse!(
+                        "T6000 bridge native counter reset retirement is not qualified"
+                    )));
                 }
                 // Initialization empties the selected accumulators, which
                 // no traffic fills.
                 if v & !u64::from(mask) != 0 {
-                    return Err(fail(
-                        "bridge initialization names an unconfigured counter slot",
-                    ));
+                    return Err(fail(refuse!(
+                        "bridge initialization names an unconfigured counter slot"
+                    )));
                 }
             }
-            Role::Sample(_) => return Err(fail("bridge samples are read-only")),
+            Role::Sample(_) => return Err(fail(refuse!("bridge samples are read-only"))),
         }
         Ok(())
     }

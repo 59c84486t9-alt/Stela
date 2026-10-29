@@ -47,8 +47,10 @@
 //! declares sRGB its default color space) are Inferred from the EDID the
 //! model serves; docs/research/display-gpu.md section 8.6 is the row.
 use super::super::scanout::Mode;
+use crate::Result;
 use alloc::string::String;
 use core::fmt::Write;
+use stela_contracts::refuse;
 
 /// The timing element's ID. `IOMobileFramebufferShim::set_digital_out_mode`
 /// (0x2a66aac) treats timing IDs in 500..=10027 as display-wall modes, so
@@ -117,16 +119,18 @@ const V_BLANK: u32 = 45;
 /// An 18-byte EDID detailed timing descriptor for `mode` at 60 Hz, digital
 /// separate sync, both polarities positive. A mode whose fields do not fit
 /// the descriptor refuses rather than wraps.
-pub fn detailed_timing(mode: Mode) -> Result<[u8; 18], &'static str> {
+pub fn detailed_timing(mode: Mode) -> Result<[u8; 18]> {
     let (w, h) = (mode.width, mode.height);
     if w == 0 || h == 0 || w > 0xfff || h > 0xfff {
-        return Err("DCP mode does not fit an EDID detailed timing");
+        return Err(refuse!("DCP mode does not fit an EDID detailed timing"));
     }
     let clock = u64::from(w + H_BLANK) * u64::from(h + V_BLANK) * u64::from(REFRESH) / 10_000;
     let clock = u16::try_from(clock)
         .ok()
         .filter(|&clock| clock != 0)
-        .ok_or("DCP mode's pixel clock does not fit an EDID detailed timing")?;
+        .ok_or(refuse!(
+            "DCP mode's pixel clock does not fit an EDID detailed timing"
+        ))?;
     let mut d = [0u8; 18];
     d[0..2].copy_from_slice(&clock.to_le_bytes());
     d[2] = w as u8;
@@ -149,7 +153,7 @@ pub fn detailed_timing(mode: Mode) -> Result<[u8; 18], &'static str> {
 }
 
 /// A truthful EDID 1.4 base block whose one detailed timing is `mode`'s.
-pub fn edid(mode: Mode) -> Result<[u8; 128], &'static str> {
+pub fn edid(mode: Mode) -> Result<[u8; 128]> {
     let mut e = [0u8; 128];
     e[0..8].copy_from_slice(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00]);
     // Manufacturer "STE" (Stela), product 1, serial 1, week 1, year 2026.
@@ -190,16 +194,16 @@ fn get(data: &[u8], at: usize) -> u32 {
 
 /// The `IOAVVideoTimingData` of an EDID detailed timing, decoded as
 /// `IOAVVideoTimingElement::initWithDetailedTiming` does.
-pub fn timing_data(d: &[u8; 18]) -> Result<[u8; TIMING_BYTES], &'static str> {
+pub fn timing_data(d: &[u8; 18]) -> Result<[u8; TIMING_BYTES]> {
     let clock = u32::from(u16::from_le_bytes([d[0], d[1]]));
     let interlaced = u32::from(d[17] >> 7);
     let h_active = u32::from(d[2]) | u32::from(d[4] >> 4) << 8;
     let h_blank = u32::from(d[3]) | u32::from(d[4] & 0xf) << 8;
     let h_front = u32::from(d[8]) | u32::from(d[11] >> 6 & 3) << 8;
     let h_sync = u32::from(d[9]) | u32::from(d[11] >> 4 & 3) << 8;
-    let h_back = h_blank
-        .checked_sub(h_front + h_sync)
-        .ok_or("DCP detailed timing's horizontal porches exceed its blanking")?;
+    let h_back = h_blank.checked_sub(h_front + h_sync).ok_or(refuse!(
+        "DCP detailed timing's horizontal porches exceed its blanking"
+    ))?;
     let field = |lines: u32| {
         if interlaced != 0 {
             lines * 2 + 1
@@ -211,9 +215,9 @@ pub fn timing_data(d: &[u8; 18]) -> Result<[u8; TIMING_BYTES], &'static str> {
     let v_front = field(u32::from(d[10] >> 4) | u32::from(d[11] >> 2 & 3) << 4);
     let v_sync = (u32::from(d[10] & 0xf) | u32::from(d[11] & 3) << 4) << interlaced;
     let v_blank = field(u32::from(d[6]) | u32::from(d[7] & 0xf) << 8);
-    let v_back = v_blank
-        .checked_sub(v_front + v_sync)
-        .ok_or("DCP detailed timing's vertical porches exceed its blanking")?;
+    let v_back = v_blank.checked_sub(v_front + v_sync).ok_or(refuse!(
+        "DCP detailed timing's vertical porches exceed its blanking"
+    ))?;
     let mut t = [0u8; TIMING_BYTES];
     put(&mut t, 0x00, interlaced);
     for (axis, [total, active, sync, back, front]) in [
@@ -249,7 +253,7 @@ pub fn timing_data(d: &[u8; 18]) -> Result<[u8; TIMING_BYTES], &'static str> {
     let line = u64::from(get(&t, 0x04)) * u64::from(get(&t, 0x20) + 1);
     let frame = u64::from(get(&t, 0x24)) * line;
     if line == 0 || frame == 0 {
-        return Err("DCP detailed timing has no blanking totals");
+        return Err(refuse!("DCP detailed timing has no blanking totals"));
     }
     let q16 = u64::from(pixel_clock) << 16;
     let h_rate = (q16 + line * 500) / (line * 1000);
@@ -260,7 +264,7 @@ pub fn timing_data(d: &[u8; 18]) -> Result<[u8; TIMING_BYTES], &'static str> {
     put(&mut t, 0x18, h_rate as u32);
     put(&mut t, 0x38, v_rate as u32);
     if v_rate == 0 || h_active == 0 || v_active == 0 {
-        return Err("DCP detailed timing has no active area or refresh");
+        return Err(refuse!("DCP detailed timing has no active area or refresh"));
     }
     let ratio = aspect_ratio(precise_aspect_ratio(&t));
     put(&mut t, 0x48, ratio);
@@ -404,7 +408,7 @@ pub struct Advertised {
 impl Advertised {
     /// The one mode for the scanout's `mode`, or why it cannot be
     /// advertised.
-    pub fn new(mode: Mode) -> Result<Self, &'static str> {
+    pub fn new(mode: Mode) -> Result<Self> {
         let edid = edid(mode)?;
         let dtd: [u8; 18] = edid[54..72].try_into().expect("18 bytes");
         Ok(Self {

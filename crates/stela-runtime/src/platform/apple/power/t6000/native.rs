@@ -8,7 +8,10 @@
 //! captured Apple microstate. Every view shares the parent controller's lifecycle,
 //! request prefix and byte storage; there is no parallel SRAM image.
 use super::{Controller, RequestKind};
+use crate::Result;
 use alloc::{collections::BTreeMap, vec, vec::Vec};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
@@ -592,7 +595,7 @@ impl View {
     }
 }
 impl Lifecycle for View {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         if let Some(clock) = self
             .controller
             .0
@@ -604,9 +607,9 @@ impl Lifecycle for View {
             clock.cycles().map_err(super::clock::Error::reason)?;
         }
         if proposed.reset || (!proposed.powered && !proposed.retention) {
-            return Err(
-                "T6000 native reset/nonretained loss and pending-work cancellation are unqualified",
-            );
+            return Err(refuse!(
+                "T6000 native reset/nonretained loss and pending-work cancellation are unqualified"
+            ));
         }
         Ok(())
     }
@@ -626,19 +629,19 @@ impl MmioDevice for View {
         Some(self)
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |why| refuse(NAME, offset, width, Direction::Read, why);
+        let fail = |why: Refusal| refuse(NAME, offset, width, Direction::Read, why);
         let state = self.controller.0.borrow();
         state.accessible().map_err(fail)?;
         let native = state
             .native
             .as_ref()
-            .ok_or_else(|| fail(Error::Unmounted.reason()))?;
+            .ok_or_else(|| fail(Error::Unmounted.reason().into()))?;
         (if self.sram {
             native.read_sram(offset, width)
         } else {
             native.read_control(offset, width)
         })
-        .map_err(|error| fail(error.reason()))
+        .map_err(|error| fail(error.reason().into()))
     }
     fn write(
         &mut self,
@@ -647,25 +650,25 @@ impl MmioDevice for View {
         value: u64,
         _: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |why| refuse(NAME, offset, width, Direction::Write, why);
+        let fail = |why: Refusal| refuse(NAME, offset, width, Direction::Write, why);
         let mut state = self.controller.0.borrow_mut();
         state.accessible().map_err(fail)?;
         if Self::pending(&state) {
-            return Err(fail(Error::Pending.reason()));
+            return Err(fail(Error::Pending.reason().into()));
         }
         let native = state
             .native
             .as_mut()
-            .ok_or_else(|| fail(Error::Unmounted.reason()))?;
+            .ok_or_else(|| fail(Error::Unmounted.reason().into()))?;
         if (self.sram || !State::activation_word(offset)) && !native.reconfiguration_qualified() {
-            return Err(fail(Error::Pending.reason()));
+            return Err(fail(Error::Pending.reason().into()));
         }
         (if self.sram {
             native.write_sram(offset, width, value)
         } else {
             native.write_control(offset, width, value)
         })
-        .map_err(|error| fail(error.reason()))
+        .map_err(|error| fail(error.reason().into()))
     }
 }
 

@@ -103,6 +103,8 @@
 //! output source this model has; firmware, fault and rail events have no
 //! modeled producer (as for the fault log), so such a PMU's output is an
 //! actual, permanently deasserted wire rather than an unchecked one.
+use crate::Result;
+use stela_contracts::refuse;
 use stela_soc_data::pmu::ALARM_BYTES;
 #[cfg(test)]
 use stela_soc_data::pmu::DEFAULT_EVENT_MASK;
@@ -190,10 +192,7 @@ impl Pmu {
     /// Instantiate only validated byte resources. Initial wall time is a declared
     /// emulated resource value, never a captured PMIC identity or firmware image.
     #[cfg(test)]
-    pub fn configured(
-        config: Configuration,
-        wall: Option<WallClock>,
-    ) -> Result<Self, &'static str> {
+    pub fn configured(config: Configuration, wall: Option<WallClock>) -> Result<Self> {
         Self::with_clock(
             config,
             RtcClock::new(RtcEpoch {
@@ -210,7 +209,7 @@ impl Pmu {
         config: Configuration,
         clock: RtcClock,
         wall: Option<WallClock>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let Resources {
             mut windows,
             rtc,
@@ -282,7 +281,9 @@ impl Pmu {
             match rtc.clock_offset {
                 ClockOffset::Register(base) => {
                     if !(-(1i128 << 47)..(1i128 << 47)).contains(&offset) {
-                        return Err("PMU initial RTC offset exceeds signed 48-bit resource");
+                        return Err(refuse!(
+                            "PMU initial RTC offset exceeds signed 48-bit resource"
+                        ));
                     }
                     let bytes = (offset as i64).to_le_bytes();
                     pmu.store(base, &bytes[..OFFSET_BYTES.into()]);
@@ -290,7 +291,9 @@ impl Pmu {
                 ClockOffset::LegacyScratch(_) => {
                     // `_readCurrentOffsetTicks` sign-extends 47 bits.
                     if !(-(1i128 << 46)..(1i128 << 46)).contains(&offset) {
-                        return Err("PMU initial RTC offset exceeds signed 47-bit resource");
+                        return Err(refuse!(
+                            "PMU initial RTC offset exceeds signed 47-bit resource"
+                        ));
                     }
                     let [seconds, fraction] = rtc.clock_offset.legacy_fields().expect("validated");
                     let offset = offset as i64;
@@ -361,17 +364,17 @@ impl Pmu {
     fn check_unqualified(&self, address: u16, bytes: usize) -> Result<(), SlaveError> {
         for address in Self::span(address, bytes)? {
             if self.identity.is_some_and(|window| window.contains(address)) {
-                return Err(SlaveError::Unsupported(
-                    "PMU declared identity register contents are unqualified",
-                ));
+                return Err(SlaveError::Unsupported(refuse!(
+                    "PMU declared identity register contents are unqualified"
+                )));
             }
             if self
                 .mailbox
                 .is_some_and(|windows| windows.iter().any(|window| window.contains(address)))
             {
-                return Err(SlaveError::Unsupported(
-                    "PMU firmware mailbox requires executing PMIC firmware",
-                ));
+                return Err(SlaveError::Unsupported(refuse!(
+                    "PMU firmware mailbox requires executing PMIC firmware"
+                )));
             }
         }
         Ok(())
@@ -397,9 +400,9 @@ impl Pmu {
                 })
             })
         {
-            return Err(SlaveError::Unsupported(
-                "PMU firmware startup requires the actual protected-control, execution and completion owner",
-            ));
+            return Err(SlaveError::Unsupported(refuse!(
+                "PMU firmware startup requires the actual protected-control, execution and completion owner"
+            )));
         }
         Ok(())
     }
@@ -617,9 +620,9 @@ impl SpmiSlave for Pmu {
         let acknowledged = owners.next();
         if let Some(index) = acknowledged {
             if owners.any(|other| other != index) {
-                return Err(SlaveError::Unsupported(
-                    "PMU acknowledge spanning two retained-history owners is unqualified",
-                ));
+                return Err(SlaveError::Unsupported(refuse!(
+                    "PMU acknowledge spanning two retained-history owners is unqualified"
+                )));
             }
             self.histories[index]
                 .check_acknowledge(address, data)
@@ -637,9 +640,9 @@ impl SpmiSlave for Pmu {
                     _ => true,
                 };
                 if !qualified {
-                    return Err(SlaveError::Unsupported(
-                        "PMU RTC control/event/mask field is unqualified",
-                    ));
+                    return Err(SlaveError::Unsupported(refuse!(
+                        "PMU RTC control/event/mask field is unqualified"
+                    )));
                 }
             }
         }

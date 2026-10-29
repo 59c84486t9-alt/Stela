@@ -9,7 +9,9 @@
 pub mod assigned;
 
 use super::Processor;
-use alloc::{collections::BTreeMap, format, string::String};
+use crate::Result;
+use alloc::collections::BTreeMap;
+use stela_contracts::refuse;
 
 /// A kernel's compiled CPU topology bounds: CPUs, clusters and the highest
 /// physical cluster number (MPIDR Aff1). XNU's `ml_parse_cpu_topology`
@@ -35,7 +37,7 @@ impl KernelLimits {
     }
 
     /// Refuse `processors` that exceed these bounds.
-    pub fn check(self, processors: &[Processor]) -> Result<(), String> {
+    pub fn check(self, processors: &[Processor]) -> Result<()> {
         let mut spans = BTreeMap::new();
         for processor in processors {
             let span = spans.entry(processor.reg >> 8).or_insert(0);
@@ -44,45 +46,50 @@ impl KernelLimits {
         let cluster_id = spans.keys().copied().max().unwrap_or(0);
         let span: usize = spans.values().sum();
         if processors.len() > self.cpus {
-            return Err(format!(
-                "{} CPUs exceed the kernel's {} (MAX_CPUS)",
-                processors.len(),
-                self.cpus
+            return Err(refuse!(
+                "{processors_len} CPUs exceed the kernel's {cpus} (MAX_CPUS)",
+                processors_len = processors.len(),
+                cpus = self.cpus
             ));
         }
         if spans.len() > self.clusters {
-            return Err(format!(
-                "{} CPU clusters exceed the kernel's {} (MAX_CPU_CLUSTERS)",
-                spans.len(),
-                self.clusters
+            return Err(refuse!(
+                "{spans_len} CPU clusters exceed the kernel's {clusters} (MAX_CPU_CLUSTERS)",
+                spans_len = spans.len(),
+                clusters = self.clusters
             ));
         }
         if cluster_id > self.cluster_id {
-            return Err(format!(
-                "CPU cluster {cluster_id} exceeds the kernel's highest, {} (MAX_CPU_CLUSTER_PHY_ID)",
-                self.cluster_id
+            return Err(refuse!(
+                "CPU cluster {cluster_id} exceeds the kernel's highest, {cluster_id2} (MAX_CPU_CLUSTER_PHY_ID)",
+                cluster_id,
+                cluster_id2 = self.cluster_id
             ));
         }
         if span > self.cpus {
-            return Err(format!(
-                "the clusters' Aff0 spans need {span} CPU slots, beyond the kernel's {}",
-                self.cpus
+            return Err(refuse!(
+                "the clusters' Aff0 spans need {span} CPU slots, beyond the kernel's {cpus}",
+                span,
+                cpus = self.cpus
             ));
         }
         Ok(())
     }
 }
 
-pub(super) fn validate(processors: &[Processor]) -> Result<(), String> {
+pub(super) fn validate(processors: &[Processor]) -> Result<()> {
     for (index, processor) in processors.iter().enumerate() {
         for previous in &processors[..index] {
             if previous.reg == processor.reg {
-                return Err(format!("duplicate CPU affinity reg {:#x}", processor.reg));
+                return Err(refuse!(
+                    "duplicate CPU affinity reg {reg:#x}",
+                    reg = processor.reg
+                ));
             }
             if previous.reg >> 8 == processor.reg >> 8 && previous.l2_bytes != processor.l2_bytes {
-                return Err(format!(
-                    "CPU cluster {:#x} has conflicting l2-cache-size values",
-                    processor.reg >> 8
+                return Err(refuse!(
+                    "CPU cluster {cluster:#x} has conflicting l2-cache-size values",
+                    cluster = processor.reg >> 8
                 ));
             }
         }
@@ -118,23 +125,37 @@ mod tests {
         assert_eq!(limits.check(&j375d), Ok(()));
         let mut more = j375d.clone();
         more.push(pe(b'E', 2, Some(4 << 20)));
-        assert!(limits.check(&more).unwrap_err().contains("MAX_CPUS"));
+        assert!(
+            limits
+                .check(&more)
+                .unwrap_err()
+                .to_string()
+                .contains("MAX_CPUS")
+        );
         let clusters: alloc::vec::Vec<_> = (0..7).map(|c| pe(b'P', c << 8, None)).collect();
         assert!(
             limits
                 .check(&clusters)
                 .unwrap_err()
+                .to_string()
                 .contains("MAX_CPU_CLUSTERS")
         );
         assert!(
             limits
                 .check(&[pe(b'P', 0xb00, None)])
                 .unwrap_err()
+                .to_string()
                 .contains("PHY_ID")
         );
         // Two cores at Aff0 0 and 15 of each of two clusters need 32 slots.
         let sparse = [0x000, 0x00f, 0x100, 0x10f].map(|reg| pe(b'P', reg, None));
-        assert!(limits.check(&sparse).unwrap_err().contains("Aff0 spans"));
+        assert!(
+            limits
+                .check(&sparse)
+                .unwrap_err()
+                .to_string()
+                .contains("Aff0 spans")
+        );
     }
 
     #[test]
@@ -144,6 +165,7 @@ mod tests {
             assert!(
                 validate(&processors)
                     .unwrap_err()
+                    .to_string()
                     .contains("duplicate CPU affinity")
             );
         }

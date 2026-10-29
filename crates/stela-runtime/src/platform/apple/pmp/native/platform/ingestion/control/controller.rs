@@ -7,7 +7,9 @@
 //! a register read may consume, and this adapter must not replay it.
 use super::super::super::owner::Completion;
 use super::{FlagsMethod, Operation, ResourceRequest, ResourceValue};
+use crate::Result;
 use alloc::boxed::Box;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::MmioDevice,
     stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -27,7 +29,7 @@ pub struct Placement {
 }
 impl Placement {
     /// Original controller classes, not PMGR domain IDs or invented counters.
-    pub fn t8112(ordinal: usize, provider: u32) -> Result<Self, &'static str> {
+    pub fn t8112(ordinal: usize, provider: u32) -> Result<Self> {
         let address = match (ordinal, provider) {
             (4, 0) => 0x210ee0000,
             (5, 0) => 0x211ee0000,
@@ -47,7 +49,11 @@ impl Placement {
                     member_stride: 0x100,
                 });
             }
-            _ => return Err("T8112 auxiliary controller selector has no source-owned mapping"),
+            _ => {
+                return Err(refuse!(
+                    "T8112 auxiliary controller selector has no source-owned mapping"
+                ));
+            }
         };
         Ok(Self {
             control: Mapping {
@@ -85,13 +91,15 @@ impl Controller {
         control: Box<dyn MmioDevice>,
         member_mapping: Option<Mapping>,
         member: Option<Box<dyn MmioDevice>>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let placement = Placement::t8112(ordinal, provider)?;
         if control_mapping != placement.control
             || member_mapping != placement.member
             || member.is_some() != placement.member.is_some()
         {
-            return Err("auxiliary controller views differ from actual source placements");
+            return Err(refuse!(
+                "auxiliary controller views differ from actual source placements"
+            ));
         }
         Ok(Self {
             placement,
@@ -106,7 +114,7 @@ impl Controller {
         self.placement
     }
     pub fn uncertain_access(&self) -> Option<MmioError> {
-        self.uncertain
+        self.uncertain.clone()
     }
     pub fn call(
         &mut self,
@@ -115,9 +123,9 @@ impl Controller {
         access: &mut Access<'_>,
     ) -> Completion<ResourceValue> {
         if self.uncertain.is_some() {
-            return Completion::Refused(
-                "auxiliary controller MMIO retirement is uncertain; replay refused",
-            );
+            return Completion::Refused(refuse!(
+                "auxiliary controller MMIO retirement is uncertain; replay refused"
+            ));
         }
         if let Some(done) = &self.completed {
             if done.request.same_operation(request) {
@@ -127,13 +135,15 @@ impl Controller {
                         refusal: None,
                     }
                 } else {
-                    Completion::Refused("auxiliary controller retired operation changed")
+                    Completion::Refused(refuse!("auxiliary controller retired operation changed"))
                 };
             }
             if !done.request.identity.same(&request.identity)
                 || (request.sequence, request.step) <= (done.request.sequence, done.request.step)
             {
-                return Completion::Refused("auxiliary controller caller is foreign or stale");
+                return Completion::Refused(refuse!(
+                    "auxiliary controller caller is foreign or stale"
+                ));
             }
         }
         let (provider, index, kind) = match operation {
@@ -144,15 +154,15 @@ impl Controller {
                 provider, member, ..
             } => (provider, member, 3),
             _ => {
-                return Completion::Refused(
-                    "operation requires another actual auxiliary resource owner",
-                );
+                return Completion::Refused(refuse!(
+                    "operation requires another actual auxiliary resource owner"
+                ));
             }
         };
         if provider != self.provider {
-            return Completion::Refused(
-                "auxiliary controller provider selector differs from its source binding",
-            );
+            return Completion::Refused(refuse!(
+                "auxiliary controller provider selector differs from its source binding"
+            ));
         }
         let offset = match kind {
             0 => index.checked_mul(0x200).and_then(|v| v.checked_add(0x1008)),
@@ -188,9 +198,9 @@ impl Controller {
             self.placement.control.bytes
         };
         let Some(offset) = offset.filter(|v| u64::from(*v) + 4 <= bytes) else {
-            return Completion::Refused(
-                "auxiliary controller operation exceeds its actual mapped aperture",
-            );
+            return Completion::Refused(refuse!(
+                "auxiliary controller operation exceeds its actual mapped aperture"
+            ));
         };
         let result = match operation {
             Operation::Flags { value, .. } => {
@@ -234,9 +244,9 @@ impl Controller {
             }
             Err(error) => {
                 self.uncertain = Some(error);
-                Completion::Refused(
-                    "auxiliary controller MMIO retirement is uncertain; replay refused",
-                )
+                Completion::Refused(refuse!(
+                    "auxiliary controller MMIO retirement is uncertain; replay refused"
+                ))
             }
         }
     }
@@ -269,7 +279,7 @@ mod tests {
                     offset,
                     width,
                     direction: Direction::Read,
-                    reason: "authored read may have consumed",
+                    reason: refuse!("authored read may have consumed"),
                 });
             }
             Ok(0x830a_1234)

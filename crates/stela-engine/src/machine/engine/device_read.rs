@@ -179,7 +179,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         shape: DeviceReadShape,
         now: u64,
     ) -> Result<ConsumedPair, DeviceError> {
-        let refused = |reason: &str| DeviceError::TransferRefused(reason.into());
+        let refused = |reason: &'static str| DeviceError::TransferRefused(reason.into());
         if self.serial_hold.is_none() {
             return Err(refused(
                 "canonical device read requires its actual recovered-frame memory continuation",

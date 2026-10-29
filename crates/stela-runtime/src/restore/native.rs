@@ -3,7 +3,8 @@
 use super::{Error, Result, driver::Ports};
 use crate::machine::apple::{MuxState, MuxStream, MuxStreamState, UsbClient};
 use core::task::Poll;
-fn transport(error: &'static str) -> Error {
+use stela_contracts::Refusal;
+fn transport(error: impl Into<Refusal>) -> Error {
     Error::Transport(error.into())
 }
 impl Ports for UsbClient<'_> {

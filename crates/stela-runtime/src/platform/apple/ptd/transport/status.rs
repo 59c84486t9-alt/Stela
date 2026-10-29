@@ -2,6 +2,8 @@
 //! original PMP reader file0x28044..0x28204 also uses aligned LDP128. All words
 //! belong to the pending bank and are read under one immutable borrow.
 use super::{IRQ_STATUS, Ptd, State};
+use crate::Result;
+use stela_contracts::refuse;
 
 /// Checked complete status-register transaction widths in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,22 +44,26 @@ impl Ptd {
     /// Original T8112 PMP VA1012e40..1012fa8 reads naturally aligned status
     /// words/doubles/quads covering a range, then shifts and masks its bits.
     /// This is a nondestructive observation of at most128 entries.
-    pub fn pending_range(&self, start: u32, count: u32) -> Result<Snapshot, &'static str> {
+    pub fn pending_range(&self, start: u32, count: u32) -> Result<Snapshot> {
         self.0.borrow().pending_range(start, count)
     }
     /// Snapshot one naturally aligned, complete status span. `offset` is relative
     /// to the whole PTD device and must select status words, never entries,
     /// holes, routes or write aliases. Nothing is consumed or acknowledged.
-    pub fn interrupt_snapshot(&self, offset: u64, width: Width) -> Result<Snapshot, &'static str> {
+    pub fn interrupt_snapshot(&self, offset: u64, width: Width) -> Result<Snapshot> {
         self.0.borrow().interrupt_snapshot(offset, width)
     }
 }
 
 impl State {
-    fn pending_range(&self, start: u32, count: u32) -> Result<Snapshot, &'static str> {
-        let end = start.checked_add(count).ok_or("PTD pending range wraps")?;
+    fn pending_range(&self, start: u32, count: u32) -> Result<Snapshot> {
+        let end = start
+            .checked_add(count)
+            .ok_or(refuse!("PTD pending range wraps"))?;
         if count > 128 || end as usize > self.values.len() {
-            return Err("PTD pending range exceeds its actual bank or128-bit result");
+            return Err(refuse!(
+                "PTD pending range exceeds its actual bank or128-bit result"
+            ));
         }
         if count == 0 {
             return Ok(Snapshot { low: 0, high: 0 });
@@ -92,29 +98,26 @@ impl State {
             high: (bits >> 64) as u64,
         })
     }
-    pub(super) fn interrupt_snapshot(
-        &self,
-        offset: u64,
-        width: Width,
-    ) -> Result<Snapshot, &'static str> {
+    pub(super) fn interrupt_snapshot(&self, offset: u64, width: Width) -> Result<Snapshot> {
         self.accessible()?;
         if !offset.is_multiple_of(width.bytes()) {
-            return Err("PTD IRQ access is not aligned");
+            return Err(refuse!("PTD IRQ access is not aligned"));
         }
         let relative = offset
             .checked_sub(IRQ_STATUS)
-            .ok_or("PTD IRQ read outside its bank")?;
-        let index = usize::try_from(relative / 4).map_err(|_| "PTD IRQ read outside its bank")?;
+            .ok_or(refuse!("PTD IRQ read outside its bank"))?;
+        let index =
+            usize::try_from(relative / 4).map_err(|_| refuse!("PTD IRQ read outside its bank"))?;
         if index >= self.pending.len() {
-            return Err("PTD IRQ read outside its bank");
+            return Err(refuse!("PTD IRQ read outside its bank"));
         }
         let end = index
             .checked_add(width.words())
-            .ok_or("PTD IRQ read crosses its bank")?;
+            .ok_or(refuse!("PTD IRQ read crosses its bank"))?;
         let words = self
             .pending
             .get(index..end)
-            .ok_or("PTD IRQ read crosses its bank")?;
+            .ok_or(refuse!("PTD IRQ read crosses its bank"))?;
         let mut raw = [0u64; 2];
         for (position, word) in words.iter().enumerate() {
             raw[position / 2] |= word.read(u64::from(u32::MAX))? << (32 * (position % 2));

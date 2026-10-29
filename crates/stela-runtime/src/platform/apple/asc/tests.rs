@@ -1,5 +1,7 @@
 use super::*;
+use crate::Result;
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 
 #[test]
 fn physical_retention_freezes_work_and_preserves_mailbox_irq_ownership() {
@@ -8,23 +10,23 @@ fn physical_retention_freezes_work_and_preserves_mailbox_irq_ownership() {
         resets: u32,
     }
     impl Firmware for Active {
-        fn check_reset(&self) -> Result<(), &'static str> {
+        fn check_reset(&self) -> Result<()> {
             Ok(())
         }
-        fn reset(&mut self) -> Result<(), &'static str> {
+        fn reset(&mut self) -> Result<()> {
             self.resets += 1;
             Ok(())
         }
-        fn start(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn start(&mut self, _: &mut Vec<Message>) -> Result<()> {
             Ok(())
         }
-        fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<()> {
             Ok(())
         }
         fn dma_pending(&self) -> bool {
             true
         }
-        fn poll(&mut self, out: &mut Vec<Message>) -> Result<(), &'static str> {
+        fn poll(&mut self, out: &mut Vec<Message>) -> Result<()> {
             self.polls += 1;
             out.push(Message {
                 endpoint: 0x20,
@@ -110,19 +112,19 @@ fn physical_retention_freezes_work_and_preserves_mailbox_irq_ownership() {
 /// Echoes every message back on endpoint + 1 and says hello at start.
 struct Echo;
 impl Firmware for Echo {
-    fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn start(&mut self, outbox: &mut Vec<Message>) -> Result<()> {
         outbox.push(Message {
             endpoint: 0,
             payload: 0x11,
         });
         Ok(())
     }
-    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<()> {
         if message.endpoint == 0xff {
             return Err(if message.payload == 0 {
-                "refused without a reply"
+                refuse!("refused without a reply")
             } else {
-                "refused"
+                refuse!("refused")
             });
         }
         outbox.push(Message {
@@ -132,7 +134,7 @@ impl Firmware for Echo {
         Ok(())
     }
     /// A refused request with a nonzero payload has an error reply.
-    fn error_reply(&mut self, message: Message, _: &'static str) -> Option<Vec<Message>> {
+    fn error_reply(&mut self, message: Message, _: &Refusal) -> Option<Vec<Message>> {
         (message.payload != 0).then(|| {
             alloc::vec![Message {
                 endpoint: message.endpoint,
@@ -317,7 +319,7 @@ struct Retained {
 }
 
 impl Firmware for Retained {
-    fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn start(&mut self, outbox: &mut Vec<Message>) -> Result<()> {
         self.starts += 1;
         outbox.push(Message {
             endpoint: 0,
@@ -325,21 +327,21 @@ impl Firmware for Retained {
         });
         Ok(())
     }
-    fn stop(&mut self) -> Result<(), &'static str> {
+    fn stop(&mut self) -> Result<()> {
         if self.refuse_stop {
-            return Err("stop refused");
+            return Err(refuse!("stop refused"));
         }
         self.stops += 1;
         Ok(())
     }
-    fn resume(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn resume(&mut self, _: &mut Vec<Message>) -> Result<()> {
         if self.refuse_resume {
-            return Err("resume refused");
+            return Err(refuse!("resume refused"));
         }
         self.resumes += 1;
         Ok(())
     }
-    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<()> {
         self.value += message.payload;
         outbox.push(Message {
             endpoint: message.endpoint,
@@ -347,7 +349,7 @@ impl Firmware for Retained {
         });
         Ok(())
     }
-    fn poll(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn poll(&mut self, _: &mut Vec<Message>) -> Result<()> {
         self.polls += 1;
         Ok(())
     }
@@ -473,36 +475,36 @@ struct AtomicCommand {
     value: u64,
 }
 impl Firmware for AtomicCommand {
-    fn start(&mut self, out: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn start(&mut self, out: &mut Vec<Message>) -> Result<()> {
         out.push(Message {
             endpoint: 0,
             payload: 0x11,
         });
         if self.refuse_start {
-            return Err("start refused");
+            return Err(refuse!("start refused"));
         }
         Ok(())
     }
-    fn stop(&mut self) -> Result<(), &'static str> {
+    fn stop(&mut self) -> Result<()> {
         Ok(())
     }
-    fn resume(&mut self, out: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn resume(&mut self, out: &mut Vec<Message>) -> Result<()> {
         out.push(Message {
             endpoint: 0,
             payload: 7 << 52 | 0x20,
         });
         if self.refuse_resume {
-            return Err("resume refused");
+            return Err(refuse!("resume refused"));
         }
         Ok(())
     }
-    fn receive(&mut self, message: Message, out: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn receive(&mut self, message: Message, out: &mut Vec<Message>) -> Result<()> {
         out.push(Message {
             endpoint: message.endpoint,
             payload: self.value + message.payload,
         });
         if self.refuse_receive {
-            return Err("command refused");
+            return Err(refuse!("command refused"));
         }
         self.value += message.payload;
         Ok(())
@@ -574,20 +576,20 @@ struct AsyncEndpoint {
     polls: u32,
 }
 impl super::super::rtkit::Endpoint for AsyncEndpoint {
-    fn start(&mut self, _: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn start(&mut self, _: &mut Vec<u64>) -> Result<()> {
         Ok(())
     }
-    fn receive(&mut self, _: u64, _: &mut Vec<u64>) -> Result<(), &'static str> {
-        Err("no command contract")
+    fn receive(&mut self, _: u64, _: &mut Vec<u64>) -> Result<()> {
+        Err(refuse!("no command contract"))
     }
-    fn poll(&mut self, out: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn poll(&mut self, out: &mut Vec<u64>) -> Result<()> {
         self.polls += 1;
         if !self.issued {
             self.issued = true;
             out.push(self.value);
         }
         if self.fail {
-            return Err("later async operation failed");
+            return Err(refuse!("later async operation failed"));
         }
         Ok(())
     }
@@ -654,22 +656,24 @@ fn rtkit_poll_keeps_prior_and_failing_events() {
 
 struct PartialDma(bool);
 impl Firmware for PartialDma {
-    fn start(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn start(&mut self, _: &mut Vec<Message>) -> Result<()> {
         Ok(())
     }
-    fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<()> {
         Ok(())
     }
-    fn dma(&mut self, port: &mut Port<'_, '_>, out: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn dma(&mut self, port: &mut Port<'_, '_>, out: &mut Vec<Message>) -> Result<()> {
         if !self.0 {
-            port.write(0, b"done").map_err(|_| "first DMA failed")?;
+            port.write(0, b"done")
+                .map_err(|_| refuse!("first DMA failed"))?;
             out.push(Message {
                 endpoint: 0x24,
                 payload: 0x85 << 48,
             });
             self.0 = true;
         }
-        port.read(0x1000, &mut [0]).map_err(|_| "later DMA failed")
+        port.read(0x1000, &mut [0])
+            .map_err(|_| refuse!("later DMA failed"))
     }
 }
 
@@ -689,7 +693,7 @@ fn an_earlier_dma_notification_survives_a_later_transfer_fault() {
             memory: &mut memory,
             access: &mut access,
         };
-        assert_eq!(asc.service_dma(&mut port), Err("later DMA failed"));
+        assert_eq!(asc.service_dma(&mut port), Err(refuse!("later DMA failed")));
     }
     assert_eq!(&memory.bytes[..4], b"done");
     assert_eq!(asc.outbox.len(), 1);
@@ -705,18 +709,14 @@ struct Standby {
     requested: bool,
 }
 impl Firmware for Standby {
-    fn start(&mut self, _outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn start(&mut self, _outbox: &mut Vec<Message>) -> Result<()> {
         Ok(())
     }
-    fn receive(
-        &mut self,
-        _message: Message,
-        _outbox: &mut Vec<Message>,
-    ) -> Result<(), &'static str> {
+    fn receive(&mut self, _message: Message, _outbox: &mut Vec<Message>) -> Result<()> {
         self.requested = true;
         Ok(())
     }
-    fn poll(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn poll(&mut self, outbox: &mut Vec<Message>) -> Result<()> {
         self.events += 1;
         outbox.push(Message {
             endpoint: 0x20,

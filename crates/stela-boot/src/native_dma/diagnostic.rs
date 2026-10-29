@@ -4,8 +4,10 @@ use super::{
     dmar::{self, HardwareUnit},
     vtd::{self, MmioRegisters, Registers, Unit},
 };
+use crate::Result;
 use alloc::{format, string::String, vec::Vec};
 use core::{ops::Range, ptr::NonNull};
+use stela_contracts::refuse;
 use stela_drivers::{
     Clock, Handoff,
     bus::{
@@ -51,41 +53,39 @@ pub(crate) struct Prepared<F = stela_drivers::bus::pci::Identity> {
     pub(super) second: Option<(usize, Range<u64>)>,
 }
 
-fn memory_bar(bar: Option<Bar>) -> Result<Range<u64>, String> {
+fn memory_bar(bar: Option<Bar>) -> Result<Range<u64>> {
     let Some(Bar::Memory { address, size, .. }) = bar else {
-        return Err(String::from("fixture needs a memory BAR"));
+        return Err(refuse!("fixture needs a memory BAR"));
     };
     let end = address
         .checked_add(size)
         .filter(|end| *end > address)
-        .ok_or_else(|| String::from("invalid fixture BAR span"))?;
+        .ok_or_else(|| refuse!("invalid fixture BAR span"))?;
     Ok(address..end)
 }
 
-fn observed_bars(
-    observation: &crate::pci_io::FunctionObservation,
-) -> Result<[Option<Bar>; 6], String> {
+fn observed_bars(observation: &crate::pci_io::FunctionObservation) -> Result<[Option<Bar>; 6]> {
     let mut result = [None; 6];
     for (index, regions) in observation.bars.iter().enumerate() {
         let regions = match regions {
             Ok(regions) => regions,
             Err(crate::pci_io::Error::Firmware(uefi::Status::UNSUPPORTED)) => continue,
             Err(error) => {
-                return Err(format!(
-                    "fixture BAR observation {} bar={index}: {error}",
-                    observation.address
+                return Err(refuse!(
+                    "fixture BAR observation {address} bar={index}: {error}",
+                    address = %observation.address,
+                    index,
+                    ?error
                 ));
             }
         };
         if regions.len() != 1 {
-            return Err(String::from(
-                "fixture BAR needs one exact firmware descriptor",
-            ));
+            return Err(refuse!("fixture BAR needs one exact firmware descriptor"));
         }
         let region = &regions[0];
         if region.host != region.pci {
-            return Err(String::from(
-                "fixture BAR requires identity host/PCI translation",
+            return Err(refuse!(
+                "fixture BAR requires identity host/PCI translation"
             ));
         }
         let bytes = region
@@ -93,7 +93,7 @@ fn observed_bars(
             .end
             .checked_sub(region.pci.start)
             .filter(|bytes| *bytes != 0)
-            .ok_or("invalid fixture BAR observation")?;
+            .ok_or(refuse!("invalid fixture BAR observation"))?;
         let start = 16 + index * 4;
         let raw = u32::from_le_bytes(observation.header[start..start + 4].try_into().unwrap());
         result[index] = Some(match region.resource_type {
@@ -104,21 +104,20 @@ fn observed_bars(
                 wide: raw & 6 == 4,
             },
             1 => Bar::Io {
-                port: u32::try_from(region.pci.start).map_err(|_| "fixture IO port overflow")?,
-                size: u32::try_from(bytes).map_err(|_| "fixture IO span overflow")?,
+                port: u32::try_from(region.pci.start)
+                    .map_err(|_| refuse!("fixture IO port overflow"))?,
+                size: u32::try_from(bytes).map_err(|_| refuse!("fixture IO span overflow"))?,
             },
-            _ => return Err(String::from("fixture BAR resource type unsupported")),
+            _ => return Err(refuse!("fixture BAR resource type unsupported")),
         });
     }
     Ok(result)
 }
 
-fn translation_features_stopped<C: ConfigSpace>(
-    function: &mut PciFunction<C>,
-) -> Result<(), String> {
+fn translation_features_stopped<C: ConfigSpace>(function: &mut PciFunction<C>) -> Result<()> {
     for (offset, id) in function.capabilities() {
         if id == 0x10 && function.config().read16(u16::from(offset) + 8) & (1 << 11) != 0 {
-            return Err(String::from("fixture PCIe NoSnoop is enabled"));
+            return Err(refuse!("fixture PCIe NoSnoop is enabled"));
         }
     }
     if !function.capabilities().iter().any(|(_, id)| *id == 0x10) {
@@ -131,7 +130,7 @@ fn translation_features_stopped<C: ConfigSpace>(
             || !offset.is_multiple_of(4)
             || visited.contains(&offset)
         {
-            return Err(String::from("malformed fixture extended capabilities"));
+            return Err(refuse!("malformed fixture extended capabilities"));
         }
         visited.push(offset);
         let header = function.config().read32(offset);
@@ -139,7 +138,7 @@ fn translation_features_stopped<C: ConfigSpace>(
             return Ok(());
         }
         if matches!(header as u16, 0x000f | 0x0013 | 0x001b) && offset > 0xff8 {
-            return Err(String::from("truncated fixture translation capability"));
+            return Err(refuse!("truncated fixture translation capability"));
         }
         let active = match header as u16 {
             0x000f => function.config().read16(offset + 6) & (1 << 15) != 0,
@@ -148,7 +147,7 @@ fn translation_features_stopped<C: ConfigSpace>(
             _ => false,
         };
         if active {
-            return Err(String::from("fixture ATS/PRI/PASID is enabled"));
+            return Err(refuse!("fixture ATS/PRI/PASID is enabled"));
         }
         offset = (header >> 20) as u16;
         if offset == 0 {
@@ -161,7 +160,7 @@ impl Prepared {
     /// Before EBS at application TPL: only scoped firmware protocol reads and
     /// owned copied DATA. No config accessor, callback or pool buffer crosses
     /// EBS. Native BAR sizing occurs only after device quiescence.
-    pub(crate) fn prepare(handoff: &Handoff, isolation: bool) -> Result<Self, String> {
+    pub(crate) fn prepare(handoff: &Handoff, isolation: bool) -> Result<Self> {
         let hv = core::arch::x86_64::__cpuid(0x4000_0000);
         let signature = [
             hv.ebx.to_le_bytes(),
@@ -170,34 +169,31 @@ impl Prepared {
         ]
         .concat();
         if signature != b"TCGTCGTCGTCG" {
-            return Err(String::from("native DMA fixture requires QEMU TCG"));
+            return Err(refuse!("native DMA fixture requires QEMU TCG"));
         }
         if handoff.ecam.len() != 1 || handoff.ecam[0].segment != 0 || handoff.ecam[0].start_bus != 0
         {
-            return Err(String::from(
-                "fixture needs one flat segment-zero ECAM window",
-            ));
+            return Err(refuse!("fixture needs one flat segment-zero ECAM window"));
         }
-        let rsdp = crate::storage::rsdp().ok_or_else(|| String::from("fixture has no RSDP"))?;
+        let rsdp = crate::storage::rsdp().ok_or_else(|| refuse!("fixture has no RSDP"))?;
         // SAFETY: the firmware's RSDP/tables remain mapped before EBS.
         let table = unsafe { acpi::find(rsdp, b"DMAR") }
-            .map_err(|error| format!("fixture DMAR: {error:?}"))?;
+            .map_err(|error| refuse!("fixture DMAR: {error}", ?error))?;
         // QEMU's FADT builder emits SMI_CMD and ACPI enable/disable only when
         // SMM is enabled. This is a source-bound fixture check, not a general
         // proof about physical SMM ownership.
         // SAFETY: `rsdp` is the firmware's ACPI root, which the identity map covers after EBS.
         let fadt = unsafe { acpi::find(rsdp, b"FACP") }
-            .map_err(|error| format!("fixture FADT: {error:?}"))?;
+            .map_err(|error| refuse!("fixture FADT: {error}", ?error))?;
         if fadt.get(48..54) != Some(&[0; 6]) {
-            return Err(String::from("fixture requires QEMU SMM off"));
+            return Err(refuse!("fixture requires QEMU SMM off"));
         }
         let census = crate::pci_io::capture_configurations()
-            .map_err(|error| format!("fixture firmware config: {error}"))?;
+            .map_err(|error| refuse!("fixture firmware config: {error}", %error))?;
         if !census.failures.is_empty() {
-            return Err(format!(
-                "incomplete fixture firmware inventory: {:?}",
-                census.failures
-            ));
+            return Err(
+                refuse!("incomplete fixture firmware inventory: {failures}", failures = ?census.failures),
+            );
         }
         let mut observations = Vec::new();
         for mut observation in census.functions {
@@ -205,9 +201,9 @@ impl Prepared {
             let config = observation
                 .configuration
                 .take()
-                .ok_or("fixture configuration DATA missing")?;
+                .ok_or(refuse!("fixture configuration DATA missing"))?;
             let function = PciFunction::try_new(observation.address, config)
-                .map_err(|_| "fixture firmware function absent or CRS")?;
+                .map_err(|_| refuse!("fixture firmware function absent or CRS"))?;
             observations.push((function, bars));
         }
         observations.sort_by_key(|(function, _)| {
@@ -223,7 +219,7 @@ impl Prepared {
         let (mut edu, mut virtio, mut host, mut isa) = (None, None, false, false);
         for (index, function) in functions.iter_mut().enumerate() {
             if function.address.bus != 0 {
-                return Err(String::from("fixture has a non-flat PCI route"));
+                return Err(refuse!("fixture has a non-flat PCI route"));
             }
             translation_features_stopped(function)?;
             if (function.vendor, function.device) == (EDU_VENDOR, EDU_DEVICE) {
@@ -233,7 +229,7 @@ impl Prepared {
                 }
             } else if function.vendor == 0x1af4 && matches!(function.device, 0x1001 | 0x1042) {
                 if virtio.replace(index).is_some() {
-                    return Err(String::from("multiple fixture boot virtio devices"));
+                    return Err(refuse!("multiple fixture boot virtio devices"));
                 }
             } else if function.vendor == 0x8086
                 && function.device == 0x29c0
@@ -252,28 +248,27 @@ impl Prepared {
             {
                 isa = true;
             } else {
-                return Err(format!(
-                    "unknown fixture requester {} {:04x}:{:04x}",
-                    function.address, function.vendor, function.device
-                ));
+                return Err(
+                    refuse!("unknown fixture requester {address} {vendor:04x}:{device:04x}", address = %function.address, vendor = function.vendor, device = function.device),
+                );
             }
         }
         if edus.len() != if isolation { 2 } else { 1 } {
-            return Err(String::from("unexpected fixture EDU requester count"));
+            return Err(refuse!("unexpected fixture EDU requester count"));
         }
         if isolation
             && edus.iter().enumerate().any(|(n, &i)| {
                 functions[i].address.device != n as u8 + 2 || functions[i].address.function != 0
             })
         {
-            return Err(String::from(
-                "isolation fixture requires EDU 00:02.0 and 00:03.0",
+            return Err(refuse!(
+                "isolation fixture requires EDU 00:02.0 and 00:03.0"
             ));
         }
-        let edu = edu.ok_or_else(|| String::from("fixture EDU requester missing"))?;
-        let virtio = virtio.ok_or_else(|| String::from("fixture boot virtio missing"))?;
+        let edu = edu.ok_or_else(|| refuse!("fixture EDU requester missing"))?;
+        let virtio = virtio.ok_or_else(|| refuse!("fixture boot virtio missing"))?;
         if !host || !isa {
-            return Err(String::from("fixture needs exact Q35/ICH9 chipset"));
+            return Err(refuse!("fixture needs exact Q35/ICH9 chipset"));
         }
         let requesters: Vec<u16> = functions
             .iter()
@@ -284,13 +279,13 @@ impl Prepared {
             })
             .collect();
         let hardware = dmar::single_flat_owner(table, 0, &requesters)
-            .map_err(|error| format!("fixture DMAR ownership: {error:?}"))?;
+            .map_err(|error| refuse!("fixture DMAR ownership: {error}", ?error))?;
         if hardware.bytes > 65536 {
-            return Err(String::from("fixture remapping register span unsupported"));
+            return Err(refuse!("fixture remapping register span unsupported"));
         }
         let edu_registers = memory_bar(observed[edu][0])?;
         if edu_registers.end - edu_registers.start != 1 << 20 {
-            return Err(String::from("unexpected EDU register span"));
+            return Err(refuse!("unexpected EDU register span"));
         }
         let bars = observed[virtio];
         let mut virtio_status = None;
@@ -306,7 +301,7 @@ impl Prepared {
             }
             let capability_bytes = u16::from(config.read8(base + 2));
             if capability_bytes < 16 || base + capability_bytes > 256 {
-                return Err(String::from("short virtio common capability"));
+                return Err(refuse!("short virtio common capability"));
             }
             let bar = memory_bar(
                 bars.get(usize::from(config.read8(base + 4)))
@@ -316,14 +311,14 @@ impl Prepared {
             let start = bar
                 .start
                 .checked_add(u64::from(config.read32(base + 8)))
-                .ok_or_else(|| String::from("virtio common offset overflow"))?;
+                .ok_or_else(|| refuse!("virtio common offset overflow"))?;
             let bytes = u64::from(config.read32(base + 12));
             if bytes < 0x15 || start.checked_add(bytes).is_none_or(|end| end > bar.end) {
-                return Err(String::from("virtio common capability outside BAR"));
+                return Err(refuse!("virtio common capability outside BAR"));
             }
             virtio_resource = Some(bar);
             if virtio_status.replace(start + 0x14).is_some() {
-                return Err(String::from("duplicate virtio common capability"));
+                return Err(refuse!("duplicate virtio common capability"));
             }
         }
         let level = if isolation {
@@ -337,7 +332,7 @@ impl Prepared {
             let i = edus[1];
             let bar = memory_bar(observed[i][0])?;
             if bar.end - bar.start != 1 << 20 {
-                return Err(String::from("unexpected second EDU register span"));
+                return Err(refuse!("unexpected second EDU register span"));
             }
             Some((i, bar))
         } else {
@@ -354,9 +349,8 @@ impl Prepared {
             edu,
             virtio,
             edu_registers,
-            virtio_status: virtio_status
-                .ok_or_else(|| String::from("virtio reset register missing"))?,
-            virtio_resource: virtio_resource.ok_or("virtio register BAR missing")?,
+            virtio_status: virtio_status.ok_or_else(|| refuse!("virtio reset register missing"))?,
+            virtio_resource: virtio_resource.ok_or(refuse!("virtio register BAR missing"))?,
             bars: observed,
             clock: handoff.clock,
             register_mappings: Vec::new(),
@@ -378,16 +372,13 @@ impl Prepared {
         ranges
     }
 
-    pub(crate) fn bind(
-        self,
-        source: &crate::paging::config::Source,
-    ) -> Result<Prepared<Function>, String> {
+    pub(crate) fn bind(self, source: &crate::paging::config::Source) -> Result<Prepared<Function>> {
         let mut actual = Vec::new();
         for window in source.windows() {
             actual.extend(
                 source
                     .inventory(&window)
-                    .map_err(|error| format!("fixture owned inventory: {error}"))?,
+                    .map_err(|error| refuse!("fixture owned inventory: {error}", %error))?,
             );
         }
         actual.sort_by_key(|identity| {
@@ -399,8 +390,8 @@ impl Prepared {
             )
         });
         if actual != self.functions {
-            return Err(String::from(
-                "fixture requester observations changed at native handoff",
+            return Err(refuse!(
+                "fixture requester observations changed at native handoff"
             ));
         }
         let ranges = self.mappings();
@@ -408,12 +399,12 @@ impl Prepared {
         for (index, identity) in self.functions.into_iter().enumerate() {
             let config = source
                 .config(identity.address)
-                .map_err(|error| format!("fixture owned config: {error}"))?;
+                .map_err(|error| refuse!("fixture owned config: {error}", %error))?;
             let mut function = Function::try_new(identity.address, config)
-                .map_err(|_| "fixture requester disappeared during owned bind")?;
+                .map_err(|_| refuse!("fixture requester disappeared during owned bind"))?;
             if function.identity() != identity {
-                return Err(String::from(
-                    "fixture identity changed during native ownership bind",
+                return Err(refuse!(
+                    "fixture identity changed during native ownership bind"
                 ));
             }
             translation_features_stopped(&mut function)?;
@@ -428,7 +419,7 @@ impl Prepared {
                     } => {
                         if raw & 1 != 0 || (raw & 6 == 4) != wide || (raw & 8 != 0) != prefetchable
                         {
-                            return Err(String::from("fixture BAR kind changed during owned bind"));
+                            return Err(refuse!("fixture BAR kind changed during owned bind"));
                         }
                         u64::from(raw & !15)
                             | if wide {
@@ -439,7 +430,7 @@ impl Prepared {
                     }
                     Bar::Io { .. } => {
                         if raw & 1 == 0 {
-                            return Err(String::from("fixture IO BAR kind changed"));
+                            return Err(refuse!("fixture IO BAR kind changed"));
                         }
                         u64::from(raw & !3)
                     }
@@ -449,9 +440,7 @@ impl Prepared {
                     Bar::Io { port, .. } => u64::from(port),
                 };
                 if address != expected {
-                    return Err(String::from(
-                        "fixture BAR address changed during owned bind",
-                    ));
+                    return Err(refuse!("fixture BAR address changed during owned bind"));
                 }
             }
             functions.push(function);
@@ -462,7 +451,7 @@ impl Prepared {
             register_mappings.push(
                 source
                     .fixture_registers(&permit)
-                    .map_err(|error| format!("fixture real register owner: {error}"))?,
+                    .map_err(|error| refuse!("fixture real register owner: {error}", %error))?,
             );
         }
         Ok(Prepared {
@@ -492,7 +481,7 @@ impl Prepared<Function> {
     /// Only after EBS on the prepared UC mappings, with interrupts off. Any
     /// error must stop the host check; normal probing cannot resume into an
     /// uncertain translation state. Unit/lease Drop keeps uncertain resources.
-    pub(crate) fn run(mut self) -> Result<Report, String> {
+    pub(crate) fn run(mut self) -> Result<Report> {
         self.quiesce()?;
         if self.second.is_some() {
             return super::isolation_diagnostic::run(self).map(Report::Isolation);
@@ -504,16 +493,16 @@ impl Prepared<Function> {
     pub(crate) fn run_irq_work(
         mut self,
         work: crate::native_work_check::Prepared,
-    ) -> Result<Report, String> {
+    ) -> Result<Report> {
         self.quiesce()?;
         if self.second.is_some() {
-            return Err(String::from("IRQ work requires the single EDU grant"));
+            return Err(refuse!("IRQ work requires the single EDU grant"));
         }
         self.run_single(Some(work))
             .map(|(dma, irq)| Report::IrqWork(format!("{dma}; {irq}")))
     }
 
-    fn quiesce(&mut self) -> Result<(), String> {
+    fn quiesce(&mut self) -> Result<()> {
         // QEMU v11.1.2 i8257.c: write-all-mask stops each channel, including
         // controller two's cascade. Its single-threaded device callbacks are
         // synchronous; the next run sees all masks before any channel handler.
@@ -529,7 +518,7 @@ impl Prepared<Function> {
                 core::arch::asm!("in al, dx", in("dx") read, out("al") mask, options(nostack, preserves_flags));
             }
             if mask & 15 != 15 {
-                return Err(String::from("fixture legacy DMA mask did not latch"));
+                return Err(refuse!("fixture legacy DMA mask did not latch"));
             }
         }
         for (index, function) in self.functions.iter_mut().enumerate() {
@@ -541,7 +530,7 @@ impl Prepared<Function> {
                 let command = config.read16(COMMAND);
                 config.write16(COMMAND, command & !BUS_MASTER);
                 if config.read16(COMMAND) & BUS_MASTER != 0 {
-                    return Err(String::from("fixture chipset bus master remained enabled"));
+                    return Err(refuse!("fixture chipset bus master remained enabled"));
                 }
             }
         }
@@ -555,13 +544,13 @@ impl Prepared<Function> {
             // register.
             || unsafe { (self.virtio_status as *const u8).read_volatile() } == 0,
         ) {
-            return Err(String::from("virtio reset did not quiesce DMA"));
+            return Err(refuse!("virtio reset did not quiesce DMA"));
         }
         let config = self.functions[self.virtio].config();
         let command = config.read16(COMMAND);
         config.write16(COMMAND, command & !BUS_MASTER);
         if config.read16(COMMAND) & BUS_MASTER != 0 {
-            return Err(String::from("virtio bus master remained enabled"));
+            return Err(refuse!("virtio bus master remained enabled"));
         }
         let mut devices = alloc::vec![(self.edu, self.edu_registers.clone())];
         if let Some(second) = &self.second {
@@ -571,7 +560,7 @@ impl Prepared<Function> {
             let config = self.functions[index].config();
             let command = config.read16(COMMAND);
             if command == u16::MAX {
-                return Err(String::from("EDU command read failed"));
+                return Err(refuse!("EDU command read failed"));
             }
             config.write16(COMMAND, (command | MEMORY | INTX_DISABLE) & !BUS_MASTER);
             let device = Device {
@@ -583,7 +572,7 @@ impl Prepared<Function> {
                 || device.read64(DMA_COMMAND) & DMA_RUN != 0
                 || device.read32(0x24) != 0
             {
-                return Err(String::from("EDU is not the supported idle QEMU fixture"));
+                return Err(refuse!("EDU is not the supported idle QEMU fixture"));
             }
             device.write32(0x20, 0);
             device.write32(0x64, u32::MAX);
@@ -599,8 +588,8 @@ impl Prepared<Function> {
                     .as_ref()
                     .is_some_and(|(second, _)| index == *second);
             if selected && function.bars() != self.bars[index] {
-                return Err(String::from(
-                    "native BAR sizing disagrees with firmware observation",
+                return Err(refuse!(
+                    "native BAR sizing disagrees with firmware observation"
                 ));
             }
         }
@@ -610,25 +599,25 @@ impl Prepared<Function> {
     fn run_single(
         mut self,
         work: Option<crate::native_work_check::Prepared>,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String)> {
         let device = self.device();
         let timeout = self
             .clock
             .ticks_per_microsecond
             .checked_mul(TIMEOUT_US)
-            .ok_or_else(|| String::from("fixture timeout overflow"))?;
+            .ok_or_else(|| refuse!("fixture timeout overflow"))?;
         // SAFETY: strict fixture discovery supplies the UC unit window;
         // root mappings keep it, clock advances on this one BSP.
         let registers = unsafe {
             MmioRegisters::new(
                 NonNull::new(self.hardware.base as *mut u8)
-                    .ok_or_else(|| String::from("zero unit base"))?,
+                    .ok_or_else(|| refuse!("zero unit base"))?,
                 self.hardware.bytes,
                 crate::apic::rdtsc,
                 timeout,
             )
         }
-        .map_err(|error| format!("VT-d registers: {error:?}"))?;
+        .map_err(|error| refuse!("VT-d registers: {error}", ?error))?;
         let table_walk_coherent = registers.read64(0x10) & 1 != 0;
         let address = self.functions[self.edu].address;
         let requester = u16::from(address.bus) << 8
@@ -644,7 +633,7 @@ impl Prepared<Function> {
         let function = self.functions.swap_remove(self.edu);
         // SAFETY: same exclusive, idle fixture function and kept root.
         let claim = unsafe { super::requester::RequesterClaim::from_stopped_pci(function) }
-            .map_err(|error| format!("requester claim: {error:?}"))?;
+            .map_err(|error| refuse!("requester claim: {error}", ?error))?;
         // SAFETY: the unit window is this fixture's matched DMAR unit and every listed requester
         // was reset and stopped above.
         let unit = unsafe {
@@ -656,36 +645,41 @@ impl Prepared<Function> {
                 &[],
             )
         }
-        .map_err(|error| format!("VT-d takeover: {error:?}; no normal probing permitted"))?;
+        .map_err(|error| {
+            refuse!(
+                "VT-d takeover: {error}; no normal probing permitted",
+                ?error
+            )
+        })?;
         // SAFETY: same stopped requester epoch and coherent grant.
         let domain = unsafe { unit.attach_requester(claim) }
-            .map_err(|error| format!("requester domain: {error:?}"))?;
+            .map_err(|error| refuse!("requester domain: {error}", ?error))?;
         if !unit
             .pending_faults()
-            .map_err(|error| format!("VT-d initial faults: {error:?}"))?
+            .map_err(|error| refuse!("VT-d initial faults: {error}", ?error))?
             .is_empty()
         {
-            return Err(String::from("VT-d had prior faults"));
+            return Err(refuse!("VT-d had prior faults"));
         }
         let send = crate::native_memory::SOURCE
             .allocate(BYTES, BYTES, CacheAttribute::WriteBack)
-            .map_err(|error| format!("native DMA send pages: {error:?}"))?;
+            .map_err(|error| refuse!("native DMA send pages: {error}", ?error))?;
         let receive = crate::native_memory::SOURCE
             .allocate(BYTES, BYTES, CacheAttribute::WriteBack)
-            .map_err(|error| format!("native DMA receive pages: {error:?}"))?;
+            .map_err(|error| refuse!("native DMA receive pages: {error}", ?error))?;
         let send_cpu = send
             .cpu_mapping(CacheAttribute::WriteBack)
-            .map_err(|error| format!("send CPU map: {error:?}"))?;
+            .map_err(|error| refuse!("send CPU map: {error}", ?error))?;
         let receive_cpu = receive
             .cpu_mapping(CacheAttribute::WriteBack)
-            .map_err(|error| format!("receive CPU map: {error:?}"))?;
+            .map_err(|error| refuse!("receive CPU map: {error}", ?error))?;
         let send_pointer = send_cpu
             .address(0, BYTES)
-            .map_err(|error| format!("send bounds: {error:?}"))?
+            .map_err(|error| refuse!("send bounds: {error}", ?error))?
             .as_ptr();
         let receive_pointer = receive_cpu
             .address(0, BYTES)
-            .map_err(|error| format!("receive bounds: {error:?}"))?
+            .map_err(|error| refuse!("receive bounds: {error}", ?error))?
             .as_ptr();
         for index in 0..BYTES {
             // SAFETY: both pointers map `BYTES` owned write-back bytes and `index` is below
@@ -703,61 +697,62 @@ impl Prepared<Function> {
             Direction::ToDevice,
             0x0fff_ffff,
         )
-        .map_err(|error| format!("send IOVA: {error:?}"))?;
+        .map_err(|error| refuse!("send IOVA: {error}", ?error))?;
         let mut receive_dma = DmaMapping::map(
             domain.clone(),
             receive.clone(),
             Direction::FromDevice,
             0x0fff_ffff,
         )
-        .map_err(|error| format!("receive IOVA: {error:?}"))?;
+        .map_err(|error| refuse!("receive IOVA: {error}", ?error))?;
         let send_iova = send_dma
             .address()
-            .map_err(|error| format!("send IOVA unavailable: {error:?}"))?;
+            .map_err(|error| refuse!("send IOVA unavailable: {error}", ?error))?;
         let receive_iova = receive_dma
             .address()
-            .map_err(|error| format!("receive IOVA unavailable: {error:?}"))?;
+            .map_err(|error| refuse!("receive IOVA unavailable: {error}", ?error))?;
         if send_iova == send.physical_pages()[0] || receive_iova == receive.physical_pages()[0] {
-            return Err(String::from("fixture did not establish nonidentity IOVAs"));
+            return Err(refuse!("fixture did not establish nonidentity IOVAs"));
         }
         send_dma
             .sync_for_device(0..BYTES)
-            .map_err(|error| format!("send visibility: {error:?}"))?;
+            .map_err(|error| refuse!("send visibility: {error}", ?error))?;
         receive_dma
             .sync_for_device(0..BYTES)
-            .map_err(|error| format!("receive visibility: {error:?}"))?;
+            .map_err(|error| refuse!("receive visibility: {error}", ?error))?;
         // SAFETY: the requester is attached to its translated domain, and every mapping it may
         // reach is live.
-        unsafe { domain.set_bus_master(true) }.map_err(|e| format!("EDU BM enable: {e:?}"))?;
+        unsafe { domain.set_bus_master(true) }.map_err(|e| refuse!("EDU BM enable: {e}", ?e))?;
         device.transfer(send_iova, DEVICE_BUFFER, false)?;
         device.transfer(DEVICE_BUFFER, receive_iova, true)?;
         // SAFETY: EDU RUN-clear completion; exclusive fixture has no
         // queued submission, IRQ callback or worker that could reuse the BO.
         unsafe { receive_dma.sync_for_cpu(0..BYTES) }
-            .map_err(|error| format!("CPU DMA visibility: {error:?}"))?;
+            .map_err(|error| refuse!("CPU DMA visibility: {error}", ?error))?;
         for index in 0..BYTES {
             // SAFETY: `receive_pointer` maps `BYTES` owned write-back bytes and `index` is below
             // `BYTES`.
             if unsafe { receive_pointer.add(index).read_volatile() }
                 != (index.wrapping_mul(37) + 11) as u8
             {
-                return Err(format!("DMA roundtrip mismatch at {index}"));
+                return Err(refuse!("DMA roundtrip mismatch at {index}", index));
             }
         }
         if !unit
             .pending_faults()
-            .map_err(|error| format!("VT-d roundtrip fault status: {error:?}"))?
+            .map_err(|error| refuse!("VT-d roundtrip fault status: {error}", ?error))?
             .is_empty()
         {
-            return Err(String::from("unexpected VT-d roundtrip fault"));
+            return Err(refuse!("unexpected VT-d roundtrip fault"));
         }
         // SAFETY: stopping bus mastering only revokes the requester's DMA.
-        unsafe { domain.set_bus_master(false) }.map_err(|e| format!("EDU BM disable: {e:?}"))?;
+        unsafe { domain.set_bus_master(false) }.map_err(|e| refuse!("EDU BM disable: {e}", ?e))?;
         // SAFETY: both transfers completed and submission is stopped;
         // no ISR/worker exists. Unmap awaits IOTLB acknowledgement.
-        unsafe { send_dma.unmap() }.map_err(|error| format!("send unmap: {error:?}"))?;
+        unsafe { send_dma.unmap() }.map_err(|error| refuse!("send unmap: {error}", ?error))?;
         // SAFETY: the same completed transfers and stopped bus mastering cover this mapping.
-        unsafe { receive_dma.unmap() }.map_err(|error| format!("receive unmap: {error:?}"))?;
+        unsafe { receive_dma.unmap() }
+            .map_err(|error| refuse!("receive unmap: {error}", ?error))?;
         for index in 0..BYTES {
             // SAFETY: `receive_pointer` maps `BYTES` owned write-back bytes and `index` is below
             // `BYTES`.
@@ -769,13 +764,13 @@ impl Prepared<Function> {
         // would corrupt the sentinel and fail the test.
         // SAFETY: the requester is attached to its translated domain, and every mapping it may
         // reach is live.
-        unsafe { domain.set_bus_master(true) }.map_err(|e| format!("EDU BM enable: {e:?}"))?;
+        unsafe { domain.set_bus_master(true) }.map_err(|e| refuse!("EDU BM enable: {e}", ?e))?;
         device.transfer(DEVICE_BUFFER, receive_iova, true)?;
         // SAFETY: stopping bus mastering only revokes the requester's DMA.
-        unsafe { domain.set_bus_master(false) }.map_err(|e| format!("EDU BM disable: {e:?}"))?;
+        unsafe { domain.set_bus_master(false) }.map_err(|e| refuse!("EDU BM disable: {e}", ?e))?;
         let faults = unit
             .pending_faults()
-            .map_err(|error| format!("VT-d stale IOVA fault status: {error:?}"))?;
+            .map_err(|error| refuse!("VT-d stale IOVA fault status: {error}", ?error))?;
         let fault = faults
             .iter()
             .find(|fault| {
@@ -784,27 +779,30 @@ impl Prepared<Function> {
                     && !fault.read
                     && fault.reason != 0
             })
-            .ok_or_else(|| format!("missing matching VT-d stale IOVA fault: {faults:?}"))?;
+            .ok_or_else(|| refuse!("missing matching VT-d stale IOVA fault: {faults}", ?faults))?;
         for index in 0..BYTES {
             // SAFETY: `receive_pointer` maps `BYTES` owned write-back bytes and `index` is below
             // `BYTES`.
             if unsafe { receive_pointer.add(index).read_volatile() } != 0xd3 {
-                return Err(format!("stale IOVA modified retained CPU RAM at {index}"));
+                return Err(refuse!(
+                    "stale IOVA modified retained CPU RAM at {index}",
+                    index
+                ));
             }
         }
         unit.acknowledge_fault(fault.index)
-            .map_err(|error| format!("fault acknowledgement: {error:?}"))?;
+            .map_err(|error| refuse!("fault acknowledgement: {error}", ?error))?;
         // SAFETY: EDU idle, bus mastering stopped, both mappings removed with
         // IOTLB acknowledgements, no other DMA requester or IRQ work can start.
-        let claim = unsafe { domain.detach() }.map_err(|e| format!("requester detach: {e:?}"))?;
+        let claim = unsafe { domain.detach() }.map_err(|e| refuse!("requester detach: {e}", ?e))?;
         drop(domain);
         let function = claim
             .into_function()
-            .map_err(|e| format!("retired PCI owner: {e:?}"))?;
+            .map_err(|e| refuse!("retired PCI owner: {e}", ?e))?;
         // SAFETY: the only requester was detached and every mapping removed with an IOTLB
         // acknowledgement.
         unsafe { unit.shut_down() }
-            .map_err(|error| format!("VT-d TE-off acknowledgement failed: {error:?}"))?;
+            .map_err(|error| refuse!("VT-d TE-off acknowledgement failed: {error}", ?error))?;
         let dma = format!(
             "QEMU EDU rid={requester:#06x} bytes={BYTES} table_walk_coherent={table_walk_coherent} send_iova={send_iova:#x} send_pa={:#x} receive_iova={receive_iova:#x} receive_pa={:#x} roundtrip=verified stale_fault_reason={:#x} retained_ram=unchanged teardown=IOTLB+TE-off-ack",
             send.physical_pages()[0],
@@ -833,7 +831,7 @@ impl Prepared<Function> {
         }
         let level = self
             .level
-            .ok_or_else(|| String::from("single fixture missing level preparation"))?
+            .ok_or_else(|| refuse!("single fixture missing level preparation"))?
             .run(function, self.edu_registers.start, self.clock)?;
         retire_registers(self.register_mappings)?;
         Ok((dma, format!("{irq}; {level}")))
@@ -853,12 +851,12 @@ impl RegisterSpan<'_> {
 }
 pub(crate) fn retire_registers(
     mappings: Vec<stela_drivers::bus::mmio::owned::Mapping>,
-) -> Result<(), String> {
+) -> Result<()> {
     for mut mapping in mappings {
         // SAFETY: callers just completed exact fixture DMA/IRQ/work/posted
         // drain and have released all callbacks; no access can restart.
         unsafe { mapping.retire() }
-            .map_err(|error| format!("fixture register retirement: {error:?}"))?;
+            .map_err(|error| refuse!("fixture register retirement: {error}", ?error))?;
     }
     Ok(())
 }
@@ -866,11 +864,12 @@ pub(crate) fn retire_registers(
 /// # Safety of the surrounding caller
 /// This exact fixture completed real device/DMA/IRQ/work/posted-write drain.
 /// No other view or callback can start using the original config mapping.
-pub(crate) fn retire_function(function: Function) -> Result<(), String> {
+pub(crate) fn retire_function(function: Function) -> Result<()> {
     let mut mapping = function.into_config().into_mapping();
     // SAFETY: all callers are final acknowledged fixture teardown, not a
     // vendor read or BM-disable guess. Busy/error keeps the original lease.
-    unsafe { mapping.retire() }.map_err(|error| format!("original config retirement: {error:?}"))
+    unsafe { mapping.retire() }
+        .map_err(|error| refuse!("original config retirement: {error}", ?error))
 }
 
 pub(crate) enum Report {
@@ -910,14 +909,9 @@ impl Device {
         // SAFETY: as for read64, with exclusive fixture ownership.
         unsafe { ((self.edu_registers.start + offset as u64) as *mut u64).write_volatile(value) };
     }
-    pub(super) fn transfer(
-        &self,
-        source: u64,
-        destination: u64,
-        to_ram: bool,
-    ) -> Result<(), String> {
+    pub(super) fn transfer(&self, source: u64, destination: u64, to_ram: bool) -> Result<()> {
         if self.read64(DMA_COMMAND) & DMA_RUN != 0 {
-            return Err(String::from("EDU DMA was already running"));
+            return Err(refuse!("EDU DMA was already running"));
         }
         self.write64(DMA_SOURCE, source);
         self.write64(DMA_DESTINATION, destination);
@@ -928,9 +922,7 @@ impl Device {
             .clock
             .wait(TIMEOUT_US, || self.read64(DMA_COMMAND) & DMA_RUN == 0)
         {
-            return Err(String::from(
-                "EDU DMA completion timeout; domain quarantined",
-            ));
+            return Err(refuse!("EDU DMA completion timeout; domain quarantined"));
         }
         Ok(())
     }

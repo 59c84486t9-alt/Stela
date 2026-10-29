@@ -1,5 +1,7 @@
 //! Firmware reservations and page-table construction for the engine handoff.
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 
 /// The relocated engine image and the host ranges its mappings must reach.
 pub(super) struct EngineImage {
@@ -28,12 +30,12 @@ pub(super) struct EngineMemory {
 }
 
 /// Copy and relocate the pristine image into the selected host window.
-pub(super) fn prepare_image() -> Result<EngineImage, &'static str> {
+pub(super) fn prepare_image() -> Result<EngineImage> {
     // SAFETY: written once at entry, read here.
-    let snapshot = unsafe { *PRISTINE.0.get() }.ok_or("no pristine image copy")?;
+    let snapshot = unsafe { *PRISTINE.0.get() }.ok_or(refuse!("no pristine image copy"))?;
     let image = firmware::Image::loaded()?;
     if image.start != snapshot.start || image.end - image.start != snapshot.bytes {
-        return Err("image layout changed after the snapshot");
+        return Err(refuse!("image layout changed after the snapshot"));
     }
     let engine = allocate(snapshot.bytes as u64)?;
     // SAFETY: two distinct live allocations of `bytes`.
@@ -56,8 +58,9 @@ pub(super) fn prepare_image() -> Result<EngineImage, &'static str> {
         .chain(core::iter::once(apic + PAGE))
         .max()
         .unwrap_or(0);
-    let placement = layout::choose(crate::cpu::LA57.present(), top)
-        .ok_or("host physical addresses lie beyond what any placement's physmap reaches")?;
+    let placement = layout::choose(crate::cpu::LA57.present(), top).ok_or(refuse!(
+        "host physical addresses lie beyond what any placement's physmap reaches"
+    ))?;
     layout::set(placement);
     relocate(
         engine.physical as usize,
@@ -81,7 +84,7 @@ pub(super) fn reserve(
     system: &System,
     cores: usize,
     ram: &[(usize, usize)],
-) -> Result<EngineMemory, &'static str> {
+) -> Result<EngineMemory> {
     let sizes = Sizes::for_host(free_ram()?, cores, system.parallel);
     let heap = allocate(sizes.heap)?;
     // The engine allocator uses this existing physmap directly. Prove the
@@ -93,22 +96,22 @@ pub(super) fn reserve(
                 .checked_add(heap.bytes)
                 .is_some_and(|top| top <= end as u64)
     }) {
-        return Err("engine heap is outside the retained RAM physmap");
+        return Err(refuse!("engine heap is outside the retained RAM physmap"));
     }
     let stacks = allocate(STACK_BYTES * cores as u64)?;
     let invocations = allocate(
         crate::native_smp::resources::invocation_stacks(cores)
-            .map_err(|_| "invalid native invocation-stack geometry")?
+            .map_err(|_| refuse!("invalid native invocation-stack geometry"))?
             .physical_bytes(),
     )?;
     use crate::native_smp::resources::{TaskAllocations, TaskPool};
     let prototype_bytes = if system.native_mmio_check {
         if cores != 1 {
-            return Err("mixed32 diagnostic requires one actual host core");
+            return Err(refuse!("mixed32 diagnostic requires one actual host core"));
         }
         Some(
             crate::native_smp::resources::prototype_tasks(layout::prototype_task_stacks())
-                .map_err(|_| "mixed32 diagnostic stack geometry overflow")?
+                .map_err(|_| refuse!("mixed32 diagnostic stack geometry overflow"))?
                 .raw_allocation_bytes(),
         )
     } else {
@@ -128,7 +131,7 @@ pub(super) fn reserve(
         invocations,
         tasks: native_task_allocations
             .region(TaskPool::Uniform)
-            .ok_or("task allocation absent")?,
+            .ok_or(refuse!("task allocation absent"))?,
         ..NativeResources::default()
     };
     // Only the existing explicit UP MMIO diagnostic requests this additional
@@ -144,10 +147,10 @@ pub(super) fn reserve(
             MemoryType::LOADER_CODE,
             1,
         )
-        .map_err(|_| "no owned SIPI page below 1 MiB")?;
+        .map_err(|_| refuse!("no owned SIPI page below 1 MiB"))?;
         let physical = page.as_ptr() as u64;
         if physical < PAGE {
-            return Err("SIPI page overlaps real-mode vector table");
+            return Err(refuse!("SIPI page overlaps real-mode vector table"));
         }
         // SAFETY: the allocation is owned by Stela through every AP's lifetime.
         unsafe {
@@ -196,7 +199,7 @@ pub(super) fn map(
     storage: Option<&stela_drivers::Handoff>,
     native_mmio: Option<&crate::native_mmio::Prepared>,
     host_firmware: &crate::host_firmware::Resources,
-) -> Result<Storage, &'static str> {
+) -> Result<Storage> {
     let EngineImage {
         snapshot,
         image,
@@ -284,7 +287,7 @@ pub(super) fn map(
             layout::invocation_stacks(),
             native_resources.invocations,
             crate::native_smp::resources::invocation_stacks(cores)
-                .map_err(|_| "invalid native invocation-stack geometry")?,
+                .map_err(|_| refuse!("invalid native invocation-stack geometry"))?,
         ),
         (
             layout::task_stacks(),
@@ -295,7 +298,7 @@ pub(super) fn map(
         for index in 0..geometry.count() {
             let slot = geometry
                 .slot(base, index)
-                .map_err(|_| "guarded stack virtual range overflow")?;
+                .map_err(|_| refuse!("guarded stack virtual range overflow"))?;
             tables::map_range(
                 frames,
                 root,
@@ -303,7 +306,7 @@ pub(super) fn map(
                 region.physical
                     + geometry
                         .physical_offset(index)
-                        .map_err(|_| "guarded stack physical offset overflow")?,
+                        .map_err(|_| refuse!("guarded stack physical offset overflow"))?,
                 slot.usable.end - slot.usable.start,
                 data,
             )?;
@@ -314,20 +317,22 @@ pub(super) fn map(
     {
         let geometry =
             crate::native_smp::resources::prototype_tasks(layout::prototype_task_stacks())
-                .map_err(|_| "mixed32 diagnostic virtual range overflow")?;
+                .map_err(|_| refuse!("mixed32 diagnostic virtual range overflow"))?;
         let raw = native_resources.prototype_tasks;
         let end = raw
             .physical
             .checked_add(raw.bytes)
-            .ok_or("mixed32 raw reservation wraps")?;
+            .ok_or(refuse!("mixed32 raw reservation wraps"))?;
         if raw.bytes != geometry.raw_allocation_bytes() {
-            return Err("mixed32 raw reservation size changed");
+            return Err(refuse!("mixed32 raw reservation size changed"));
         }
         for index in 0..geometry.count() {
-            let slot = geometry.slot(index).map_err(|_| "mixed32 slot overflow")?;
+            let slot = geometry
+                .slot(index)
+                .map_err(|_| refuse!("mixed32 slot overflow"))?;
             let backing = geometry
                 .backing(raw.physical..end, index)
-                .map_err(|_| "mixed32 backing alignment overflow")?;
+                .map_err(|_| refuse!("mixed32 backing alignment overflow"))?;
             tables::map_range(
                 frames,
                 root,
@@ -385,7 +390,8 @@ pub(super) fn map(
             let address = layout::bounce() + (slot * 2 + index) as u64 * PAGE;
             tables::map_page(frames, root, address, scratch, data)?;
             let entry = tables::entry(frames, root, address, 0, false)?;
-            native_resources.bounce[slot][index] = entry.ok_or("bounce slot unmapped")? as u64;
+            native_resources.bounce[slot][index] =
+                entry.ok_or(refuse!("bounce slot unmapped"))? as u64;
         }
     }
 

@@ -2,26 +2,30 @@
 //! KC2e4971c..2e497f4 reads at778, masks at784/790 and writes at7ac.
 //! Only Prepared may associate this control image with a live RAM drain.
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 
 impl Controller {
-    pub(crate) fn drain_control(&self, aperture: u8, offset: u64) -> Result<u32, &'static str> {
+    pub(crate) fn drain_control(&self, aperture: u8, offset: u64) -> Result<u32> {
         let state = self
             .0
             .try_borrow()
-            .map_err(|_| "DCS control image is borrowed")?;
+            .map_err(|_| refuse!("DCS control image is borrowed"))?;
         state.accessible()?;
         if state.origin != Origin::StelaInitialized
             || state.resource != CacheResource::Cacheless
             || !matches!(role(offset), Ok(Role::Drain))
         {
-            return Err("DCS drain has no initialized cacheless control image");
+            return Err(refuse!(
+                "DCS drain has no initialized cacheless control image"
+            ));
         }
         let word = state
             .words
             .get(&(aperture, offset))
-            .ok_or("DCS drain aperture is absent")?;
+            .ok_or(refuse!("DCS drain aperture is absent"))?;
         if word.known & 0xffff_0000 != 0xffff_0000 {
-            return Err("DCS drain opaque high control bits are unknown");
+            return Err(refuse!("DCS drain opaque high control bits are unknown"));
         }
         Ok(word.value as u32 & 0xffff_0000)
     }
@@ -35,18 +39,20 @@ impl Controller {
         offset: u64,
         written: u32,
         at: u64,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if written != self.drain_control(aperture, offset)? {
-            return Err("DCS flush must preserve high16 and clear both low bytes");
+            return Err(refuse!(
+                "DCS flush must preserve high16 and clear both low bytes"
+            ));
         }
         let mut state = self
             .0
             .try_borrow_mut()
-            .map_err(|_| "DCS control image is borrowed")?;
+            .map_err(|_| refuse!("DCS control image is borrowed"))?;
         let serial = state
             .serial
             .checked_add(1)
-            .ok_or("MCC request serial exhausted")?;
+            .ok_or(refuse!("MCC request serial exhausted"))?;
         let previous = state.words[&(aperture, offset)];
         state.requests.push(Request {
             serial,

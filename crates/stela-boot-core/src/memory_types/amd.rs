@@ -1,7 +1,9 @@
 //! AMD APM 24593 rev3.44 §§3.2.1,7.9: routing controls beyond common MTRRs.
 //! Common AMD64 controls are selected by vendor/capability observations;
 //! family names do not grant additional model-specific or encryption permission.
+use crate::Result;
 use crate::topology::Snapshot;
+use stela_contracts::refuse;
 
 pub const SYSCFG: u32 = 0xc001_0010;
 pub const IORR_BASE: u32 = 0xc001_0016;
@@ -56,9 +58,11 @@ pub struct State {
 }
 
 impl State {
-    pub fn from_snapshot(snapshot: &Snapshot, physical_bits: u8) -> Result<Self, &'static str> {
+    pub fn from_snapshot(snapshot: &Snapshot, physical_bits: u8) -> Result<Self> {
         if !architectural(snapshot) || !snapshot.amd_fixed_raw {
-            return Err("AMD64 controls or full fixed-DRAM observation is unqualified");
+            return Err(refuse!(
+                "AMD64 controls or full fixed-DRAM observation is unqualified"
+            ));
         }
         let register = |index| super::register(snapshot, index);
         let state = Self {
@@ -71,21 +75,23 @@ impl State {
             top_mem2: register(TOP_MEM2)?,
         };
         if state.syscfg & ENCRYPTION != 0 {
-            return Err("AMD encryption/SNP memory ownership is unqualified");
+            return Err(refuse!(
+                "AMD encryption/SNP memory ownership is unqualified"
+            ));
         }
         let address = ((1u64 << physical_bits) - 1) & !0xfff;
         if state.top_mem & !(address & !((1 << 23) - 1)) != 0
             || state.top_mem2 & !(address & !((1 << 23) - 1)) != 0
             || state.top_mem > 1 << 32
         {
-            return Err("unsupported AMD top-of-memory geometry");
+            return Err(refuse!("unsupported AMD top-of-memory geometry"));
         }
         for (base, mask) in state.iorr {
             if mask & (1 << 11) != 0 {
                 super::ranges::range(base, mask, physical_bits)?;
             }
             if base & !(address | 0x18) != 0 || mask & !(address | (1 << 11)) != 0 {
-                return Err("unsupported AMD IORR fields");
+                return Err(refuse!("unsupported AMD IORR fields"));
             }
         }
         if state.iorr.iter().all(|(_, mask)| mask & (1 << 11) != 0) {
@@ -93,7 +99,7 @@ impl State {
             // overlap rather than choose undocumented precedence.
             let [(left, lm), (right, rm)] = state.iorr;
             if (left ^ right) & lm & rm & address == 0 {
-                return Err("overlapping AMD IORRs are unqualified");
+                return Err(refuse!("overlapping AMD IORRs are unqualified"));
             }
         }
         Ok(state)
@@ -113,13 +119,15 @@ impl State {
 
     /// Per-processor opaque non-memory fields are held, never interpreted
     /// as feature permission or overwritten from a different processor.
-    pub fn compatible(self, other: Self) -> Result<(), &'static str> {
+    pub fn compatible(self, other: Self) -> Result<()> {
         if (self.syscfg ^ other.syscfg) & !FIXED_MODIFY != 0
             || self.iorr != other.iorr
             || self.top_mem != other.top_mem
             || self.top_mem2 != other.top_mem2
         {
-            return Err("AMD initial routing or opaque controls differ across selected cores");
+            return Err(refuse!(
+                "AMD initial routing or opaque controls differ across selected cores"
+            ));
         }
         Ok(())
     }

@@ -2,7 +2,9 @@
 //! One selected logical processor owns each physical core; SMT siblings never
 //! increase the number of guest PEs admitted by this native executor.
 
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 /// Physical cores the native executor can own. Hosts with more physical
 /// cores run on the first `MAX_CORES` of `select`'s order.
@@ -11,11 +13,13 @@ pub const MAX_CORES: usize = 64;
 /// Physical cores the executor owns from `available` discovered cores.
 /// Without a request this is `min(available, MAX_CORES)`; an explicit count
 /// narrows it and refuses when it exceeds either bound.
-pub fn assignment_count(requested: Option<usize>, available: usize) -> Result<usize, &'static str> {
+pub fn assignment_count(requested: Option<usize>, available: usize) -> Result<usize> {
     let assignable = available.min(MAX_CORES);
     let count = requested.unwrap_or(assignable);
     if assignable == 0 || count == 0 || count > assignable {
-        return Err("native assignment is outside the actual physical-core roster");
+        return Err(refuse!(
+            "native assignment is outside the actual physical-core roster"
+        ));
     }
     Ok(count)
 }
@@ -33,7 +37,7 @@ pub fn guest_assignment_count(
     requested: Option<usize>,
     available: usize,
     source_slots: usize,
-) -> Result<usize, &'static str> {
+) -> Result<usize> {
     assignment_count(requested, available.min(source_slots))
 }
 

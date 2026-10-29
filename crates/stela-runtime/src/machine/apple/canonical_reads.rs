@@ -62,7 +62,7 @@ impl AppleDevices {
             // no RAM copy, new submission or native resume while it is held.
             // Each resource also checks this exact RAM identity and generation.
             unsafe { owner.read_ram_drain(offset, width, memory.memory()) }
-                .map_err(|reason| DeviceError::TransferRefused(reason.into()))
+                .map_err(DeviceError::TransferRefused)
         } else {
             self.bus
                 .read(physical, width, &mut access)

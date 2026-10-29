@@ -1,13 +1,13 @@
 //! RTC publication, board-entry time correlation and the watchdogs.
 
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 
 impl AppleDevices {
     pub(super) fn publish_rtc_time(&self, now: u64) -> Result<(), DeviceError> {
         if let Some(clock) = &self.rtc_clock {
-            clock
-                .publish(now)
-                .map_err(|reason| DeviceError::Refused(reason.into()))?;
+            clock.publish(now).map_err(DeviceError::Refused)?;
         }
         Ok(())
     }
@@ -77,51 +77,61 @@ impl AppleDevices {
         side: Option<&stela_soc_data::board::WatchdogSide>,
         irq: Option<AicInput>,
         now: u64,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let Some(side) = side else {
             return self
                 .add_watchdog(&[range], irq, now)
-                .map_err(|e| format!("{e:?}"));
+                .map_err(|error| refuse!("watchdog placement: {error}", ?error));
         };
         if !(2..=4).contains(&side.words.len()) {
-            return Err("watchdog side controls require two to four complete words".into());
+            return Err(refuse!(
+                "watchdog side controls require two to four complete words"
+            ));
         }
         let shared_flags = side.words.len() == 4 && side.words[0] == side.words[3];
         let end = range
             .physical
             .checked_add(range.bytes)
-            .ok_or("watchdog primary extent overflows")?;
+            .ok_or(refuse!("watchdog primary extent overflows"))?;
         for (index, &physical) in side.words.iter().enumerate() {
             let last = physical
                 .checked_add(4)
-                .ok_or("watchdog side extent overflows")?;
+                .ok_or(refuse!("watchdog side extent overflows"))?;
             if !physical.is_multiple_of(4) {
-                return Err("watchdog side word is unaligned".into());
+                return Err(refuse!("watchdog side word is unaligned"));
             }
             if physical < end && range.physical < last {
-                return Err("watchdog side word overlaps primary timer registers".into());
+                return Err(refuse!(
+                    "watchdog side word overlaps primary timer registers"
+                ));
             }
             if side.words[..index].contains(&physical) && !(shared_flags && index == 3) {
-                return Err("watchdog side alias lacks a qualified shared register owner".into());
+                return Err(refuse!(
+                    "watchdog side alias lacks a qualified shared register owner"
+                ));
             }
         }
         let mut triggers = Vec::new();
         for &(physical, mask, value) in &side.triggers {
             let last = physical
                 .checked_add(4)
-                .ok_or("watchdog trigger extent overflows")?;
+                .ok_or(refuse!("watchdog trigger extent overflows"))?;
             if !physical.is_multiple_of(4) || mask == 0 || value & !mask != 0 {
-                return Err("watchdog trigger word or mask is invalid".into());
+                return Err(refuse!("watchdog trigger word or mask is invalid"));
             }
             if (physical < end && range.physical < last) || side.words.contains(&physical) {
-                return Err("watchdog trigger aliases a different register role".into());
+                return Err(refuse!(
+                    "watchdog trigger aliases a different register role"
+                ));
             }
             if let Some(&previous) = triggers
                 .iter()
                 .find(|&&(address, _, _)| address == physical)
             {
                 if previous != (physical, mask, value) {
-                    return Err("watchdog shared trigger has conflicting configurations".into());
+                    return Err(refuse!(
+                        "watchdog shared trigger has conflicting configurations"
+                    ));
                 }
             } else {
                 triggers.push((physical, mask, value));
@@ -132,7 +142,8 @@ impl AppleDevices {
             model = model.with_shared_panic_flags();
         }
         let device = self.bus.add(Box::new(model));
-        self.map(device, &[range]).map_err(|e| format!("{e:?}"))?;
+        self.map(device, &[range])
+            .map_err(|error| refuse!("watchdog placement: {error}", ?error))?;
         let offsets = [
             wdt::PANIC_SAVE,
             wdt::MECHANISM,
@@ -141,16 +152,24 @@ impl AppleDevices {
         ];
         for (index, (&physical, offset)) in side.words.iter().zip(offsets).enumerate() {
             if !(shared_flags && index == 3) {
-                self.bus
-                    .map(device, physical, 4, offset)
-                    .map_err(|e| format!("{e:?}"))?;
+                self.bus.map(device, physical, 4, offset).map_err(|error| {
+                    refuse!(
+                        "watchdog side word at {physical:#x}: {error}",
+                        physical,
+                        ?error
+                    )
+                })?;
             }
         }
         for (physical, mask, _) in triggers {
             let trigger = self.bus.add(Box::new(wdt::CoreTrigger::new(mask)));
-            self.bus
-                .map(trigger, physical, 4, 0)
-                .map_err(|e| format!("{e:?}"))?;
+            self.bus.map(trigger, physical, 4, 0).map_err(|error| {
+                refuse!(
+                    "watchdog core trigger at {physical:#x}: {error}",
+                    physical,
+                    ?error
+                )
+            })?;
         }
         Ok(())
     }

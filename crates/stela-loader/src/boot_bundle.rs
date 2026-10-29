@@ -128,13 +128,13 @@ impl Inputs<'_> {
     /// The guest DRAM base of the target board, from its DeviceTree or its
     /// SoC (`board::board_dram_base`); `None` when the target names no chip.
     pub fn dram_base(&self) -> Result<Option<u64>> {
-        self.target
-            .chip_id
-            .map(|chip_id| {
-                stela_soc_data::board::board_dram_base(self.device_tree.bytes, chip_id)
-                    .map_err(|reason| refuse!("{reason}", reason).into())
-            })
-            .transpose()
+        let Some(chip_id) = self.target.chip_id else {
+            return Ok(None);
+        };
+        Ok(Some(stela_soc_data::board::board_dram_base(
+            self.device_tree.bytes,
+            chip_id,
+        )?))
     }
 }
 

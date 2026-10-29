@@ -1,7 +1,9 @@
 //! Explicit native UAS reset diagnostic before block-device type erasure.
 //! No alternate enumeration or recovery behavior is enabled in normal boots.
+use crate::Result;
 use crate::output;
 use alloc::{boxed::Box, vec, vec::Vec};
+use stela_contracts::refuse;
 use stela_drivers::{
     Handoff,
     block::BlockDevice,
@@ -25,7 +27,7 @@ pub(super) unsafe fn probe_and_reset(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
     target: &Target,
-) -> Result<Devices, &'static str> {
+) -> Result<Devices> {
     let mut owners = Vec::<xhci::Found>::new();
     let mut replacement = Vec::<UsbDisk>::new();
     let mut fresh_storage = Vec::new();
@@ -33,7 +35,7 @@ pub(super) unsafe fn probe_and_reset(
     let result = (|| {
         for window in &handoff.ecam {
             if !handoff.is_mapped(&window.range()) {
-                return Err("USB reset check requires mapped ECAM");
+                return Err(refuse!("USB reset check requires mapped ECAM"));
             }
             // SAFETY: caller owns the mapped ECAM and native devices.
             for mut function in unsafe { Function::enumerate(window) } {
@@ -52,11 +54,11 @@ pub(super) unsafe fn probe_and_reset(
                 if device.identity().serial == target.serial
                     && selected.replace((controller, disk)).is_some()
                 {
-                    return Err("USB reset check target serial is ambiguous");
+                    return Err(refuse!("USB reset check target serial is ambiguous"));
                 }
             }
         }
-        let (controller, disk) = selected.ok_or("USB reset check target was not found")?;
+        let (controller, disk) = selected.ok_or(refuse!("USB reset check target was not found"))?;
         let original = &mut owners[controller].disks[disk];
         let identity = original.identity().clone();
         let mut before = vec![0; identity.block_size as usize];
@@ -73,7 +75,7 @@ pub(super) unsafe fn probe_and_reset(
             output::arguments(format_args!("USB RESET FAILED {location}: {error}\n"));
         }
         if !failures.is_empty() {
-            return Err("USB reset fresh SCSI discovery failed");
+            return Err(refuse!("USB reset fresh SCSI discovery failed"));
         }
         // The original object remains alive. Its old epoch must never submit
         // to a replacement slot, even when the hardware offered that ID again.
@@ -82,7 +84,7 @@ pub(super) unsafe fn probe_and_reset(
             || original.flush().is_ok()
             || retired_buffer.iter().any(|byte| *byte != 0xa5)
         {
-            return Err("USB reset allowed the retired disk to perform I/O");
+            return Err(refuse!("USB reset allowed the retired disk to perform I/O"));
         }
         let mut matching = replacement.iter_mut().filter(|device| {
             device.identity().serial == identity.serial
@@ -90,21 +92,23 @@ pub(super) unsafe fn probe_and_reset(
         });
         let fresh = matching
             .next()
-            .ok_or("USB reset lost the selected logical unit")?;
+            .ok_or(refuse!("USB reset lost the selected logical unit"))?;
         if matching.next().is_some() {
-            return Err("USB reset produced ambiguous replacement logical units");
+            return Err(refuse!(
+                "USB reset produced ambiguous replacement logical units"
+            ));
         }
         if fresh.identity().blocks != identity.blocks
             || fresh.identity().block_size != identity.block_size
         {
-            return Err("USB reset diagnostic media geometry changed");
+            return Err(refuse!("USB reset diagnostic media geometry changed"));
         }
         let mut after = vec![0; fresh.identity().block_size as usize];
         fresh
             .read(0, &mut after)
             .map_err(|error| failure("read after USB reset", error))?;
         if before != after {
-            return Err("USB reset changed the first disk block");
+            return Err(refuse!("USB reset changed the first disk block"));
         }
         fresh
             .flush()

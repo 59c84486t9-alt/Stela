@@ -1,6 +1,8 @@
 //! One scoped ownership transfer to one fixed physical AP. Erasure is private;
 //! the heap-pinned job keeps the non-'static native frame loan.
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 use stela_engine::machine::engine::publication;
 use stela_engine::machine::engine::publication::NativeFrame;
 use stela_engine::machine::engine::publication::NativeLoan;
@@ -178,14 +180,14 @@ impl Processor {
         ram: alloc::sync::Arc<stela_engine::memory::RegisteredSystemRam>,
         sender: &Apic,
         tsc_hz: u64,
-    ) -> Result<publication::InitialPublication, &'static str> {
+    ) -> Result<publication::InitialPublication> {
         let command = Initial {
             owner,
             apic: self.apic_id() as u32,
             ram,
         };
         self.send(command, sender, tsc_hz)
-            .map_err(|_| "native initialization transport busy")?
+            .map_err(|_| refuse!("native initialization transport busy"))?
             .finish()
     }
     /// # Safety
@@ -256,10 +258,10 @@ impl Processor {
         work: Box<dyn FnOnce(&mut host::HostOwner) + Send>,
         sender: &Apic,
         tsc_hz: u64,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         let pending = self
             .send(Spawned(work), sender, tsc_hz)
-            .map_err(|_| "AP mailbox busy")?;
+            .map_err(|_| refuse!("AP mailbox busy"))?;
         // Its drop would wait for a return that never comes; the leaked job
         // stays where the AP reads it.
         core::mem::forget(pending);
@@ -303,14 +305,14 @@ struct Initial {
     ram: alloc::sync::Arc<stela_engine::memory::RegisteredSystemRam>,
 }
 impl Command for Initial {
-    type Output = Result<publication::InitialPublication, &'static str>;
+    type Output = Result<publication::InitialPublication>;
     fn execute(
         mut self,
         host: &mut host::HostOwner,
         owner: &mut Option<WorkerOwner>,
     ) -> Self::Output {
         if owner.is_some() {
-            return Err("native worker already initialized");
+            return Err(refuse!("native worker already initialized"));
         }
         // Check the same physical bytes in this AP's MMU and
         // cache controls before its owner publishes any runtime admission.
@@ -319,7 +321,7 @@ impl Command for Initial {
             // SAFETY: fixed pristine AP owner; the caller keeps the canonical
             // reservation and its complete closed all-writer contract.
             unsafe { crate::native_memory::qualify_reserved_writeback(cpu, physical, bytes) }
-                .map_err(|_| "AP canonical RAM effective cache type refused")?;
+                .map_err(|_| refuse!("AP canonical RAM effective cache type refused"))?;
         }
         // SAFETY: same canonical owner, no raw guest dispatch/DMA;
         // this pristine physical Host remains pinned through all later loans.
@@ -328,7 +330,7 @@ impl Command for Initial {
         let published = self
             .owner
             .publish_initial(&mut host.host())
-            .map_err(|_| "native initial publication refused")?;
+            .map_err(|_| refuse!("native initial publication refused"))?;
         *owner = Some(self.owner);
         Ok(published)
     }

@@ -1,6 +1,7 @@
 //! PTD effects, never service replies inferred from a resource request.
 use super::{Error, Operation, Packets, Value};
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 use {
     crate::platform::apple::ptd::transport::notifications::LocalNotifications,
     stela_contracts::bus::Access, stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,
@@ -63,7 +64,9 @@ pub(super) fn apply(
                 Value::Constant(value) => value,
                 Value::Packet(index) => {
                     packets
-                        .ok_or(Error::Contract("PMP publication has no refreshed state"))?
+                        .ok_or(Error::Contract(refuse!(
+                            "PMP publication has no refreshed state"
+                        )))?
                         .0[index]
                 }
             };
@@ -82,8 +85,8 @@ pub(super) fn apply(
         Operation::Enable { offset, mask } => bank
             .write(offset, Width::Word, u64::from(mask), access)
             .map_err(Error::Mmio),
-        _ => Err(Error::Contract(
-            "PMP transport received a resource operation",
-        )),
+        _ => Err(Error::Contract(refuse!(
+            "PMP transport received a resource operation"
+        ))),
     }
 }

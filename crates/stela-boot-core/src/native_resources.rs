@@ -1,6 +1,8 @@
 //! Stack geometry and the per-executor partition of the code arena and
 //! shadow pool. Each executor owns its own ranges; none is shared.
+use crate::Result;
 use crate::topology::MAX_CORES;
+use stela_contracts::refuse;
 
 const PAGE: u64 = 4096;
 
@@ -80,9 +82,9 @@ pub fn partition(
     code: u64,
     pool: u64,
     serialized: bool,
-) -> Result<Partition, &'static str> {
+) -> Result<Partition> {
     if cores == 0 || cores > MAX_CORES || slot >= cores {
-        return Err("invalid native executor slot");
+        return Err(refuse!("invalid native executor slot"));
     }
     let workers = cores as u64 - 1;
     // Each host ring has eight 16-byte-aligned code units. Each shadow pool
@@ -116,7 +118,7 @@ pub fn partition(
         )
     };
     if code_bytes < 128 || pool_bytes < 66 * PAGE {
-        return Err("native executor resources too small");
+        return Err(refuse!("native executor resources too small"));
     }
     Ok(Partition {
         code_offset,

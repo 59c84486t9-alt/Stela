@@ -1,6 +1,7 @@
 //! Semantic projection of original generic descriptor data, not executable code.
 use super::{CounterReference, Descriptor, Error, Ordinal};
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frequency {
     pub(super) references: [CounterReference; 2],
@@ -393,9 +394,9 @@ impl Configuration {
                 auxiliaries.push(Auxiliary::empty());
             }
             _ => {
-                return Err(Error::Contract(
-                    "generic source ordinal outside T8112 registry",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "generic source ordinal outside T8112 registry"
+                )));
             }
         }
         // Initializer1019c54..9c90 only enables ratio when each metric group exists.

@@ -6,7 +6,10 @@
 //! Native performance/APSC, DVMR, throttling and autonomous counter execution
 //! require their controller owner; neither zero nor a cleared BUSY is
 //! manufactured to satisfy the driver's polls.
+use crate::Result;
 use alloc::{collections::BTreeMap, vec::Vec};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -96,13 +99,11 @@ pub struct T6000 {
     words: BTreeMap<u64, u64>,
 }
 impl T6000 {
-    pub fn new(
-        complex: Complex,
-        states: usize,
-        image: &[(u64, u64)],
-    ) -> Result<Self, &'static str> {
+    pub fn new(complex: Complex, states: usize, image: &[(u64, u64)]) -> Result<Self> {
         if states == 0 || states > STATE_CAPACITY {
-            return Err("T6000 state table exceeds the native four-bit selector");
+            return Err(refuse!(
+                "T6000 state table exceeds the native four-bit selector"
+            ));
         }
         let mut roles = BTreeMap::new();
         roles.insert(COMMAND, Role::Command);
@@ -148,40 +149,50 @@ impl T6000 {
         for &(offset, value) in image {
             let role = model.role(offset, Width::Double)?;
             if model.words.contains_key(&offset) {
-                return Err("T6000 cluster image repeats a physical word");
+                return Err(refuse!("T6000 cluster image repeats a physical word"));
             }
             match role {
                 Role::Restore => {
-                    return Err("T6000 CPM restore command has no qualified image/readback");
+                    return Err(refuse!(
+                        "T6000 CPM restore command has no qualified image/readback"
+                    ));
                 }
                 Role::Command if value & (BUSY | SET | APSC_PENDING | DVMR_PENDING) != 0 => {
-                    return Err(
-                        "T6000 cluster image has pending work without native controller context",
-                    );
+                    return Err(refuse!(
+                        "T6000 cluster image has pending work without native controller context"
+                    ));
                 }
                 Role::Command if value & APSC_DISABLE == 0 => {
-                    return Err(
-                        "T6000 enabled APSC requires its actual controller execution owner",
-                    );
+                    return Err(refuse!(
+                        "T6000 enabled APSC requires its actual controller execution owner"
+                    ));
                 }
                 Role::Dvmr if value & complex.dvmr_mask() != 0 => {
-                    return Err(
-                        "T6000 enabled DVMR requires its actual controller execution owner",
-                    );
+                    return Err(refuse!(
+                        "T6000 enabled DVMR requires its actual controller execution owner"
+                    ));
                 }
                 Role::CounterEnable if value & COUNTERS != 0 => {
-                    return Err("T6000 enabled residency counters require actual event ownership");
+                    return Err(refuse!(
+                        "T6000 enabled residency counters require actual event ownership"
+                    ));
                 }
                 Role::EnergyEnable if value & ENERGY_COUNTERS != 0 => {
-                    return Err("T6000 enabled energy counters require actual event ownership");
+                    return Err(refuse!(
+                        "T6000 enabled energy counters require actual event ownership"
+                    ));
                 }
                 Role::Throttler if value >> 63 != 0 => {
-                    return Err("T6000 enabled throttling requires actual clock/thermal ownership");
+                    return Err(refuse!(
+                        "T6000 enabled throttling requires actual clock/thermal ownership"
+                    ));
                 }
                 _ => {}
             }
             if role == Role::Command && value & STATE >= states as u64 {
-                return Err("T6000 image selects a state outside its actual table");
+                return Err(refuse!(
+                    "T6000 image selects a state outside its actual table"
+                ));
             }
             model.words.insert(offset, value);
         }
@@ -200,7 +211,7 @@ impl T6000 {
                 .collect(),
         }
     }
-    pub fn restore(image: &Snapshot) -> Result<Self, &'static str> {
+    pub fn restore(image: &Snapshot) -> Result<Self> {
         Self::new(image.complex, image.states, &image.words)
     }
     /// Full64 logical words only; the mount routes each whole word
@@ -209,92 +220,102 @@ impl T6000 {
         self.roles.keys().copied()
     }
 
-    fn role(&self, offset: u64, width: Width) -> Result<Role, &'static str> {
+    fn role(&self, offset: u64, width: Width) -> Result<Role> {
         if width != Width::Double {
-            return Err("T6000 ACC/CPM access is not full64");
+            return Err(refuse!("T6000 ACC/CPM access is not full64"));
         }
         self.roles
             .get(&offset)
             .copied()
-            .ok_or("T6000 ACC/CPM logical register is not qualified")
+            .ok_or(refuse!("T6000 ACC/CPM logical register is not qualified"))
     }
-    fn known(&self, offset: u64) -> Result<u64, &'static str> {
+    fn known(&self, offset: u64) -> Result<u64> {
         self.words
             .get(&offset)
             .copied()
-            .ok_or("T6000 ACC/CPM handoff word is unknown")
+            .ok_or(refuse!("T6000 ACC/CPM handoff word is unknown"))
     }
-    fn disabled(&self, offset: u64, mask: u64) -> Result<(), &'static str> {
+    fn disabled(&self, offset: u64, mask: u64) -> Result<()> {
         if self.known(offset)? & mask != 0 {
-            return Err("T6000 autonomous register source is not disabled");
+            return Err(refuse!("T6000 autonomous register source is not disabled"));
         }
         Ok(())
     }
-    fn inactive_apsc(&self) -> Result<(), &'static str> {
+    fn inactive_apsc(&self) -> Result<()> {
         let command = self.known(COMMAND)?;
         if command & (BUSY | SET | APSC_PENDING | DVMR_PENDING) != 0 || command & APSC_DISABLE == 0
         {
-            return Err("T6000 state-table update requires actual quiescent disabled APSC");
+            return Err(refuse!(
+                "T6000 state-table update requires actual quiescent disabled APSC"
+            ));
         }
         Ok(())
     }
-    fn readable(&self, role: Role) -> Result<(), &'static str> {
+    fn readable(&self, role: Role) -> Result<()> {
         match role {
             Role::Counter => self.disabled(COUNTER_ENABLE, COUNTERS),
             Role::Energy => self.disabled(ENERGY_ENABLE, ENERGY_COUNTERS),
-            Role::Restore => Err("T6000 CPM restore command readback is not qualified"),
+            Role::Restore => Err(refuse!(
+                "T6000 CPM restore command readback is not qualified"
+            )),
             _ => Ok(()),
         }
     }
     /// Pure whole-word preflight. No trigger is accepted without its
     /// native execution/retirement owner, and no status bit is cleared here.
-    pub fn check_write(&self, offset: u64, width: Width, value: u64) -> Result<(), &'static str> {
+    pub fn check_write(&self, offset: u64, width: Width, value: u64) -> Result<()> {
         let role = self.role(offset, width)?;
         match role {
             Role::Command => {
                 let old = self.known(offset)?;
                 if value != old {
-                    return Err(
-                        "T6000 performance/APSC request requires actual native controller effects and retirement",
-                    );
+                    return Err(refuse!(
+                        "T6000 performance/APSC request requires actual native controller effects and retirement"
+                    ));
                 }
             }
             Role::Autonomous => {
                 if value != self.known(offset)? {
-                    return Err(
-                        "T6000 autonomous or cross-complex control effects are not qualified",
-                    );
+                    return Err(refuse!(
+                        "T6000 autonomous or cross-complex control effects are not qualified"
+                    ));
                 }
             }
             Role::Dvmr | Role::Throttler => {
                 let old = self.known(offset)?;
                 if value != old {
-                    return Err(
-                        "T6000 DVMR/throttler control requires actual controller ownership",
-                    );
+                    return Err(refuse!(
+                        "T6000 DVMR/throttler control requires actual controller ownership"
+                    ));
                 }
             }
             Role::StateTable => self.inactive_apsc()?,
             Role::Weight => self.disabled(DVMR_CONTROL, self.complex.dvmr_mask())?,
             Role::CounterEnable => {
                 if value & COUNTERS != 0 {
-                    return Err("T6000 residency counter events are not connected");
+                    return Err(refuse!("T6000 residency counter events are not connected"));
                 }
                 if (value ^ self.known(offset)?) & !COUNTERS != 0 {
-                    return Err("T6000 counter write changes unqualified preserved fields");
+                    return Err(refuse!(
+                        "T6000 counter write changes unqualified preserved fields"
+                    ));
                 }
             }
             Role::EnergyEnable => {
                 if value & ENERGY_COUNTERS != 0 {
-                    return Err("T6000 energy counter events are not connected");
+                    return Err(refuse!("T6000 energy counter events are not connected"));
                 }
                 if (value ^ self.known(offset)?) & !ENERGY_COUNTERS != 0 {
-                    return Err("T6000 energy enable write changes unqualified preserved fields");
+                    return Err(refuse!(
+                        "T6000 energy enable write changes unqualified preserved fields"
+                    ));
                 }
             }
             Role::Counter | Role::Energy => self.readable(role)?,
             Role::Restore => {
-                return Err("T6000 CPM restore requires actual electrical effects and retirement");
+                return Err(refuse!(
+                    "T6000 CPM restore requires actual electrical effects and retirement"
+                ));
             }
         }
         Ok(())
@@ -305,7 +326,7 @@ impl MmioDevice for T6000 {
         NAME
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         let role = self.role(offset, width).map_err(fail)?;
         self.readable(role).map_err(fail)?;
         self.known(offset).map_err(fail)

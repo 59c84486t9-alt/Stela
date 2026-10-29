@@ -1,6 +1,8 @@
 //! Cold checked entry and consuming device reads on one physical BSP.
 //! No ARM warmup/legacy V1 instruction runs before canonical conversion.
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 use stela_engine::machine::engine::{
     CanonicalDeviceMemory, ConsumedPair, ConsumedScalar, DeviceReadShape,
 };
@@ -146,11 +148,11 @@ pub(super) unsafe fn check(
     executors: &Executors,
     owner: &mut host::HostOwner,
     sender: &Apic,
-) -> Result<(), &'static str> {
+) -> Result<()> {
     let reservation = handoff.guest[..handoff.guest_count]
         .iter()
         .find(|region| region.bytes >= source::BYTES as u64)
-        .ok_or("cold fixture has no actual loader RAM reservation")?;
+        .ok_or(refuse!("cold fixture has no actual loader RAM reservation"))?;
     let range = host::RamRange {
         guest: source::BASE,
         host: reservation.physical,
@@ -190,7 +192,7 @@ pub(super) unsafe fn check(
     let code: Vec<_> = words.iter().copied().flat_map(u32::to_le_bytes).collect();
     // SAFETY: before first guest entry, fixture owns the whole RAM.
     unsafe { ram.publish_physical(source::CODE, &code) }
-        .map_err(|_| "cold source publication refused")?;
+        .map_err(|_| refuse!("cold source publication refused"))?;
     let mut cpu = Cpu::of(Chip::AppleM1, source::CODE, Pstate::reset(2));
     for (index, vector) in cpu.state.v.iter_mut().enumerate() {
         *vector = [0x10203040 + index as u64, !(index as u64)];
@@ -236,7 +238,9 @@ pub(super) unsafe fn check(
             "NATIVE COLD unexpected {stopped:?} reads={}\n",
             machine.devices.reads
         ));
-        return Err("cold source did not reach expected post-consume settlement failure");
+        return Err(refuse!(
+            "cold source did not reach expected post-consume settlement failure"
+        ));
     }
     let mut expected = before;
     expected.x[0] = VALUE;
@@ -291,7 +295,9 @@ pub(super) unsafe fn check(
             })
         || machine.cpu.pstate != Pstate::reset(2)
     {
-        return Err("cold complete frame/data/writeback/retirement mismatch");
+        return Err(refuse!(
+            "cold complete frame/data/writeback/retirement mismatch"
+        ));
     }
     // SAFETY: no device read is pending, so this only checks that a completion is refused.
     if unsafe { machine.complete_device_read() }.is_ok()
@@ -306,7 +312,9 @@ pub(super) unsafe fn check(
             .map(|progress| progress.completed_flushes)
             != Some(1)
     {
-        return Err("cold consumed read replayed or resumed after failed settlement");
+        return Err(refuse!(
+            "cold consumed read replayed or resumed after failed settlement"
+        ));
     }
     crate::output::arguments(format_args!(
         "CHECK native-cold PASS actual_BSP=1 warmup=none live_ADT_publish=canonical checked_Device_RAM=store+load CPU_DSB=1 actual_MCC_drain=1 actual_empty_cache_flush=1 consumed_reads=4 scalar_signextend=1 pair_writeback=2 postfailure_retired=1 full_frame=preserved replay=refused; no macOS/SMP/DRAM completion claim\n"

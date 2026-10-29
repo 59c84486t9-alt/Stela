@@ -23,6 +23,7 @@ use crate::{
 };
 use alloc::{format, string::String, vec::Vec};
 use core::time::Duration;
+use stela_contracts::refuse;
 use stela_loader::mount_interface::{
     CHOICES_FILE, CHOSEN_DISK, ChoiceKind, Choices, DISK_FILE, with_disk,
 };
@@ -124,9 +125,9 @@ fn read(volume: &mut FileSystem) -> Option<Choices> {
     }
     let choices = volume
         .read(&path)
-        .map_err(|_| "cannot read choices.cfg")
-        .and_then(|bytes| String::from_utf8(bytes).map_err(|_| "choices.cfg is not UTF-8"))
-        .and_then(|text| Choices::parse(&text));
+        .map_err(|_| refuse!("cannot read choices.cfg"))
+        .and_then(|bytes| String::from_utf8(bytes).map_err(|_| refuse!("choices.cfg is not UTF-8")))
+        .and_then(|text| Ok(Choices::parse(&text)?));
     match choices {
         Ok(choices) => Some(choices),
         Err(error) => {

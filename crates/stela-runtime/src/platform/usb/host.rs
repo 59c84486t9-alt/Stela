@@ -3,7 +3,9 @@
 //! tuple ff/fe/02 is from AppleUSBDeviceMux::start, KC file 0x321fc60..cb8,
 //! independently matched by usbmuxd 3ded00c `src/usb.c` descriptor discovery.
 use super::{BusPeer, MAX_PACKET, Reply, Token};
+use crate::Result;
 use alloc::{collections::VecDeque, vec, vec::Vec};
+use stela_contracts::refuse;
 
 const EP0_PACKET: usize = 64;
 const MAX_DESCRIPTOR: usize = 8192;
@@ -84,14 +86,14 @@ pub struct MuxEndpoints {
 
 /// Strict walk of one configuration; endpoint numbers are never constants.
 /// Alternate settings other than zero require SET_INTERFACE and stay explicit.
-pub fn mux_endpoints(bytes: &[u8]) -> Result<Option<MuxEndpoints>, &'static str> {
+pub fn mux_endpoints(bytes: &[u8]) -> Result<Option<MuxEndpoints>> {
     if bytes.len() < 9
         || bytes[0] != 9
         || bytes[1] != CONFIGURATION
         || usize::from(u16::from_le_bytes([bytes[2], bytes[3]])) != bytes.len()
         || bytes[5] == 0
     {
-        return Err("invalid USB configuration header or total length");
+        return Err(refuse!("invalid USB configuration header or total length"));
     }
     let mut found = None;
     let mut interface = None;
@@ -102,20 +104,20 @@ pub fn mux_endpoints(bytes: &[u8]) -> Result<Option<MuxEndpoints>, &'static str>
     while offset < bytes.len() {
         let size = usize::from(bytes[offset]);
         if size < 2 || size > bytes.len() - offset {
-            return Err("truncated or zero-length USB descriptor");
+            return Err(refuse!("truncated or zero-length USB descriptor"));
         }
         let descriptor = &bytes[offset..offset + size];
         match descriptor[1] {
             4 => {
                 if size != 9 {
-                    return Err("invalid USB interface descriptor length");
+                    return Err(refuse!("invalid USB interface descriptor length"));
                 }
                 if interface.is_some() && (input.is_none() || output.is_none()) {
-                    return Err("mux interface lacks opposite bulk endpoints");
+                    return Err(refuse!("mux interface lacks opposite bulk endpoints"));
                 }
                 interface = if descriptor[3] == 0 && descriptor[5..8] == [0xff, 0xfe, 2] {
                     if descriptor[4] != 2 {
-                        return Err("mux interface requires two endpoints");
+                        return Err(refuse!("mux interface requires two endpoints"));
                     }
                     Some(descriptor[2])
                 } else {
@@ -126,16 +128,18 @@ pub fn mux_endpoints(bytes: &[u8]) -> Result<Option<MuxEndpoints>, &'static str>
             }
             5 if interface.is_some() => {
                 if size != 7 || descriptor[3] != 2 {
-                    return Err("mux endpoint is not a USB2 bulk endpoint");
+                    return Err(refuse!("mux endpoint is not a USB2 bulk endpoint"));
                 }
                 let address = descriptor[2];
                 let packet = u16::from_le_bytes([descriptor[4], descriptor[5]]);
                 if address & 0x70 != 0 || address & 0xf == 0 || packet != MAX_PACKET as u16 {
-                    return Err("invalid high-speed bulk endpoint address or max packet");
+                    return Err(refuse!(
+                        "invalid high-speed bulk endpoint address or max packet"
+                    ));
                 }
                 let bit = u32::from(address & 0xf) * 2 + u32::from(address & 0x80 != 0);
                 if addresses & (1 << bit) != 0 {
-                    return Err("duplicate USB mux endpoint address");
+                    return Err(refuse!("duplicate USB mux endpoint address"));
                 }
                 addresses |= 1 << bit;
                 let slot = if address & 0x80 != 0 {
@@ -144,13 +148,13 @@ pub fn mux_endpoints(bytes: &[u8]) -> Result<Option<MuxEndpoints>, &'static str>
                     &mut output
                 };
                 if slot.replace((address, packet)).is_some() {
-                    return Err("duplicate USB mux endpoint direction");
+                    return Err(refuse!("duplicate USB mux endpoint direction"));
                 }
                 if let (Some((input, input_packet)), Some((output, output_packet))) =
                     (input, output)
                 {
                     if found.is_some() {
-                        return Err("ambiguous USB mux interfaces");
+                        return Err(refuse!("ambiguous USB mux interfaces"));
                     }
                     found = Some(MuxEndpoints {
                         configuration: bytes[5],
@@ -167,7 +171,7 @@ pub fn mux_endpoints(bytes: &[u8]) -> Result<Option<MuxEndpoints>, &'static str>
         offset += size;
     }
     if interface.is_some() && (input.is_none() || output.is_none()) {
-        return Err("mux interface lacks opposite bulk endpoints");
+        return Err(refuse!("mux interface lacks opposite bulk endpoints"));
     }
     Ok(found)
 }
@@ -193,9 +197,9 @@ impl Control {
             deadline: now.saturating_add(REQUEST_TIMEOUT),
         }
     }
-    fn step(&mut self, peer: &mut impl BusPeer, now: u64) -> Result<bool, &'static str> {
+    fn step(&mut self, peer: &mut impl BusPeer, now: u64) -> Result<bool> {
         if now >= self.deadline {
-            return Err("USB control request timed out");
+            return Err(refuse!("USB control request timed out"));
         }
         let (endpoint, token, mut packet) = match self.stage {
             Stage::Setup => (0, Token::Setup, self.setup.bytes().to_vec()),
@@ -214,21 +218,21 @@ impl Control {
         };
         let bytes = match peer.packet(endpoint, token, &mut packet)? {
             Reply::Nak => return Ok(false),
-            Reply::Stall => return Err("USB control request stalled"),
+            Reply::Stall => return Err(refuse!("USB control request stalled")),
             Reply::Ack(bytes) => bytes,
         };
         if bytes > packet.len() {
-            return Err("USB peer returned an oversized control packet");
+            return Err(refuse!("USB peer returned an oversized control packet"));
         }
         match self.stage {
             Stage::Setup => {
                 if bytes != 8 {
-                    return Err("USB setup acknowledgement is not eight bytes");
+                    return Err(refuse!("USB setup acknowledgement is not eight bytes"));
                 }
                 if self.setup.length == 0 {
                     self.stage = Stage::Status;
                 } else if self.setup.request_type & 0x80 == 0 {
-                    return Err("USB host control OUT data is not implemented");
+                    return Err(refuse!("USB host control OUT data is not implemented"));
                 } else {
                     self.stage = Stage::Data;
                 }
@@ -241,7 +245,7 @@ impl Control {
             }
             Stage::Status => {
                 if bytes != 0 {
-                    return Err("USB status acknowledgement is not a ZLP");
+                    return Err(refuse!("USB status acknowledgement is not a ZLP"));
                 }
                 return Ok(true);
             }
@@ -363,18 +367,13 @@ impl Host {
     pub fn completion(&mut self) -> Option<Completion> {
         self.completions.pop_front()
     }
-    pub fn submit_out(
-        &mut self,
-        data: &[u8],
-        terminate_with_zlp: bool,
-        now: u64,
-    ) -> Result<u64, &'static str> {
+    pub fn submit_out(&mut self, data: &[u8], terminate_with_zlp: bool, now: u64) -> Result<u64> {
         if data.len() > MAX_TRANSFER {
-            return Err("USB host transfer bound exceeded");
+            return Err(refuse!("USB host transfer bound exceeded"));
         }
         self.submit(false, data.to_vec(), data.len(), terminate_with_zlp, now)
     }
-    pub fn submit_in(&mut self, length: usize, now: u64) -> Result<u64, &'static str> {
+    pub fn submit_in(&mut self, length: usize, now: u64) -> Result<u64> {
         self.submit(true, Vec::new(), length, false, now)
     }
     fn submit(
@@ -384,17 +383,17 @@ impl Host {
         length: usize,
         zlp: bool,
         now: u64,
-    ) -> Result<u64, &'static str> {
+    ) -> Result<u64> {
         if !self.ready() {
-            return Err("USB host is not configured");
+            return Err(refuse!("USB host is not configured"));
         }
         if length > MAX_TRANSFER || self.bulk.len() + self.completions.len() >= MAX_TRANSFERS {
-            return Err("USB host transfer bound exceeded");
+            return Err(refuse!("USB host transfer bound exceeded"));
         }
         let id = self.next_id;
         self.next_id = id
             .checked_add(1)
-            .ok_or("USB transfer identifier exhausted")?;
+            .ok_or(refuse!("USB transfer identifier exhausted"))?;
         self.bulk.push_back(Bulk {
             id,
             input,
@@ -408,7 +407,7 @@ impl Host {
     }
     /// At most one packet per call. The caller supplies the monotonic guest
     /// 24 MHz counter and runs guest code between NAKs; this never does so.
-    pub fn advance(&mut self, peer: &mut impl BusPeer, now: u64) -> Result<(), &'static str> {
+    pub fn advance(&mut self, peer: &mut impl BusPeer, now: u64) -> Result<()> {
         match self.state {
             Enumerate::Detached => return Ok(()),
             Enumerate::Reset => {
@@ -441,7 +440,7 @@ impl Host {
                     SET_CONFIGURATION,
                     u16::from(
                         self.endpoints
-                            .ok_or("USB device has no mux interface")?
+                            .ok_or(refuse!("USB device has no mux interface"))?
                             .configuration,
                     ),
                 ),
@@ -462,7 +461,7 @@ impl Host {
                     || bytes[17] == 0
                     || bytes[17] > MAX_CONFIGURATIONS
                 {
-                    return Err("invalid high-speed device descriptor");
+                    return Err(refuse!("invalid high-speed device descriptor"));
                 }
                 self.configurations = bytes[17];
                 self.bos = u16::from_le_bytes([bytes[2], bytes[3]]) >= 0x0201;
@@ -477,11 +476,11 @@ impl Host {
             Enumerate::Address => Enumerate::ConfigHeader(0),
             Enumerate::ConfigHeader(n) => {
                 if bytes.len() != 9 || bytes[..2] != [9, CONFIGURATION] {
-                    return Err("invalid USB configuration prefix");
+                    return Err(refuse!("invalid USB configuration prefix"));
                 }
                 let length = u16::from_le_bytes([bytes[2], bytes[3]]);
                 if usize::from(length) > MAX_DESCRIPTOR || length < 9 {
-                    return Err("USB configuration length bound exceeded");
+                    return Err(refuse!("USB configuration length bound exceeded"));
                 }
                 Enumerate::Config(n, length)
             }
@@ -506,7 +505,7 @@ impl Host {
                     || usize::from(bytes[0]) != bytes.len()
                     || bytes[1] != STRING
                 {
-                    return Err("invalid USB language descriptor");
+                    return Err(refuse!("invalid USB language descriptor"));
                 }
                 self.language = u16::from_le_bytes([bytes[2], bytes[3]]);
                 self.record(STRING, 0, bytes);
@@ -518,7 +517,7 @@ impl Host {
                     || usize::from(bytes[0]) != bytes.len()
                     || bytes[1] != STRING
                 {
-                    return Err("invalid USB string descriptor");
+                    return Err(refuse!("invalid USB string descriptor"));
                 }
                 self.record(STRING, self.strings[n], bytes);
                 if n + 1 < self.strings.len() {
@@ -529,17 +528,17 @@ impl Host {
             }
             Enumerate::BosHeader => {
                 if bytes.len() != 5 || bytes[..2] != [5, BOS] {
-                    return Err("invalid USB BOS prefix");
+                    return Err(refuse!("invalid USB BOS prefix"));
                 }
                 let length = u16::from_le_bytes([bytes[2], bytes[3]]);
                 if length < 5 || usize::from(length) > MAX_DESCRIPTOR {
-                    return Err("USB BOS length bound exceeded");
+                    return Err(refuse!("USB BOS length bound exceeded"));
                 }
                 Enumerate::Bos(length)
             }
             Enumerate::Bos(length) => {
                 if bytes.len() != usize::from(length) || bytes[..2] != [5, BOS] {
-                    return Err("invalid USB BOS total length");
+                    return Err(refuse!("invalid USB BOS total length"));
                 }
                 self.record(BOS, 0, bytes);
                 Enumerate::Configure
@@ -568,7 +567,7 @@ impl Host {
             Enumerate::Configure
         }
     }
-    fn bulk_step(&mut self, peer: &mut impl BusPeer, now: u64) -> Result<(), &'static str> {
+    fn bulk_step(&mut self, peer: &mut impl BusPeer, now: u64) -> Result<()> {
         let Some(position) = self
             .bulk
             .iter()
@@ -608,7 +607,9 @@ impl Host {
                 Reply::Ack(bytes) => {
                     if bytes > length || (!transfer.input && bytes != length) {
                         self.bulk.insert(position, transfer);
-                        return Err("USB peer returned an invalid bulk acknowledgement length");
+                        return Err(refuse!(
+                            "USB peer returned an invalid bulk acknowledgement length"
+                        ));
                     }
                     if transfer.input {
                         transfer.data.extend_from_slice(&packet[..bytes]);
@@ -678,11 +679,11 @@ mod tests {
         nak: bool,
     }
     impl BusPeer for Fixture {
-        fn reset(&mut self) -> Result<(), &'static str> {
+        fn reset(&mut self) -> Result<()> {
             self.pending.clear();
             Ok(())
         }
-        fn packet(&mut self, _: u8, token: Token, data: &mut [u8]) -> Result<Reply, &'static str> {
+        fn packet(&mut self, _: u8, token: Token, data: &mut [u8]) -> Result<Reply> {
             if self.nak {
                 self.nak = false;
                 return Ok(Reply::Nak);

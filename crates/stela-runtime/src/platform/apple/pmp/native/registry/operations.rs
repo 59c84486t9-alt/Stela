@@ -1,11 +1,12 @@
 //! Cold-start and native registry operation retirement.
 use super::*;
+use crate::Result;
 
 impl<B: memory::Backend> Owner<B>
 where
     B::Mapping: PublicationMapping,
 {
-    pub fn advance(&mut self, access: &mut Access<'_>) -> Result<Progress, Error> {
+    pub fn advance(&mut self, access: &mut Access<'_>) -> Result<Progress> {
         self.claim.check()?;
         // The separate original class4 callback can run while class3 waits for
         // its AP reply. Keep the entry identity captured at delivery.
@@ -14,7 +15,7 @@ where
         }
         while self.plan.is_some() {
             let p = self.plan.as_ref().unwrap();
-            if let Some(reason) = p.failed {
+            if let Some(reason) = p.failed.clone() {
                 return Err(reason);
             }
             let Some(op) = p.ops.get(p.cursor).copied() else {
@@ -56,8 +57,8 @@ where
                     };
                     let memory::Completion::Allocated(Some(allocation)) = result else {
                         let reason = "PMP registry actual AP allocation failed; reached resource prefix retained";
-                        self.plan.as_mut().unwrap().failed = Some(reason);
-                        return Err(reason);
+                        self.plan.as_mut().unwrap().failed = Some(reason.into());
+                        return Err(reason.into());
                     };
                     match target {
                         Target::Outgoing => self.outgoing = Some(allocation),
@@ -149,8 +150,8 @@ where
                         || (!p.data.is_empty() && bytes != 0 && bytes != p.data.len())
                     {
                         let reason = "PMP registry AP add returned an unqualified length; reached remote entry retained";
-                        p.failed = Some(reason);
-                        return Err(reason);
+                        p.failed = Some(reason.into());
+                        return Err(reason.into());
                     }
                     if bytes != 0 && configuration.local_value() && p.data.is_empty() {
                         p.ops

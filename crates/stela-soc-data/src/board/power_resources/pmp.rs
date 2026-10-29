@@ -8,7 +8,9 @@
 //! neither a canonical PMGR ID nor a completion token.
 
 use super::{Dies, DomainId, Layout, Node, PMGR_DEVICE, PowerStates, Record, SOCS};
-use alloc::{format, string::String, vec::Vec};
+use crate::Result;
+use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 /// One original PMGR member of a potential PMP power group. Multiple
 /// physical domains and virtual aliases can share the same raw source ID.
@@ -25,16 +27,20 @@ impl PowerStates {
     /// Recover source identities against the exact canonical domain table.
     /// This supplies no group membership, initial state or lifecycle credit;
     /// native PMP resolves sources with its own original soc-device table.
-    pub fn pmp_domains(&self, root: &Node<'_>) -> Result<Vec<PmpDomain>, String> {
-        let io = root.child("arm-io").ok_or("PMP PMGR requires arm-io")?;
-        let parent = io.child("pmgr").ok_or("PMP PMGR requires pmgr")?;
+    pub fn pmp_domains(&self, root: &Node<'_>) -> Result<Vec<PmpDomain>> {
+        let io = root
+            .child("arm-io")
+            .ok_or(refuse!("PMP PMGR requires arm-io"))?;
+        let parent = io.child("pmgr").ok_or(refuse!("PMP PMGR requires pmgr"))?;
         // M6's generic controller has a separate DeviceConfig implementation.
         // The legacy helper's presence in that KC alone does not establish
         // that the new implementation publishes byte 3 with these semantics.
         if parent.compatible(super::PMGR2_ARCH)
             || !SOCS.iter().any(|soc| parent.compatible(soc.pmgr))
         {
-            return Err("PMP PMGR source-byte layout is unqualified for this controller".into());
+            return Err(refuse!(
+                "PMP PMGR source-byte layout is unqualified for this controller"
+            ));
         }
         let dies = Dies::of(root, &parent)?;
         let table = super::decode_domain_table(&parent, dies, &|address, bytes| {
@@ -44,17 +50,18 @@ impl PowerStates {
             || self.blocks != table.blocks
             || self.registers != table.registers
         {
-            return Err("PMP PMGR canonical inventory differs from the source tree".into());
+            return Err(refuse!(
+                "PMP PMGR canonical inventory differs from the source tree"
+            ));
         }
-        let (layout, _) = Layout::select(parent.property("ps-regs"), parent.property("ps-groups"))
-            .map_err(String::from)?;
+        let (layout, _) = Layout::select(parent.property("ps-regs"), parent.property("ps-groups"))?;
         let bytes = parent
             .property("devices")
-            .ok_or("PMP PMGR requires devices")?;
+            .ok_or(refuse!("PMP PMGR requires devices"))?;
         let mut output = Vec::with_capacity(self.domains.len());
         for die in 0..dies.count {
             for raw in bytes.as_chunks::<PMGR_DEVICE>().0 {
-                let record = Record::parse(layout, raw).map_err(String::from)?;
+                let record = Record::parse(layout, raw)?;
                 let domain = &self.domains[output.len()];
                 if domain.id
                     != (DomainId {
@@ -62,7 +69,10 @@ impl PowerStates {
                         device: record.id,
                     })
                 {
-                    return Err(format!("PMP PMGR source identity differs on die {die}"));
+                    return Err(refuse!(
+                        "PMP PMGR source identity differs on die {die}",
+                        die
+                    ));
                 }
                 output.push(PmpDomain {
                     id: domain.id,
@@ -194,6 +204,7 @@ mod tests {
                 states
                     .pmp_domains(&root)
                     .unwrap_err()
+                    .to_string()
                     .contains("canonical inventory")
             );
         }
@@ -225,6 +236,7 @@ mod tests {
             empty
                 .pmp_domains(&root)
                 .unwrap_err()
+                .to_string()
                 .contains("not whole entries")
         );
         for compatible in [b"pmgr2,arch".as_slice(), b"pmgr1,unknown"] {
@@ -235,6 +247,7 @@ mod tests {
                 empty
                     .pmp_domains(&Node::root(&bytes).unwrap())
                     .unwrap_err()
+                    .to_string()
                     .contains("source-byte layout is unqualified")
             );
         }

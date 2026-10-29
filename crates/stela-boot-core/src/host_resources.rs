@@ -1,10 +1,12 @@
 //! Host-device resources from the selected boot volume and native UEFI before EBS. Unlike
 //! a Vec/Arc in the loader heap, this fixed wire representation survives engine
 //! relocation. Only immutable bytes in reserved LOADER_DATA pages cross it.
+use crate::Result;
 use crate::handoff_records::Region;
 use alloc::{format, sync::Arc, vec::Vec};
 use core::fmt;
 use sha2::Digest;
+use stela_contracts::refuse;
 use stela_drivers::firmware::{Catalog, Provider, Requirement, Target};
 use stela_drivers::net::wifi::intel::platform::{
     CapturedVariable, Observation, Observations, VARIABLE_DESCRIPTORS,
@@ -67,24 +69,24 @@ impl Resources {
         map: impl Fn(u64) -> u64,
         phase: Option<&'static str>,
         log: fn(fmt::Arguments<'_>),
-    ) -> Result<Option<Arc<Catalog>>, &'static str> {
+    ) -> Result<Option<Arc<Catalog>>> {
         if self.count > MAX_IMAGES
             || (!self.present && self.count != 0)
             || (self.present
                 && (self.manifest.bytes as usize > MAX_MANIFEST_BYTES || self.manifest.bytes == 0))
         {
-            return Err("invalid host firmware wire handoff");
+            return Err(refuse!("invalid host firmware wire handoff"));
         }
-        let view = |region: Region| -> Result<&'static [u8], &'static str> {
+        let view = |region: Region| -> Result<&'static [u8]> {
             let end = region
                 .physical
                 .checked_add(region.bytes)
-                .ok_or("host firmware region overflow")?;
+                .ok_or(refuse!("host firmware region overflow"))?;
             if region.physical == 0
                 || region.bytes == 0
                 || map(end - 1) != map(region.physical) + region.bytes - 1
             {
-                return Err("invalid host firmware mapped range");
+                return Err(refuse!("invalid host firmware mapped range"));
             }
             // SAFETY: caller's reserved immutable pages and permanent alias.
             Ok(unsafe {
@@ -107,7 +109,7 @@ impl Resources {
             .as_ref()
             .is_some_and(|parsed| parsed.images.len() != self.count)
         {
-            return Err("host firmware wire count mismatch");
+            return Err(refuse!("host firmware wire count mismatch"));
         }
         let mut bytes = Vec::with_capacity(self.count);
         for (image, region) in parsed
@@ -116,7 +118,7 @@ impl Resources {
             .zip(&self.images[..self.count])
         {
             if region.bytes != image.length as u64 {
-                return Err("host firmware wire length mismatch");
+                return Err(refuse!("host firmware wire length mismatch"));
             }
             bytes.push(view(*region)?);
         }
@@ -135,7 +137,9 @@ impl Resources {
                             && image.target.board == variable.requirement().target.board)
                 })
             }) {
-                return Err("installed firmware collides with a live UEFI observation");
+                return Err(refuse!(
+                    "installed firmware collides with a live UEFI observation"
+                ));
             }
             if let Observation::Present {
                 attributes,
@@ -145,10 +149,12 @@ impl Resources {
             } = capture.observation
             {
                 if bytes > variable.maximum_bytes() as u64 {
-                    return Err("Wi-Fi observation wire exceeds its resource budget");
+                    return Err(refuse!(
+                        "Wi-Fi observation wire exceeds its resource budget"
+                    ));
                 }
                 if capture.region.bytes != bytes {
-                    return Err("Wi-Fi observation wire length mismatch");
+                    return Err(refuse!("Wi-Fi observation wire length mismatch"));
                 }
                 let raw = if bytes == 0 {
                     &[]
@@ -161,13 +167,13 @@ impl Resources {
                     attributes,
                     probe_reported_bytes,
                 )
-                .map_err(|_| "Wi-Fi observation exceeds its permanent resource budget")?;
+                .map_err(|_| refuse!("Wi-Fi observation exceeds its permanent resource budget"))?;
                 if captured.observation() != capture.observation {
-                    return Err("Wi-Fi observation wire digest mismatch");
+                    return Err(refuse!("Wi-Fi observation wire digest mismatch"));
                 }
                 captures.push(captured);
             } else if capture.region.bytes != 0 || capture.region.physical != 0 {
-                return Err("failed Wi-Fi observation has a resource region");
+                return Err(refuse!("failed Wi-Fi observation has a resource region"));
             }
         }
         if parsed.as_ref().is_some_and(|parsed| {
@@ -181,7 +187,9 @@ impl Resources {
                         && image.target.board.is_none())
             })
         }) {
-            return Err("installed firmware collides with a live SMBIOS observation");
+            return Err(refuse!(
+                "installed firmware collides with a live SMBIOS observation"
+            ));
         }
         let mut smbios_capture = match self.smbios.state {
             smbios::State::Present => {
@@ -190,20 +198,22 @@ impl Resources {
                         + stela_drivers::firmware::smbios::MAX_TABLE_BYTES)
                         as u64
                 {
-                    return Err("SMBIOS observation wire exceeds its resource budget");
+                    return Err(refuse!(
+                        "SMBIOS observation wire exceeds its resource budget"
+                    ));
                 }
                 let raw = view(self.smbios.region)?;
                 if <[u8; 32]>::from(stela_crypto::Sha256::digest(raw)) != self.smbios.sha256 {
-                    return Err("SMBIOS observation wire digest mismatch");
+                    return Err(refuse!("SMBIOS observation wire digest mismatch"));
                 }
                 Some(
                     stela_drivers::firmware::smbios::Captured::new(raw)
-                        .map_err(|_| "invalid permanent SMBIOS observation")?,
+                        .map_err(|_| refuse!("invalid permanent SMBIOS observation"))?,
                 )
             }
             _ => {
                 if self.smbios.region.bytes != 0 || self.smbios.region.physical != 0 {
-                    return Err("unobserved SMBIOS has a resource region");
+                    return Err(refuse!("unobserved SMBIOS has a resource region"));
                 }
                 None
             }
@@ -222,20 +232,23 @@ impl Resources {
             .find(|resource| resource.name == stela_drivers::firmware::smbios::NAME)
             .map(|resource| {
                 let raw = resource.bytes;
-                let format = self.smbios.format.ok_or("SMBIOS wire has no source GUID")?;
+                let format = self
+                    .smbios
+                    .format
+                    .ok_or(refuse!("SMBIOS wire has no source GUID"))?;
                 let length = stela_drivers::firmware::smbios::entry_length(raw, format)
-                    .map_err(|_| "SMBIOS wire source mismatch")?;
+                    .map_err(|_| refuse!("SMBIOS wire source mismatch"))?;
                 let entry = stela_drivers::firmware::smbios::entry(&raw[..length], format)
-                    .map_err(|_| "SMBIOS wire source mismatch")?;
+                    .map_err(|_| refuse!("SMBIOS wire source mismatch"))?;
                 if <[u8; 32]>::from(stela_crypto::Sha256::digest(&raw[..length]))
                     != self.smbios.entry_sha256
                     || <[u8; 32]>::from(stela_crypto::Sha256::digest(&raw[length..]))
                         != self.smbios.table_sha256
                 {
-                    return Err("SMBIOS observation component digest mismatch");
+                    return Err(refuse!("SMBIOS observation component digest mismatch"));
                 }
                 stela_drivers::firmware::smbios::identity(entry, &raw[length..])
-                    .map_err(|_| "invalid SMBIOS identity")
+                    .map_err(|_| refuse!("invalid SMBIOS identity"))
             })
             .transpose()?;
         if self.count + additional.len() > MAX_IMAGES
@@ -243,7 +256,9 @@ impl Resources {
                 + additional.iter().map(|r| r.bytes.len()).sum::<usize>()
                 > manifest::MAX_TOTAL_BYTES
         {
-            return Err("combined firmware observations exceed the catalog budget");
+            return Err(refuse!(
+                "combined firmware observations exceed the catalog budget"
+            ));
         }
         let records: Vec<_> = phase
             .into_iter()
@@ -281,13 +296,13 @@ impl Resources {
                 .map_err(|error| report(error, log))?
         } else {
             Catalog::from_persistent_handoff(additional)
-                .map_err(|_| "invalid permanent Wi-Fi resources")?
+                .map_err(|_| refuse!("invalid permanent Wi-Fi resources"))?
         });
         if let Some(record) = smbios_record {
             // Canonical lookup also checks returned image identity/provenance.
             if self.smbios.state == smbios::State::Present {
                 let _ = stela_drivers::firmware::smbios::load(catalog.as_ref())
-                    .map_err(|_| "SMBIOS canonical resource binding mismatch")?;
+                    .map_err(|_| refuse!("SMBIOS canonical resource binding mismatch"))?;
             }
             log(format_args!("HOST SMBIOS RECORD {record}\n"));
         }
@@ -312,7 +327,7 @@ fn record(
     manifest: &Manifest<'_>,
     catalog: &Catalog,
     log: fn(fmt::Arguments<'_>),
-) -> Result<(), &'static str> {
+) -> Result<()> {
     let images = manifest.images.len();
     let bytes: usize = manifest.images.iter().map(|image| image.length).sum();
     let record = serde_json::json!({
@@ -332,7 +347,7 @@ fn record(
                 },
                 minimum_bytes: expected.length,
             })
-            .map_err(|_| "cannot record verified host firmware requirement")?;
+            .map_err(|_| refuse!("cannot record verified host firmware requirement"))?;
         let target = image.target();
         let source = image.provenance();
         let digest: alloc::string::String = image
@@ -401,11 +416,13 @@ mod tests {
                 unsafe { resources.catalog(|address| address, None, |_| {}) }
                     .err()
                     .unwrap(),
-                if requirement.name == stela_drivers::firmware::smbios::NAME {
-                    "installed firmware collides with a live SMBIOS observation"
-                } else {
-                    "installed firmware collides with a live UEFI observation"
-                }
+                refuse!(
+                    if requirement.name == stela_drivers::firmware::smbios::NAME {
+                        "installed firmware collides with a live SMBIOS observation"
+                    } else {
+                        "installed firmware collides with a live UEFI observation"
+                    }
+                )
             );
         }
     }
@@ -470,7 +487,9 @@ mod tests {
                 resources.catalog(|_| panic!("over-bound SMBIOS must not map"), None, |_| {})
             }
             .err(),
-            Some("SMBIOS observation wire exceeds its resource budget")
+            Some(refuse!(
+                "SMBIOS observation wire exceeds its resource budget"
+            ))
         );
         resources = copied;
         resources.smbios.sha256[0] ^= 1;
@@ -484,7 +503,7 @@ mod tests {
                 )
             }
             .err(),
-            Some("SMBIOS observation wire digest mismatch")
+            Some(refuse!("SMBIOS observation wire digest mismatch"))
         );
     }
 
@@ -512,7 +531,9 @@ mod tests {
                     resources.catalog(|_| panic!("over-limit wire must not map"), None, |_| {})
                 }
                 .err(),
-                Some("Wi-Fi observation wire exceeds its resource budget")
+                Some(refuse!(
+                    "Wi-Fi observation wire exceeds its resource budget"
+                ))
             );
         }
         let variable = Variable::Eckv;

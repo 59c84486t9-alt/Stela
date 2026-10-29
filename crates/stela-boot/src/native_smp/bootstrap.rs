@@ -8,7 +8,9 @@
 //! remain outside this containment. No early IST/task gate is supplied: a
 //! corrupt stack, IDT or faulting exception delivery can still double/triple
 //! fault. This contains ordinary delivered exceptions, not every CPU shutdown.
+use crate::Result;
 use core::arch::global_asm;
+use stela_contracts::refuse;
 
 use super::memory_types::{Image, MAX_WRITABLE, Write, amd};
 use crate::{layout, tables::PAGE};
@@ -330,14 +332,10 @@ pub(crate) struct Entry<'a> {
 /// root, entry, stack and argument mappings remain live through AP entry and
 /// recovery; the caller has checked this AP's features and memory types.
 /// The low identity alias is executable and the high stack is writable/NX.
-pub(crate) unsafe fn prepare(
-    mapped: *mut u8,
-    physical: u64,
-    entry: Entry<'_>,
-) -> Result<u8, &'static str> {
+pub(crate) unsafe fn prepare(mapped: *mut u8, physical: u64, entry: Entry<'_>) -> Result<u8> {
     let bytes = offset(&raw const stela_ap_end);
     if !image_holds_its_tables(bytes) {
-        return Err("AP bootstrap tables lie outside its image");
+        return Err(refuse!("AP bootstrap tables lie outside its image"));
     }
     if !(PAGE..1 << 20).contains(&physical)
         || !physical.is_multiple_of(PAGE)
@@ -349,7 +347,7 @@ pub(crate) unsafe fn prepare(
         || entry.stack_top == 0
         || entry.stack_top & 15 != 0
     {
-        return Err("invalid owned AP bootstrap mappings");
+        return Err(refuse!("invalid owned AP bootstrap mappings"));
     }
     // SAFETY: exclusive owned destination and immutable assembly text. All
     // patch symbols lie inside `bytes`, which fits in the supplied page.

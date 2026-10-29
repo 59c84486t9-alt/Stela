@@ -12,6 +12,7 @@ pub mod t6000_pmgr;
 mod timekeeping;
 mod usb;
 
+use crate::Result;
 pub use crate::platform::apple::pmu::RtcEpoch;
 use crate::platform::usb::{
     Function, Speed,
@@ -30,6 +31,7 @@ pub use crate::platform::usb::{
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::cell::Cell;
 use stela_compiler::aarch64::system::registers::Encoding;
+use stela_contracts::refuse;
 use stela_drivers::{block::BlockDevice, input::Input, net::Mac};
 use stela_engine::machine::engine::ConsumedPair;
 use stela_engine::machine::engine::DeviceError;
@@ -269,7 +271,7 @@ struct UsbMaster {
     session_reset: bool,
 }
 impl UsbMaster {
-    fn cancel_session(&mut self, reset: bool) -> Result<(), &'static str> {
+    fn cancel_session(&mut self, reset: bool) -> Result<()> {
         self.session_reset |= reset;
         if self.session_reset {
             self.session.detach()?;
@@ -452,9 +454,10 @@ enum Controller {
 fn describe(error: MmioError) -> DeviceError {
     match error {
         MmioError::Unmapped { .. } => DeviceError::NoDevice,
-        MmioError::Misaligned { address, width } => DeviceError::Refused(format!(
-            "misaligned {}-byte device access at {address:#x}",
-            width.bytes()
+        MmioError::Misaligned { address, width } => DeviceError::Refused(refuse!(
+            "misaligned {bytes}-byte device access at {address:#x}",
+            bytes = width.bytes(),
+            address
         )),
         MmioError::Unsupported {
             device,
@@ -462,16 +465,22 @@ fn describe(error: MmioError) -> DeviceError {
             width,
             direction,
             reason,
-        } => DeviceError::Refused(format!(
-            "{device} {direction:?} of {} bytes at offset {offset:#x}: {reason}",
-            width.bytes()
-        )),
+        } => DeviceError::Refused(
+            refuse!(
+                "{device} {direction} of {bytes} bytes at offset {offset:#x}",
+                device,
+                ?direction,
+                bytes = width.bytes(),
+                offset
+            )
+            .because(reason),
+        ),
     }
 }
 
 fn describe_transfer(error: MmioError) -> DeviceError {
     match describe(error) {
-        DeviceError::NoDevice => DeviceError::TransferRefused("unmapped DMA service".into()),
+        DeviceError::NoDevice => DeviceError::TransferRefused(refuse!("unmapped DMA service")),
         DeviceError::Refused(reason) | DeviceError::TransferRefused(reason) => {
             DeviceError::TransferRefused(reason)
         }
@@ -494,25 +503,25 @@ impl UsbClient<'_> {
     pub fn control_ready(&self) -> bool {
         self.0.control_ready()
     }
-    pub fn open(&mut self, port: u16) -> Result<MuxStream, &'static str> {
+    pub fn open(&mut self, port: u16) -> Result<MuxStream> {
         self.0.open(port)
     }
-    pub fn state(&self, stream: MuxStream) -> Result<MuxStreamState, &'static str> {
+    pub fn state(&self, stream: MuxStream) -> Result<MuxStreamState> {
         self.0.state(stream)
     }
-    pub fn write(&mut self, stream: MuxStream, bytes: &[u8]) -> Result<usize, &'static str> {
+    pub fn write(&mut self, stream: MuxStream, bytes: &[u8]) -> Result<usize> {
         self.0.write(stream, bytes)
     }
-    pub fn read(&mut self, stream: MuxStream, bytes: &mut [u8]) -> Result<usize, &'static str> {
+    pub fn read(&mut self, stream: MuxStream, bytes: &mut [u8]) -> Result<usize> {
         self.0.read(stream, bytes)
     }
-    pub fn close(&mut self, stream: MuxStream) -> Result<(), &'static str> {
+    pub fn close(&mut self, stream: MuxStream) -> Result<()> {
         self.0.close(stream)
     }
-    pub fn release(&mut self, stream: MuxStream) -> Result<(), &'static str> {
+    pub fn release(&mut self, stream: MuxStream) -> Result<()> {
         self.0.release(stream)
     }
-    pub fn query_type(&mut self) -> Result<(), &'static str> {
+    pub fn query_type(&mut self) -> Result<()> {
         self.0.query_type()
     }
 }
@@ -668,7 +677,7 @@ impl AppleDevices {
 
 fn width(bytes: u8) -> Result<Width, DeviceError> {
     Width::from_bytes(u64::from(bytes))
-        .ok_or_else(|| DeviceError::Refused(format!("{bytes}-byte device access")))
+        .ok_or_else(|| DeviceError::Refused(refuse!("{bytes}-byte device access", bytes)))
 }
 
 fn reset_reason(access: &Access<'_>) -> Option<Reset> {
@@ -794,7 +803,7 @@ impl Devices for AppleDevices {
         let values = memory_resources::resource_for(&self.bus, device)
             .expect("paired read retains the prepared resource")
             .read_pair_values(offset, bytes, &mut access)
-            .map_err(|reason| DeviceError::Refused(reason.into()))?;
+            .map_err(DeviceError::Refused)?;
         let reset = reset_reason(&access);
         let settlement = self.settle(cpu, now, reset);
         Ok(Some(ConsumedPair { values, settlement }))
@@ -1125,10 +1134,10 @@ impl Devices for AppleDevices {
             };
             ans.run(&mut port, sart)
                 .map_err(|error| match describe_transfer(error) {
-                    DeviceError::TransferRefused(reason) => DeviceError::TransferRefused(format!(
-                        "{reason}; ANS last submission {:02x?}",
-                        ans.last_submission()
-                    )),
+                    DeviceError::TransferRefused(reason) => DeviceError::TransferRefused(
+                        refuse!("ANS transfer", last_submission = ?ans.last_submission())
+                            .because(reason),
+                    ),
                     other => other,
                 })?;
         }
@@ -1178,13 +1187,15 @@ impl Devices for AppleDevices {
                         }
                     }
                 }
-                return Err(DeviceError::TransferRefused(format!(
-                    "GFX firmware DMA: {reason}; last UAT fault {:x?}; context TTBAT {:x?}; \
-                     root entries {:x?}",
-                    uat.last_fault(),
-                    words,
-                    entries
-                )));
+                return Err(DeviceError::TransferRefused(
+                    refuse!(
+                        "GFX firmware DMA",
+                        last_uat_fault = ?uat.last_fault(),
+                        context_ttbat = ?words,
+                        root_entries = ?entries
+                    )
+                    .because(reason),
+                ));
             }
         }
         for master in &self.sep_masters {
@@ -1233,7 +1244,7 @@ impl Devices for AppleDevices {
                     access: &mut access,
                 };
                 coprocessor.present(&mut port).map_err(|reason| {
-                    DeviceError::TransferRefused(format!("DCPEXT swap surface: {reason}"))
+                    DeviceError::TransferRefused(refuse!("DCPEXT swap surface").because(reason))
                 })?;
             }
             let (asc, dart) = self
@@ -1251,7 +1262,7 @@ impl Devices for AppleDevices {
                 access: &mut access,
             };
             asc.service_dma(&mut port).map_err(|reason| {
-                DeviceError::TransferRefused(format!("DCPEXT link DMA: {reason}"))
+                DeviceError::TransferRefused(refuse!("DCPEXT link DMA").because(reason))
             })?;
         }
         for master in &mut self.usb_masters {
@@ -1267,7 +1278,7 @@ impl Devices for AppleDevices {
                 access: &mut access,
             };
             let fail =
-                |why: &str| DeviceError::TransferRefused(format!("USB device advance: {why}"));
+                |why| DeviceError::TransferRefused(refuse!("USB device advance").because(why));
             master
                 .cancel_session(controller.take_session_reset())
                 .map_err(fail)?;
@@ -1310,7 +1321,7 @@ impl Devices for AppleDevices {
                 master.epoch = master
                     .epoch
                     .checked_add(1)
-                    .ok_or_else(|| fail("USB connection generation exhausted"))?;
+                    .ok_or_else(|| fail(refuse!("USB connection generation exhausted")))?;
                 master.session.attach(master.epoch).map_err(fail)?;
                 master.attached = true;
             }
@@ -1320,7 +1331,7 @@ impl Devices for AppleDevices {
                     .try_for_each(|_| master.session.advance(&mut controller.peer(&mut port), now))
                     .and_then(|()| controller.flush(&mut port));
                 advanced.map_err(|why| match controller.dma_fault() {
-                    Some(fault) => fail(&format!("{why}: {fault:x?}")),
+                    Some(fault) => fail(refuse!("USB DMA fault", ?fault).because(why)),
                     None => fail(why),
                 })?;
             }

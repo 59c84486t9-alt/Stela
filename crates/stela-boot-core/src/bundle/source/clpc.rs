@@ -1,5 +1,7 @@
 //! Positive evidence for hiding the unsupported original CLPC class.
+use crate::Result;
 use alloc::{format, string::String, vec::Vec};
+use stela_contracts::refuse;
 use stela_loader::apple_device_tree::{DeviceTree, Node};
 
 fn class(node: &Node) -> bool {
@@ -13,7 +15,7 @@ fn class(node: &Node) -> bool {
         })
 }
 
-fn nodes<'a>(node: &'a Node, path: &str, out: &mut Vec<(String, &'a Node)>) -> Result<(), String> {
+fn nodes<'a>(node: &'a Node, path: &str, out: &mut Vec<(String, &'a Node)>) -> Result<()> {
     out.push((
         if path.is_empty() {
             "/".into()
@@ -25,19 +27,21 @@ fn nodes<'a>(node: &'a Node, path: &str, out: &mut Vec<(String, &'a Node)>) -> R
     for child in &node.children {
         let name = child
             .name()
-            .ok_or("CLPC evidence tree has an unnamed child")?;
+            .ok_or(refuse!("CLPC evidence tree has an unnamed child"))?;
         nodes(child, &format!("{path}/{name}"), out)?;
     }
     Ok(())
 }
 
-fn hidden_node(nodes: &[(String, &Node)], path: &str) -> Result<(), String> {
+fn hidden_node(nodes: &[(String, &Node)], path: &str) -> Result<()> {
     let mut matching = nodes.iter().filter(|(candidate, _)| candidate == path);
-    let (_, node) = matching
-        .next()
-        .ok_or("hidden original CLPC path is absent from live tree")?;
+    let (_, node) = matching.next().ok_or(refuse!(
+        "hidden original CLPC path is absent from live tree"
+    ))?;
     if matching.next().is_some() || node.property("compatible").is_some() {
-        return Err("original CLPC must remain uniquely retained without compatible".into());
+        return Err(refuse!(
+            "original CLPC must remain uniquely retained without compatible"
+        ));
     }
     Ok(())
 }
@@ -48,13 +52,13 @@ pub fn verify(
     ledger: &[String],
     soc: u32,
     board: u32,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>> {
     // Only the selected variant pass proves which overlay paths go.
     // This derived copy supplies CLPC class membership, never CPU provenance:
     // the source CPU indices are still checked against the immutable input.
     let mut projected = original.clone();
     stela_loader::soc_variant::apply(&mut projected, Some(soc), Some(board))
-        .map_err(|error| format!("CLPC source variant projection: {error}"))?;
+        .map_err(|error| refuse!("CLPC source variant projection: {error}", %error))?;
     let mut source = Vec::new();
     let mut current = Vec::new();
     nodes(&projected.root, "", &mut source)?;
@@ -62,7 +66,9 @@ pub fn verify(
     let mut hidden: Vec<String> = Vec::new();
     for (path, _) in source.iter().filter(|(_, node)| class(node)) {
         if hidden.contains(path) || ledger.iter().filter(|entry| *entry == path).count() != 1 {
-            return Err("original CLPC requires exact once-only hidden_devices evidence".into());
+            return Err(refuse!(
+                "original CLPC requires exact once-only hidden_devices evidence"
+            ));
         }
         hidden_node(&current, path)?;
         hidden.push(path.clone());
@@ -70,7 +76,7 @@ pub fn verify(
     Ok(hidden)
 }
 
-pub fn validate_live(tree: &DeviceTree, hidden: &[String]) -> Result<(), String> {
+pub fn validate_live(tree: &DeviceTree, hidden: &[String]) -> Result<()> {
     let mut current = Vec::new();
     nodes(&tree.root, "", &mut current)?;
     for path in hidden {

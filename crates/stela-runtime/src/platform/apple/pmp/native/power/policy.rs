@@ -7,7 +7,9 @@
 //! VM1032d88..1032e20 initializes three vote rows. No ACK writer or applied
 //! lifecycle setter is supplied by this module.
 use super::DeviceTable;
+use crate::Result;
 use crate::platform::apple::pmp::native::Packets;
+use stela_contracts::refuse;
 
 const SOURCE_IDS: [u32; 18] = [
     1, 2, 16, 17, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18,
@@ -150,10 +152,7 @@ impl Policy {
     /// Original native T8112 inventory/constructor order. The unmodified
     /// source-ID order must match; labels and firmware hashes are not dispatch
     /// keys. The optional original property is one complete little-endian word.
-    pub fn t8112(
-        table: DeviceTable,
-        display_min_state: Option<&[u8]>,
-    ) -> Result<Self, &'static str> {
+    pub fn t8112(table: DeviceTable, display_min_state: Option<&[u8]>) -> Result<Self> {
         if table.len() != SOURCE_IDS.len()
             || !table
                 .records()
@@ -161,14 +160,15 @@ impl Policy {
                 .zip(SOURCE_IDS)
                 .all(|(row, source)| row[0] == source)
         {
-            return Err("native T8112 power policy has a different source ordinal inventory");
+            return Err(refuse!(
+                "native T8112 power policy has a different source ordinal inventory"
+            ));
         }
         let display_min_word = display_min_state
             .map(|bytes| {
-                bytes
-                    .try_into()
-                    .map(u32::from_le_bytes)
-                    .map_err(|_| "native display minimum state is not a complete source word")
+                bytes.try_into().map(u32::from_le_bytes).map_err(|_| {
+                    refuse!("native display minimum state is not a complete source word")
+                })
             })
             .transpose()?;
         Ok(Self {
@@ -188,17 +188,19 @@ impl Policy {
 
     /// Source VM1010a3c..1010a48 keeps old bits outside the selected mask,
     /// then ORs the full incoming word. It does not mask the incoming request.
-    pub fn merge_request(&self, previous: u64, incoming: u64) -> Result<u64, &'static str> {
+    pub fn merge_request(&self, previous: u64, incoming: u64) -> Result<u64> {
         self.validate_bits(previous | incoming)?;
         Ok((previous & !self.table.power_group_mask()) | incoming)
     }
-    fn validate_bits(&self, bits: u64) -> Result<(), &'static str> {
+    fn validate_bits(&self, bits: u64) -> Result<()> {
         if bits & !INVENTORY_MASK != 0 {
-            return Err("native power request names a device outside its actual source inventory");
+            return Err(refuse!(
+                "native power request names a device outside its actual source inventory"
+            ));
         }
         Ok(())
     }
-    pub fn resolve(&self, requested: u64) -> Result<Resolution, &'static str> {
+    pub fn resolve(&self, requested: u64) -> Result<Resolution> {
         self.validate_bits(requested)?;
         let mut resolved = requested | FORCED_ON;
         // Original ascending single pass. Repeating to a fixpoint could change

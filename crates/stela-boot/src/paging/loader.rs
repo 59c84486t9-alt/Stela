@@ -1,9 +1,11 @@
 //! Original Engine loader allocations, including their real catalog storage.
 //! Allocation ownership supplies no controller, firmware-service or CPU grant.
 use super::{AllocatedTablePage, RootError, allocate_table};
+use crate::Result;
 use alloc::vec::Vec;
 use core::arch::asm;
 use stela_boot_core::guarded_stacks::mappings;
+use stela_contracts::refuse;
 
 pub(crate) struct Builder {
     root: u64,
@@ -11,11 +13,11 @@ pub(crate) struct Builder {
     levels: u32,
 }
 impl Builder {
-    pub(crate) fn new() -> Result<Self, &'static str> {
+    pub(crate) fn new() -> Result<Self> {
         let mut pages = Vec::new();
         pages
             .try_reserve_exact(1)
-            .map_err(|_| "loader table catalog allocation failed")?;
+            .map_err(|_| refuse!("loader table catalog allocation failed"))?;
         // The real-mode/AP trampoline loads this original root below 4 GiB.
         let allocation = allocate_table(uefi::boot::AllocateType::MaxAddress(u32::MAX as u64))?;
         let root = allocation.physical;
@@ -271,8 +273,8 @@ impl LoaderTables {
         // Sealing checked all original identity and high-window aliases. The
         // sole builder was consumed; later native mappings must preserve them.
         self.read_owned(self.root, index)
-            .ok_or(RootError::Transition(
-                "loader root entry is outside its owned table",
-            ))
+            .ok_or(RootError::Transition(refuse!(
+                "loader root entry is outside its owned table"
+            )))
     }
 }

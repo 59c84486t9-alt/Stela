@@ -13,6 +13,8 @@
 //! Other bits change timeout/error handling and debug capture, so mere
 //! retention would discard effects. Stela keeps the supported diagnostic
 //! control across controller resets, until the die is recreated.
+use crate::Result;
+use stela_contracts::refuse;
 
 pub(super) const READ: u32 = 0;
 pub(super) const WRITE: u32 = 1;
@@ -32,14 +34,11 @@ pub(super) struct DebugService {
 }
 
 impl DebugService {
-    pub fn execute(
-        &mut self,
-        operation: u32,
-        selector: u32,
-        value: u32,
-    ) -> Result<Reply, &'static str> {
+    pub fn execute(&mut self, operation: u32, selector: u32, value: u32) -> Result<Reply> {
         if !matches!(operation, READ | WRITE) || (operation == READ && value != 0) {
-            return Err("ANS debug-service operation or read value is unsupported");
+            return Err(refuse!(
+                "ANS debug-service operation or read value is unsupported"
+            ));
         }
         let (word, supported) = match selector {
             NAND_DEBUG_LOW => (&mut self.mask[0], NAND_ERROR_DIAGNOSTICS),
@@ -48,9 +47,15 @@ impl DebugService {
             // reaches the completion's Invalid Field status at 0x16f090.
             0x100 | 0x301 | 0xb20 | 0xb21 => return Ok(Reply::InvalidField),
             0x300 => {
-                return Err("ANS power gating timeout debug selector is not modeled");
+                return Err(refuse!(
+                    "ANS power gating timeout debug selector is not modeled"
+                ));
             }
-            0x600 => return Err("ANS I/O log level debug selector (0x600) is not modeled"),
+            0x600 => {
+                return Err(refuse!(
+                    "ANS I/O log level debug selector (0x600) is not modeled"
+                ));
+            }
             // Firmware's lane query returns zero at 0x16f9a8; a write
             // takes Invalid Field at 0x16dc08..0x16dc30.
             0xa20 => {
@@ -60,11 +65,13 @@ impl DebugService {
                     Reply::InvalidField
                 });
             }
-            _ => return Err("ANS debug-service selector is not modeled"),
+            _ => return Err(refuse!("ANS debug-service selector is not modeled")),
         };
         if operation == WRITE {
             if value & !supported != 0 {
-                return Err("ANS NAND debug flags require unmodeled timeout or capture effects");
+                return Err(refuse!(
+                    "ANS NAND debug flags require unmodeled timeout or capture effects"
+                ));
             }
             *word = value;
             Ok(Reply::Value(0))

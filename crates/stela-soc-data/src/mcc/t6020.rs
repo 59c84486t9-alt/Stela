@@ -1,4 +1,6 @@
 //! Immutable T602x request aperture/channel geometry; no cache rights.
+use crate::Result;
+use stela_contracts::refuse;
 pub const APERTURE_BYTES: u64 = 0x1000000;
 pub const MAX_APERTURES: usize = 16;
 pub const PLANES: u8 = 4;
@@ -19,9 +21,11 @@ pub const WAYS_STATUS: u64 = 0x1c04;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout(u8);
 impl Layout {
-    pub fn new(apertures: usize) -> Result<Self, &'static str> {
+    pub fn new(apertures: usize) -> Result<Self> {
         if !(1..=MAX_APERTURES).contains(&apertures) {
-            return Err("T602x controller exceeds the source sixteen-aperture descriptor array");
+            return Err(refuse!(
+                "T602x controller exceeds the source sixteen-aperture descriptor array"
+            ));
         }
         Ok(Self(apertures as u8))
     }
@@ -31,9 +35,11 @@ impl Layout {
     pub fn channels(self) -> usize {
         self.apertures() * CHANNELS
     }
-    pub fn channel(self, ordinal: usize) -> Result<(u8, u64), &'static str> {
+    pub fn channel(self, ordinal: usize) -> Result<(u8, u64)> {
         if ordinal >= self.channels() {
-            return Err("T602x DCS ordinal exceeds the actual source apertures");
+            return Err(refuse!(
+                "T602x DCS ordinal exceeds the actual source apertures"
+            ));
         }
         Ok((
             (ordinal / CHANNELS) as u8,

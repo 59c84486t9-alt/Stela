@@ -1,14 +1,16 @@
 //! Native system services joined to the cold PMP ASC and DMA owners.
 use super::{AppleDevices, ExplicitRuntimeConfiguration};
+use crate::Result;
 use crate::platform::apple::asc::Asc;
 use crate::platform::apple::pmp;
 use crate::platform::apple::pmp::native::services::Clock;
 use crate::platform::apple::pmp::native::services::Services;
 use crate::platform::apple::rtkit::RtKit;
-use alloc::{format, string::String, sync::Arc};
+use alloc::sync::Arc;
 use stela_contracts::bus::Access;
 use stela_contracts::bus::DeviceId;
 use stela_contracts::bus::Width;
+use stela_contracts::refuse;
 use stela_engine::machine::engine::DeviceError;
 use stela_engine::memory::RegisteredSystemRam;
 use stela_soc_data::board::Board;
@@ -22,9 +24,7 @@ impl AppleDevices {
     /// Optional system endpoints must not advertise an AP-buffer protocol
     /// whose source DART filter cannot yet perform its memory effects. The
     /// existing application endpoint remains independently usable.
-    pub fn native_pmp_system_endpoint_refusal(
-        board: &Board,
-    ) -> Result<Option<&'static str>, String> {
+    pub fn native_pmp_system_endpoint_refusal(board: &Board) -> Result<Option<&'static str>> {
         // Services::t8112 carries source-specific reporting/trace defaults.
         // A direct MCC owner supplies no validation for that protocol.
         if board.memory_cache.is_none() || board.direct_memory_cache.is_some() {
@@ -35,12 +35,12 @@ impl AppleDevices {
         let pmp = board
             .pmp
             .as_ref()
-            .ok_or("native PMP descriptor is missing")?;
+            .ok_or(refuse!("native PMP descriptor is missing"))?;
         let route = pmp.dma_route(&board.darts)?;
         let dart = board
             .darts
             .get(route.iommu)
-            .ok_or("native PMP DART is missing")?;
+            .ok_or(refuse!("native PMP DART is missing"))?;
         Ok(dart.apf.is_some().then_some(
             "PMP reporting/trace endpoints unavailable: active DART address permission filtering is unqualified; no AP buffer service is advertised",
         ))
@@ -60,21 +60,21 @@ impl AppleDevices {
         ram: Arc<RegisteredSystemRam>,
         configuration: ExplicitRuntimeConfiguration,
         clock: Clock,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         if let Some(reason) = Self::native_pmp_system_endpoint_refusal(board)? {
             return Err(reason.into());
         }
         if self.native_pmp_services.is_some() || self.native_pmp_dma.is_some() {
-            return Err("native PMP services are already bound".into());
+            return Err(refuse!("native PMP services are already bound"));
         }
         let placement = board
             .pmp
             .as_ref()
-            .ok_or("native PMP services have no live ASC descriptor")?;
+            .ok_or(refuse!("native PMP services have no live ASC descriptor"))?;
         let (asc, offset) = self
             .bus
             .route(placement.wrapper.0, Width::Word)
-            .map_err(|e| format!("native PMP service ASC route: {e:?}"))?;
+            .map_err(|e| refuse!("native PMP service ASC route: {e}", ?e))?;
         if offset != 0
             || self
                 .bus
@@ -82,23 +82,25 @@ impl AppleDevices {
                 .and_then(|asc| asc.firmware::<RtKit>())
                 .is_none()
         {
-            return Err("native PMP system services require the actual mounted RTKit ASC".into());
+            return Err(refuse!(
+                "native PMP system services require the actual mounted RTKit ASC"
+            ));
         }
         // SAFETY: same source graph and persistent canonical owner.
         let broker = unsafe { self.bind_native_pmp_dma(board, ram, configuration) }?;
         // SAFETY: native callbacks run only under the same held/fenced owner.
-        let (services, endpoints) =
-            unsafe { Services::t8112(broker, clock) }.map_err(String::from)?;
+        let (services, endpoints) = unsafe { Services::t8112(broker, clock) }?;
         let kit = self
             .bus
             .device_mut::<Asc>(asc)
             .and_then(|asc| asc.firmware_mut::<RtKit>())
-            .ok_or("native PMP ASC owner changed during cold binding")?;
+            .ok_or(refuse!("native PMP ASC owner changed during cold binding"))?;
         if kit.endpoint_mut::<pmp::Pmp>(pmp::ENDPOINT).is_none() {
-            return Err("native PMP application endpoint has another actual protocol owner".into());
+            return Err(refuse!(
+                "native PMP application endpoint has another actual protocol owner"
+            ));
         }
-        kit.attach_cold_system_endpoints(endpoints)
-            .map_err(String::from)?;
+        kit.attach_cold_system_endpoints(endpoints)?;
         self.native_pmp_services = Some(NativePmpServices { asc, services });
         Ok(())
     }
@@ -130,10 +132,9 @@ impl AppleDevices {
             return Ok(());
         }
         let mut access = Access::new(cpu, now, &mut self.latch);
-        owner
-            .services
-            .advance(&mut access)
-            .map_err(|e| DeviceError::TransferRefused(format!("native PMP system service: {e}")))?;
+        owner.services.advance(&mut access).map_err(|error| {
+            DeviceError::TransferRefused(refuse!("native PMP system service: {error}", ?error))
+        })?;
         Ok(())
     }
 }

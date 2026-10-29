@@ -3,16 +3,17 @@
 //! A wire reply is not local mapping permission. The backend must keep the
 //! canonical RAM/DMA mapping and retire each real map/unmap operation.
 use super::{Progress, Step};
+use crate::Result;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
+use stela_contracts::Refusal;
 use stela_contracts::bus::Access;
+use stela_contracts::refuse;
 
 mod regions;
 mod wire;
 pub use regions::Region;
 use wire::{Kind, PAGE, TABLE_BYTES};
-
-type Error = &'static str;
 
 /// Unique admission to the native owner's class1 callback/mutex slot.
 /// No Clone, reset, replacement or drop-time remote cleanup is provided.
@@ -24,11 +25,11 @@ impl Claim {
     pub(super) fn new(owner: Rc<()>, alive: Rc<Cell<bool>>) -> Self {
         Self { owner, alive }
     }
-    pub(super) fn check(&self) -> Result<(), Error> {
+    pub(super) fn check(&self) -> Result<()> {
         if self.alive.get() {
             Ok(())
         } else {
-            Err("PMP native memory owner was abandoned")
+            Err(refuse!("PMP native memory owner was abandoned"))
         }
     }
 }
@@ -68,18 +69,18 @@ impl Request {
 /// fault/prefix semantics; dropping it must not pretend to unmap/free remotely.
 pub trait Mapping {
     fn geometry(&self) -> MapRequest;
-    fn read(
-        &mut self,
-        offset: u64,
-        output: &mut [u8],
-        access: &mut Access<'_>,
-    ) -> Result<(), Error>;
-    fn write(&mut self, offset: u64, input: &[u8], access: &mut Access<'_>) -> Result<(), Error>;
+    fn read(&mut self, offset: u64, output: &mut [u8], access: &mut Access<'_>) -> Result<()>;
+    fn write(&mut self, offset: u64, input: &[u8], access: &mut Access<'_>) -> Result<()>;
 }
 pub enum MapStep<M> {
-    Busy { deadline: Option<u64> },
-    Retired { mapping: M, refusal: Option<Error> },
-    Refused(Error),
+    Busy {
+        deadline: Option<u64>,
+    },
+    Retired {
+        mapping: M,
+        refusal: Option<Refusal>,
+    },
+    Refused(Refusal),
 }
 /// Backend effects remain under the same request through Busy/refusal. Map
 /// refusal may not discard a published mapping; return Retired with its
@@ -172,7 +173,7 @@ pub struct Client<B: Backend> {
     allocations: Vec<Record<B::Mapping>>,
 }
 impl<B: Backend> Client<B> {
-    pub fn new(claim: Claim, backend: B) -> Result<Self, Error> {
+    pub fn new(claim: Claim, backend: B) -> Result<Self> {
         claim.check()?;
         Ok(Self {
             claim,
@@ -185,15 +186,17 @@ impl<B: Backend> Client<B> {
             allocations: Vec::new(),
         })
     }
-    fn begin(&mut self, operation: Operation) -> Result<(), Error> {
+    fn begin(&mut self, operation: Operation) -> Result<()> {
         self.claim.check()?;
         if self.pending.is_some() || self.completion.is_some() {
-            return Err("PMP memory callback slot still retains a transaction or result");
+            return Err(refuse!(
+                "PMP memory callback slot still retains a transaction or result"
+            ));
         }
         let serial = self
             .serial
             .checked_add(1)
-            .ok_or("PMP memory transaction identity exhausted")?;
+            .ok_or(refuse!("PMP memory transaction identity exhausted"))?;
         self.serial = serial;
         self.pending = Some(Pending {
             operation,
@@ -209,29 +212,35 @@ impl<B: Backend> Client<B> {
         });
         Ok(())
     }
-    pub fn begin_init(&mut self) -> Result<(), Error> {
+    pub fn begin_init(&mut self) -> Result<()> {
         if self.initialized {
-            return Err("PMP static memory table initialization already completed");
+            return Err(refuse!(
+                "PMP static memory table initialization already completed"
+            ));
         }
         self.begin(Operation::Init)
     }
-    pub fn begin_allocate(&mut self, bytes: u32) -> Result<(), Error> {
+    pub fn begin_allocate(&mut self, bytes: u32) -> Result<()> {
         self.begin(Operation::Allocate {
             requested: u64::from(bytes),
             rounded: wire::allocation_bytes(bytes)?,
         })
     }
-    fn index(&self, allocation: &Allocation) -> Result<usize, Error> {
+    fn index(&self, allocation: &Allocation) -> Result<usize> {
         self.claim.check()?;
         if !Rc::ptr_eq(&allocation.owner, &self.claim.owner) {
-            return Err("PMP allocation belongs to another actual native owner");
+            return Err(refuse!(
+                "PMP allocation belongs to another actual native owner"
+            ));
         }
         self.allocations
             .iter()
             .position(|r| Rc::ptr_eq(&r.object, &allocation.object))
-            .ok_or("PMP allocation is not retained by this actual client")
+            .ok_or(refuse!(
+                "PMP allocation is not retained by this actual client"
+            ))
     }
-    pub fn begin_free(&mut self, allocation: &Allocation) -> Result<(), Error> {
+    pub fn begin_free(&mut self, allocation: &Allocation) -> Result<()> {
         let index = self.index(allocation)?;
         self.begin(Operation::Free { index })?;
         if self.allocations[index].released {
@@ -243,7 +252,7 @@ impl<B: Backend> Client<B> {
     /// Commit a request exactly once to the endpoint's outgoing queue.
     /// Free is withheld until real local unmap retirement. No callback is
     /// credited before publication, and no fallible work follows this push.
-    pub fn emit(&mut self, outbox: &mut Vec<u64>) -> Result<bool, Error> {
+    pub fn emit(&mut self, outbox: &mut Vec<u64>) -> Result<bool> {
         self.claim.check()?;
         let Some(p) = &mut self.pending else {
             return Ok(false);
@@ -265,20 +274,22 @@ impl<B: Backend> Client<B> {
         p.sent = true;
         Ok(true)
     }
-    pub fn receive(&mut self, payload: u64) -> Result<(), Error> {
+    pub fn receive(&mut self, payload: u64) -> Result<()> {
         self.claim.check()?;
         let p = self
             .pending
             .as_mut()
-            .ok_or("PMP memory reply has no pending class callback")?;
+            .ok_or(refuse!("PMP memory reply has no pending class callback"))?;
         if !p.sent || p.reply.is_some() {
-            return Err("PMP memory reply is premature or repeats a retained reply");
+            return Err(refuse!(
+                "PMP memory reply is premature or repeats a retained reply"
+            ));
         }
         let body = p.kind().reply(payload)?;
         p.reply = Some(body);
         Ok(())
     }
-    pub fn take_completion(&mut self) -> Result<Option<Completion>, Error> {
+    pub fn take_completion(&mut self) -> Result<Option<Completion>> {
         self.claim.check()?;
         Ok(self.completion.take())
     }
@@ -291,7 +302,7 @@ impl<B: Backend> Client<B> {
     pub(super) fn fresh(&self) -> bool {
         self.serial == 0
     }
-    pub(super) fn mapping(&mut self, allocation: &Allocation) -> Result<&mut B::Mapping, Error> {
+    pub(super) fn mapping(&mut self, allocation: &Allocation) -> Result<&mut B::Mapping> {
         self.usable(allocation, 0, 0)
     }
     fn usable(
@@ -299,28 +310,31 @@ impl<B: Backend> Client<B> {
         allocation: &Allocation,
         offset: u64,
         bytes: usize,
-    ) -> Result<&mut B::Mapping, Error> {
+    ) -> Result<&mut B::Mapping> {
         let index = self.index(allocation)?;
         if self
             .pending
             .as_ref()
             .is_some_and(|p| matches!(p.operation,Operation::Free { index: i } if i == index))
         {
-            return Err("PMP allocation is being released");
+            return Err(refuse!("PMP allocation is being released"));
         }
         let r = &mut self.allocations[index];
         if r.released
             || offset
                 .checked_add(
-                    u64::try_from(bytes).map_err(|_| "PMP memory access length exceeds u64")?,
+                    u64::try_from(bytes)
+                        .map_err(|_| refuse!("PMP memory access length exceeds u64"))?,
                 )
                 .is_none_or(|end| end > r.requested)
         {
-            return Err("PMP memory access exceeds its live requested allocation");
+            return Err(refuse!(
+                "PMP memory access exceeds its live requested allocation"
+            ));
         }
         r.mapping
             .as_mut()
-            .ok_or("PMP allocation has no actual local mapping")
+            .ok_or(refuse!("PMP allocation has no actual local mapping"))
     }
     pub fn read(
         &mut self,
@@ -328,7 +342,7 @@ impl<B: Backend> Client<B> {
         offset: u64,
         output: &mut [u8],
         access: &mut Access<'_>,
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         self.usable(allocation, offset, output.len())?
             .read(offset, output, access)
     }
@@ -338,11 +352,11 @@ impl<B: Backend> Client<B> {
         offset: u64,
         input: &[u8],
         access: &mut Access<'_>,
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         self.usable(allocation, offset, input.len())?
             .write(offset, input, access)
     }
-    pub fn advance(&mut self, access: &mut Access<'_>) -> Result<Progress, Error> {
+    pub fn advance(&mut self, access: &mut Access<'_>) -> Result<Progress> {
         self.claim.check()?;
         let Some(p) = &mut self.pending else {
             return Ok(Progress::Idle);
@@ -353,7 +367,7 @@ impl<B: Backend> Client<B> {
                 let mapping = self.allocations[index]
                     .mapping
                     .as_mut()
-                    .ok_or("PMP free lost its actual local mapping")?;
+                    .ok_or(refuse!("PMP free lost its actual local mapping"))?;
                 match self.backend.unmap(&p.request, mapping, access) {
                     Step::Busy { deadline } => return Ok(Progress::Busy { deadline }),
                     Step::Refused(reason) => return Err(reason),
@@ -405,9 +419,9 @@ impl<B: Backend> Client<B> {
                 }
                 let mapping = p.mapping.as_mut().unwrap();
                 if mapping.geometry() != geometry {
-                    return Err(
-                        "PMP backend returned a mismatched mapping; actual object remains quarantined",
-                    );
+                    return Err(refuse!(
+                        "PMP backend returned a mismatched mapping; actual object remains quarantined"
+                    ));
                 }
                 match p.operation {
                     Operation::Init => {

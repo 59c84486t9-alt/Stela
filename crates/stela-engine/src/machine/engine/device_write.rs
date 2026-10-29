@@ -4,6 +4,7 @@ use super::*;
 use owners::WriteOwners;
 pub use owners::{CanonicalDeviceWrite, CanonicalWriteMemory};
 use shared_memory::RecoveredWrite;
+use stela_contracts::refuse;
 
 pub type DeviceWriteShape = DeviceReadShape;
 /// Diagnostics omit stored values; they grant no execution or replay permission.
@@ -158,9 +159,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         now: u64,
     ) -> Result<(), DeviceError> {
         let Some(held) = self.serial_hold.take() else {
-            return Err(DeviceError::TransferRefused(
-                "canonical device write requires the serialized worker hold".into(),
-            ));
+            return Err(DeviceError::TransferRefused(refuse!(
+                "canonical device write requires the serialized worker hold"
+            )));
         };
         let consumed = self.serial_write_held(&held, cpu, physical, bytes, value, now);
         self.serial_hold = Some(held);
@@ -185,7 +186,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .canonical_memory
                 .as_ref()
                 .ok_or_else(|| {
-                    DeviceError::TransferRefused("serialized PE has no canonical RAM owner".into())
+                    DeviceError::TransferRefused(refuse!(
+                        "serialized PE has no canonical RAM owner"
+                    ))
                 })?
                 .ram_owner(),
         );

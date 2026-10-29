@@ -10,8 +10,9 @@ use super::{
     session::{Action, Job, PORT, Phase, Session},
     stream::{ByteStream, Endian, Framed},
 };
-use alloc::{boxed::Box, format, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 use core::task::Poll;
+use stela_contracts::refuse;
 use stela_formats::payload::ReadAt;
 
 /// Handles identify owned streams, including ones still connecting. A Pending
@@ -278,7 +279,7 @@ impl<R: ReadAt, H: Copy + Eq> Driver<R, H> {
         for transfer in &mut self.jobs {
             if let Err(e) = transfer.job.prefetch(&mut self.answers.store, chunks) {
                 self.failure = Some(super::refuse(
-                    format!("transfer failed: {e}"),
+                    refuse!("transfer failed: {e}", ?e),
                     &transfer.job.request,
                 ));
                 return;

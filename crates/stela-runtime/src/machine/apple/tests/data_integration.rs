@@ -1,5 +1,6 @@
 //! Board metadata exercised through stateful Runtime device models.
 use super::super::{DcpextDma, DcpextNub};
+use crate::Result;
 use crate::platform::apple::cluster::t6000::{Complex, T6000};
 use crate::platform::apple::power::t6000::native;
 use alloc::{vec, vec::Vec};
@@ -126,7 +127,7 @@ fn original_j314s_external_output_preserves_native_routes_and_identity() {
                 format: ScanoutFormat::Bgra8888,
             }
         }
-        fn present(&mut self, _: &[u8]) -> Result<(), &'static str> {
+        fn present(&mut self, _: &[u8]) -> Result<()> {
             panic!("mount is not a frame")
         }
     }
@@ -198,12 +199,11 @@ fn the_t6050_rows_follow_the_template_soc_name() {
         }
     );
     assert_eq!(
-        cpus(0x6050, "Apple M5", &layout_of(&[(b'P', 0x200)])),
-        Err(
-            "ApChipID 0x6050 is Apple M5 Pro or Apple M5 Max or Apple M5 Ultra, but the \
-             DeviceTree names Apple M5"
-                .into()
-        )
+        cpus(0x6050, "Apple M5", &layout_of(&[(b'P', 0x200)]))
+            .unwrap_err()
+            .to_string(),
+        "ApChipID 0x6050 is Apple M5 Pro or Apple M5 Max or Apple M5 Ultra, but the DeviceTree \
+         names Apple M5"
     );
     // The template's 36 PEs fill the kernel's slots; a 37th refuses.
     let mut template = Vec::new();
@@ -218,6 +218,7 @@ fn the_t6050_rows_follow_the_template_soc_name() {
         T6050_FIXTURE_LIMITS
             .check(&layout_of(&template))
             .unwrap_err()
+            .to_string()
             .contains("MAX_CPUS")
     );
 }
@@ -262,6 +263,7 @@ fn the_a18_pro_takes_the_m4_cpu_profile() {
     assert!(
         cpus(0x8140, "Apple A18 Pro", &layout_of(&seventh))
             .unwrap_err()
+            .to_string()
             .contains("MAX_CPUS")
     );
 }
@@ -446,6 +448,7 @@ fn original_complete_descriptor_and_sparse_ownership_have_no_invented_state() {
         d.coverage_requirement
             .as_ref()
             .unwrap()
+            .to_string()
             .contains("device: 197")
     );
     let layout = d.layout().unwrap();

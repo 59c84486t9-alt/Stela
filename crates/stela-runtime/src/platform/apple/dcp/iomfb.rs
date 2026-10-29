@@ -56,6 +56,7 @@ use super::avipc::DisplayState;
 use super::modes::{self, Advertised};
 use super::rpc::{Callback, Service, Step};
 use super::swap::{self, Layer, Submission};
+use crate::Result;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::format;
@@ -64,6 +65,8 @@ use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 
 /// The most display-log entries kept between drains.
 const LOG_CAPACITY: usize = 4096;
@@ -127,7 +130,7 @@ struct Outgoing {
 pub struct Methods {
     scanout: Box<dyn Scanout>,
     /// The one mode, or why the scanout's mode cannot be advertised.
-    advertised: Result<Advertised, &'static str>,
+    advertised: Result<Advertised>,
     /// Why the last call refused, with the tag and its interface row.
     last_refusal: Option<String>,
     log: VecDeque<Log>,
@@ -159,7 +162,7 @@ pub struct Methods {
 }
 
 impl Methods {
-    pub(super) fn check_reset(&self) -> Result<(), &'static str> {
+    pub(super) fn check_reset(&self) -> Result<()> {
         if self.open_swap.is_some()
             || !self.frames.is_empty()
             || !self.outgoing.is_empty()
@@ -167,7 +170,9 @@ impl Methods {
             || self.in_flight
             || self.display.borrow().hotplug_pending()
         {
-            return Err("DCP physical reset with owned scanout or callback work");
+            return Err(refuse!(
+                "DCP physical reset with owned scanout or callback work"
+            ));
         }
         Ok(())
     }
@@ -274,10 +279,7 @@ impl Methods {
     /// (DVA, bytes; false when unreachable), hand the composed rows to the
     /// scanout and queue its completion. A swap is never completed before its pixels
     /// are consumed.
-    pub fn present(
-        &mut self,
-        read: impl FnMut(u64, &mut [u8]) -> bool,
-    ) -> Result<(), &'static str> {
+    pub fn present(&mut self, read: impl FnMut(u64, &mut [u8]) -> bool) -> Result<()> {
         if !self.display.borrow().active() {
             return Ok(());
         }
@@ -305,7 +307,7 @@ impl Methods {
     }
 
     /// Record and return a named refusal for method `tag`.
-    fn refuse(&mut self, tag: [u8; 4], reason: &'static str) -> Result<Step<Self>, &'static str> {
+    fn refuse(&mut self, tag: [u8; 4], reason: Refusal) -> Result<Step<Self>> {
         let row = abi::method(&tag)
             .map(|row| {
                 format!(
@@ -319,7 +321,7 @@ impl Methods {
     }
 
     /// Record and return a named refusal of the AP's answer to callback `tag`.
-    fn refuse_answer(&mut self, tag: [u8; 4], reason: &'static str) -> Result<(), &'static str> {
+    fn refuse_answer(&mut self, tag: [u8; 4], reason: Refusal) -> Result<()> {
         let name = abi::callback(&tag).map_or("", |row| row.name);
         self.refusal(format!(
             "DCP IOMFB callback {} {name}: {reason}",
@@ -332,11 +334,7 @@ impl Methods {
         self.record_log(Log::Callback { tag, input, output });
     }
 
-    fn reply(
-        &mut self,
-        tag: [u8; 4],
-        packed: Result<Vec<u8>, &'static str>,
-    ) -> Result<Step<Self>, &'static str> {
+    fn reply(&mut self, tag: [u8; 4], packed: Result<Vec<u8>>) -> Result<Step<Self>> {
         match packed {
             Ok(bytes) => Ok(Step::Return(bytes)),
             Err(reason) => self.refuse(tag, reason),
@@ -344,10 +342,10 @@ impl Methods {
     }
 
     /// Queue a callback, sized by its interface row.
-    fn queue(&mut self, tag: [u8; 4], input: Packed) -> Result<(), &'static str> {
-        let row = abi::callback(&tag).ok_or("DCP callback is not on the interface")?;
+    fn queue(&mut self, tag: [u8; 4], input: Packed) -> Result<()> {
+        let row = abi::callback(&tag).ok_or(refuse!("DCP callback is not on the interface"))?;
         let (Some(length), Some(output)) = (row.input, row.output) else {
-            return Err("DCP callback sizes are not recorded");
+            return Err(refuse!("DCP callback sizes are not recorded"));
         };
         let input = input.finish(length)?;
         self.outgoing.push_back(Outgoing { tag, input, output });
@@ -356,11 +354,11 @@ impl Methods {
 
     /// Publish the one mode's `TimingElements` and `ColorElements` on the
     /// IOMFB service, then report the monitor plugged.
-    fn publish(&mut self) -> Result<(), &'static str> {
+    fn publish(&mut self) -> Result<()> {
         let advertised = match &self.advertised {
             Ok(advertised) => advertised,
             Err(reason) => {
-                let reason = *reason;
+                let reason = reason.clone();
                 return self.refuse_answer(PROP_START, reason);
             }
         };
@@ -373,7 +371,8 @@ impl Methods {
             // hands the whole buffer to OSUnserializeXML.
             let mut bytes = xml.into_bytes();
             bytes.push(0);
-            let length = u32::try_from(bytes.len()).map_err(|_| "DCP property is too long")?;
+            let length =
+                u32::try_from(bytes.len()).map_err(|_| refuse!("DCP property is too long"))?;
             self.queue(PROP_START, Packed::new().u32(length))?;
             for (index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
                 let mut data = [0u8; CHUNK_BYTES];
@@ -396,7 +395,7 @@ impl Methods {
         self.queue_hotplug()
     }
 
-    fn queue_hotplug(&mut self) -> Result<(), &'static str> {
+    fn queue_hotplug(&mut self) -> Result<()> {
         self.queue(
             HOTPLUG,
             Packed::new()
@@ -409,27 +408,27 @@ impl Methods {
 }
 
 impl Service for Methods {
-    fn call(
-        &mut self,
-        tag: [u8; 4],
-        input: &[u8],
-        output: u32,
-    ) -> Result<Step<Self>, &'static str> {
+    fn call(&mut self, tag: [u8; 4], input: &[u8], output: u32) -> Result<Step<Self>> {
         self.record_log(Log::Call {
             tag,
             input: input[..input.len().min(LOGGED_INPUT)].to_vec(),
             output,
         });
         let Some(row) = abi::method(&tag) else {
-            return self.refuse(tag, "tag is not a method of this DCP interface");
+            return self.refuse(tag, refuse!("tag is not a method of this DCP interface"));
         };
         if row.input as usize != input.len() || row.output != output {
-            return self.refuse(tag, "call sizes differ from the interface's record");
+            return self.refuse(
+                tag,
+                refuse!("call sizes differ from the interface's record"),
+            );
         }
         if self.shut_down {
             return self.refuse(
                 tag,
-                "the AP shut the DCP link down; an IOP sleep-to-wake transition is required",
+                refuse!(
+                    "the AP shut the DCP link down; an IOP sleep-to-wake transition is required"
+                ),
             );
         }
         let mut fields = Fields::new(input);
@@ -474,7 +473,7 @@ impl Service for Methods {
                 if param != ADAPTIVE_SYNC || values != [0; 4] {
                     return self.refuse(
                         tag,
-                        "set_parameter_dcp sets a parameter the fixed mode does not have",
+                        refuse!("set_parameter_dcp sets a parameter the fixed mode does not have"),
                     );
                 }
                 let packed = Packed::new().u32(IO_RETURN_SUCCESS).finish(output);
@@ -488,8 +487,10 @@ impl Service for Methods {
                     0 => false,
                     1 => true,
                     _ => {
-                        return self
-                            .refuse(tag, "setPowerState names a state other than off or on");
+                        return self.refuse(
+                            tag,
+                            refuse!("setPowerState names a state other than off or on"),
+                        );
                     }
                 });
                 let packed = Packed::new().u32(0).u32(IO_RETURN_SUCCESS).finish(output);
@@ -502,7 +503,7 @@ impl Service for Methods {
                 if !fields.bool()? {
                     return self.refuse(
                         tag,
-                        "manage_properties withdraws the published modes, which the fixed monitor never does",
+                        refuse!("manage_properties withdraws the published modes, which the fixed monitor never does"),
                     );
                 }
                 Ok(Step::Return(Vec::new()))
@@ -544,7 +545,7 @@ impl Service for Methods {
                 if (color, timing) != (modes::COLOR_ID, modes::TIMING_ID) {
                     return self.refuse(
                         tag,
-                        "set_digital_out_mode names a mode the DCP never advertised",
+                        refuse!("set_digital_out_mode names a mode the DCP never advertised"),
                     );
                 }
                 self.digital_out = Some((color, timing));
@@ -584,7 +585,9 @@ impl Service for Methods {
                 if self.config_frame != (mode.width, mode.height) {
                     return self.refuse(
                         tag,
-                        "program_config_frame_size programs a frame size other than the mode's",
+                        refuse!(
+                            "program_config_frame_size programs a frame size other than the mode's"
+                        ),
                     );
                 }
                 Ok(Step::Return(Vec::new()))
@@ -604,8 +607,10 @@ impl Service for Methods {
             // swap_start_dcp(u32* swap_id, u64 client) -> {swap_id, u32}.
             b"A406" => {
                 if self.open_swap.is_some() {
-                    return self
-                        .refuse(tag, "swap_start_dcp while a started swap is not submitted");
+                    return self.refuse(
+                        tag,
+                        refuse!("swap_start_dcp while a started swap is not submitted"),
+                    );
                 }
                 let id = self.next_swap;
                 self.next_swap = self.next_swap.wrapping_add(1).max(1);
@@ -636,7 +641,7 @@ impl Service for Methods {
                 if fields.u8()? == 1 {
                     return self.refuse(
                         tag,
-                        "link_shutdown_signal saves the pipe for hibernation, which is not modeled",
+                        refuse!("link_shutdown_signal saves the pipe for hibernation, which is not modeled"),
                     );
                 }
                 self.shut_down = true;
@@ -686,7 +691,8 @@ impl Service for Methods {
                     // "setProperty failed".
                     if tag != HOTPLUG && !answer.first().is_some_and(|byte| byte & 1 != 0) {
                         methods.outgoing.clear();
-                        return methods.refuse_answer(tag, "the AP refused the published mode");
+                        return methods
+                            .refuse_answer(tag, refuse!("the AP refused the published mode"));
                     }
                     Ok(())
                 }),
@@ -717,14 +723,9 @@ impl Service for Methods {
 impl Methods {
     /// `swap_submit_dcp`: update the layer slots, queue the visible layers
     /// (none is a background clear) and answer `{bool, u32, link status}`.
-    fn submit(
-        &mut self,
-        tag: [u8; 4],
-        input: &[u8],
-        output: u32,
-    ) -> Result<Step<Self>, &'static str> {
+    fn submit(&mut self, tag: [u8; 4], input: &[u8], output: u32) -> Result<Step<Self>> {
         let Some(swap_id) = self.open_swap else {
-            return self.refuse(tag, "swap_submit_dcp without swap_start_dcp");
+            return self.refuse(tag, refuse!("swap_submit_dcp without swap_start_dcp"));
         };
         if self.dumped < DUMPED_SWAPS {
             self.dumped += 1;
@@ -759,12 +760,11 @@ impl Methods {
 /// The layers the slots show, bottom to top, over a black background. A
 /// non-black background, or a layer whose surface or rectangles the model
 /// cannot show, refuses by name.
-fn visible(
-    planes: &[Option<Layer>; swap::LAYERS],
-    background: u32,
-) -> Result<Vec<scanout::Layer>, &'static str> {
+fn visible(planes: &[Option<Layer>; swap::LAYERS], background: u32) -> Result<Vec<scanout::Layer>> {
     if background != 0 {
-        return Err("swap clears to a background color; the model presents black only");
+        return Err(refuse!(
+            "swap clears to a background color; the model presents black only"
+        ));
     }
     planes
         .iter()
@@ -789,18 +789,15 @@ fn bool_reply(ok: bool) -> Vec<u8> {
 /// Answer a stateless query for the fixed `mode`, or refuse it by name. The
 /// output must be exactly the length the AP's header allocated (the
 /// interface's size); a mismatch refuses rather than truncates.
-pub fn answer(
-    code: &[u8; 4],
-    _input: &[u8],
-    output: u32,
-    mode: Mode,
-) -> Result<Vec<u8>, &'static str> {
+pub fn answer(code: &[u8; 4], _input: &[u8], output: u32, mode: Mode) -> Result<Vec<u8>> {
     let out = output as usize;
-    let sized = |bytes: Vec<u8>| -> Result<Vec<u8>, &'static str> {
+    let sized = |bytes: Vec<u8>| -> Result<Vec<u8>> {
         if bytes.len() == out {
             Ok(bytes)
         } else {
-            Err("DCP method output size differs from the AP's header")
+            Err(refuse!(
+                "DCP method output size differs from the AP's header"
+            ))
         }
     };
     let width = mode.width.to_le_bytes().to_vec();
@@ -858,7 +855,9 @@ pub fn answer(
         // once AppleClamshellState exists): false, the pipe's byte +0x2ba8,
         // which nothing sets (restore 0x2c01d0, normal 0x2c2fb4).
         b"A489" => sized(bool_reply(false)),
-        _ => Err("DCP method is not modeled for the one fixed monitor"),
+        _ => Err(refuse!(
+            "DCP method is not modeled for the one fixed monitor"
+        )),
     }
 }
 

@@ -32,6 +32,9 @@
 //! LOAD_CNT restarts the count. The model has no UTMI cycle clock, so the
 //! count reports one event once the clock has been active with EVT_EN set,
 //! not elapsed cycles. The block's other words refuse.
+use crate::Result;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     super::regfile::Held, stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -133,15 +136,15 @@ impl AtcPhy {
             utmi_clock_event: false,
         }
     }
-    fn mmio_ready(&self) -> Result<(), &'static str> {
+    fn mmio_ready(&self) -> Result<()> {
         if !self.powered {
-            return Err("ATC PHY power domain is off");
+            return Err(refuse!("ATC PHY power domain is off"));
         }
         if !self.clocked {
-            return Err("ATC PHY clock is gated");
+            return Err(refuse!("ATC PHY clock is gated"));
         }
         if self.reset {
-            return Err("ATC PHY reset is asserted");
+            return Err(refuse!("ATC PHY reset is asserted"));
         }
         Ok(())
     }
@@ -267,10 +270,12 @@ impl MmioDevice for AtcPhy {
         NAME
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let err = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let err = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         self.mmio_ready().map_err(err)?;
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(err("ATC PHY registers require aligned 32-bit accesses"));
+            return Err(err(refuse!(
+                "ATC PHY registers require aligned 32-bit accesses"
+            )));
         }
         let value = match offset {
             POWER_STAT => self.word(POWER_CTRL) & (SMALL | BIG),
@@ -290,9 +295,9 @@ impl MmioDevice for AtcPhy {
             }
             _ if Self::mask(offset).is_some() => self.word(offset),
             _ => {
-                return Err(err(
-                    "unmodeled ATC PHY register, analog status or transport",
-                ));
+                return Err(err(refuse!(
+                    "unmodeled ATC PHY register, analog status or transport"
+                )));
             }
         };
         Ok(u64::from(value))
@@ -304,26 +309,30 @@ impl MmioDevice for AtcPhy {
         value: u64,
         _: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let err = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let err = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         self.mmio_ready().map_err(err)?;
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(err("ATC PHY registers require aligned 32-bit accesses"));
+            return Err(err(refuse!(
+                "ATC PHY registers require aligned 32-bit accesses"
+            )));
         }
         let mask = Self::mask(offset)
-            .ok_or_else(|| err("unmodeled ATC PHY register or read-only status"))?;
+            .ok_or_else(|| err(refuse!("unmodeled ATC PHY register or read-only status")))?;
         let value = value as u32;
         if value & !mask != 0 {
-            return Err(err("unmodeled ATC PHY register fields"));
+            return Err(err(refuse!("unmodeled ATC PHY register fields")));
         }
         if offset == PLL && value & REQUEST != 0 && value & PLL_COMMAND != 0 {
-            return Err(err(
-                "AUSPLL command effects beyond command zero are undetermined",
-            ));
+            return Err(err(refuse!(
+                "AUSPLL command effects beyond command zero are undetermined"
+            )));
         }
         if offset == MUX
             && (!matches!((value & MUX_CLOCK) >> 3, 0 | 1 | 2 | 4) || value & MUX_DATA > 2)
         {
-            return Err(err("reserved pipehandler clock/data mux selection"));
+            return Err(err(refuse!(
+                "reserved pipehandler clock/data mux selection"
+            )));
         }
         if offset == USB2_EVENTS && value & !self.word(offset) & LOAD_COUNT != 0 {
             self.utmi_clock_event = false;

@@ -3,8 +3,10 @@
 //! Field encodings: Linux v6.17 `include/uapi/linux/pci_regs.h`. Device
 //! identities and capabilities must be supplied from the selected device's
 //! evidence; this module supplies no Apple or downstream-device identity.
+use crate::Result;
 use alloc::vec::Vec;
 use stela_contracts::bus::Width;
+use stela_contracts::refuse;
 
 pub const COMMAND: u16 = 0x04;
 pub const MEMORY_ENABLE: u16 = 1 << 1;
@@ -144,16 +146,16 @@ impl ConfigSpace {
     /// The owned-bank adapter currently implements standard memory routing,
     /// bus mastering, INTx masking and secondary reset only. Capability state
     /// needs an endpoint protocol, not an arbitrary RW register image.
-    pub(super) fn check_header_contract(&self, bridge: bool) -> Result<(), &'static str> {
+    pub(super) fn check_header_contract(&self, bridge: bool) -> Result<()> {
         for register in &self.registers {
             let d = register.description;
             if d.offset >= 0x40
                 || (d.offset == 0x34 && d.reset & 0xff != 0)
                 || (d.offset == COMMAND && d.reset & 0x0010_0000 != 0)
             {
-                return Err(
-                    "PCIe capability protocols require an actual qualified configuration adapter",
-                );
+                return Err(refuse!(
+                    "PCIe capability protocols require an actual qualified configuration adapter"
+                ));
             }
             let supported = match d.offset {
                 COMMAND => u32::from(MEMORY_ENABLE | BUS_MASTER_ENABLE | INTX_DISABLE),
@@ -164,10 +166,14 @@ impl ConfigSpace {
                 _ => 0,
             };
             if d.writable & !supported != 0 || d.clear != 0 {
-                return Err("PCIe configuration side effects exceed the qualified header contract");
+                return Err(refuse!(
+                    "PCIe configuration side effects exceed the qualified header contract"
+                ));
             }
             if d.offset == COMMAND && d.reset & 0xffff & !supported != 0 {
-                return Err("PCIe initial command enables an unsupported protocol");
+                return Err(refuse!(
+                    "PCIe initial command enables an unsupported protocol"
+                ));
             }
         }
         Ok(())

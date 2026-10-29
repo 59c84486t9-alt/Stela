@@ -15,8 +15,11 @@ use super::{
     metrics,
     publisher::{Bank, Publisher},
 };
+use crate::Result;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     crate::platform::apple::ptd::transport::Entry,
     crate::platform::apple::ptd::transport::notifications::LocalNotifications,
@@ -31,14 +34,14 @@ const SCALE: u32 = 1u32.wrapping_mul(4).wrapping_mul(8).wrapping_shl(6);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
-    Contract(&'static str),
+    Contract(Refusal),
     Platform(ingestion::Error),
     Metrics(metrics::Error),
-    Publication(&'static str),
+    Publication(Refusal),
 }
 
-impl From<&'static str> for Error {
-    fn from(reason: &'static str) -> Self {
+impl From<Refusal> for Error {
+    fn from(reason: Refusal) -> Self {
         Self::Contract(reason)
     }
 }
@@ -64,11 +67,11 @@ impl Claim {
             alive,
         }
     }
-    pub(in crate::platform::apple::pmp::native) fn check(&self) -> Result<(), &'static str> {
+    pub(in crate::platform::apple::pmp::native) fn check(&self) -> Result<()> {
         if self.alive.get() {
             Ok(())
         } else {
-            Err("PMP cache service native owner was abandoned")
+            Err(refuse!("PMP cache service native owner was abandoned"))
         }
     }
 }
@@ -114,9 +117,9 @@ impl metrics::SamplesView for View<'_> {
     fn group(&self, group: u32) -> Result<&[u8; GROUP_BYTES], metrics::Error> {
         self.samples
             .group(group as usize)
-            .ok_or(metrics::Error::Contract(
-                "MC samples group exceeds its actual allocation",
-            ))
+            .ok_or(metrics::Error::Contract(refuse!(
+                "MC samples group exceeds its actual allocation"
+            )))
     }
 }
 
@@ -199,9 +202,9 @@ impl<B: metrics::Backend> Owner<B> {
             .profile()
             .descriptors()
             .get(1)
-            .ok_or(Error::Contract(
-                "MC service requires its actual AMCC descriptor",
-            ))?;
+            .ok_or(Error::Contract(refuse!(
+                "MC service requires its actual AMCC descriptor"
+            )))?;
         if d.source_id() != 2
             || d.counter_slice()
                 != Some(platform::Slice {
@@ -210,9 +213,9 @@ impl<B: metrics::Backend> Owner<B> {
                 })
             || sources.amcc.group_count() != GROUPS
         {
-            return Err(Error::Contract(
-                "MC service source geometry is not qualified",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC service source geometry is not qualified"
+            )));
         }
         if configuration.request_words == 0
             || configuration.request_words > 8
@@ -222,9 +225,9 @@ impl<B: metrics::Backend> Owner<B> {
                 .checked_add(configuration.command_words)
                 != Some(claim.request.count)
         {
-            return Err(Error::Contract(
-                "MC command counts differ from actual directional ownership",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC command counts differ from actual directional ownership"
+            )));
         }
         let response = publisher.response_range();
         if !publisher.notifications().owns(claim.local.bank())
@@ -233,20 +236,20 @@ impl<B: metrics::Backend> Owner<B> {
             || response.count != claim.response.count
             || publisher.response_words() < configuration.request_words
         {
-            return Err(Error::Contract(
-                "MC service publisher differs from its actual PTD association",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC service publisher differs from its actual PTD association"
+            )));
         }
         publisher.idle().map_err(Error::Publication)?;
         if publisher.policy().active_groups() & !((1u32 << GROUPS) - 1) != 0 {
-            return Err(Error::Contract(
-                "MC active group exceeds actual AMCC sample storage",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC active group exceeds actual AMCC sample storage"
+            )));
         }
         let mut groups = Vec::new();
         groups
             .try_reserve_exact(GROUPS)
-            .map_err(|_| Error::Contract("MC source sample allocation failed"))?;
+            .map_err(|_| Error::Contract(refuse!("MC source sample allocation failed")))?;
         groups.resize(GROUPS, [0; GROUP_BYTES]);
         Ok(Self {
             claim,
@@ -279,9 +282,9 @@ impl<B: metrics::Backend> Owner<B> {
     ) -> Result<(), Error> {
         self.claim.check()?;
         if self.batch.is_some() || self.metrics.callback_executing() {
-            return Err(Error::Contract(
-                "MC registry control overlaps retained service or callback work",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC registry control overlaps retained service or callback work"
+            )));
         }
         self.metrics.apply_registry_control(control);
         Ok(())
@@ -289,7 +292,7 @@ impl<B: metrics::Backend> Owner<B> {
     fn begin(&mut self, stage: Stage) -> Result<(), Error> {
         self.claim.check()?;
         if self.batch.is_some() {
-            return Err(Error::Contract("MC service has retained work"));
+            return Err(Error::Contract(refuse!("MC service has retained work")));
         }
         self.batch = Some(Batch {
             stage,
@@ -305,21 +308,21 @@ impl<B: metrics::Backend> Owner<B> {
     pub fn begin_initialize(&mut self) -> Result<(), Error> {
         self.claim.check()?;
         if self.batch.is_some() {
-            return Err(Error::Contract("MC service has retained work"));
+            return Err(Error::Contract(refuse!("MC service has retained work")));
         }
         self.metrics.begin_initialize().map_err(Error::Metrics)?;
         self.begin(Stage::Initialize)
     }
     pub fn begin_start(&mut self) -> Result<(), Error> {
         if !self.metrics.initialized() {
-            return Err(Error::Contract(
-                "MC start requires actual queue initialization",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC start requires actual queue initialization"
+            )));
         }
         if self.run_state == 0 && self.metrics.callback_executing() {
-            return Err(Error::Contract(
-                "MC restart concurrency with an executing callback is unqualified",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC restart concurrency with an executing callback is unqualified"
+            )));
         }
         self.begin(if self.run_state == 0 {
             Stage::StartDefaults
@@ -329,14 +332,14 @@ impl<B: metrics::Backend> Owner<B> {
     }
     pub fn begin_event(&mut self) -> Result<(), Error> {
         if !self.metrics.initialized() {
-            return Err(Error::Contract(
-                "MC event requires actual initialized work resources",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC event requires actual initialized work resources"
+            )));
         }
         if self.metrics.callback_executing() {
-            return Err(Error::Contract(
-                "MC event concurrency with an executing callback is unqualified",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC event concurrency with an executing callback is unqualified"
+            )));
         }
         self.begin(Stage::TraceEnterBegin)
     }
@@ -356,9 +359,9 @@ impl<B: metrics::Backend> Owner<B> {
         if !Rc::ptr_eq(&self.manager_identity, &sources.manager.identity())
             || !Rc::ptr_eq(&self.amcc_identity, &sources.amcc.identity())
         {
-            return Err(Error::Contract(
-                "MC service borrowed a replacement platform owner",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC service borrowed a replacement platform owner"
+            )));
         }
         Ok(())
     }
@@ -392,9 +395,9 @@ impl<B: metrics::Backend> Owner<B> {
             .as_ref()
             .is_some_and(|batch| !matches!(batch.stage, Stage::Stop))
         {
-            return Err(Error::Contract(
-                "MC callback overlaps retained foreground service work",
-            ));
+            return Err(Error::Contract(refuse!(
+                "MC callback overlaps retained foreground service work"
+            )));
         }
         match self
             .metrics
@@ -410,9 +413,9 @@ impl<B: metrics::Backend> Owner<B> {
         {
             metrics::Progress::Busy { deadline } => Ok(Progress::Busy { deadline }),
             metrics::Progress::CallbackComplete => Ok(Progress::MetricsComplete),
-            _ => Err(Error::Contract(
-                "MC metrics dispatcher returned a foreign stage",
-            )),
+            _ => Err(Error::Contract(refuse!(
+                "MC metrics dispatcher returned a foreign stage"
+            ))),
         }
     }
     pub fn advance<M: owner::Backend, I: ingestion::Backend>(
@@ -429,7 +432,7 @@ impl<B: metrics::Backend> Owner<B> {
             let stage = self
                 .batch
                 .as_ref()
-                .ok_or(Error::Contract("MC service has no retained work"))?
+                .ok_or(Error::Contract(refuse!("MC service has no retained work")))?
                 .stage;
             let interval = sources.amcc.generic().periods().1;
             match stage {
@@ -470,9 +473,9 @@ impl<B: metrics::Backend> Owner<B> {
                             return Ok(Progress::EventComplete { command_id });
                         }
                         _ => {
-                            return Err(Error::Contract(
-                                "MC metrics operation returned a foreign stage",
-                            ));
+                            return Err(Error::Contract(refuse!(
+                                "MC metrics operation returned a foreign stage"
+                            )));
                         }
                     }
                 }
@@ -523,9 +526,9 @@ impl<B: metrics::Backend> Owner<B> {
                 }
                 Stage::Gate => {
                     if sources.manager.committed_prefix().is_some() {
-                        return Err(Error::Contract(
-                            "MC event overlaps its manager's retained operation",
-                        ));
+                        return Err(Error::Contract(refuse!(
+                            "MC event overlaps its manager's retained operation"
+                        )));
                     }
                     let d = &sources.manager.profile().descriptors()[1];
                     if self.run_state != 1 || sources.manager.evaluated(d.ordinal()) != 1 {
@@ -722,7 +725,9 @@ impl<B: metrics::Backend> Owner<B> {
                                 access,
                             )
                             .map_err(|_| {
-                                Error::Contract("MC actual PTD command ACK publication refused")
+                                Error::Contract(refuse!(
+                                    "MC actual PTD command ACK publication refused"
+                                ))
                             })?;
                     }
                     self.stage(Stage::TraceExitBegin);

@@ -8,7 +8,11 @@
 #[cfg(test)]
 use super::super::power::t6000::identity::Image;
 #[cfg(test)]
+use crate::Result;
+#[cfg(test)]
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use stela_contracts::refuse;
 
 #[cfg(test)]
 const HEADER: usize = 0x30;
@@ -59,21 +63,27 @@ impl Selected<'_> {
 }
 #[cfg(test)]
 impl<'a> Ftab<'a> {
-    pub fn read(bytes: &'a [u8], expected_sha256: [u8; 32]) -> Result<Self, &'static str> {
-        let header = bytes.get(..HEADER).ok_or("GFX FTAB header is truncated")?;
+    pub fn read(bytes: &'a [u8], expected_sha256: [u8; 32]) -> Result<Self> {
+        let header = bytes
+            .get(..HEADER)
+            .ok_or(refuse!("GFX FTAB header is truncated"))?;
         if &header[0x20..0x28] != MAGIC {
-            return Err("GFX firmware input is not an FTAB");
+            return Err(refuse!("GFX firmware input is not an FTAB"));
         }
         let count = u32::from_le_bytes(header[0x28..0x2c].try_into().unwrap()) as usize;
         if count > MAX_ENTRIES {
-            return Err("GFX FTAB exceeds the original 32-entry selector capacity");
+            return Err(refuse!(
+                "GFX FTAB exceeds the original 32-entry selector capacity"
+            ));
         }
         bytes
             .get(..HEADER + count * ENTRY)
-            .ok_or("GFX FTAB entry table is truncated")?;
+            .ok_or(refuse!("GFX FTAB entry table is truncated"))?;
         let digest: [u8; 32] = Sha256::digest(bytes).into();
         if digest != expected_sha256 {
-            return Err("GFX FTAB bytes do not match the preserved input identity");
+            return Err(refuse!(
+                "GFX FTAB bytes do not match the preserved input identity"
+            ));
         }
         Ok(Self {
             bytes,
@@ -86,10 +96,10 @@ impl<'a> Ftab<'a> {
     /// It calls the physical revision getter even for a one-entry table.
     /// `Image::revision` keeps full-word knownness and the source's special
     /// discriminator8f rule; an omitted input cannot become revision0.
-    pub fn select_t6000(&self, identity: &Image) -> Result<Selected<'a>, &'static str> {
-        let revision = identity
-            .revision()
-            .map_err(|_| "GFX FTAB selection requires complete physical revision inputs")?;
+    pub fn select_t6000(&self, identity: &Image) -> Result<Selected<'a>> {
+        let revision = identity.revision().map_err(|_| {
+            refuse!("GFX FTAB selection requires complete physical revision inputs")
+        })?;
         let target = (0x6130_0000u32
             .wrapping_add((u32::from(revision) << 20) & 0x0f00_0000)
             .wrapping_add((u32::from(revision) & 0xf) << 16))
@@ -110,7 +120,9 @@ impl<'a> Ftab<'a> {
             }
         }
         if best == 0 {
-            return Err("GFX FTAB has no member selected by the physical revision");
+            return Err(refuse!(
+                "GFX FTAB has no member selected by the physical revision"
+            ));
         }
         // Original e5c18/10e2e0 performs a second scan and takes the first
         // exact matching entry. Unselected payload extents are not consumed.
@@ -123,12 +135,12 @@ impl<'a> Ftab<'a> {
             let offset = u32::from_le_bytes(entry[4..8].try_into().unwrap());
             let bytes = u32::from_le_bytes(entry[8..12].try_into().unwrap());
             let end = u64::from(offset) + u64::from(bytes);
-            let end =
-                usize::try_from(end).map_err(|_| "GFX selected FTAB extent exceeds host size")?;
+            let end = usize::try_from(end)
+                .map_err(|_| refuse!("GFX selected FTAB extent exceeds host size"))?;
             let payload = self
                 .bytes
                 .get(offset as usize..end)
-                .ok_or("GFX selected FTAB payload is truncated")?;
+                .ok_or(refuse!("GFX selected FTAB payload is truncated"))?;
             return Ok(Selected {
                 payload,
                 source: Source {
@@ -141,7 +153,9 @@ impl<'a> Ftab<'a> {
                 },
             });
         }
-        Err("GFX FTAB selected tag disappeared from its immutable table")
+        Err(refuse!(
+            "GFX FTAB selected tag disappeared from its immutable table"
+        ))
     }
 }
 

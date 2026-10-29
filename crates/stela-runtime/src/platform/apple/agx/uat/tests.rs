@@ -1,5 +1,6 @@
 use super::*;
 use stela_contracts::dma::test_support::Ram;
+use stela_contracts::refuse;
 
 #[test]
 fn leaf_flags_round_trip_and_match_the_kext_constants() {
@@ -291,9 +292,9 @@ fn physical_gate_prevents_a_real_agent_walk_and_keeps_the_mapping() {
     for agent in [Agent::Firmware, Agent::Gpu] {
         assert_eq!(
             port_read(&mut uat, agent, &mut ram, FIRMWARE_CONTEXT, va),
-            Err(DmaError::Unsupported(
+            Err(DmaError::Unsupported(refuse!(
                 "SGX DMA while PMGR inhibits execution"
-            ))
+            )))
         );
     }
     uat.set_available(true);

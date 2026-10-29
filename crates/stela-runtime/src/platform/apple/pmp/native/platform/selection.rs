@@ -2,7 +2,9 @@
 //! Base1019d1c..34,101a0f8..11c,101a1a4..c4,101a3a8..40c;
 //! AMCC100471c..4890, control1004d70..4eb0; AGX101dcf0..dd30;
 //! ANE1018da0..de0. These are facts about native software, not GPU execution.
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 /// A semantic source24-byte counter reference; raw type/provider are held.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -43,7 +45,7 @@ impl CounterSelection {
     pub(super) fn initialized(
         references: Vec<CounterReference>,
         freshness_arm: u8,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let mut result = Self {
             bits: u128::from(freshness_arm == 1),
             references,
@@ -52,7 +54,9 @@ impl CounterSelection {
             if r.kind == 2 && r.provider == 0 {
                 let entry = r.start >> 6;
                 if entry >= 128 {
-                    return Err("native counter reference exceeds two source selection words");
+                    return Err(refuse!(
+                        "native counter reference exceeds two source selection words"
+                    ));
                 }
                 result.bits |= 1u128 << entry;
             }
@@ -90,17 +94,17 @@ impl McSelection {
         lanes: u32,
         control: u32,
         descriptors: &[CounterReference; 8],
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let prefix = base_banks
             .checked_mul(8)
-            .ok_or("MC source prefix overflow")?;
+            .ok_or(refuse!("MC source prefix overflow"))?;
         if prefix > 128 || lanes == 0 {
-            return Err("MC source selection geometry exceeds native words");
+            return Err(refuse!("MC source selection geometry exceeds native words"));
         }
         let frames = banks
             .checked_sub(base_banks)
             .and_then(|x| x.checked_mul(lanes))
-            .ok_or("MC source bank geometry is inconsistent")?;
+            .ok_or(refuse!("MC source bank geometry is inconsistent"))?;
         let stride = 8 / lanes; // Original W32 UDIV; do not round.
         let mut desired = if prefix == 128 {
             previous
@@ -117,7 +121,9 @@ impl McSelection {
                 }
                 let bit = bit_base.wrapping_add(r.start) >> 6;
                 if bit >= 128 {
-                    return Err("MC source control reference exceeds selection words");
+                    return Err(refuse!(
+                        "MC source control reference exceeds selection words"
+                    ));
                 }
                 desired |= 1u128 << bit;
             }

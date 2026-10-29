@@ -47,7 +47,9 @@ use super::{
         SET_FEATURE, SET_INTERFACE, STANDARD, Setup, Stall,
     },
 };
+use crate::Result;
 use alloc::{string::String, vec, vec::Vec};
+use stela_contracts::refuse;
 
 /// The most ports one status-change byte reports.
 pub const MAX_PORTS: usize = 7;
@@ -204,9 +206,9 @@ fn descriptors(serial: &str) -> Descriptors {
 }
 
 impl<P: Ports> Hub<P> {
-    pub fn new(ports: P, serial: &str) -> Result<Self, &'static str> {
+    pub fn new(ports: P, serial: &str) -> Result<Self> {
         if !(1..=MAX_PORTS).contains(&ports.count()) {
-            return Err("a hub has one to seven downstream ports");
+            return Err(refuse!("a hub has one to seven downstream ports"));
         }
         Ok(Self {
             control: Control::new(descriptors(serial)),
@@ -474,7 +476,7 @@ impl<P: Ports> Requests for Context<'_, P> {
 impl<P: Ports> BusPeer for Hub<P> {
     /// A reset from the hub's own upstream port: Default state, every
     /// downstream port unpowered (11.24.2.7.1).
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         let (control, mut context) = self.context();
         control.reset(&mut context)?;
         self.state.ports.fill(Port::default());
@@ -483,12 +485,7 @@ impl<P: Ports> BusPeer for Hub<P> {
         Ok(())
     }
 
-    fn packet(
-        &mut self,
-        endpoint: u8,
-        token: Token,
-        data: &mut [u8],
-    ) -> Result<Reply, &'static str> {
+    fn packet(&mut self, endpoint: u8, token: Token, data: &mut [u8]) -> Result<Reply> {
         match (endpoint, token) {
             (0, _) => {
                 let (control, mut context) = self.context();
@@ -496,7 +493,7 @@ impl<P: Ports> BusPeer for Hub<P> {
                 self.detect();
                 reply
             }
-            (_, Token::Setup) => Err("SETUP to a non-control endpoint"),
+            (_, Token::Setup) => Err(refuse!("SETUP to a non-control endpoint")),
             (STATUS_ENDPOINT, Token::In) if self.control.configuration() != 0 => {
                 if self.state.halted {
                     return Ok(Reply::Stall);
@@ -508,7 +505,7 @@ impl<P: Ports> BusPeer for Hub<P> {
                         data[0] = bitmap;
                         Ok(Reply::Ack(1))
                     }
-                    _ => Err("status change IN without a buffer"),
+                    _ => Err(refuse!("status change IN without a buffer")),
                 }
             }
             _ => Ok(Reply::Stall),
@@ -559,11 +556,11 @@ mod tests {
         now: u64,
     }
     impl BusPeer for Probe {
-        fn reset(&mut self) -> Result<(), &'static str> {
+        fn reset(&mut self) -> Result<()> {
             self.resets += 1;
             Ok(())
         }
-        fn packet(&mut self, _: u8, _: Token, _: &mut [u8]) -> Result<Reply, &'static str> {
+        fn packet(&mut self, _: u8, _: Token, _: &mut [u8]) -> Result<Reply> {
             Ok(Reply::Ack(0))
         }
     }

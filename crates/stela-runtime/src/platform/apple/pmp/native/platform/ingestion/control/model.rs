@@ -3,6 +3,7 @@
 //! little-endian accessors for the raw slot bytes.
 use super::super::{Auxiliary, Descriptor, Error, Ordinal};
 use alloc::{vec, vec::Vec};
+use stela_contracts::refuse;
 
 /// Complete raw source rows. Pointer words are provenance only; the kept
 /// owned member arrays replace no provider, bank, or callback.
@@ -22,25 +23,25 @@ impl Configuration {
     /// producer and provider bindings; this constructor grants none of them.
     pub fn declared(descriptor: &Descriptor, rows: &[Auxiliary]) -> Result<Self, Error> {
         if rows.len() != 4 {
-            return Err(Error::Contract(
-                "control tail requires four complete56-byte rows",
-            ));
+            return Err(Error::Contract(refuse!(
+                "control tail requires four complete56-byte rows"
+            )));
         }
         for row in rows {
             if row.words[7] as usize != row.members.len() || row.words[2] > 2 {
-                return Err(Error::Contract(
-                    "auxiliary row count or packed source kind is unqualified",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "auxiliary row count or packed source kind is unqualified"
+                )));
             }
             if row.words[2] == 2 && row.words[5] > 64 {
-                return Err(Error::Contract(
-                    "auxiliary packed field width exceeds source word",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "auxiliary packed field width exceeds source word"
+                )));
             }
             if row.members.iter().any(|member| member[0] > 2) {
-                return Err(Error::Contract(
-                    "auxiliary member class has no qualified source path",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "auxiliary member class has no qualified source path"
+                )));
             }
         }
         Ok(Self {
@@ -92,15 +93,15 @@ impl SoftwareImage {
     }
     pub(super) fn check(&self, configuration: &Configuration) -> Result<(), Error> {
         if (self.flags & 4 != 0) != configuration.enabled {
-            return Err(Error::Contract(
-                "control gate differs from source-configured auxiliary kinds",
-            ));
+            return Err(Error::Contract(refuse!(
+                "control gate differs from source-configured auxiliary kinds"
+            )));
         }
         for (slot, row) in self.slots.iter().zip(&configuration.rows) {
             if slot.members.len() != row.members.len() || word(&slot.raw, 8) > 2 {
-                return Err(Error::Contract(
-                    "control software image has foreign geometry or mode",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "control software image has foreign geometry or mode"
+                )));
             }
         }
         Ok(())

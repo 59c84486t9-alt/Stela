@@ -1,6 +1,7 @@
 use super::*;
 use alloc::{boxed::Box, collections::BTreeMap, vec};
 use core::sync::atomic::{Ordering, fence};
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Bus, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError,
@@ -30,7 +31,7 @@ impl MmioDevice for Captured {
                 offset,
                 width: Width::Word,
                 direction: Direction::Read,
-                reason: "after committed read side effect",
+                reason: refuse!("after committed read side effect"),
             });
         }
         Ok(self.words.get(&offset).copied().unwrap_or(0xa5a55aa5))
@@ -50,7 +51,7 @@ impl MmioDevice for Captured {
                 offset,
                 width,
                 direction: Direction::Write,
-                reason: "after committed configuration effect",
+                reason: refuse!("after committed configuration effect"),
             });
         }
         Ok(())
@@ -378,7 +379,7 @@ fn latched_rmw_survives_no_effect_write_refusal_and_uncertain_write_is_terminal(
         _ => panic!("real target must retain the write then refuse"),
     };
     assert_eq!(
-        install.finish(&retry, Outcome::Uncertain(error)),
+        install.finish(&retry, Outcome::Uncertain(error.clone())),
         Err(FinishError::Uncertain(error))
     );
     assert_eq!(install.committed_writes(), 2);
@@ -427,10 +428,8 @@ fn partial_read_and_barrier_refusal_cannot_replay_committed_stores_or_reads() {
     let outcome = route(action, &mut ram, &mut bus, &mut access);
     assert!(matches!(
         outcome,
-        Outcome::Uncertain(MmioError::Unsupported {
-            reason: "after committed read side effect",
-            ..
-        })
+        Outcome::Uncertain(MmioError::Unsupported { ref reason, .. })
+            if reason.what() == "after committed read side effect"
     ));
     assert!(matches!(
         install.finish(&next, outcome),

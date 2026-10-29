@@ -8,20 +8,23 @@ use super::super::{
     power::policy::{ConstraintState, Resolution},
 };
 use super::{Descriptor, Evaluation, Hook, McSelection, Ordinal, Packed, Profile, Slice};
+use crate::Result;
 use alloc::{collections::VecDeque, rc::Rc, vec::Vec};
+use stela_contracts::Refusal;
 use stela_contracts::bus::Access;
+use stela_contracts::refuse;
 
 pub mod controllers;
 
 /// An immutable pending snapshot. Numeric bits are observations only.
 /// The built-in adapter keeps Frames' non-Clone owner-bound capture.
 pub trait Pending {
-    fn bits(&self, start: u32, count: u32) -> Result<u128, &'static str>;
+    fn bits(&self, start: u32, count: u32) -> Result<u128>;
 }
 impl Pending for Captured {
-    fn bits(&self, start: u32, count: u32) -> Result<u128, &'static str> {
+    fn bits(&self, start: u32, count: u32) -> Result<u128> {
         Captured::bits(self, start, count)
-            .map_err(|_| "actual native PTD snapshot does not cover platform slice")
+            .map_err(|_| refuse!("actual native PTD snapshot does not cover platform slice"))
     }
 }
 #[derive(Clone, Debug)]
@@ -48,12 +51,12 @@ pub enum Completion<T> {
     Busy {
         deadline: Option<u64>,
     },
-    Refused(&'static str),
+    Refused(Refusal),
     /// The source operation retired. Preserve any committed prefix
     /// before returning its refusal and never replay it on the next advance.
     Retired {
         value: T,
-        refusal: Option<&'static str>,
+        refusal: Option<Refusal>,
     },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,10 +274,10 @@ pub enum Progress {
     Busy { deadline: Option<u64> },
     Idle,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    Contract(&'static str),
-    Backend(&'static str),
+    Contract(Refusal),
+    Backend(Refusal),
 }
 
 /// Private native software fields with explicit original zero initialization.
@@ -411,10 +414,10 @@ pub struct Owner<B: Backend> {
     initialized: bool,
     started: bool,
     completed: Option<Evaluation>,
-    refusal: Option<&'static str>,
+    refusal: Option<Refusal>,
     forced_capture: u64,
     trace: bool,
-    fault: Option<&'static str>,
+    fault: Option<Refusal>,
 }
 impl<B: Backend> Owner<B> {
     pub fn initialized_software(profile: Profile, backend: B) -> Self {
@@ -468,22 +471,22 @@ impl<B: Backend> Owner<B> {
     pub fn last_evaluation(&self) -> Option<Evaluation> {
         self.completed
     }
-    pub fn refusal(&self) -> Option<&'static str> {
-        self.refusal
+    pub fn refusal(&self) -> Option<&Refusal> {
+        self.refusal.as_ref()
     }
     pub fn committed_prefix(&self) -> Option<u64> {
         self.batch.as_ref().map(|b| b.cursor)
     }
     fn begin(&mut self, ops: VecDeque<Op>) -> Result<(), Error> {
         if self.batch.is_some() || self.fault.is_some() {
-            return Err(Error::Contract(
-                "native platform operation already retained or faulted",
-            ));
+            return Err(Error::Contract(refuse!(
+                "native platform operation already retained or faulted"
+            )));
         }
         self.serial = self
             .serial
             .checked_add(1)
-            .ok_or(Error::Contract("native platform serial exhausted"))?;
+            .ok_or(Error::Contract(refuse!("native platform serial exhausted")))?;
         self.batch = Some(Batch {
             serial: self.serial,
             cursor: 0,
@@ -499,9 +502,9 @@ impl<B: Backend> Owner<B> {
     }
     pub fn begin_initialize(&mut self) -> Result<(), Error> {
         if self.initialized {
-            return Err(Error::Contract(
-                "native platform resources already initialized",
-            ));
+            return Err(Error::Contract(refuse!(
+                "native platform resources already initialized"
+            )));
         }
         let mut ops = VecDeque::new();
         for d in &self.profile.descriptors {
@@ -522,9 +525,9 @@ impl<B: Backend> Owner<B> {
     }
     pub fn begin_start(&mut self) -> Result<(), Error> {
         if !self.initialized || self.started {
-            return Err(Error::Contract(
-                "native platform start requires initialized stopped resources",
-            ));
+            return Err(Error::Contract(refuse!(
+                "native platform start requires initialized stopped resources"
+            )));
         }
         let mut ops = VecDeque::new();
         for d in &self.profile.descriptors {
@@ -538,7 +541,9 @@ impl<B: Backend> Owner<B> {
     }
     pub fn begin_stop(&mut self) -> Result<(), Error> {
         if !self.started {
-            return Err(Error::Contract("native platform resources are not started"));
+            return Err(Error::Contract(refuse!(
+                "native platform resources are not started"
+            )));
         }
         let mut ops = VecDeque::new();
         for d in &self.profile.descriptors {
@@ -559,9 +564,9 @@ impl<B: Backend> Owner<B> {
     /// be checked against a backend observation before activation.
     pub fn begin_selection(&mut self, resolution: Resolution) -> Result<(), Error> {
         if !self.started {
-            return Err(Error::Contract(
-                "native selection requires actual source starts",
-            ));
+            return Err(Error::Contract(refuse!(
+                "native selection requires actual source starts"
+            )));
         }
         self.begin(
             [
@@ -574,9 +579,9 @@ impl<B: Backend> Owner<B> {
     }
     pub fn begin_cycle(&mut self) -> Result<(), Error> {
         if !self.started {
-            return Err(Error::Contract(
-                "native evaluation requires actual source starts",
-            ));
+            return Err(Error::Contract(refuse!(
+                "native evaluation requires actual source starts"
+            )));
         }
         let bits = self.selected & self.profile.enabled;
         let mut ops = VecDeque::from([
@@ -604,9 +609,9 @@ impl<B: Backend> Owner<B> {
     }
     pub fn begin_device_request(&mut self, ordinal: Ordinal) -> Result<(), Error> {
         if !self.started {
-            return Err(Error::Contract(
-                "native device request requires started owners",
-            ));
+            return Err(Error::Contract(refuse!(
+                "native device request requires started owners"
+            )));
         }
         self.begin(
             [
@@ -619,9 +624,9 @@ impl<B: Backend> Owner<B> {
     }
     pub fn begin_counter_controls(&mut self) -> Result<(), Error> {
         if !self.started {
-            return Err(Error::Contract(
-                "native counter controls require started owners",
-            ));
+            return Err(Error::Contract(refuse!(
+                "native counter controls require started owners"
+            )));
         }
         self.begin([Op::Observe(Observation::CounterControls), Op::ControlFlags].into())
     }
@@ -642,9 +647,9 @@ impl<B: Backend> Owner<B> {
         override_word: u32,
     ) -> Result<McSelection, Error> {
         if self.batch.is_some() || self.fault.is_some() {
-            return Err(Error::Contract(
-                "native selection mutation during retained operation",
-            ));
+            return Err(Error::Contract(refuse!(
+                "native selection mutation during retained operation"
+            )));
         }
         let d = &mut self.profile.descriptors[1];
         let control = McSelection::control_word(control, override_word, 3);
@@ -659,9 +664,9 @@ impl<B: Backend> Owner<B> {
     /// finish an effect or publish an ACK. The callback owner keeps its ID.
     pub fn apply_source_enable(&mut self, ordinal: Ordinal, value: u32) -> Result<(), Error> {
         if self.batch.is_some() || self.fault.is_some() {
-            return Err(Error::Contract(
-                "native source enable mutation during retained operation",
-            ));
+            return Err(Error::Contract(refuse!(
+                "native source enable mutation during retained operation"
+            )));
         }
         if value == 0 {
             self.profile.enabled &= !ordinal.bit();
@@ -678,9 +683,9 @@ impl<B: Backend> Owner<B> {
         value: super::Configuration,
     ) -> Result<(), Error> {
         if self.batch.is_some() || self.fault.is_some() {
-            return Err(Error::Contract(
-                "native configuration mutation during retained operation",
-            ));
+            return Err(Error::Contract(refuse!(
+                "native configuration mutation during retained operation"
+            )));
         }
         let d = &mut self.profile.descriptors[ordinal.index()];
         match value {
@@ -698,9 +703,9 @@ impl<B: Backend> Owner<B> {
         }
     }
     fn tick(batch: &Batch<B::Snapshot>) -> Result<u64, Error> {
-        batch
-            .tick
-            .ok_or(Error::Contract("native source clock observation absent"))
+        batch.tick.ok_or(Error::Contract(refuse!(
+            "native source clock observation absent"
+        )))
     }
     fn refresh(&self, ordinal: Ordinal, tick: u64) -> Op {
         let s = &self.states[ordinal.index()];
@@ -724,7 +729,9 @@ impl<B: Backend> Owner<B> {
             batch
                 .snapshot
                 .as_ref()
-                .ok_or(Error::Contract("native manager pending capture absent"))?
+                .ok_or(Error::Contract(refuse!(
+                    "native manager pending capture absent"
+                )))?
                 .bits(slice.start, slice.count)
                 .map_err(Error::Contract)?
         } else {
@@ -857,9 +864,9 @@ impl<B: Backend> Owner<B> {
         if let Some(interpolation) = s.interpolation.as_mut()
             && let Some(target) = interpolation.advance(d.times().1)
         {
-            let controller = d.controller.ok_or(Error::Contract(
-                "native interpolation controller join absent",
-            ))?;
+            let controller = d.controller.ok_or(Error::Contract(refuse!(
+                "native interpolation controller join absent"
+            )))?;
             s.logical.set(controller, target);
             refresh = true;
         }
@@ -878,7 +885,11 @@ impl<B: Backend> Owner<B> {
     fn packet(&mut self, batch: &mut Batch<B::Snapshot>, ordinal: Ordinal) -> Result<(), Error> {
         let payload = match batch.value.take() {
             Some(Value::Payload(v)) => v,
-            _ => return Err(Error::Contract("native device request payload absent")),
+            _ => {
+                return Err(Error::Contract(refuse!(
+                    "native device request payload absent"
+                )));
+            }
         };
         let d = &self.profile.descriptors[ordinal.index()];
         let s = &mut self.states[ordinal.index()];
@@ -886,13 +897,13 @@ impl<B: Backend> Owner<B> {
         let mut index = None;
         match d.mode {
             1 => {
-                let interpolation = s.interpolation.as_mut().ok_or(Error::Contract(
-                    "native mode1 interpolation initialization absent",
-                ))?;
+                let interpolation = s.interpolation.as_mut().ok_or(Error::Contract(refuse!(
+                    "native mode1 interpolation initialization absent"
+                )))?;
                 let target = interpolation.request(payload);
                 packed.set(
                     d.controller
-                        .ok_or(Error::Contract("native mode1 controller absent"))?,
+                        .ok_or(Error::Contract(refuse!("native mode1 controller absent")))?,
                     target,
                 );
             }
@@ -945,15 +956,15 @@ impl<B: Backend> Owner<B> {
     /// Advance a prefix. A refused operation cannot be replaced with
     /// a different batch, backend or snapshot. Busy resumes the same request.
     pub fn advance(&mut self, access: &mut Access<'_>) -> Result<Progress, Error> {
-        if let Some(reason) = self.fault {
+        if let Some(reason) = self.fault.clone() {
             return Err(Error::Contract(reason));
         }
         let Some(mut batch) = self.batch.take() else {
             return Ok(Progress::Idle);
         };
         let result = self.advance_batch(&mut batch, access);
-        if let Err(Error::Contract(reason)) = result {
-            self.fault = Some(reason);
+        if let Err(Error::Contract(reason)) = &result {
+            self.fault = Some(reason.clone());
         }
         if !batch.ops.is_empty() || result.is_err() {
             self.batch = Some(batch);
@@ -968,9 +979,9 @@ impl<B: Backend> Owner<B> {
         while let Some(op) = batch.ops.pop_front() {
             // Reserve the next operation identity before any external operation
             // can retire. Exhaustion must never execute an unrecordable effect.
-            let next_cursor = batch.cursor.checked_add(1).ok_or(Error::Contract(
-                "native platform operation cursor exhausted",
-            ))?;
+            let next_cursor = batch.cursor.checked_add(1).ok_or(Error::Contract(refuse!(
+                "native platform operation cursor exhausted"
+            )))?;
             let request = Request {
                 owner: self.identity.clone(),
                 serial: batch.serial,
@@ -991,7 +1002,7 @@ impl<B: Backend> Owner<B> {
                         }
                         Completion::Refused(reason) => {
                             batch.ops.push_front(op);
-                            self.refusal = Some(reason);
+                            self.refusal = Some(reason.clone());
                             return Err(Error::Backend(reason));
                         }
                         Completion::Retired { value, refusal } => {
@@ -1013,7 +1024,7 @@ impl<B: Backend> Owner<B> {
                             output: batch.output,
                             tick: Self::tick(batch)?,
                             current_packet: batch.current_packet.ok_or(Error::Contract(
-                                "native actual manager six-word packet absent",
+                                refuse!("native actual manager six-word packet absent"),
                             ))?,
                         },
                         batch.snapshot.as_ref(),
@@ -1025,7 +1036,7 @@ impl<B: Backend> Owner<B> {
                         }
                         Completion::Refused(reason) => {
                             batch.ops.push_front(op);
-                            self.refusal = Some(reason);
+                            self.refusal = Some(reason.clone());
                             return Err(Error::Backend(reason));
                         }
                         Completion::Retired { value: (), refusal } => {
@@ -1044,7 +1055,7 @@ impl<B: Backend> Owner<B> {
                         }
                         Completion::Refused(reason) => {
                             batch.ops.push_front(op);
-                            self.refusal = Some(reason);
+                            self.refusal = Some(reason.clone());
                             return Err(Error::Backend(reason));
                         }
                         Completion::Retired { value, refusal } => {
@@ -1078,7 +1089,7 @@ impl<B: Backend> Owner<B> {
                         }
                         Completion::Refused(reason) => {
                             batch.ops.push_front(op);
-                            self.refusal = Some(reason);
+                            self.refusal = Some(reason.clone());
                             return Err(Error::Backend(reason));
                         }
                         Completion::Retired { value, refusal } => {
@@ -1106,15 +1117,15 @@ impl<B: Backend> Owner<B> {
                                     },
                                     _,
                                 ) => {
-                                    return Err(Error::Contract(
-                                        "native counter hook software products absent",
-                                    ));
+                                    return Err(Error::Contract(refuse!(
+                                        "native counter hook software products absent"
+                                    )));
                                 }
                                 (_, EffectValue::Complete) => {}
                                 _ => {
-                                    return Err(Error::Contract(
-                                        "native backend returned hook products for a different effect",
-                                    ));
+                                    return Err(Error::Contract(refuse!(
+                                        "native backend returned hook products for a different effect"
+                                    )));
                                 }
                             }
                             retired_refusal = refusal;
@@ -1124,12 +1135,16 @@ impl<B: Backend> Owner<B> {
                 Op::ProviderStates(ordinal) => {
                     let count = match batch.value.take() {
                         Some(Value::ProviderStateCount(v)) => v,
-                        _ => return Err(Error::Contract("native provider count result absent")),
+                        _ => {
+                            return Err(Error::Contract(refuse!(
+                                "native provider count result absent"
+                            )));
+                        }
                     };
                     if count > 32 {
-                        return Err(Error::Contract(
-                            "native provider state count exceeds request encoding",
-                        ));
+                        return Err(Error::Contract(refuse!(
+                            "native provider state count exceeds request encoding"
+                        )));
                     }
                     self.states[ordinal.index()].source_states = count;
                 }
@@ -1141,9 +1156,9 @@ impl<B: Backend> Owner<B> {
                         Some(Value::Packets(p)) => p,
                         _ => {
                             batch.ops.push_front(op);
-                            return Err(Error::Contract(
-                                "native source policy packet snapshot absent",
-                            ));
+                            return Err(Error::Contract(refuse!(
+                                "native source policy packet snapshot absent"
+                            )));
                         }
                     };
                     if resolution.check_packets(packets) != ConstraintState::WithinConstraints {
@@ -1198,7 +1213,11 @@ impl<B: Backend> Owner<B> {
                 } => {
                     let value = match batch.value.take() {
                         Some(Value::ObserverWord(v)) => v,
-                        _ => return Err(Error::Contract("native observer word result absent")),
+                        _ => {
+                            return Err(Error::Contract(refuse!(
+                                "native observer word result absent"
+                            )));
+                        }
                     };
                     Self::prepend(
                         batch,
@@ -1218,9 +1237,9 @@ impl<B: Backend> Owner<B> {
                     let stamp = match batch.value.take() {
                         Some(Value::ConsumedValueLow32(v)) => v,
                         _ => {
-                            return Err(Error::Contract(
-                                "native consumed entry value low32 absent",
-                            ));
+                            return Err(Error::Contract(refuse!(
+                                "native consumed entry value low32 absent"
+                            )));
                         }
                     };
                     let d = &self.profile.descriptors[ordinal.index()];
@@ -1323,9 +1342,9 @@ impl<B: Backend> Owner<B> {
                     let counters = CounterContext {
                         selected: s.selected,
                         evaluation_tick: s.tick,
-                        current_packet: batch.current_packet.ok_or(Error::Contract(
-                            "native actual manager six-word packet absent",
-                        ))?,
+                        current_packet: batch.current_packet.ok_or(Error::Contract(refuse!(
+                            "native actual manager six-word packet absent"
+                        )))?,
                         activity: s.activity,
                         buffer_index: s.adjacent,
                         state_index: s.state_index,
@@ -1365,26 +1384,26 @@ impl<B: Backend> Owner<B> {
                             trace_result,
                         }) => (trace_enabled, trace_result),
                         _ => {
-                            return Err(Error::Contract(
-                                "native cycle diagnostic observation absent",
-                            ));
+                            return Err(Error::Contract(refuse!(
+                                "native cycle diagnostic observation absent"
+                            )));
                         }
                     };
                     self.trace = if enabled == 0 {
                         false
                     } else {
-                        result.ok_or(Error::Contract(
-                            "native enabled cycle trace has no actual return",
-                        ))? != 0x80000007
+                        result.ok_or(Error::Contract(refuse!(
+                            "native enabled cycle trace has no actual return"
+                        )))? != 0x80000007
                     };
                 }
                 Op::RetainPackets => {
                     batch.current_packet = Some(match batch.value.take() {
                         Some(Value::Packets(packets)) => packets,
                         _ => {
-                            return Err(Error::Contract(
-                                "native actual manager packet observation absent",
-                            ));
+                            return Err(Error::Contract(refuse!(
+                                "native actual manager packet observation absent"
+                            )));
                         }
                     });
                 }
@@ -1392,9 +1411,9 @@ impl<B: Backend> Owner<B> {
                     let flags = match batch.value.take() {
                         Some(Value::Controls(x)) => x,
                         _ => {
-                            return Err(Error::Contract(
-                                "native source counter control flags absent",
-                            ));
+                            return Err(Error::Contract(refuse!(
+                                "native source counter control flags absent"
+                            )));
                         }
                     };
                     for flag in flags {
@@ -1407,7 +1426,7 @@ impl<B: Backend> Owner<B> {
             }
             batch.cursor = next_cursor;
             if let Some(reason) = retired_refusal {
-                self.refusal = Some(reason);
+                self.refusal = Some(reason.clone());
                 return Err(Error::Backend(reason));
             }
         }

@@ -68,6 +68,9 @@
 //! every generation but Gen2, command types outside the extended/scalar register
 //! and four payloadless forms, unchecked slave command effects, and request
 //! or response overflow refuse.
+use crate::Result;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 
 #[cfg(test)]
 use stela_soc_data::spmi::BANK_B;
@@ -96,13 +99,13 @@ const REGISTER_ADDRESS_MASK: u32 = 0x1f;
 const REGISTER_ZERO_DATA_MASK: u8 = 0x7f;
 
 /// A slave's refusal to complete a transaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlaveError {
     /// The slave answers NACK, a bus result the driver reports.
     Nack,
     /// The transaction needs behavior the model does not have; the machine
     /// stops with this reason.
-    Unsupported(&'static str),
+    Unsupported(Refusal),
 }
 
 /// Payloadless MIPI commands recovered from the original AP command table
@@ -124,9 +127,9 @@ pub trait SpmiSlave {
     fn write(&mut self, address: u16, data: &[u8], now: u64) -> Result<(), SlaveError>;
     /// Execute a slave-owned command. Unqualified effects must not ACK.
     fn command(&mut self, _command: Command, _now: u64) -> Result<(), SlaveError> {
-        Err(SlaveError::Unsupported(
-            "SPMI slave payloadless command is unqualified",
-        ))
+        Err(SlaveError::Unsupported(refuse!(
+            "SPMI slave payloadless command is unqualified"
+        )))
     }
     /// Bring time-driven state up to `now`; the next counter value at which
     /// the slave changes state by itself, if any.
@@ -179,17 +182,19 @@ struct Chunk {
 }
 
 impl Chunk {
-    fn decode(header: u32) -> Result<Self, &'static str> {
+    fn decode(header: u32) -> Result<Self> {
         let opcode = header & 0xff;
         if header & 0x7000 != 0 {
-            return Err("SPMI request header reserved bits");
+            return Err(refuse!("SPMI request header reserved bits"));
         }
         let (kind, address, bytes, inline) = match opcode {
             REGISTER_WRITE | REGISTER_READ => {
                 let address = (header >> 16) & 0xff;
                 if address > REGISTER_ADDRESS_MASK || (opcode == REGISTER_READ && header >> 24 != 0)
                 {
-                    return Err("SPMI scalar register access has reserved address/data bits");
+                    return Err(refuse!(
+                        "SPMI scalar register access has reserved address/data bits"
+                    ));
                 }
                 (
                     if opcode == REGISTER_READ {
@@ -204,7 +209,9 @@ impl Chunk {
             }
             0x10..=0x13 => {
                 if header >> 16 != 0 {
-                    return Err("SPMI payloadless command carries address or data bits");
+                    return Err(refuse!(
+                        "SPMI payloadless command carries address or data bits"
+                    ));
                 }
                 let command = match opcode {
                     0x10 => Command::Reset,
@@ -218,7 +225,9 @@ impl Chunk {
             REGISTER_ZERO_WRITE => {
                 let data = (header >> 24) as u8;
                 if header & 0x00ff_0000 != 0 || data & !REGISTER_ZERO_DATA_MASK != 0 {
-                    return Err("SPMI register-zero write has reserved address/data bits");
+                    return Err(refuse!(
+                        "SPMI register-zero write has reserved address/data bits"
+                    ));
                 }
                 (Kind::Write, 0, 1, Some(data))
             }
@@ -229,10 +238,14 @@ impl Chunk {
                     0x20..=0x2f => (Kind::Read, (opcode & 0xf) + 1, false),
                     0x30..=0x37 => (Kind::Write, (opcode & 7) + 1, true),
                     0x38..=0x3f => (Kind::Read, (opcode & 7) + 1, true),
-                    _ => return Err("SPMI command other than a qualified register access"),
+                    _ => {
+                        return Err(refuse!(
+                            "SPMI command other than a qualified register access"
+                        ));
+                    }
                 };
                 if !long && address > 0xff {
-                    return Err("SPMI extended access with a 16-bit address");
+                    return Err(refuse!("SPMI extended access with a 16-bit address"));
                 }
                 (kind, address, bytes as usize, None)
             }
@@ -306,9 +319,9 @@ impl Spmi {
         }
     }
     /// Attaches a slave at its four-bit ID; an unoccupied ID NACKs.
-    pub fn attach(&mut self, sid: u8, slave: Box<dyn SpmiSlave>) -> Result<(), &'static str> {
+    pub fn attach(&mut self, sid: u8, slave: Box<dyn SpmiSlave>) -> Result<()> {
         if sid > 0xf || self.slaves.iter().any(|(id, _)| *id == sid) {
-            return Err("invalid or duplicate SPMI slave ID");
+            return Err(refuse!("invalid or duplicate SPMI slave ID"));
         }
         self.slaves.push((sid, slave));
         Ok(())
@@ -320,7 +333,7 @@ impl Spmi {
         sid: u8,
         vector: u16,
         slave: Box<dyn SpmiSlave>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         self.attach_with_interrupts(sid, &[(0, vector)], slave)
     }
     /// Attach every source-declared output atomically. Output indices select
@@ -330,9 +343,9 @@ impl Spmi {
         sid: u8,
         outputs: &[(u8, u16)],
         slave: Box<dyn SpmiSlave>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if outputs.is_empty() {
-            return Err("SPMI interrupt attachment has no outputs");
+            return Err(refuse!("SPMI interrupt attachment has no outputs"));
         }
         for (index, &(output, vector)) in outputs.iter().enumerate() {
             if usize::from(vector) >= GROUPS * 32
@@ -342,10 +355,14 @@ impl Spmi {
                     .iter()
                     .any(|&(previous, input)| previous == output || input == vector)
             {
-                return Err("invalid, response-aliasing or duplicate SPMI input vector/output");
+                return Err(refuse!(
+                    "invalid, response-aliasing or duplicate SPMI input vector/output"
+                ));
             }
             if slave.interrupt_level_at(output) != Some(false) {
-                return Err("SPMI input requires an actual qualified deasserted output");
+                return Err(refuse!(
+                    "SPMI input requires an actual qualified deasserted output"
+                ));
             }
         }
         self.attach(sid, slave)?;
@@ -397,7 +414,7 @@ impl Spmi {
             .any(|(e, p)| e & p != 0);
         access.interrupts.set_level(Wire::Aic(self.irq), asserted);
     }
-    fn request(&mut self, word: u32, now: u64) -> Result<(), &'static str> {
+    fn request(&mut self, word: u32, now: u64) -> Result<()> {
         if let Some((chunk, payload)) = &self.partial {
             let mut words = payload.clone();
             words.push(word);
@@ -422,14 +439,14 @@ impl Spmi {
             }
         }
     }
-    fn execute(&mut self, chunk: Chunk, payload: &[u32], now: u64) -> Result<(), &'static str> {
+    fn execute(&mut self, chunk: Chunk, payload: &[u32], now: u64) -> Result<()> {
         let words = 1 + if chunk.kind == Kind::Read {
             chunk.words()
         } else {
             0
         };
         if self.responses.len() + words > self.configuration.response_words() {
-            return Err("SPMI response FIFO overflow");
+            return Err(refuse!("SPMI response FIFO overflow"));
         }
         let slave = self
             .slaves
@@ -501,11 +518,11 @@ impl Spmi {
 }
 
 impl Lifecycle for Spmi {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         if !proposed.powered || proposed.reset {
-            return Err(
-                "SPMI physical reset/supply retention is unqualified; queue reset is a separate software operation",
-            );
+            return Err(refuse!(
+                "SPMI physical reset/supply retention is unqualified; queue reset is a separate software operation"
+            ));
         }
         if !proposed.clocked || proposed.quiesced {
             if self.inputs.iter().any(|(sid, _, _, _)| {
@@ -513,19 +530,19 @@ impl Lifecycle for Spmi {
                     .iter()
                     .any(|(id, slave)| id == sid && slave.interrupt_armed())
             }) {
-                return Err(
-                    "SPMI pause with an autonomous routed slave has unqualified capture/wake semantics",
-                );
+                return Err(refuse!(
+                    "SPMI pause with an autonomous routed slave has unqualified capture/wake semantics"
+                ));
             }
             if self.partial.is_some() {
-                return Err(
-                    "SPMI pause while a partial request owns the transaction is unqualified",
-                );
+                return Err(refuse!(
+                    "SPMI pause while a partial request owns the transaction is unqualified"
+                ));
             }
             if self.enable.iter().any(|&enabled| enabled != 0) {
-                return Err(
-                    "SPMI pause with an armed interrupt has unqualified wake/capture semantics",
-                );
+                return Err(refuse!(
+                    "SPMI pause with an armed interrupt has unqualified wake/capture semantics"
+                ));
             }
         }
         Ok(())
@@ -548,18 +565,22 @@ impl MmioDevice for Spmi {
         width: Width,
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
-        let err = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let err = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         if !self.lifecycle.clocked {
-            return Err(err(
-                "SPMI MMIO while the physical clock is stopped is unqualified",
-            ));
+            return Err(err(refuse!(
+                "SPMI MMIO while the physical clock is stopped is unqualified"
+            )));
         }
         let layout = self.configuration.profile().layout();
         if self.lifecycle.quiesced && offset == layout.response {
-            return Err(err("SPMI response ownership cannot advance while quiesced"));
+            return Err(err(refuse!(
+                "SPMI response ownership cannot advance while quiesced"
+            )));
         }
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(err("SPMI registers require aligned 32-bit accesses"));
+            return Err(err(refuse!(
+                "SPMI registers require aligned 32-bit accesses"
+            )));
         }
         let value = match offset {
             at if at == layout.status => self.status(),
@@ -567,7 +588,7 @@ impl MmioDevice for Spmi {
                 let word = self
                     .responses
                     .pop_front()
-                    .ok_or_else(|| err("SPMI response FIFO read while empty"))?;
+                    .ok_or_else(|| err(refuse!("SPMI response FIFO read while empty")))?;
                 self.update_irq(access);
                 word
             }
@@ -582,7 +603,7 @@ impl MmioDevice for Spmi {
             at if Some(at) == layout.depth => self.configuration.depth_register(),
             at if at == layout.fault_status => layout.fault_empty,
             at if at == layout.fault_response => {
-                return Err(err("SPMI fault FIFO read while empty"));
+                return Err(err(refuse!("SPMI fault FIFO read while empty")));
             }
             at if layout
                 .latches
@@ -591,7 +612,7 @@ impl MmioDevice for Spmi {
                 0
             }
             at if self.configuration.profile().counter(at) => 0,
-            _ => return Err(err("unmodeled SPMI register")),
+            _ => return Err(err(refuse!("unmodeled SPMI register"))),
         };
         Ok(u64::from(value))
     }
@@ -602,12 +623,14 @@ impl MmioDevice for Spmi {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let err = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let err = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         if !self.lifecycle.clocked || self.lifecycle.quiesced {
-            return Err(err("SPMI controller transactions are paused"));
+            return Err(err(refuse!("SPMI controller transactions are paused")));
         }
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(err("SPMI registers require aligned 32-bit accesses"));
+            return Err(err(refuse!(
+                "SPMI registers require aligned 32-bit accesses"
+            )));
         }
         let value = value as u32;
         let profile = self.configuration.profile();
@@ -624,13 +647,15 @@ impl MmioDevice for Spmi {
                 // Gen2's driver saves, zeroes and restores control; the
                 // other generations' fields have no recovered effects.
                 if profile != Profile::Gen2 && value != 0 {
-                    return Err(err("SPMI nonzero control-field effects are unqualified"));
+                    return Err(err(refuse!(
+                        "SPMI nonzero control-field effects are unqualified"
+                    )));
                 }
                 self.control = value;
             }
             at if at == layout.queue_reset => {
                 if value != 1 {
-                    return Err(err("SPMI queue reset other than bit 0"));
+                    return Err(err(refuse!("SPMI queue reset other than bit 0")));
                 }
                 self.partial = None;
                 self.responses.clear();
@@ -641,10 +666,12 @@ impl MmioDevice for Spmi {
                 .is_some_and(|(start, end)| (start..end).contains(&at)) =>
             {
                 if value != 0 {
-                    return Err(err("SPMI fault latch acknowledge of an unlatched fault"));
+                    return Err(err(refuse!(
+                        "SPMI fault latch acknowledge of an unlatched fault"
+                    )));
                 }
             }
-            _ => return Err(err("unmodeled SPMI register")),
+            _ => return Err(err(refuse!("unmodeled SPMI register"))),
         }
         self.update_irq(access);
         Ok(())
@@ -661,7 +688,7 @@ impl MmioDevice for Spmi {
                     Direction::Read,
                     match error {
                         SlaveError::Unsupported(reason) => reason,
-                        SlaveError::Nack => "SPMI autonomous slave refused time",
+                        SlaveError::Nack => refuse!("SPMI autonomous slave refused time"),
                     },
                 )
             })?;

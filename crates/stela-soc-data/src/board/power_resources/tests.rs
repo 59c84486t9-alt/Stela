@@ -394,6 +394,7 @@ fn repeated_sibling_names_keep_ancestry_and_ambiguous_admission_is_atomic() {
             states
                 .apply_admission(&bytes, &[entry.into()])
                 .unwrap_err()
+                .to_string()
                 .contains("ambiguous")
         );
         assert_eq!(states, before);
@@ -988,7 +989,7 @@ fn multi_die(dies: u32, compatible: &[u8], stride: Option<u64>) -> Vec<u8> {
     )
 }
 
-fn multi_die_states(bytes: &[u8]) -> Result<PowerStates, String> {
+fn multi_die_states(bytes: &[u8]) -> Result<PowerStates, crate::Refusal> {
     let root = Node::root(bytes).unwrap();
     let io = root.child("arm-io").unwrap();
     decode_power_states(&root, &io.child("pmgr").unwrap(), &|address, bytes| {
@@ -1043,20 +1044,30 @@ fn die_checked_gates_reach_each_dies_strided_pmgr_records() {
 fn unplaced_dies_and_reserved_gate_bits_stay_explicit_requirements() {
     // A die without a checked stride has no placed PMGR instance.
     let error = multi_die_states(&multi_die(2, b"pmgr1,t8112", None)).unwrap_err();
-    assert!(error.contains("without a qualified die-stride"), "{error}");
+    assert!(
+        error.to_string().contains("without a qualified die-stride"),
+        "{error}"
+    );
     // A one-die SoC places no die-1 records for a die-1 gate.
     let error = multi_die_states(&multi_die(1, b"pmgr1,t8112", None)).unwrap_err();
-    assert!(error.contains("UnknownRequirement"), "{error}");
+    assert!(error.to_string().contains("UnknownRequirement"), "{error}");
     // A stride inside one die's bank never aliases two dies' registers.
     let error = multi_die_states(&multi_die(2, b"pmgr1,t8112", Some(8))).unwrap_err();
-    assert!(error.contains("overlaps another die"), "{error}");
+    assert!(
+        error.to_string().contains("overlaps another die"),
+        "{error}"
+    );
     // The 4-bit die field reaches 16 dies.
     let error = multi_die_states(&multi_die(17, b"pmgr1,t8112", Some(1))).unwrap_err();
-    assert!(error.contains("exceeds the PMGR die field"), "{error}");
+    assert!(
+        error.to_string().contains("exceeds the PMGR die field"),
+        "{error}"
+    );
     let bytes = encode(&[("clock-gates", &words(&[0x0001_0002]))], &[]);
     assert!(
         gate_ids(&Node::root(&bytes).unwrap(), "/node", "clock-gates")
             .unwrap_err()
+            .to_string()
             .contains("reserved")
     );
     let bytes = encode(&[("clock-gates", &words(&[0xf000_0002]))], &[]);

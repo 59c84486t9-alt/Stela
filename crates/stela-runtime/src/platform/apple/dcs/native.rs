@@ -20,8 +20,11 @@
 //! them; `_enablePerfCtrl` panics unless a clear bit reads clear within
 //! 20 us, and a clear completes at once. The counters at +4000 count DRAM
 //! events, which no producer supplies, so their reads refuse.
+use crate::Result;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::RefCell;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
@@ -92,23 +95,20 @@ struct State {
     serial: u64,
 }
 impl State {
-    fn accessible(&self) -> Result<(), &'static str> {
+    fn accessible(&self) -> Result<()> {
         let state = self.lifecycle;
         if !state.powered || !state.clocked || state.quiesced || state.reset {
-            return Err("native DCS resource is paused by its actual lifecycle owner");
+            return Err(refuse!(
+                "native DCS resource is paused by its actual lifecycle owner"
+            ));
         }
         Ok(())
     }
-    fn request(
-        &mut self,
-        channel: usize,
-        at: u64,
-        effect: Effect,
-    ) -> Result<Request, &'static str> {
+    fn request(&mut self, channel: usize, at: u64, effect: Effect) -> Result<Request> {
         let serial = self
             .serial
             .checked_add(1)
-            .ok_or("DCS request serial exhausted")?;
+            .ok_or(refuse!("DCS request serial exhausted"))?;
         let request = Request {
             serial,
             channel,
@@ -130,15 +130,19 @@ impl Controller {
     pub fn initialized(
         configuration: Vec<ChannelConfiguration>,
         lifecycle: LifecycleState,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         if configuration.len() != CHANNELS || lifecycle.reset || !lifecycle.retention {
-            return Err("native T8112 DCS requires all eight retained initialized channels");
+            return Err(refuse!(
+                "native T8112 DCS requires all eight retained initialized channels"
+            ));
         }
         if configuration
             .iter()
             .any(|channel| channel.gating & GATING_FIELDS == 0x1000)
         {
-            return Err("native DCS initial gating selector is outside the original protocol");
+            return Err(refuse!(
+                "native DCS initial gating selector is outside the original protocol"
+            ));
         }
         Ok(Self {
             state: Rc::new(RefCell::new(State {
@@ -162,28 +166,24 @@ impl Controller {
     pub fn requires_ram_access(&self, offset: u64, width: Width) -> bool {
         locate(offset, width).is_ok_and(|(_, register)| register == DRAIN)
     }
-    pub(crate) fn drain_control(
-        &self,
-        offset: u64,
-        width: Width,
-    ) -> Result<(usize, u16), &'static str> {
+    pub(crate) fn drain_control(&self, offset: u64, width: Width) -> Result<(usize, u16)> {
         let (channel, register) = locate(offset, width)?;
         if register != DRAIN {
-            return Err("native DCS service is not its original drain word");
+            return Err(refuse!("native DCS service is not its original drain word"));
         }
         let state = self
             .state
             .try_borrow()
-            .map_err(|_| "native DCS owner is already borrowed")?;
+            .map_err(|_| refuse!("native DCS owner is already borrowed"))?;
         state.accessible()?;
         if state
             .channels
             .iter()
             .any(|channel| channel.progress.pending_configuration.is_some())
         {
-            return Err(
-                "native DCS drain cannot settle an outstanding channel configuration request",
-            );
+            return Err(refuse!(
+                "native DCS drain cannot settle an outstanding channel configuration request"
+            ));
         }
         Ok((channel, state.channels[channel].configuration.drain_high))
     }
@@ -193,20 +193,22 @@ impl Controller {
         width: Width,
         value: u64,
         at: u64,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         let (channel, high) = self.drain_control(offset, width)?;
         if value != u64::from(high) << 16 {
-            return Err("native DCS flush must retain high16 and clear both low bytes");
+            return Err(refuse!(
+                "native DCS flush must retain high16 and clear both low bytes"
+            ));
         }
         let mut state = self
             .state
             .try_borrow_mut()
-            .map_err(|_| "native DCS owner is already borrowed")?;
+            .map_err(|_| refuse!("native DCS owner is already borrowed"))?;
         let completed = state.channels[channel]
             .progress
             .completed_drains
             .checked_add(1)
-            .ok_or("DCS completed drain count exhausted")?;
+            .ok_or(refuse!("DCS completed drain count exhausted"))?;
         let request = state.request(
             channel,
             at,
@@ -220,23 +222,27 @@ impl Controller {
     }
 }
 
-fn locate(offset: u64, width: Width) -> Result<(usize, u64), &'static str> {
+fn locate(offset: u64, width: Width) -> Result<(usize, u64)> {
     if width != Width::Word
         || !offset.is_multiple_of(4)
         || offset / CHANNEL_STRIDE >= CHANNELS as u64
     {
-        return Err("native DCS access is outside the original aligned full32 channel geometry");
+        return Err(refuse!(
+            "native DCS access is outside the original aligned full32 channel geometry"
+        ));
     }
     Ok(((offset / CHANNEL_STRIDE) as usize, offset % CHANNEL_STRIDE))
 }
 impl Lifecycle for Controller {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         let state = self
             .state
             .try_borrow()
-            .map_err(|_| "native DCS owner is already borrowed")?;
+            .map_err(|_| refuse!("native DCS owner is already borrowed"))?;
         if proposed.reset || !proposed.retention {
-            return Err("native DCS destructive reset/power loss is not source-qualified");
+            return Err(refuse!(
+                "native DCS destructive reset/power loss is not source-qualified"
+            ));
         }
         if state
             .channels
@@ -244,9 +250,9 @@ impl Lifecycle for Controller {
             .any(|channel| channel.progress.pending_configuration.is_some())
             && proposed != state.lifecycle
         {
-            return Err(
-                "native DCS lifecycle cannot discard pending channel configuration effects",
-            );
+            return Err(refuse!(
+                "native DCS lifecycle cannot discard pending channel configuration effects"
+            ));
         }
         Ok(())
     }
@@ -263,21 +269,21 @@ impl MmioDevice for Controller {
         Some(self)
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |why| refuse(NAME, offset, width, Direction::Read, why);
+        let fail = |why: Refusal| refuse(NAME, offset, width, Direction::Read, why);
         let (channel, register) = locate(offset, width).map_err(fail)?;
         let state = self
             .state
             .try_borrow()
-            .map_err(|_| fail("native DCS owner is already borrowed"))?;
+            .map_err(|_| fail(refuse!("native DCS owner is already borrowed")))?;
         state.accessible().map_err(fail)?;
         if state.channels[channel]
             .progress
             .pending_configuration
             .is_some()
         {
-            return Err(fail(
-                "native DCS configuration has no completed actual backend effect",
-            ));
+            return Err(fail(refuse!(
+                "native DCS configuration has no completed actual backend effect"
+            )));
         }
         let configuration = state.channels[channel].configuration;
         if PERF.contains(&register) {
@@ -289,13 +295,13 @@ impl MmioDevice for Controller {
             CONFIG_EC8 => Ok(u64::from(configuration.ec8)),
             CONFIG_ED0 => Ok(u64::from(configuration.ed0)),
             GATING => Ok(u64::from(configuration.gating)),
-            DRAIN => Err(fail(
-                "native DCS drain requires the actual canonical all-writer memory service",
-            )),
+            DRAIN => Err(fail(refuse!(
+                "native DCS drain requires the actual canonical all-writer memory service"
+            ))),
             REFRESH => Ok(NOMINAL_REFRESH),
-            _ => Err(fail(
-                "native DCS register/event accounting is not source-qualified",
-            )),
+            _ => Err(fail(refuse!(
+                "native DCS register/event accounting is not source-qualified"
+            ))),
         }
     }
     fn write(
@@ -305,12 +311,12 @@ impl MmioDevice for Controller {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |why| refuse(NAME, offset, width, Direction::Write, why);
+        let fail = |why: Refusal| refuse(NAME, offset, width, Direction::Write, why);
         let (channel, register) = locate(offset, width).map_err(fail)?;
         let mut state = self
             .state
             .try_borrow_mut()
-            .map_err(|_| fail("native DCS owner is already borrowed"))?;
+            .map_err(|_| fail(refuse!("native DCS owner is already borrowed")))?;
         state.accessible().map_err(fail)?;
         if PERF.contains(&register) && value <= u64::from(u32::MAX) {
             let value = value as u32;
@@ -323,27 +329,27 @@ impl MmioDevice for Controller {
             return Ok(());
         }
         if !matches!(register, CONFIG_EC8 | CONFIG_ED0 | GATING) || value > u64::from(u32::MAX) {
-            return Err(fail(
-                "native DCS write has no qualified full32 configuration or memory service",
-            ));
+            return Err(fail(refuse!(
+                "native DCS write has no qualified full32 configuration or memory service"
+            )));
         }
         if state.channels[channel]
             .progress
             .pending_configuration
             .is_some()
         {
-            return Err(fail(
-                "native DCS channel still owns an incomplete configuration effect",
-            ));
+            return Err(fail(refuse!(
+                "native DCS channel still owns an incomplete configuration effect"
+            )));
         }
         if register == GATING {
             let previous = state.channels[channel].configuration.gating;
             if ((value as u32 ^ previous) & !GATING_FIELDS) != 0
                 || value as u32 & GATING_FIELDS == 0x1000
             {
-                return Err(fail(
-                    "native DCS gating request changes opaque fields or uses an absent source selector",
-                ));
+                return Err(fail(refuse!(
+                    "native DCS gating request changes opaque fields or uses an absent source selector"
+                )));
             }
         }
         let request = state

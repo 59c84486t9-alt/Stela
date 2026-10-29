@@ -121,7 +121,7 @@ impl Preparation {
     /// The preparation `description` records, or why it records none: a
     /// stored description may be old or damaged, and its withheld set one
     /// [`Chip::admit_table`] refuses.
-    pub fn from_description(description: &Description) -> Result<Self, &'static str> {
+    pub fn from_description(description: &Description) -> Result<Self, stela_contracts::Refusal> {
         let Description {
             chip,
             target,

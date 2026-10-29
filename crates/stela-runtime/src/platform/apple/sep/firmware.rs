@@ -21,7 +21,9 @@ use super::{
     rom::Rom,
     state, xart,
 };
+use crate::Result;
 use alloc::{boxed::Box, vec::Vec};
+use stela_contracts::refuse;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 /// `_bootAction` 0x2d72d68 accepts opcode 106 ("SEP accepted IMG4") and moves
@@ -110,18 +112,20 @@ impl SepFirmware {
 
     /// Measure the container, bind its payload type to the request, and record
     /// any manifest signature as evidence. Structural or type errors refuse.
-    fn measure(&self, snapshot: &image::Snapshot, parameter: u8) -> Result<Evidence, &'static str> {
+    fn measure(&self, snapshot: &image::Snapshot, parameter: u8) -> Result<Evidence> {
         let parts = stela_formats::img4::parse(snapshot.bytes())
-            .map_err(|_| "SEP firmware Image4 structure is malformed")?;
+            .map_err(|_| refuse!("SEP firmware Image4 structure is malformed"))?;
         let kind = stela_formats::img4::payload_type(parts.payload)
-            .map_err(|_| "SEP firmware payload type is malformed")?;
+            .map_err(|_| refuse!("SEP firmware payload type is malformed"))?;
         let expected = if parameter == FIRMWARE_SEPI {
             *b"sepi"
         } else {
             *b"rsep"
         };
         if kind != expected {
-            return Err("SEP firmware payload type differs from the ROM request");
+            return Err(refuse!(
+                "SEP firmware payload type differs from the ROM request"
+            ));
         }
         let manifest = parts
             .manifest
@@ -136,23 +140,25 @@ impl SepFirmware {
     }
 }
 
-fn dma_refusal(error: DmaError) -> &'static str {
+fn dma_refusal(error: DmaError) -> stela_contracts::Refusal {
     match error {
         DmaError::Unsupported(reason) => reason,
-        DmaError::Fault(_) => "SEP firmware DMA fault in dart-sep",
-        DmaError::Memory => "SEP firmware DMA is outside guest RAM",
+        DmaError::Fault(code) => refuse!("SEP firmware DMA fault in dart-sep", code),
+        DmaError::Memory => refuse!("SEP firmware DMA is outside guest RAM"),
     }
 }
 
 impl Firmware for SepFirmware {
-    fn check_reset(&self) -> Result<(), &'static str> {
-        Err("SEP physical reset and nonretained security-state restoration are not qualified")
+    fn check_reset(&self) -> Result<()> {
+        Err(refuse!(
+            "SEP physical reset and nonretained security-state restoration are not qualified"
+        ))
     }
-    fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn start(&mut self, outbox: &mut Vec<Message>) -> Result<()> {
         self.rom.start(outbox)
     }
 
-    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<()> {
         if let Phase::Active(os) = &mut self.phase {
             os.receive(Frame::from_mailbox(message)?, self.rom.entropy(), outbox)
         } else {
@@ -167,7 +173,11 @@ impl Firmware for SepFirmware {
     /// These refusals precede any OOL transfer, so none carries reply
     /// bytes. `scrd`, the master instance and notifications have no error
     /// reply and stay refused.
-    fn error_reply(&mut self, message: Message, _reason: &'static str) -> Option<Vec<Message>> {
+    fn error_reply(
+        &mut self,
+        message: Message,
+        _reason: &stela_contracts::Refusal,
+    ) -> Option<Vec<Message>> {
         let frame = Frame::from_mailbox(message).ok()?;
         let reply = match (&self.phase, frame.service) {
             (Phase::Rom, message::ROM) => Frame {
@@ -197,11 +207,7 @@ impl Firmware for SepFirmware {
         }
     }
 
-    fn dma(
-        &mut self,
-        port: &mut Port<'_, '_>,
-        outbox: &mut Vec<Message>,
-    ) -> Result<(), &'static str> {
+    fn dma(&mut self, port: &mut Port<'_, '_>, outbox: &mut Vec<Message>) -> Result<()> {
         if let Phase::Active(os) = &mut self.phase {
             return os.dma(port, self.rom.entropy(), outbox);
         }
@@ -215,7 +221,11 @@ impl Firmware for SepFirmware {
         // ROM request and state location until all activation prerequisites
         // succeed, so neither an acknowledgement nor an accepted identity
         // escapes for a partially activated SEP.
-        let location = self.state.as_ref().ok_or("sepOS activated twice")?.clone();
+        let location = self
+            .state
+            .as_ref()
+            .ok_or(refuse!("sepOS activated twice"))?
+            .clone();
         let (store, _) = state::open(location, self.ecid, self.rom.entropy())?;
         let os = SepOs::new(self.security).with_services(store, self.observe)?;
         // Stela is the SEP: under its own explicit, TSS-free trust policy it

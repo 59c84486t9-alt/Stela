@@ -58,7 +58,7 @@ struct Header {
 pub(super) enum Nvram {
     Blank,
     Valid(Variables),
-    Invalid(String),
+    Invalid(stela_contracts::Refusal),
 }
 
 pub(super) fn nvram(bytes: &[u8]) -> Nvram {
@@ -71,12 +71,12 @@ pub(super) fn nvram(bytes: &[u8]) -> Nvram {
     });
     match parsed {
         Ok(variables) => Nvram::Valid(variables),
-        Err(error) => Nvram::Invalid(error.into()),
+        Err(error) => Nvram::Invalid(error),
     }
 }
 
 /// What the SEP's area holds.
-pub(super) fn sep(area: &[u8]) -> Result<bool, &'static str> {
+pub(super) fn sep(area: &[u8]) -> Result<bool, stela_contracts::Refusal> {
     sep_state::blank(&area[..stela_formats::machine_state::SEP_ROOTS_BYTES]).map(|blank| !blank)
 }
 

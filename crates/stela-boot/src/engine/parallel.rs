@@ -6,9 +6,11 @@
 //! RAM, the board's devices and a hub (`stela_engine::machine::engine::
 //! parallel`).
 use super::{SLICE, WAIT_POLLS_PER_SECOND, host, output};
+use crate::Result;
 use crate::{apic::Apic, native_smp::executor::Executors};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use stela_compiler::TargetCpu;
+use stela_contracts::refuse;
 use stela_engine::machine::Cpu;
 use stela_engine::machine::CpuProfile;
 use stela_engine::machine::Host;
@@ -79,7 +81,7 @@ pub(crate) fn spawn<H: Host>(
     sender: &Apic,
     tsc_hz: u64,
     settings: &Settings,
-) -> Result<(), &'static str> {
+) -> Result<()> {
     for binding in bindings {
         if binding.pe == home.processor() {
             continue;
@@ -88,7 +90,7 @@ pub(crate) fn spawn<H: Host>(
             .processors()
             .iter()
             .find(|processor| processor.slot() == binding.worker.0)
-            .ok_or("a PE's worker has no AP")?;
+            .ok_or(refuse!("a PE's worker has no AP"))?;
         let pe = Pe {
             pe: binding.pe,
             devices: home.devices.worker(),

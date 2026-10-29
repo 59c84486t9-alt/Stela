@@ -1,10 +1,12 @@
 use super::*;
+use crate::Result;
 use alloc::{
     collections::{BTreeMap, VecDeque},
     vec,
 };
 use core::cell::RefCell;
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 struct Object {
     data: Vec<u8>,
     mapped: bool,
@@ -46,13 +48,13 @@ impl memory::Mapping for Mapped {
     fn geometry(&self) -> memory::MapRequest {
         self.geometry
     }
-    fn read(&mut self, offset: u64, output: &mut [u8], _: &mut Access<'_>) -> Result<(), Error> {
+    fn read(&mut self, offset: u64, output: &mut [u8], _: &mut Access<'_>) -> Result<()> {
         assert!(self.object.borrow().mapped);
         let at = usize::try_from(offset).unwrap();
         output.copy_from_slice(&self.object.borrow().data[at..at + output.len()]);
         Ok(())
     }
-    fn write(&mut self, offset: u64, input: &[u8], _: &mut Access<'_>) -> Result<(), Error> {
+    fn write(&mut self, offset: u64, input: &[u8], _: &mut Access<'_>) -> Result<()> {
         assert!(self.object.borrow().mapped);
         let at = usize::try_from(offset).unwrap();
         self.object.borrow_mut().data[at..at + input.len()].copy_from_slice(input);
@@ -65,9 +67,9 @@ impl PublicationMapping for Mapped {
         lab.syncs.push(request.clone());
         match lab.sync_steps.pop_front() {
             Some(Outcome::Busy) => Step::Busy { deadline: Some(13) },
-            Some(Outcome::Refuse) => Step::Refused("actual synchronization refused"),
+            Some(Outcome::Refuse) => Step::Refused(refuse!("actual synchronization refused")),
             Some(Outcome::RetireRefuse) => Step::Retired {
-                refusal: Some("post-sync refusal"),
+                refusal: Some(refuse!("post-sync refusal")),
             },
             _ => Step::Retired { refusal: None },
         }
@@ -88,11 +90,11 @@ impl PublicationMapping for Mapped {
             .map_or(0, |(_, at)| *at);
         match lab.copy_steps.pop_front() {
             Some(Outcome::Busy) => Step::Busy { deadline: Some(14) },
-            Some(Outcome::Refuse) => Step::Refused("actual copy refused"),
+            Some(Outcome::Refuse) => Step::Refused(refuse!("actual copy refused")),
             Some(Outcome::Prefix) => {
                 output[0] = self.object.borrow().data[0];
                 lab.prefix = Some((request.clone(), 1));
-                Step::Refused("actual read prefix retained")
+                Step::Refused(refuse!("actual read prefix retained"))
             }
             value => {
                 let end = output.len();
@@ -100,7 +102,7 @@ impl PublicationMapping for Mapped {
                 lab.prefix = None;
                 Step::Retired {
                     refusal: matches!(value, Some(Outcome::RetireRefuse))
-                        .then_some("post-copy refusal"),
+                        .then_some(refuse!("post-copy refusal")),
                 }
             }
         }
@@ -116,11 +118,11 @@ impl PublicationMapping for Mapped {
             .map_or(0, |(_, at)| *at);
         match lab.copy_steps.pop_front() {
             Some(Outcome::Busy) => Step::Busy { deadline: Some(14) },
-            Some(Outcome::Refuse) => Step::Refused("actual copy refused"),
+            Some(Outcome::Refuse) => Step::Refused(refuse!("actual copy refused")),
             Some(Outcome::Prefix) => {
                 self.object.borrow_mut().data[0] = input[0];
                 lab.prefix = Some((request.clone(), 1));
-                Step::Refused("actual write prefix retained")
+                Step::Refused(refuse!("actual write prefix retained"))
             }
             value => {
                 self.object.borrow_mut().data[cursor..input.len()]
@@ -128,7 +130,7 @@ impl PublicationMapping for Mapped {
                 lab.prefix = None;
                 Step::Retired {
                     refusal: matches!(value, Some(Outcome::RetireRefuse))
-                        .then_some("post-copy refusal"),
+                        .then_some(refuse!("post-copy refusal")),
                 }
             }
         }
@@ -246,7 +248,7 @@ fn peer(owner: &mut Owner<Backing>, lab: &Rc<RefCell<Lab>>, word: u64) {
     drop(l);
     owner.receive(reply).unwrap();
 }
-fn step(owner: &mut Owner<Backing>, lab: &Rc<RefCell<Lab>>) -> Result<(), Error> {
+fn step(owner: &mut Owner<Backing>, lab: &Rc<RefCell<Lab>>) -> Result<()> {
     owner.advance(&mut Access::new(0, 7, &mut InterruptLatch::new()))?;
     let mut out = Vec::new();
     while owner.emit(&mut out)? {
@@ -340,11 +342,11 @@ impl Callback<Backing> for NativeCallback {
         }
         match c.steps.pop_front() {
             Some(Outcome::Busy) => CallbackStep::Busy { deadline: Some(15) },
-            Some(Outcome::Refuse) => CallbackStep::Refused("actual callback refused"),
+            Some(Outcome::Refuse) => CallbackStep::Refused(refuse!("actual callback refused")),
             value => CallbackStep::Retired {
                 accepted: c.accepted,
                 refusal: matches!(value, Some(Outcome::RetireRefuse))
-                    .then_some("post-callback refusal"),
+                    .then_some(refuse!("post-callback refusal")),
             },
         }
     }
@@ -446,7 +448,7 @@ fn class4_callback_keeps_mapping_effect_and_runs_during_class3_wait() {
     );
     assert_eq!(
         owner.advance(&mut Access::new(0, 11, &mut InterruptLatch::new())),
-        Err("post-callback refusal")
+        Err(refuse!("post-callback refusal"))
     );
     assert_eq!(capture.borrow().calls.len(), 3);
     assert!(
@@ -488,7 +490,7 @@ fn default_read_prefix_and_published_copy_retirement_never_replay() {
     lab.borrow_mut().copy_steps.push_back(Outcome::Prefix);
     assert_eq!(
         owner.advance(&mut Access::new(0, 8, &mut InterruptLatch::new())),
-        Err("actual read prefix retained")
+        Err(refuse!("actual read prefix retained"))
     );
     lab.borrow().outgoing.as_ref().unwrap().borrow_mut().data[0] = 0xee;
     run(&mut owner, &lab);
@@ -508,7 +510,7 @@ fn default_read_prefix_and_published_copy_retirement_never_replay() {
     lab.borrow_mut().copy_steps.push_back(Outcome::RetireRefuse);
     assert_eq!(
         owner.advance(&mut Access::new(0, 9, &mut InterruptLatch::new())),
-        Err("post-copy refusal")
+        Err(refuse!("post-copy refusal"))
     );
     let count = lab.borrow().copies.len();
     run(&mut owner, &lab);
@@ -531,11 +533,11 @@ fn synchronization_prefix_reply_admission_and_irreversible_allocation_failure_ar
     }
     assert_eq!(
         owner.advance(&mut Access::new(0, 9, &mut InterruptLatch::new())),
-        Err("actual synchronization refused")
+        Err(refuse!("actual synchronization refused"))
     );
     assert_eq!(
         owner.advance(&mut Access::new(0, 10, &mut InterruptLatch::new())),
-        Err("post-sync refusal")
+        Err(refuse!("post-sync refusal"))
     );
     let count = lab.borrow().syncs.len();
     run(&mut owner, &lab);
@@ -552,7 +554,7 @@ fn synchronization_prefix_reply_admission_and_irreversible_allocation_failure_ar
             break e;
         }
     };
-    assert!(error.contains("allocation failed"));
+    assert!(error.to_string().contains("allocation failed"));
     assert!(!failed.initialized);
     assert!(failed.outgoing.is_some());
     assert!(failed.incoming.is_none());
@@ -636,7 +638,7 @@ fn failed_admission_returns_owned_client_instead_of_losing_resources() {
         Err(e) => e,
         Ok(_) => panic!(),
     };
-    assert!(failure.reason.contains("another actual"));
+    assert!(failure.reason.to_string().contains("another actual"));
     assert!(failure.memory.fresh());
 }
 
@@ -725,7 +727,7 @@ fn bad_replies_keep_source_cleanup() {
             break reason;
         }
     };
-    assert!(reason.contains("unqualified length"));
+    assert!(reason.to_string().contains("unqualified length"));
     assert!(owner.plan.as_ref().unwrap().failed.is_some());
     assert_eq!(lab.borrow().objects.len(), 2);
     assert!(owner.take_completion().unwrap().is_none());
@@ -759,7 +761,7 @@ fn descriptor_write_resumes_only_unapplied_bytes_and_callback_resource_does_not_
     lab.borrow_mut().copy_steps.push_back(Outcome::Prefix);
     loop {
         if let Err(reason) = step(&mut owner, &lab) {
-            assert_eq!(reason, "actual write prefix retained");
+            assert_eq!(reason, refuse!("actual write prefix retained"));
             break;
         }
     }

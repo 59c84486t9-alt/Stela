@@ -2,6 +2,8 @@
 //! register/table profile; a compatible string is never a generation alias.
 //! All bus masters keep the same [`Dart`] DMA and lifecycle boundary.
 //! See `docs/research/dart-iommu.md` for evidence and validation limits.
+use crate::Result;
+use stela_contracts::refuse;
 use stela_soc_data::dart::{DAPF_BYTES, TRANSLATION_WINDOW_LIMIT};
 pub(crate) mod descriptor;
 pub mod gen3;
@@ -57,7 +59,7 @@ pub struct Dart {
 impl Dart {
     /// Join a physical input's wired-OR owner before mapping this translator.
     /// An active source cannot be rebound without losing its old assertion.
-    pub fn bind_shared_irq(&mut self, irq: &SharedIrq) -> Result<(), &'static str> {
+    pub fn bind_shared_irq(&mut self, irq: &SharedIrq) -> Result<()> {
         match &mut self.model {
             Model::Legacy(model) => model.bind_shared_irq(irq),
             Model::T8110(model) => model.bind_shared_irq(irq),
@@ -74,13 +76,11 @@ impl Dart {
 
     /// Construct the native generation's register/table format. Original
     /// per-chip placement and optional interfaces require separate validation.
-    pub fn for_profile(
-        profile: Profile,
-        streams: usize,
-        irq: Option<AicInput>,
-    ) -> Result<Self, &'static str> {
+    pub fn for_profile(profile: Profile, streams: usize, irq: Option<AicInput>) -> Result<Self> {
         if streams == 0 || streams > profile.stream_limit() {
-            return Err("DART stream count is outside the selected native profile");
+            return Err(refuse!(
+                "DART stream count is outside the selected native profile"
+            ));
         }
         Ok(Self {
             profile,
@@ -128,9 +128,9 @@ impl Dart {
         streams: usize,
         irq: Option<AicInput>,
         count: usize,
-    ) -> Result<Vec<Self>, &'static str> {
+    ) -> Result<Vec<Self>> {
         if count == 0 {
-            return Err("a DART group needs a translation instance");
+            return Err(refuse!("a DART group needs a translation instance"));
         }
         Self::for_profile(profile, streams, irq)?;
         Ok(match profile {
@@ -162,7 +162,7 @@ impl Dart {
     }
 
     #[cfg(test)]
-    pub fn with_smmu(mut self) -> Result<Self, &'static str> {
+    pub fn with_smmu(mut self) -> Result<Self> {
         self.enable_smmu()?;
         Ok(self)
     }
@@ -186,13 +186,13 @@ impl Dart {
 
     /// Attach only a supported, unique view. A refused attachment leaves the
     /// model unchanged; machine placement must validate before mapping MMIO.
-    pub fn enable_smmu(&mut self) -> Result<(), &'static str> {
+    pub fn enable_smmu(&mut self) -> Result<()> {
         match &mut self.model {
             Model::T8110(model) => {
                 if model.enable_smmu() {
                     Ok(())
                 } else {
-                    Err("DART already has a paired SMMU instance")
+                    Err(refuse!("DART already has a paired SMMU instance"))
                 }
             }
             Model::Legacy(model) => model.enable_smmu(),

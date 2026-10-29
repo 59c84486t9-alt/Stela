@@ -2,6 +2,7 @@
 //! pages and CPU/root/control observations. It supplies no controller, ECAM,
 //! reset, cache-policy or hardware-service grant by itself.
 use super::*;
+use crate::Refusal;
 use alloc::sync::Arc;
 use core::{
     arch::x86_64::{__cpuid, __cpuid_count},
@@ -11,7 +12,7 @@ use core::{
 };
 use stela_boot_core::guarded_stacks::mappings;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RootError {
     Privilege,
     CpuFeatures,
@@ -26,7 +27,7 @@ pub(crate) enum RootError {
     Traversal(mappings::Error),
     AliasMissing { physical: u64 },
     AliasMismatch { physical: u64 },
-    Transition(&'static str),
+    Transition(Refusal),
 }
 impl fmt::Display for RootError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -52,7 +53,7 @@ impl fmt::Display for RootError {
             Self::AliasMismatch { physical } => {
                 write!(f, "native table-frame mapping mismatches at {physical:#x}")
             }
-            Self::Transition(error) => f.write_str(error),
+            Self::Transition(error) => write!(f, "{error}"),
         }
     }
 }

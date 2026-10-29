@@ -1,5 +1,7 @@
 //! DeviceTree placement and validation for dma routes.
-use super::{Iommu, Node, String, Vec, format};
+use super::{Iommu, Node, Vec};
+use crate::Result;
+use stela_contracts::refuse;
 
 /// Declared mapper context and its assigned incoming native DMA stream.
 /// This does not resolve a buffer address, strip a relocation tag, or grant
@@ -13,19 +15,21 @@ pub struct NativeDmaRoute {
     pub stream: u32,
 }
 
-pub(super) fn native_dma_route(darts: &[Iommu], mapper: u32) -> Result<NativeDmaRoute, String> {
+pub(super) fn native_dma_route(darts: &[Iommu], mapper: u32) -> Result<NativeDmaRoute> {
     let mut found = darts.iter().enumerate().flat_map(|(index, dart)| {
         dart.mappers
             .iter()
             .filter(move |(phandle, _)| *phandle == mapper)
             .map(move |&(_, context)| (index, dart, context))
     });
-    let (iommu, dart, context) = found.next().ok_or("mapper is not mounted")?;
+    let (iommu, dart, context) = found.next().ok_or(refuse!("mapper is not mounted"))?;
     if mapper == 0 || found.next().is_some() {
-        return Err("mapper ownership is zero or ambiguous".into());
+        return Err(refuse!("mapper ownership is zero or ambiguous"));
     }
     if dart.instances.len() != 1 {
-        return Err("DMA owner requires explicit multiple-TRAD selection".into());
+        return Err(refuse!(
+            "DMA owner requires explicit multiple-TRAD selection"
+        ));
     }
     Ok(NativeDmaRoute {
         mapper,
@@ -37,15 +41,15 @@ pub(super) fn native_dma_route(darts: &[Iommu], mapper: u32) -> Result<NativeDma
 }
 
 /// Owner properties are one nonzero phandle, never a truncated first word.
-pub(super) fn native_dma_phandle(node: &Node<'_>, key: &str) -> Result<Option<u32>, String> {
+pub(super) fn native_dma_phandle(node: &Node<'_>, key: &str) -> Result<Option<u32>> {
     node.property(key)
         .map(|bytes| {
             let value: [u8; 4] = bytes
                 .try_into()
-                .map_err(|_| format!("{key} is not one native DMA owner phandle"))?;
+                .map_err(|_| refuse!("{key} is not one native DMA owner phandle", key))?;
             let value = u32::from_le_bytes(value);
             if value == 0 {
-                return Err(format!("{key} native DMA owner phandle is zero"));
+                return Err(refuse!("{key} native DMA owner phandle is zero", key));
             }
             Ok(value)
         })
@@ -53,18 +57,24 @@ pub(super) fn native_dma_phandle(node: &Node<'_>, key: &str) -> Result<Option<u3
 }
 
 /// Display pipes declare primary and PIODMA mapper parents in order.
-pub(super) fn native_dma_mapper_list(node: &Node<'_>, key: &str) -> Result<Vec<u32>, String> {
+pub(super) fn native_dma_mapper_list(node: &Node<'_>, key: &str) -> Result<Vec<u32>> {
     let Some(bytes) = node.property(key) else {
         return Ok(Vec::new());
     };
     if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
-        return Err(format!("{key} is not a complete native DMA mapper list"));
+        return Err(refuse!(
+            "{key} is not a complete native DMA mapper list",
+            key
+        ));
     }
     let mut parents = Vec::new();
     for word in bytes.as_chunks::<4>().0 {
         let parent = u32::from_le_bytes(*word);
         if parent == 0 || parents.contains(&parent) {
-            return Err(format!("{key} has a zero or duplicate native DMA mapper"));
+            return Err(refuse!(
+                "{key} has a zero or duplicate native DMA mapper",
+                key
+            ));
         }
         parents.push(parent);
     }
@@ -74,15 +84,18 @@ pub(super) fn native_dma_mapper_list(node: &Node<'_>, key: &str) -> Result<Vec<u
 /// Assign a modeled native endpoint its declared incoming route while
 /// keeping its OS mapper context. This is a Stela endpoint assignment,
 /// not an observation of an Apple bus transaction.
-pub(super) fn native_mapper_input(dart: &Iommu, context: u32) -> Result<u32, String> {
+pub(super) fn native_mapper_input(dart: &Iommu, context: u32) -> Result<u32> {
     if !dart.sids.is_empty() && !dart.sids.contains(&context) {
-        return Err("mapper context is absent from the original SID set".into());
+        return Err(refuse!(
+            "mapper context is absent from the original SID set"
+        ));
     }
-    let input = dart
-        .profile
-        .mapper_input_stream(usize::from(dart.streams), context as usize, &dart.remap)
-        .map_err(String::from)?;
-    u32::try_from(input).map_err(|_| "native DMA input exceeds u32".into())
+    let input = dart.profile.mapper_input_stream(
+        usize::from(dart.streams),
+        context as usize,
+        &dart.remap,
+    )?;
+    u32::try_from(input).map_err(|_| refuse!("native DMA input exceeds u32"))
 }
 
 #[cfg(test)]

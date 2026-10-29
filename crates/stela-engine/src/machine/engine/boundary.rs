@@ -1,6 +1,7 @@
 //! The x86 host and the board's device bus the engine runs against.
 
 use super::*;
+use stela_contracts::refuse;
 
 /// The x86 machine beneath the engine: guest RAM, native code, shadow
 /// translation, time and waiting.
@@ -68,9 +69,9 @@ pub trait Host {
         _bytes: usize,
         _write: bool,
     ) -> Result<(), stela_contracts::dma::DmaError> {
-        Err(stela_contracts::dma::DmaError::Unsupported(
-            "host DMA range validation is unavailable",
-        ))
+        Err(stela_contracts::dma::DmaError::Unsupported(refuse!(
+            "host DMA range validation is unavailable"
+        )))
     }
     /// Stateful DMA must keep partial effects across later owner failures.
     /// The default is for hosts whose boolean failure commits no bytes.
@@ -256,10 +257,10 @@ pub enum DeviceError {
     /// No device model covers this physical address.
     NoDevice,
     /// The device refused this register, width or state.
-    Refused(String),
+    Refused(stela_contracts::Refusal),
     /// A DMA service could not execute. Survey mode may substitute unknown
     /// register reads/writes, but cannot invent a completed DMA operation.
-    TransferRefused(String),
+    TransferRefused(stela_contracts::Refusal),
 }
 
 /// A complete device pair read has consumed its input. A subsequent board
@@ -308,9 +309,9 @@ pub trait Devices {
         _now: u64,
         _memory: &mut dyn CanonicalDeviceMemory,
     ) -> Result<ConsumedScalar, DeviceError> {
-        Err(DeviceError::TransferRefused(
-            "canonical device scalar read has no live backend".into(),
-        ))
+        Err(DeviceError::TransferRefused(refuse!(
+            "canonical device scalar read has no live backend"
+        )))
     }
     /// The consuming pair counterpart; no ordinary-read fallback is permitted.
     fn read_pair_canonical(
@@ -321,9 +322,9 @@ pub trait Devices {
         _now: u64,
         _memory: &mut dyn CanonicalDeviceMemory,
     ) -> Result<ConsumedPair, DeviceError> {
-        Err(DeviceError::TransferRefused(
-            "canonical device pair read has no live backend".into(),
-        ))
+        Err(DeviceError::TransferRefused(refuse!(
+            "canonical device pair read has no live backend"
+        )))
     }
     /// Outer Err is proved effect-free. Partial or unknown effects must be
     /// returned explicitly; no raw write fallback or invented ACK is allowed.
@@ -336,9 +337,9 @@ pub trait Devices {
         _now: u64,
         _owners: &mut dyn CanonicalDeviceWrite,
     ) -> Result<ConsumedWrite, DeviceError> {
-        Err(DeviceError::TransferRefused(
-            "canonical device write has no live backend".into(),
-        ))
+        Err(DeviceError::TransferRefused(refuse!(
+            "canonical device write has no live backend"
+        )))
     }
     /// One checked whole-pair owner; adjacent scalar registers are never
     /// combined by this default boundary.
@@ -351,9 +352,9 @@ pub trait Devices {
         _now: u64,
         _owners: &mut dyn CanonicalDeviceWrite,
     ) -> Result<ConsumedWrite, DeviceError> {
-        Err(DeviceError::TransferRefused(
-            "canonical device pair write has no live backend".into(),
-        ))
+        Err(DeviceError::TransferRefused(refuse!(
+            "canonical device pair write has no live backend"
+        )))
     }
     /// Optional whole-pair boundary for a device with a checked consuming
     /// read protocol. `Ok(None)` has no effects and requests ordinary scalar
@@ -524,7 +525,7 @@ impl<H: Host> Memory for HostMemory<'_, H> {
         physical: u64,
         data: &[u8],
     ) -> Result<(), stela_contracts::dma::TransferFault> {
-        let refused = stela_contracts::dma::TransferFault {
+        let refused = || stela_contracts::dma::TransferFault {
             error: stela_contracts::dma::DmaError::Memory,
             completed: 0,
         };
@@ -532,14 +533,14 @@ impl<H: Host> Memory for HostMemory<'_, H> {
             let last = u64::try_from(data.len() - 1)
                 .ok()
                 .and_then(|bytes| physical.checked_add(bytes))
-                .ok_or(refused)?;
+                .ok_or_else(refused)?;
             if self
                 .lock
                 .into_iter()
                 .flatten()
                 .any(|(first, end)| physical <= end && first <= last)
             {
-                return Err(refused);
+                return Err(refused());
             }
         }
         self.host.write_ram_progress(physical, data)

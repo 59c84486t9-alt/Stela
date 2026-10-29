@@ -3,6 +3,7 @@
 //! software `Statistics` histogram.
 use super::{CounterReference, Error};
 use alloc::{vec, vec::Vec};
+use stela_contracts::refuse;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Pair {
     pub value: u64,
@@ -48,9 +49,9 @@ pub(super) fn scaled(
         if r.scale & (1 << 26) != 0 {
             let power = 10u64
                 .checked_pow(shift.unsigned_abs())
-                .ok_or(Error::Contract(
-                    "source decimal scale exponent outside u64 table",
-                ))?;
+                .ok_or(Error::Contract(refuse!(
+                    "source decimal scale exponent outside u64 table"
+                )))?;
             if shift > 0 {
                 v = v.wrapping_mul(power)
             } else if shift < 0 {
@@ -82,9 +83,9 @@ impl Statistics {
     /// Declare source software histogram geometry, not observed counter state.
     pub fn from_source_layout(count: usize, shift: u32) -> Result<Self, Error> {
         if count == 0 || count > 511 || shift > 31 {
-            return Err(Error::Contract(
-                "source histogram geometry outside encoded bounds",
-            ));
+            return Err(Error::Contract(refuse!(
+                "source histogram geometry outside encoded bounds"
+            )));
         }
         Ok(Self::initialized(count, shift))
     }

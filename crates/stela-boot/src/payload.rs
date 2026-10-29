@@ -15,6 +15,8 @@
 //! the staging header is cleared before the first member byte and written
 //! after the last, so a partial copy never reads as staged and the members
 //! are copied again.
+use crate::Refusal;
+use crate::Result;
 use crate::output;
 use alloc::{
     format,
@@ -23,6 +25,7 @@ use alloc::{
     vec::Vec,
 };
 use sha2::Digest;
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use uefi::{
     CString16, Handle,
@@ -76,16 +79,16 @@ struct Install {
     min_apple_bytes: Option<u64>,
 }
 
-fn number(value: &str) -> Result<u64, &'static str> {
+fn number(value: &str) -> Result<u64> {
     match value.strip_prefix("0x") {
         Some(hex) => u64::from_str_radix(hex, 16),
         None => value.parse(),
     }
-    .map_err(|_| "invalid install option number")
+    .map_err(|_| refuse!("invalid install option number"))
 }
 
 /// Read the install options in `stela.cfg`, skipping the mount's own.
-fn parse(options: &str) -> Result<Install, &'static str> {
+fn parse(options: &str) -> Result<Install> {
     let mut install = Install::default();
     let mut words = options.split_ascii_whitespace();
     while let Some(name) = words.next() {
@@ -93,26 +96,28 @@ fn parse(options: &str) -> Result<Install, &'static str> {
             words.next();
             continue;
         }
-        let value = words.next().ok_or("install option without a value")?;
+        let value = words
+            .next()
+            .ok_or(refuse!("install option without a value"))?;
         match name {
             "--install-mode" => {
                 install.mode = Some(match value {
                     "verify" => Mode::Verify,
                     "stage" => Mode::Stage,
-                    _ => return Err("--install-mode must be verify or stage"),
+                    _ => return Err(refuse!("--install-mode must be verify or stage")),
                 })
             }
             "--install-build" => install.build = Some(value.into()),
             "--install-target-guid" => {
                 install.target_guid =
-                    Some(Guid::parse(value).ok_or("--install-target-guid is not a GUID")?)
+                    Some(Guid::parse(value).ok_or(refuse!("--install-target-guid is not a GUID"))?)
             }
             "--install-target-serial" => install.target_serial = Some(value.into()),
             "--install-target-path" => install.target_path = Some(value.into()),
             "--install-target-bytes" => install.target_bytes = Some(number(value)?),
             "--install-cache-bytes" => install.cache_bytes = Some(number(value)?),
             "--install-min-apple-bytes" => install.min_apple_bytes = Some(number(value)?),
-            _ => return Err("unknown install option"),
+            _ => return Err(refuse!("unknown install option")),
         }
     }
     let other = install.build.is_some()
@@ -123,15 +128,15 @@ fn parse(options: &str) -> Result<Install, &'static str> {
         || install.cache_bytes.is_some()
         || install.min_apple_bytes.is_some();
     if install.mode.is_none() && other {
-        return Err("install options need --install-mode");
+        return Err(refuse!("install options need --install-mode"));
     }
     Ok(install)
 }
 
 /// Run install mode if `stela.cfg` asks for it, which ends in
 /// [`output::terminate`]. Otherwise return the mount's own options.
-pub fn run(options: Vec<u8>) -> Result<Vec<u8>, &'static str> {
-    let text = core::str::from_utf8(&options).map_err(|_| "stela.cfg is not UTF-8")?;
+pub fn run(options: Vec<u8>) -> Result<Vec<u8>> {
+    let text = core::str::from_utf8(&options).map_err(|_| refuse!("stela.cfg is not UTF-8"))?;
     let install = parse(text)?;
     let Some(mode) = install.mode else {
         return Ok(options);
@@ -139,9 +144,9 @@ pub fn run(options: Vec<u8>) -> Result<Vec<u8>, &'static str> {
     let build = install
         .build
         .as_deref()
-        .ok_or("install mode needs --install-build")?;
+        .ok_or(refuse!("install mode needs --install-build"))?;
     // Verifying tens of gigabytes outlasts the firmware's 5-minute watchdog.
-    boot::set_watchdog_timer(0, 0x10000, None).map_err(|_| "cannot stop the watchdog")?;
+    boot::set_watchdog_timer(0, 0x10000, None).map_err(|_| refuse!("cannot stop the watchdog"))?;
     let (mut source, payload_path) = Source::find(build)?;
     output::arguments(format_args!(
         "PAYLOAD build={} model={} layout={:?} members={} bytes={} volume={payload_path}\n",
@@ -177,31 +182,31 @@ pub fn run(options: Vec<u8>) -> Result<Vec<u8>, &'static str> {
     }
 }
 
-fn report(error: PayloadError) -> &'static str {
+fn report(error: PayloadError) -> Refusal {
     output::arguments(format_args!("payload refusal: {error}\n"));
-    "install mode failed"
+    refuse!("install mode failed: {error}", %error)
 }
 
-fn copy_report<E: core::fmt::Debug>(error: CopyError<E>) -> &'static str {
+fn copy_report<E: core::fmt::Debug>(error: CopyError<E>) -> Refusal {
     output::arguments(format_args!("payload refusal: {error}\n"));
-    "install mode failed"
+    refuse!("install mode failed: {error}", %error)
 }
 
-fn path16(path: &str) -> Result<CString16, &'static str> {
-    CString16::try_from(path.replace('/', "\\").as_str()).map_err(|_| "path is not UCS-2")
+fn path16(path: &str) -> Result<CString16> {
+    CString16::try_from(path.replace('/', "\\").as_str()).map_err(|_| refuse!("path is not UCS-2"))
 }
 
-fn open_file(root: &mut Directory, path: &str) -> Result<RegularFile, &'static str> {
+fn open_file(root: &mut Directory, path: &str) -> Result<RegularFile> {
     root.open(&path16(path)?, FileMode::Read, FileAttribute::empty())
-        .map_err(|_| "cannot open a payload file")?
+        .map_err(|_| refuse!("cannot open a payload file"))?
         .into_regular_file()
-        .ok_or("a payload path is a directory")
+        .ok_or(refuse!("a payload path is a directory"))
 }
 
-fn file_size(file: &mut RegularFile) -> Result<u64, &'static str> {
+fn file_size(file: &mut RegularFile) -> Result<u64> {
     file.get_boxed_info::<FileInfo>()
         .map(|info| info.file_size())
-        .map_err(|_| "cannot read a payload file's size")
+        .map_err(|_| refuse!("cannot read a payload file's size"))
 }
 
 /// A whole file read at offsets, such as an IPSW.
@@ -211,22 +216,22 @@ struct UefiFile {
 }
 
 impl ReadAt for UefiFile {
-    type Error = &'static str;
+    type Error = Refusal;
     fn len(&self) -> u64 {
         self.length
     }
-    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<()> {
         self.file
             .set_position(offset)
-            .map_err(|_| "cannot seek a payload file")?;
+            .map_err(|_| refuse!("cannot seek a payload file"))?;
         let mut done = 0;
         while done < buffer.len() {
             let count = self
                 .file
                 .read(&mut buffer[done..])
-                .map_err(|_| "cannot read a payload file")?;
+                .map_err(|_| refuse!("cannot read a payload file"))?;
             if count == 0 {
-                return Err("payload file ended early");
+                return Err(refuse!("payload file ended early"));
             }
             done += count;
         }
@@ -255,10 +260,11 @@ struct Source {
 
 impl Source {
     /// The first volume with this build's payload, and its device path.
-    fn find(build: &str) -> Result<(Self, String), &'static str> {
+    fn find(build: &str) -> Result<(Self, String)> {
         let directory = images_directory(build);
         let manifest_path = format!("{directory}/{MANIFEST_FILE}");
-        let handles = boot::find_handles::<SimpleFileSystem>().map_err(|_| "no file systems")?;
+        let handles =
+            boot::find_handles::<SimpleFileSystem>().map_err(|_| refuse!("no file systems"))?;
         for handle in handles {
             let Ok(mut volume) = boot::open_protocol_exclusive::<SimpleFileSystem>(handle) else {
                 continue;
@@ -270,12 +276,13 @@ impl Source {
                 continue;
             };
             let length = file_size(&mut file)?;
-            let mut bytes = vec![0u8; usize::try_from(length).map_err(|_| "manifest size")?];
+            let mut bytes =
+                vec![0u8; usize::try_from(length).map_err(|_| refuse!("manifest size"))?];
             let mut reader = UefiFile { file, length };
             reader.read_at(0, &mut bytes)?;
             let manifest = PayloadManifest::parse(&bytes).map_err(report)?;
             if manifest.product_build != build {
-                return Err("payload.json is for another build");
+                return Err(refuse!("payload.json is for another build"));
             }
             let store = match &manifest.layout {
                 Layout::Split { slice_bytes } => Store::Split {
@@ -287,15 +294,17 @@ impl Source {
                     let mut file = open_file(&mut root, path)?;
                     let length = file_size(&mut file)?;
                     if length != manifest.source.bytes {
-                        return Err("the IPSW's size differs from payload.json");
+                        return Err(refuse!("the IPSW's size differs from payload.json"));
                     }
                     let mut file = UefiFile { file, length };
                     let archive = Archive::open(&mut file).map_err(report)?;
                     Store::Archive { file, archive }
                 }
-                Layout::Staged => return Err("payload.json describes a staged copy"),
+                Layout::Staged => return Err(refuse!("payload.json describes a staged copy")),
                 Layout::Pieces { .. } | Layout::Remote { .. } => {
-                    return Err("payload.json describes an install image, which --install reads");
+                    return Err(refuse!(
+                        "payload.json describes an install image, which --install reads"
+                    ));
                 }
             };
             let path = device_path(handle).unwrap_or_default();
@@ -308,7 +317,7 @@ impl Source {
                 path,
             ));
         }
-        Err("no volume has the payload for --install-build")
+        Err(refuse!("no volume has the payload for --install-build"))
     }
 }
 
@@ -326,7 +335,7 @@ struct Slices<'a> {
 
 impl MemberRead for Slices<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> Result<usize, PayloadError> {
-        let failed = |what: &'static str| PayloadError::Io(what.to_string());
+        let failed = |what: Refusal| PayloadError::Io(what.to_string());
         loop {
             if self.done == self.bytes {
                 return Ok(0);
@@ -337,22 +346,22 @@ impl MemberRead for Slices<'_> {
                 let take = buffer.len().min(*left as usize);
                 let count = file
                     .read(&mut buffer[..take])
-                    .map_err(|_| failed("cannot read a slice"))?;
+                    .map_err(|_| failed(refuse!("cannot read a slice")))?;
                 if count == 0 {
-                    return Err(failed("a slice ended early"));
+                    return Err(failed(refuse!("a slice ended early")));
                 }
                 *left -= count as u64;
                 self.done += count as u64;
                 return Ok(count);
             }
             if self.index >= slice_count(self.bytes, self.slice_bytes) {
-                return Err(failed("a member has too few slices"));
+                return Err(failed(refuse!("a member has too few slices")));
             }
             let path = format!("{}/{}", self.directory, slice_path(&self.name, self.index));
             let mut file = open_file(self.root, &path).map_err(failed)?;
             let expected = (self.bytes - self.index * self.slice_bytes).min(self.slice_bytes);
             if file_size(&mut file).map_err(failed)? != expected {
-                return Err(failed("a slice has the wrong size"));
+                return Err(failed(refuse!("a slice has the wrong size")));
             }
             self.current = Some((file, expected));
             self.index += 1;
@@ -487,42 +496,43 @@ struct Target {
 }
 
 impl Target {
-    fn read(&mut self, lba: u64, blocks: u64) -> Result<Vec<u8>, &'static str> {
+    fn read(&mut self, lba: u64, blocks: u64) -> Result<Vec<u8>> {
         let mut buffer = Aligned::new((blocks * self.disk.block_bytes) as usize);
         self.io
             .read_blocks(self.media, lba, buffer.bytes())
-            .map_err(|_| "cannot read the target disk")?;
+            .map_err(|_| refuse!("cannot read the target disk"))?;
         Ok(buffer.bytes().to_vec())
     }
 
-    fn write(&mut self, lba: u64, bytes: &[u8]) -> Result<(), &'static str> {
+    fn write(&mut self, lba: u64, bytes: &[u8]) -> Result<()> {
         if !(bytes.len() as u64).is_multiple_of(self.disk.block_bytes)
             || lba + bytes.len() as u64 / self.disk.block_bytes > self.disk.blocks
         {
-            return Err("write outside the target disk");
+            return Err(refuse!("write outside the target disk"));
         }
         let mut buffer = Aligned::new(bytes.len());
         buffer.bytes().copy_from_slice(bytes);
         self.io
             .write_blocks(self.media, lba, buffer.bytes())
-            .map_err(|_| "cannot write the target disk")
+            .map_err(|_| refuse!("cannot write the target disk"))
     }
 
     /// The disk's GPT, from the backup when an interrupted write left the
     /// primary damaged (`gpt::read`). A disk without one is staged only when
     /// it is blank, so another system's MBR or filesystem is never
     /// overwritten.
-    fn table(&mut self) -> Result<gpt::Found, &'static str> {
+    fn table(&mut self) -> Result<gpt::Found> {
         let disk = self.disk;
         gpt::read(disk, |lba, blocks| {
-            self.read(lba, blocks).map_err(PayloadError::Disk)
+            self.read(lba, blocks)
+                .map_err(|error| PayloadError::Io(error.to_string()))
         })
         .map_err(report)
     }
 }
 
-fn find_target(install: &Install, payload_path: &str) -> Result<Target, &'static str> {
-    let handles = boot::find_handles::<BlockIO>().map_err(|_| "no block devices")?;
+fn find_target(install: &Install, payload_path: &str) -> Result<Target> {
+    let handles = boot::find_handles::<BlockIO>().map_err(|_| refuse!("no block devices"))?;
     let mut found: Vec<(Handle, String)> = Vec::new();
     for handle in handles {
         // SAFETY: the protocol is only read here, before any write.
@@ -575,9 +585,11 @@ fn find_target(install: &Install, payload_path: &str) -> Result<Target, &'static
                 *want == path && bytes == disk.blocks * disk.block_bytes
             }
             _ => {
-                return Err("stage needs exactly one of --install-target-serial, \
+                return Err(refuse!(
+                    "stage needs exactly one of --install-target-serial, \
                      --install-target-guid, or --install-target-path with \
-                     --install-target-bytes");
+                     --install-target-bytes"
+                ));
             }
         };
         if matches {
@@ -586,15 +598,19 @@ fn find_target(install: &Install, payload_path: &str) -> Result<Target, &'static
     }
     let [(handle, path)] = &found[..] else {
         output::arguments(format_args!("matching target disks: {}\n", found.len()));
-        return Err("the named target disk is not exactly one present, writable disk");
+        return Err(refuse!(
+            "the named target disk is not exactly one present, writable disk"
+        ));
     };
     let holds_payload =
         payload_path == path || payload_path.starts_with(format!("{path}/").as_str());
     if path.is_empty() || holds_payload {
-        return Err("the target disk holds the payload, or has no device path");
+        return Err(refuse!(
+            "the target disk holds the payload, or has no device path"
+        ));
     }
     let io = boot::open_protocol_exclusive::<BlockIO>(*handle)
-        .map_err(|_| "cannot open the target disk exclusively")?;
+        .map_err(|_| refuse!("cannot open the target disk exclusively"))?;
     let media = io.media();
     let disk = Disk {
         block_bytes: media.block_size() as u64,
@@ -787,15 +803,15 @@ struct PartitionWriter<'a> {
 }
 
 impl PartitionWriter<'_> {
-    fn seek(&mut self, offset: u64) -> Result<(), &'static str> {
+    fn seek(&mut self, offset: u64) -> Result<()> {
         if !self.buffer.is_empty() || !offset.is_multiple_of(self.target.disk.block_bytes) {
-            return Err("staging extent is not block aligned");
+            return Err(refuse!("staging extent is not block aligned"));
         }
         self.next = self.first + offset / self.target.disk.block_bytes;
         Ok(())
     }
 
-    fn put(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+    fn put(&mut self, bytes: &[u8]) -> Result<()> {
         self.buffer.extend_from_slice(bytes);
         if self.buffer.len() >= COPY_BYTES {
             let whole = self.buffer.len() / self.target.disk.block_bytes as usize
@@ -807,10 +823,10 @@ impl PartitionWriter<'_> {
         Ok(())
     }
 
-    fn flush_whole(&mut self) -> Result<(), &'static str> {
+    fn flush_whole(&mut self) -> Result<()> {
         let blocks = self.buffer.len() as u64 / self.target.disk.block_bytes;
         if self.next + blocks > self.end {
-            return Err("staging overruns its partition");
+            return Err(refuse!("staging overruns its partition"));
         }
         let bytes = core::mem::take(&mut self.buffer);
         self.target.write(self.next, &bytes)?;
@@ -819,7 +835,7 @@ impl PartitionWriter<'_> {
     }
 
     /// Write what is left, padded with zeros to a whole block.
-    fn finish(&mut self) -> Result<(), &'static str> {
+    fn finish(&mut self) -> Result<()> {
         let block = self.target.disk.block_bytes as usize;
         let padded = self.buffer.len().next_multiple_of(block);
         self.buffer.resize(padded, 0);
@@ -832,7 +848,7 @@ fn stage(
     source: &mut Source,
     subset: PayloadManifest,
     payload_path: &str,
-) -> Result<(), &'static str> {
+) -> Result<()> {
     let source_json = source.manifest.to_json();
     let header = Header::plan(subset, stela_formats::sha256(source_json.as_bytes()));
     let mut target = find_target(install, payload_path)?;
@@ -876,7 +892,7 @@ fn stage(
         target
             .io
             .flush_blocks()
-            .map_err(|_| "cannot flush the target disk")?;
+            .map_err(|_| refuse!("cannot flush the target disk"))?;
     }
     for partition in &plan.table.partitions {
         output::arguments(format_args!(
@@ -889,7 +905,7 @@ fn stage(
     }
     let staging = plan
         .partition(Role::Staging)
-        .ok_or("the plan has no staging partition")?
+        .ok_or(refuse!("the plan has no staging partition"))?
         .clone();
     let mut writer = PartitionWriter {
         first: staging.first_lba,
@@ -918,7 +934,7 @@ fn stage(
     target
         .io
         .flush_blocks()
-        .map_err(|_| "cannot flush the target disk")?;
+        .map_err(|_| refuse!("cannot flush the target disk"))?;
     output::arguments(format_args!(
         "STELA PAYLOAD STAGED members={} bytes={} disk={}\n",
         header.manifest.members.len(),

@@ -1,5 +1,7 @@
 //! The AP-facing variable record layout, with native getter ownership separate.
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 pub const MAGIC: u32 = 0x494f5262;
 pub const HEADER_BYTES: u64 = 16;
@@ -44,7 +46,7 @@ impl Layout {
                 0
             }
     }
-    pub fn from_header(header: &[u8; RECORD_HEADER_BYTES]) -> Result<Self, &'static str> {
+    pub fn from_header(header: &[u8; RECORD_HEADER_BYTES]) -> Result<Self> {
         let n = u32::from_le_bytes(header[0x48..0x4c].try_into().unwrap());
         Ok(
             match u32::from_le_bytes(header[8..12].try_into().unwrap()) {
@@ -55,7 +57,11 @@ impl Layout {
                     count: n,
                     descriptions: u16::from_le_bytes(header[0x4e..0x50].try_into().unwrap()),
                 },
-                _ => return Err("IOReporting record kind is not one of the source four layouts"),
+                _ => {
+                    return Err(refuse!(
+                        "IOReporting record kind is not one of the source four layouts"
+                    ));
+                }
             },
         )
     }
@@ -88,14 +94,16 @@ pub struct Metadata {
     pub descriptions: Vec<[u8; 16]>,
 }
 impl Metadata {
-    pub fn header(&self) -> Result<[u8; RECORD_HEADER_BYTES], &'static str> {
+    pub fn header(&self) -> Result<[u8; RECORD_HEADER_BYTES]> {
         let expected = if let Layout::States { descriptions, .. } = self.layout {
             usize::from(descriptions)
         } else {
             0
         };
         if self.descriptions.len() != expected {
-            return Err("IOReporting description storage differs from its actual layout");
+            return Err(refuse!(
+                "IOReporting description storage differs from its actual layout"
+            ));
         }
         let mut bytes = [0; RECORD_HEADER_BYTES];
         bytes[..8].copy_from_slice(&self.channel.to_le_bytes());

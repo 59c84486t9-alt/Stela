@@ -3,6 +3,7 @@ use super::super::{
     stream::tests::{Memory, receive},
 };
 use super::*;
+use stela_contracts::refuse;
 fn ready() -> (
     Session,
     Answers<stela_formats::payload::test_support::Memory>,
@@ -147,7 +148,7 @@ fn a_signed_amr_error_is_a_reported_failure() {
     let Err(Error::Refused { reason, .. }) = session.receive(status, &mut answers) else {
         panic!("a failed status must refuse")
     };
-    assert_eq!(reason, "device final status is failure");
+    assert_eq!(reason, refuse!("device final status is failure"));
     let (mut session, mut answers) = ready();
     let status = Value::dict([
         ("MsgType", Value::from("StatusMsg")),
@@ -156,7 +157,7 @@ fn a_signed_amr_error_is_a_reported_failure() {
     let Err(Error::Refused { reason, .. }) = session.receive(status, &mut answers) else {
         panic!("a negative status must refuse as a failure")
     };
-    assert_eq!(reason, "device final status is failure");
+    assert_eq!(reason, refuse!("device final status is failure"));
 }
 #[test]
 fn progress_is_a_percentage_or_minus_one_with_the_operation_weights() {
@@ -495,7 +496,7 @@ fn fdr_commit_never_acknowledges_unpersisted_records() {
     else {
         panic!("commit was acknowledged without persistence")
     };
-    assert!(reason.contains("durable commit"));
+    assert!(reason.to_string().contains("durable commit"));
     assert_eq!(*request, commit);
     assert_eq!(session.phase(), Phase::Failed);
 }
@@ -576,7 +577,7 @@ fn fdr_commit_is_durable_before_acknowledgement_and_keeps_binding() {
     answers.fdr_commit = Some(Box::new(move |bytes| {
         journal
             .commit(&mut *writer.borrow_mut(), bytes)
-            .map_err(|error| Error::Transport(format!("{error}")))
+            .map_err(|error| Error::Transport(refuse!("FDR commit: {error}", ?error)))
     }));
     let records = Value::dict([("class-own", Value::Data(vec![9, 8, 7]))]);
     let commit = Value::dict([

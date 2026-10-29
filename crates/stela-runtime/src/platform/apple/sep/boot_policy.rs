@@ -42,6 +42,8 @@ use super::{
     store::{Backend, Nonces},
     transaction::{Answer, Payload, Refusal},
 };
+use crate::Result;
+use stela_contracts::refuse;
 
 /// Stela's catalog ID for the service.
 pub const ID: u8 = 0x13;
@@ -119,38 +121,43 @@ impl BootPolicy {
         store: &mut Nonces<B>,
         entropy: &mut dyn Entropy,
     ) -> Result<Frame, Refusal> {
-        let transport = |reason| Refusal::answered(reason, Answer::frame(transport_failure(frame)));
+        let transport = |reason: stela_contracts::Refusal| {
+            Refusal::answered(reason, Answer::frame(transport_failure(frame)))
+        };
         if frame.service != ID || frame.tag != TAG || frame.opcode != 0 || frame.parameter != 0 {
-            return Err(transport(
-                "SEP BootPolicy frame is not the kernel's tag-2 command",
-            ));
+            return Err(transport(refuse!(
+                "SEP BootPolicy frame is not the kernel's tag-2 command"
+            )));
         }
         let length = frame.data as usize;
         if length < HEADER_BYTES {
-            return Err(transport(
-                "SEP BootPolicy command is shorter than its 32-byte header",
-            ));
+            return Err(transport(refuse!(
+                "SEP BootPolicy command is shorter than its 32-byte header"
+            )));
         }
         let mut header = [0; HEADER_BYTES];
         payload.input(&mut header).map_err(transport)?;
         let word = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
         if word(0) != REQUEST_MAGIC || header[8..].iter().any(|&byte| byte != 0) {
-            return Err(transport(
-                "SEP BootPolicy command header is not libbootpolicy's",
-            ));
+            return Err(transport(refuse!(
+                "SEP BootPolicy command header is not libbootpolicy's"
+            )));
         }
-        let unsupported = |reason| Refusal::answered(reason, not_supported(frame));
+        let unsupported =
+            |reason: stela_contracts::Refusal| Refusal::answered(reason, not_supported(frame));
         if nonces::accepts(word(4)) {
             return self
                 .recovery_nonce
                 .request(word(4), frame, payload, store, entropy);
         }
         if word(4) == CURRENT_OS_TYPE && length == HEADER_BYTES {
-            return Err(unsupported(
-                "SEP BootPolicy OS type needs the booted OS, which the SEP is not given",
-            ));
+            return Err(unsupported(refuse!(
+                "SEP BootPolicy OS type needs the booted OS, which the SEP is not given"
+            )));
         }
-        Err(unsupported("SEP BootPolicy command is not implemented"))
+        Err(unsupported(refuse!(
+            "SEP BootPolicy command is not implemented"
+        )))
     }
 }
 
@@ -165,12 +172,15 @@ mod tests {
     }
 
     impl Payload for Buffers {
-        fn input(&mut self, bytes: &mut [u8]) -> Result<(), &'static str> {
-            let source = self.input.get(..bytes.len()).ok_or("short input")?;
+        fn input(&mut self, bytes: &mut [u8]) -> Result<()> {
+            let source = self
+                .input
+                .get(..bytes.len())
+                .ok_or(refuse!("short input"))?;
             bytes.copy_from_slice(source);
             Ok(())
         }
-        fn output(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+        fn output(&mut self, bytes: &[u8]) -> Result<()> {
             self.output = bytes.to_vec();
             Ok(())
         }

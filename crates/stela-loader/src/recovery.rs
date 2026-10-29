@@ -407,7 +407,7 @@ pub fn boot_args(console: &str, directory: &str) -> Result<String> {
             !IMAGE_BOOT_ARGS.contains(&name) && name != "rd" && name != "rootdev",
             "boot-args {argument} names a root; a recoveryOS boot roots from its Recovery \
              volume and BaseSystem image",
-            argument = alloc::format!("{argument:?}")
+            ?argument
         );
     }
     let mut args: Vec<String> = console.split_whitespace().map(String::from).collect();

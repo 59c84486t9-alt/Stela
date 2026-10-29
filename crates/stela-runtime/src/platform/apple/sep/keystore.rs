@@ -64,8 +64,10 @@ use super::{
     observe::Journal,
     transaction::{Answer, Payload, Refusal},
 };
+use crate::Result;
 use alloc::{string::String, vec, vec::Vec};
 use sha2::Digest;
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use zeroize::Zeroizing;
 
@@ -168,16 +170,18 @@ impl KeyStore {
         payload: &mut dyn Payload,
         entropy: &mut dyn super::Entropy,
     ) -> Result<Frame, Refusal> {
-        let refuse = |reason| Refusal::answered(reason, Answer::frame(failure(frame)));
+        let refuse = |reason: stela_contracts::Refusal| {
+            Refusal::answered(reason, Answer::frame(failure(frame)))
+        };
         if frame.tag & REPLY != 0 {
             return Err(Refusal::unanswerable(
                 "SEP keystore frame from the AP carries the reply bit",
             ));
         }
         if frame.parameter != 0 || frame.data & CALL_FLAGS != 0 {
-            return Err(refuse(
-                "SEP keystore request status or call flags are not modeled",
-            ));
+            return Err(refuse(refuse!(
+                "SEP keystore request status or call flags are not modeled"
+            )));
         }
         let command = frame.tag;
         if !matches!(
@@ -185,7 +189,7 @@ impl KeyStore {
             GET_CAPABILITIES | SET_ENVIRONMENT | system_key::PERFORM_OPERATION
         ) && !keybag::recognizes(command)
         {
-            return Err(refuse("SEP keystore command is not implemented"));
+            return Err(refuse(refuse!("SEP keystore command is not implemented")));
         }
         let mut bytes = vec![0; (frame.data >> LENGTH_SHIFT) as usize];
         payload.input(&mut bytes).map_err(refuse)?;
@@ -202,10 +206,9 @@ impl KeyStore {
                     return Err(refuse(reason));
                 }
             };
-            let keys = self
-                .system_keys
-                .as_mut()
-                .ok_or_else(|| refuse("SEP keystore requires provisioned machine roots"))?;
+            let keys = self.system_keys.as_mut().ok_or_else(|| {
+                refuse(refuse!("SEP keystore requires provisioned machine roots"))
+            })?;
             let public = match keys.perform(operation, entropy) {
                 Ok(bytes) => bytes,
                 Err(reason) => {
@@ -230,21 +233,25 @@ impl KeyStore {
         }
         if keybag::recognizes(command) {
             keybag::validate(command, message.variant(), &mut fields).map_err(refuse)?;
-            return Err(refuse(keybag::UNIMPLEMENTED));
+            return Err(refuse(keybag::UNIMPLEMENTED.into()));
         }
         if message.variant() != 0 {
-            return Err(refuse("SEP keystore startup command variant is not zero"));
+            return Err(refuse(refuse!(
+                "SEP keystore startup command variant is not zero"
+            )));
         }
         if fields.lword().map_err(refuse)? != STARTUP_ARGUMENT {
-            return Err(refuse(
-                "SEP keystore startup command argument is not the kernel's",
-            ));
+            return Err(refuse(refuse!(
+                "SEP keystore startup command argument is not the kernel's"
+            )));
         }
         let blob = fields.blob().map_err(refuse)?;
         fields.end().map_err(refuse)?;
         let (reply, environment) = if command == GET_CAPABILITIES {
             if !blob.is_empty() {
-                return Err(refuse("SEP keystore capability query carries a blob"));
+                return Err(refuse(refuse!(
+                    "SEP keystore capability query carries a blob"
+                )));
             }
             let mut fields = HEADER_VERSION.to_le_bytes().to_vec();
             fields.extend_from_slice(&0u32.to_le_bytes());
@@ -269,16 +276,18 @@ impl KeyStore {
 }
 
 impl Environment {
-    fn parse(bytes: &[u8]) -> Result<Self, &'static str> {
+    fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() != ENVIRONMENT_BYTES {
-            return Err("SEP keystore environment is not 1036 bytes");
+            return Err(refuse!("SEP keystore environment is not 1036 bytes"));
         }
         let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
         if word(0) != ENVIRONMENT_VERSION
             || !ENVIRONMENT_MODES.contains(&word(8))
             || bytes[12..].iter().any(|&byte| byte != 0)
         {
-            return Err("SEP keystore environment is outside the kernel's set_env fields");
+            return Err(refuse!(
+                "SEP keystore environment is outside the kernel's set_env fields"
+            ));
         }
         Ok(Self {
             cpx_encryption_mode: word(4),
@@ -287,11 +296,11 @@ impl Environment {
     }
 }
 
-fn u32_at(bytes: &[u8], at: usize) -> Result<u32, &'static str> {
+fn u32_at(bytes: &[u8], at: usize) -> Result<u32> {
     bytes
         .get(at..at + 4)
         .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
-        .ok_or("SEP keystore IPC message ends inside its header")
+        .ok_or(refuse!("SEP keystore IPC message ends inside its header"))
 }
 
 /// The truncated SHA-256 over everything from the header's version on.
@@ -309,21 +318,29 @@ struct Message<'a> {
 }
 
 impl<'a> Message<'a> {
-    fn parse(bytes: &'a [u8]) -> Result<Self, &'static str> {
+    fn parse(bytes: &'a [u8]) -> Result<Self> {
         let header = u32_at(bytes, 0)? as usize;
         match (u32_at(bytes, VERSION)?, header) {
             (1, HEADER_V1) | (2, HEADER_V2) => {}
-            _ => return Err("SEP keystore IPC header is neither 72-byte v1 nor 80-byte v2"),
+            _ => {
+                return Err(refuse!(
+                    "SEP keystore IPC header is neither 72-byte v1 nor 80-byte v2"
+                ));
+            }
         }
         let body = LENGTH_BYTES + header;
         if bytes.len() < body + VARIANT_BYTES {
-            return Err("SEP keystore IPC message ends inside its header or variant");
+            return Err(refuse!(
+                "SEP keystore IPC message ends inside its header or variant"
+            ));
         }
         if u32_at(bytes, FLAGS)? != 0 {
-            return Err("SEP keystore unprotected or extended IPC headers are not modeled");
+            return Err(refuse!(
+                "SEP keystore unprotected or extended IPC headers are not modeled"
+            ));
         }
         if digest(bytes) != bytes[DIGEST_START..DIGEST_START + DIGEST_BYTES] {
-            return Err("SEP keystore IPC message digest does not match");
+            return Err(refuse!("SEP keystore IPC message digest does not match"));
         }
         Ok(Self { bytes, body })
     }
@@ -359,37 +376,39 @@ struct Fields<'a> {
 }
 
 impl<'a> Fields<'a> {
-    fn take(&mut self, count: usize) -> Result<&'a [u8], &'static str> {
+    fn take(&mut self, count: usize) -> Result<&'a [u8]> {
         let field = self
             .at
             .checked_add(count)
             .and_then(|end| self.bytes.get(self.at..end))
-            .ok_or("SEP keystore IPC message ends inside a field")?;
+            .ok_or(refuse!("SEP keystore IPC message ends inside a field"))?;
         self.at += count;
         Ok(field)
     }
 
-    fn word(&mut self) -> Result<u32, &'static str> {
+    fn word(&mut self) -> Result<u32> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
 
-    fn lword(&mut self) -> Result<u64, &'static str> {
+    fn lword(&mut self) -> Result<u64> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
 
-    fn blob(&mut self) -> Result<&'a [u8], &'static str> {
+    fn blob(&mut self) -> Result<&'a [u8]> {
         let length = u32::from_le_bytes(self.take(4)?.try_into().unwrap()) as usize;
         let padded = length
             .checked_next_multiple_of(4)
-            .ok_or("SEP keystore IPC blob length overflows")?;
+            .ok_or(refuse!("SEP keystore IPC blob length overflows"))?;
         Ok(&self.take(padded)?[..length])
     }
 
-    fn end(&self) -> Result<(), &'static str> {
+    fn end(&self) -> Result<()> {
         if self.at == self.bytes.len() {
             Ok(())
         } else {
-            Err("SEP keystore IPC message has bytes after its fields")
+            Err(refuse!(
+                "SEP keystore IPC message has bytes after its fields"
+            ))
         }
     }
 }

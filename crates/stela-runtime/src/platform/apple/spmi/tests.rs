@@ -1,5 +1,6 @@
 use super::*;
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 
 // The Gen1 and Gen2 offsets and status bits.
 const STATUS: u64 = 0x00;
@@ -67,7 +68,7 @@ impl crate::research::hpm_spmi::Registers for MailboxBody {
             return Err(SlaveError::Nack);
         }
         if register != 9 {
-            return Err(SlaveError::Unsupported("fixture register"));
+            return Err(SlaveError::Unsupported(refuse!("fixture register")));
         }
         Ok(())
     }
@@ -77,7 +78,7 @@ impl crate::research::hpm_spmi::Registers for MailboxBody {
     fn write(&mut self, _: u8, data: &[u8], _: u64) -> Result<(), SlaveError> {
         let bytes: [u8; 4] = data
             .try_into()
-            .map_err(|_| SlaveError::Unsupported("fixture body length"))?;
+            .map_err(|_| SlaveError::Unsupported(refuse!("fixture body length")))?;
         self.data = bytes;
         self.outputs[0] = bytes[0] & 1 != 0;
         Ok(())
@@ -94,7 +95,7 @@ impl crate::research::hpm_spmi::Registers for MailboxBody {
                 self.outputs[1] = false;
                 self.outputs[2] = true;
             }
-            _ => return Err(SlaveError::Unsupported("fixture command")),
+            _ => return Err(SlaveError::Unsupported(refuse!("fixture command"))),
         }
         Ok(())
     }
@@ -1139,11 +1140,11 @@ fn unsupported_slave_preserves_unconsumed_payload_and_never_invents_ack() {
     }
     impl SpmiSlave for Refused {
         fn read(&mut self, _: u16, _: &mut [u8], _: u64) -> Result<(), SlaveError> {
-            Err(SlaveError::Unsupported("unqualified slave read"))
+            Err(SlaveError::Unsupported(refuse!("unqualified slave read")))
         }
         fn write(&mut self, _: u16, _: &[u8], _: u64) -> Result<(), SlaveError> {
             if !self.allow.get() {
-                return Err(SlaveError::Unsupported("unqualified slave write"));
+                return Err(SlaveError::Unsupported(refuse!("unqualified slave write")));
             }
             self.writes.set(self.writes.get() + 1);
             Ok(())

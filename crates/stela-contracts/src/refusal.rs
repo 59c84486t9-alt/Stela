@@ -1,21 +1,24 @@
 //! Why a model refused a request: what it refused and the values that
 //! decided it.
-use alloc::string::String;
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-/// A refused request: a static description and the named values that
-/// decided it.
+/// A refused request: a static description, the named values that decided
+/// it and, when it explains a nested refusal, that cause.
 ///
 /// The description is a template. `{name}` shows a value as `format!` would
 /// (`{name:#x}`, `{name:08x}` and the other integer radix forms included);
 /// values the description does not name follow it as
-/// `(name=value, name=value)`. Build one with [`refuse!`](crate::refuse),
-/// which names each value after the expression that supplies it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `(name=value, name=value)`, and a cause follows as `: cause`. Build one
+/// with [`refuse!`](crate::refuse), which names each value after the
+/// expression that supplies it.
+#[derive(Clone)]
 pub struct Refusal {
     what: &'static str,
     fields: Vec<(&'static str, Value)>,
+    cause: Option<Box<Refusal>>,
 }
 
 /// A value a refusal reports. Appended after the description, registers,
@@ -35,12 +38,38 @@ impl Refusal {
         Self {
             what,
             fields: Vec::new(),
+            cause: None,
         }
+    }
+
+    /// This refusal as what was being done when `cause` was refused.
+    pub fn because(mut self, cause: Refusal) -> Self {
+        self.cause = Some(Box::new(cause));
+        self
+    }
+
+    /// The nested refusal this one explains.
+    pub fn cause(&self) -> Option<&Refusal> {
+        self.cause.as_deref()
     }
 
     /// Add a named value.
     pub fn with(mut self, name: &'static str, value: &(impl ToValue + ?Sized)) -> Self {
         self.fields.push((name, value.to_value()));
+        self
+    }
+
+    /// Add a named value in its `Display` form.
+    pub fn display(mut self, name: &'static str, value: &(impl fmt::Display + ?Sized)) -> Self {
+        self.fields
+            .push((name, Value::Text(alloc::format!("{value}"))));
+        self
+    }
+
+    /// Add a named value in its `Debug` form.
+    pub fn debug(mut self, name: &'static str, value: &(impl fmt::Debug + ?Sized)) -> Self {
+        self.fields
+            .push((name, Value::Text(alloc::format!("{value:?}"))));
         self
     }
 
@@ -115,19 +144,60 @@ impl fmt::Display for Refusal {
             .iter()
             .filter(|(name, _)| !named(name))
             .peekable();
-        if appended.peek().is_none() {
-            return Ok(());
+        if appended.peek().is_some() {
+            for (index, (name, value)) in appended.enumerate() {
+                f.write_str(if index == 0 { " (" } else { ", " })?;
+                write!(f, "{name}=")?;
+                value.write(f, None)?;
+            }
+            f.write_str(")")?;
         }
-        for (index, (name, value)) in appended.enumerate() {
-            f.write_str(if index == 0 { " (" } else { ", " })?;
-            write!(f, "{name}=")?;
-            value.write(f, None)?;
+        match &self.cause {
+            Some(cause) => write!(f, ": {cause}"),
+            None => Ok(()),
         }
-        f.write_str(")")
     }
 }
 
-impl core::error::Error for Refusal {}
+/// Refusals are equal when they say the same thing, whether a value was
+/// written into the template or reported beside it.
+impl PartialEq for Refusal {
+    fn eq(&self, other: &Self) -> bool {
+        let same =
+            self.what == other.what && self.fields == other.fields && self.cause == other.cause;
+        same || self.to_string() == other.to_string()
+    }
+}
+
+impl Eq for Refusal {}
+
+/// The rendered description, so a refusal inside another value's `Debug`
+/// reads as the message it reports.
+impl fmt::Debug for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Refusal")
+            .field(&format_args!("{self}"))
+            .finish()
+    }
+}
+
+impl core::error::Error for Refusal {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        self.cause.as_deref().map(|cause| cause as _)
+    }
+}
+
+/// Say what was being done when a nested request was refused; `context`
+/// runs only on failure.
+pub trait Within<T> {
+    fn within(self, context: impl FnOnce() -> Refusal) -> Result<T, Refusal>;
+}
+
+impl<T> Within<T> for Result<T, Refusal> {
+    fn within(self, context: impl FnOnce() -> Refusal) -> Result<T, Refusal> {
+        self.map_err(|cause| context().because(cause))
+    }
+}
 
 impl From<&'static str> for Refusal {
     fn from(what: &'static str) -> Self {
@@ -202,6 +272,12 @@ impl ToValue for isize {
     }
 }
 
+impl ToValue for char {
+    fn to_value(&self) -> Value {
+        Value::Text((*self).into())
+    }
+}
+
 impl ToValue for str {
     fn to_value(&self) -> Value {
         Value::Text(self.into())
@@ -226,20 +302,36 @@ impl<T: ToValue + ?Sized> ToValue for &T {
     }
 }
 
-/// Build a [`Refusal`]: `refuse!("what")`, `refuse!("what {offset:#x}", /// offset)` or `refuse!("what", kind = message.kind, offset)`. A value is
+/// Build a [`Refusal`]: `refuse!("what")`, `refuse!("what {offset:#x}",
+/// offset)` or `refuse!("what", kind = message.kind, offset)`. A value is
 /// named after its variable, or after the name given before `=`, and read
-/// by reference.
+/// by reference; `%name` and `name = %value` report its `Display` form,
+/// `?name` and `name = ?value` its `Debug` form.
 #[macro_export]
 macro_rules! refuse {
-    (@ $name:ident) => {
-        $name
+    (@ $refusal:expr; $(,)?) => {
+        $refusal
     };
-    (@ $name:ident $value:expr) => {
-        $value
+    (@ $refusal:expr; %$name:ident $(, $($rest:tt)*)?) => {
+        $crate::refuse!(@ $refusal.display(stringify!($name), &$name); $($($rest)*)?)
     };
-    ($what:expr $(, $name:ident $(= $value:expr)?)* $(,)?) => {
-        $crate::refusal::Refusal::new($what)
-            $(.with(stringify!($name), &$crate::refuse!(@ $name $($value)?)))*
+    (@ $refusal:expr; $name:ident = %$value:expr $(, $($rest:tt)*)?) => {
+        $crate::refuse!(@ $refusal.display(stringify!($name), &$value); $($($rest)*)?)
+    };
+    (@ $refusal:expr; ?$name:ident $(, $($rest:tt)*)?) => {
+        $crate::refuse!(@ $refusal.debug(stringify!($name), &$name); $($($rest)*)?)
+    };
+    (@ $refusal:expr; $name:ident = ?$value:expr $(, $($rest:tt)*)?) => {
+        $crate::refuse!(@ $refusal.debug(stringify!($name), &$value); $($($rest)*)?)
+    };
+    (@ $refusal:expr; $name:ident = $value:expr $(, $($rest:tt)*)?) => {
+        $crate::refuse!(@ $refusal.with(stringify!($name), &$value); $($($rest)*)?)
+    };
+    (@ $refusal:expr; $name:ident $(, $($rest:tt)*)?) => {
+        $crate::refuse!(@ $refusal.with(stringify!($name), &$name); $($($rest)*)?)
+    };
+    ($what:expr $(, $($values:tt)*)?) => {
+        $crate::refuse!(@ $crate::refusal::Refusal::new($what); $($($values)*)?)
     };
 }
 
@@ -257,7 +349,13 @@ macro_rules! require {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::string::ToString;
+
+    #[test]
+    fn refusals_that_say_the_same_thing_are_equal() {
+        let die = 8u32;
+        assert_eq!(refuse!("names die {die}", die), refuse!("names die 8"));
+        assert_ne!(refuse!("names die {die}", die), refuse!("names die 0x8"));
+    }
 
     #[test]
     fn shows_the_description_alone_without_values() {
@@ -276,6 +374,16 @@ mod tests {
             "register outside the window (offset=0x40, pe=3)"
         );
         assert_eq!(refusal.what(), "register outside the window");
+        let state = Some(3_u8);
+        assert_eq!(
+            refuse!("bad state {state}", ?state, kind = ?Some("hpm")).to_string(),
+            "bad state Some(3) (kind=Some(\"hpm\"))"
+        );
+        let cause = refuse!("inner");
+        assert_eq!(
+            refuse!("outer: {cause}", %cause, at = %0x10_u8).to_string(),
+            "outer: inner (at=16)"
+        );
         assert_eq!(refusal.value("pe"), Some(&Value::Count(3)));
         assert_eq!(refusal.value("width"), None);
     }
@@ -293,6 +401,22 @@ mod tests {
         assert_eq!(
             refusal.to_string(),
             "region 0x1000..0000002000 has 1 pages ({whole}) (owner=SPTM)"
+        );
+    }
+
+    #[test]
+    fn follows_with_the_refusal_it_explains() {
+        let path = "/arm-io/dart-disp0";
+        let refusal = Err::<(), _>(refuse!("vm-base is not one 64-bit address"))
+            .within(|| refuse!("{path}", path))
+            .unwrap_err();
+        assert_eq!(
+            refusal.to_string(),
+            "/arm-io/dart-disp0: vm-base is not one 64-bit address"
+        );
+        assert_eq!(
+            refusal.cause().map(Refusal::what),
+            Some("vm-base is not one 64-bit address")
         );
     }
 

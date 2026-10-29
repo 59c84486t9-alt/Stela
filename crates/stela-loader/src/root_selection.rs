@@ -51,7 +51,7 @@ fn uuid_property(text: &str) -> Result<Vec<u8>> {
         text.len() + 1 == UUID_PROPERTY_BYTES
             && crate::boot_selection::parse_uuid(text.as_bytes()).is_some(),
         "{text} is not a UUID",
-        text = alloc::format!("{text:?}")
+        ?text
     );
     let mut value = text.to_ascii_uppercase().into_bytes();
     value.push(0);

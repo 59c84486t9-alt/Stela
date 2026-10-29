@@ -2,6 +2,7 @@
 use super::{Error, transport};
 use alloc::rc::Rc;
 use core::cell::Cell;
+use stela_contracts::refuse;
 use {
     crate::platform::apple::ptd::transport::notifications::LocalNotifications,
     stela_contracts::bus::Access, stela_soc_data::ptd::Range,
@@ -31,12 +32,14 @@ impl Target {
     }
     pub fn publish(&self, relative: u32, value: u64, access: &mut Access<'_>) -> Result<(), Error> {
         if !self.epoch.get() {
-            return Err(Error::Contract(
-                "PMP publisher lifetime retired or its native owner was abandoned",
-            ));
+            return Err(Error::Contract(refuse!(
+                "PMP publisher lifetime retired or its native owner was abandoned"
+            )));
         }
         if relative >= self.range.count {
-            return Err(Error::Contract("PMP publisher exceeds its actual range"));
+            return Err(Error::Contract(refuse!(
+                "PMP publisher exceeds its actual range"
+            )));
         }
         transport::publish(&self.local, self.range.start + relative, value, access)
     }

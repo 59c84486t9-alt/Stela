@@ -28,8 +28,11 @@
 //! is a permitted one). `CONFIG` (0x10), the per-CPU views from 0x5000 and
 //! `IPI_SEND` bit 31 have no public description, so they stop explicitly, as
 //! does any CPU mask naming a CPU the model does not serve.
+use crate::Result;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use stela_soc_data::aic::{AIC1_EVENT, AIC1_MAX_IRQ};
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
@@ -68,9 +71,9 @@ const EVENT_TYPE_IPI: u32 = 4 << 16;
 const EVENT_IPI_OTHER: u32 = 1;
 const EVENT_IPI_SELF: u32 = 2;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Aic1Error {
-    InvalidConfig(&'static str),
+    InvalidConfig(Refusal),
     UnknownInput(AicInput),
 }
 
@@ -118,12 +121,14 @@ impl Aic1 {
     /// controller serves, numbered as `WHOAMI` reads them.
     pub fn new(nr_irq: u16, cpus: usize) -> Result<Self, Aic1Error> {
         if nr_irq == 0 || nr_irq > MAX_IRQ {
-            return Err(Aic1Error::InvalidConfig("NR_IRQ must be in 1..=0x400"));
+            return Err(Aic1Error::InvalidConfig(refuse!(
+                "NR_IRQ must be in 1..=0x400"
+            )));
         }
         if cpus == 0 || cpus > 31 {
-            return Err(Aic1Error::InvalidConfig(
-                "the CPU count must be in 1..=31, below IPI_SEND bit 31",
-            ));
+            return Err(Aic1Error::InvalidConfig(refuse!(
+                "the CPU count must be in 1..=31, below IPI_SEND bit 31"
+            )));
         }
         let ipis = Ipis {
             pending: 0,
@@ -250,12 +255,12 @@ impl Aic1 {
             (1 << count) - 1
         }
     }
-    fn read_register(&mut self, register: Register, cpu: CpuIndex) -> Result<u32, &'static str> {
+    fn read_register(&mut self, register: Register, cpu: CpuIndex) -> Result<u32> {
         let served = || {
             if cpu < self.cpus() {
                 Ok(cpu)
             } else {
-                Err("AIC1 access from a CPU the AIC does not serve")
+                Err(refuse!("AIC1 access from a CPU the AIC does not serve"))
             }
         };
         Ok(match register {
@@ -289,19 +294,16 @@ impl Aic1 {
             | Register::IpiAck
             | Register::IpiMaskSet
             | Register::IpiMaskClear => {
-                return Err("AIC1 IPI registers are write-only");
+                return Err(refuse!("AIC1 IPI registers are write-only"));
             }
         })
     }
-    fn write_register(
-        &mut self,
-        register: Register,
-        value: u32,
-        cpu: CpuIndex,
-    ) -> Result<(), &'static str> {
+    fn write_register(&mut self, register: Register, value: u32, cpu: CpuIndex) -> Result<()> {
         let ipi_bits = |value: u32| {
             if value & !(IPI_OTHER | IPI_SELF) != 0 {
-                Err("AIC1 IPI registers have only OTHER (bit 0) and SELF (bit 31)")
+                Err(refuse!(
+                    "AIC1 IPI registers have only OTHER (bit 0) and SELF (bit 31)"
+                ))
             } else {
                 Ok(value)
             }
@@ -310,16 +312,16 @@ impl Aic1 {
             if cpu < self.cpus() {
                 Ok(cpu)
             } else {
-                Err("AIC1 access from a CPU the AIC does not serve")
+                Err(refuse!("AIC1 access from a CPU the AIC does not serve"))
             }
         };
         match register {
             Register::IpiSend => {
                 if value & IPI_SELF != 0 {
-                    return Err("AIC1 IPI_SEND bit 31 is not documented");
+                    return Err(refuse!("AIC1 IPI_SEND bit 31 is not documented"));
                 }
                 if value & !self.all_cpus() != 0 {
-                    return Err("AIC1 IPI_SEND names a CPU the AIC does not serve");
+                    return Err(refuse!("AIC1 IPI_SEND names a CPU the AIC does not serve"));
                 }
                 for (target, ipis) in self.ipis.iter_mut().enumerate() {
                     if value & 1 << target != 0 {
@@ -341,7 +343,9 @@ impl Aic1 {
             }
             Register::TargetCpu(irq) => {
                 if value & !self.all_cpus() != 0 {
-                    return Err("AIC1 TARGET_CPU names a CPU the AIC does not serve");
+                    return Err(refuse!(
+                        "AIC1 TARGET_CPU names a CPU the AIC does not serve"
+                    ));
                 }
                 self.target[irq] = value;
             }
@@ -352,12 +356,12 @@ impl Aic1 {
                     Array::SoftwareClear => self.software[word] &= !bits,
                     Array::MaskSet => self.mask[word] |= bits,
                     Array::MaskClear => self.mask[word] &= !bits,
-                    Array::HardwareState => return Err("AIC1 HW_STATE is read-only"),
+                    Array::HardwareState => return Err(refuse!("AIC1 HW_STATE is read-only")),
                 }
             }
-            Register::Info => return Err("AIC1 INFO is read-only"),
-            Register::WhoAmI => return Err("AIC1 WHOAMI is read-only"),
-            Register::Event => return Err("AIC1 event register is read-only"),
+            Register::Info => return Err(refuse!("AIC1 INFO is read-only")),
+            Register::WhoAmI => return Err(refuse!("AIC1 WHOAMI is read-only")),
+            Register::Event => return Err(refuse!("AIC1 event register is read-only")),
         }
         Ok(())
     }
@@ -377,13 +381,13 @@ impl MmioDevice for Aic1 {
         width: Width,
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         if width != Width::Word {
-            return Err(fail("AIC1 registers are 32-bit"));
+            return Err(fail(refuse!("AIC1 registers are 32-bit")));
         }
         let register = self
             .decode(offset)
-            .ok_or_else(|| fail(Self::unknown_reason(offset)))?;
+            .ok_or_else(|| fail(Self::unknown_reason(offset).into()))?;
         let value = self.read_register(register, access.cpu).map_err(fail)?;
         self.update(access);
         Ok(u64::from(value))
@@ -395,13 +399,13 @@ impl MmioDevice for Aic1 {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         if width != Width::Word {
-            return Err(fail("AIC1 registers are 32-bit"));
+            return Err(fail(refuse!("AIC1 registers are 32-bit")));
         }
         let register = self
             .decode(offset)
-            .ok_or_else(|| fail(Self::unknown_reason(offset)))?;
+            .ok_or_else(|| fail(Self::unknown_reason(offset).into()))?;
         self.write_register(register, value as u32, access.cpu)
             .map_err(fail)?;
         self.update(access);

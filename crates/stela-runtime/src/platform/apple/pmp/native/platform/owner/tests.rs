@@ -1,10 +1,12 @@
 use super::super::profile::tests::fixture;
 use super::*;
+use crate::Result;
 use alloc::vec;
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 struct Snapshot(u128, u128);
 impl Pending for Snapshot {
-    fn bits(&self, start: u32, count: u32) -> Result<u128, &'static str> {
+    fn bits(&self, start: u32, count: u32) -> Result<u128> {
         let x = if start < 128 {
             self.0 >> (start - 16)
         } else {
@@ -139,11 +141,11 @@ impl Backend for TestBackend {
         }
         if self.refuse {
             self.refuse = false;
-            return Completion::Refused("authored unavailable native effect");
+            return Completion::Refused(refuse!("authored unavailable native effect"));
         }
         let refusal = if self.after {
             self.after = false;
-            Some("authored retired effect refusal")
+            Some(refuse!("authored retired effect refusal"))
         } else {
             None
         };
@@ -239,9 +241,9 @@ fn manager_stages_bracket_hooks_and_cursor_exhaustion_precedes_backend() {
     let before = o.backend.reads.len();
     assert_eq!(
         step(&mut o),
-        Err(Error::Contract(
+        Err(Error::Contract(refuse!(
             "native platform operation cursor exhausted"
-        ))
+        )))
     );
     assert_eq!(o.backend.reads.len(), before);
 }
@@ -470,8 +472,8 @@ fn hook_products_feed_next_stage_and_absent_products_cannot_succeed() {
     assert!(matches!(
         step(&mut o),
         Err(Error::Contract(
-            "native counter hook software products absent"
-        ))
+            reason
+        )) if reason == refuse!("native counter hook software products absent")
     ));
     assert!(o.begin_cycle().is_err());
     assert!(step(&mut o).is_err());

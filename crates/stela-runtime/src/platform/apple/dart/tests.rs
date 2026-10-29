@@ -1,5 +1,6 @@
 use super::*;
 use alloc::vec;
+use stela_contracts::refuse;
 use {
     stela_contracts::dma::Port, stela_contracts::dma::test_support::Ram,
     stela_contracts::interrupt::InterruptLatch, stela_contracts::interrupt::Wire,
@@ -90,7 +91,7 @@ fn explicit_profiles_keep_the_shared_bus_master_type_and_table_effects() {
             };
             assert_eq!(
                 port.write(0x200_4007, &[9, 9, 9, 9]),
-                Err(DmaError::Unsupported(reason))
+                Err(DmaError::Unsupported(reason.into()))
             );
             assert!(ram.read(ROOT + 2 * PAGE + 7, &mut actual));
             assert_eq!(actual, [1, 3, 5, 7]);
@@ -164,12 +165,14 @@ fn paired_capture_view_is_available_only_for_its_implemented_generation() {
             model.enable_smmu().unwrap();
             assert_eq!(
                 model.enable_smmu(),
-                Err("DART already has a paired SMMU instance")
+                Err(refuse!("DART already has a paired SMMU instance"))
             );
         } else {
             assert_eq!(
                 model.enable_smmu(),
-                Err("legacy DART paired SMMU capture format is unsupported")
+                Err(refuse!(
+                    "legacy DART paired SMMU capture format is unsupported"
+                ))
             );
         }
         assert_eq!(model.has_smmu(), supported);
@@ -212,7 +215,7 @@ fn grouped_profile_requires_an_translation_instance() {
     for profile in [Profile::T8020, Profile::T6000, Profile::T8110] {
         assert!(matches!(
             Dart::group_for_profile(profile, 16, None, 0),
-            Err("a DART group needs a translation instance")
+            Err(e) if e == refuse!("a DART group needs a translation instance")
         ));
     }
 }
@@ -329,9 +332,9 @@ fn incoming_streams_outside_the_profile_never_truncate_into_fault_sids() {
         for stream in [1, 16, 256, usize::MAX] {
             assert_eq!(
                 model.translate(&mut ram, stream, 0, 0, false, &mut a),
-                Err(DmaError::Unsupported(
+                Err(DmaError::Unsupported(refuse!(
                     "DART incoming stream is outside the native profile"
-                ))
+                )))
             );
             let error = if profile == Profile::T8110 {
                 0x100
@@ -369,7 +372,9 @@ fn functional_clock_gating_keeps_configuration_and_blocks_both_access_paths() {
         assert!(model.write(tcr, Width::Word, 0, &mut a).is_err());
         assert_eq!(
             model.translate(&mut ram, 0, 0, 0, false, &mut a),
-            Err(DmaError::Unsupported("DART functional clock is gated"))
+            Err(DmaError::Unsupported(refuse!(
+                "DART functional clock is gated"
+            )))
         );
         model.set_clock(true);
         assert_eq!(model.read(tcr, Width::Word, &mut a), Ok(bypass));

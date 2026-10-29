@@ -18,7 +18,9 @@
 //!
 //! Every other update, the memory cache's commands among them, only holds
 //! what the AP wrote.
+use crate::Result;
 use core::cell::Cell;
+use stela_contracts::refuse;
 use {
     crate::platform::apple::ptd::transport::Ptd, stela_contracts::bus::Access,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -41,15 +43,17 @@ pub struct Duties {
 impl Duties {
     /// The duties of a bank with these ranges; `None` when it has no
     /// `PMP-STATUS`, which no driver then waits for.
-    pub fn new(ranges: &[Range]) -> Result<Option<Self>, &'static str> {
+    pub fn new(ranges: &[Range]) -> Result<Option<Self>> {
         let named = |name: &str| ranges.iter().find(|range| range.name == name);
         let Some(status) = named(STATUS) else {
             return Ok(None);
         };
-        let requests = named(REQUESTS).ok_or("PTD has no SOC-DEV-PS-REQ range")?;
-        let acks = named(ACKS).ok_or("PTD has no SOC-DEV-PS-ACK range")?;
+        let requests = named(REQUESTS).ok_or(refuse!("PTD has no SOC-DEV-PS-REQ range"))?;
+        let acks = named(ACKS).ok_or(refuse!("PTD has no SOC-DEV-PS-ACK range"))?;
         if requests.count != acks.count {
-            return Err("PTD device power-state requests and acknowledgements differ");
+            return Err(refuse!(
+                "PTD device power-state requests and acknowledgements differ"
+            ));
         }
         Ok(Some(Self {
             status: status.start,

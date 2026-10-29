@@ -6,6 +6,7 @@
 //! and an interrupt sink. Any refusal is returned unchanged; the engine must
 //! stop or fault rather than invent a value.
 use super::interrupt::{CpuIndex, InterruptSink};
+use crate::Refusal;
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
@@ -52,7 +53,7 @@ pub enum Direction {
 /// A refused device access. Earlier device, wire or transition effects may
 /// already be held by their owners; this error alone proves no byte prefix
 /// and grants no replay or source-retirement permission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MmioError {
     /// No device is mapped at this guest PA.
     Unmapped { address: u64, width: Width },
@@ -64,7 +65,7 @@ pub enum MmioError {
         offset: u64,
         width: Width,
         direction: Direction,
-        reason: &'static str,
+        reason: Refusal,
     },
 }
 
@@ -154,7 +155,7 @@ pub struct LifecycleState {
 /// then commits the checked state before any subsequent client activity.
 /// A commit must not fail or generate synthetic completion of canceled work.
 pub trait Lifecycle {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str>;
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), Refusal>;
     fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>);
 }
 
@@ -208,14 +209,14 @@ pub fn refuse(
     offset: u64,
     width: Width,
     direction: Direction,
-    reason: &'static str,
+    reason: impl Into<Refusal>,
 ) -> MmioError {
     MmioError::Unsupported {
         device,
         offset,
         width,
         direction,
-        reason,
+        reason: reason.into(),
     }
 }
 

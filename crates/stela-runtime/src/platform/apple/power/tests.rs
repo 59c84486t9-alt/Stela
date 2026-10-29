@@ -1,5 +1,6 @@
 use super::*;
 use alloc::boxed::Box;
+use stela_contracts::refuse;
 use {stela_contracts::bus::Bus, stela_contracts::interrupt::InterruptLatch};
 
 fn snapshot(kind: Kind, value: u32) -> Power {
@@ -28,9 +29,9 @@ fn unknown_handoff_is_never_zero_marker_unlocked_channel_or_healthy_status() {
             assert!(matches!(
                 model.read(offset, Width::Word, &mut access),
                 Err(MmioError::Unsupported {
-                    reason: "SOC power handoff register value is unknown",
+                    reason,
                     ..
-                })
+                }) if reason == refuse!("SOC power handoff register value is unknown")
             ));
             assert!(model.write(offset, Width::Word, 0, &mut access).is_err());
         }

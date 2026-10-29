@@ -1,6 +1,8 @@
 //! State owned by this physical host processor for its executor lifetime.
 //! GS is private to Stela at CPL0, including translated execution and faults.
 use super::State;
+use crate::Result;
+use stela_contracts::refuse;
 pub(crate) mod context;
 use core::{
     arch::asm,
@@ -108,13 +110,15 @@ impl Owner {
     /// backing, before a guest regime, frame or registered RAM exists: the
     /// host drivers that read a bundle's DRAM base run after `install`.
     /// Root contexts and MMIO views see only the host spans, which stay.
-    pub(crate) fn place_ram(&mut self, base: u64) -> Result<(), &'static str> {
+    pub(crate) fn place_ram(&mut self, base: u64) -> Result<()> {
         if current() != self.local.as_ptr() {
-            return Err("native Host owner migrated");
+            return Err(refuse!("native Host owner migrated"));
         }
         let state = state();
         if state.native || state.regime.is_some() || state.registered_ram.is_some() {
-            return Err("guest RAM is placed before the guest's memory is registered");
+            return Err(refuse!(
+                "guest RAM is placed before the guest's memory is registered"
+            ));
         }
         super::ram::place(&mut state.ram, base);
         Ok(())
@@ -133,9 +137,9 @@ impl Owner {
     pub(crate) unsafe fn register_system_ram(
         &mut self,
         ram: alloc::sync::Arc<stela_engine::memory::RegisteredSystemRam>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if current() != self.local.as_ptr() {
-            return Err("native Host owner migrated");
+            return Err(refuse!("native Host owner migrated"));
         }
         let state = state();
         if self.root_context.strong_count() != 0
@@ -143,12 +147,14 @@ impl Owner {
             || state.regime.is_some()
             || state.registered_ram.is_some()
         {
-            return Err("native RAM adoption requires pristine owner-local dispatch");
+            return Err(refuse!(
+                "native RAM adoption requires pristine owner-local dispatch"
+            ));
         }
         let mut incoming = alloc::vec::Vec::new();
         incoming
             .try_reserve_exact(ram.placements().count())
-            .map_err(|_| "canonical RAM placement allocation failed")?;
+            .map_err(|_| refuse!("canonical RAM placement allocation failed"))?;
         incoming.extend(
             ram.placements()
                 .map(|(guest, host, bytes)| super::RamRange {
@@ -172,26 +178,30 @@ impl Owner {
         &mut self,
         worker: stela_engine::machine::engine::publication::WorkerId,
         expected_apic: u32,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if current() != self.local.as_ptr() {
-            return Err("native Host owner migrated");
+            return Err(refuse!("native Host owner migrated"));
         }
         let state = state();
         if state.apic.id() != expected_apic {
-            return Err("native Host physical identity differs");
+            return Err(refuse!("native Host physical identity differs"));
         }
         if state.native || state.regime.is_some() {
-            return Err("native Host worker binding requires pristine dispatch");
+            return Err(refuse!(
+                "native Host worker binding requires pristine dispatch"
+            ));
         }
         // SAFETY: this unique processor-local owner has no active native call.
         if unsafe { *self.local.as_ref().recovery_rsp.get() } != 0 {
-            return Err("native Host worker binding has active recovery frame");
+            return Err(refuse!(
+                "native Host worker binding has active recovery frame"
+            ));
         }
         // SAFETY: this processor's unique owner, before any native dispatch;
         // handler code never changes the immutable runtime worker binding.
         let binding = unsafe { &mut *self.local.as_ref().worker.get() };
         if binding.is_some() {
-            return Err("native Host worker already bound");
+            return Err(refuse!("native Host worker already bound"));
         }
         // SAFETY: install's owned post-EBS platform contract keeps
         // destination affinity and stable declarations through retirement.
@@ -199,11 +209,11 @@ impl Owner {
         // their local Host/control installation. No firmware snapshot or BSP
         // observation mints an AP lease. Hardware validation stays separate.
         let declarations = unsafe { stela_engine::NativeCpuOwner::new(worker, expected_apic) }
-            .map_err(|_| "native Host CPU declaration admission refused")?;
+            .map_err(|_| refuse!("native Host CPU declaration admission refused"))?;
         // SAFETY: same unique processor-local owner, no active dispatch.
         let slot = unsafe { &mut *self.local.as_ref().declarations.get() };
         if slot.is_some() {
-            return Err("native Host CPU declarations already owned");
+            return Err(refuse!("native Host CPU declarations already owned"));
         }
         *slot = Some(declarations);
         *binding = Some(worker);

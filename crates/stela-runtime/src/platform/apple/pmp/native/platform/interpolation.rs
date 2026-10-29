@@ -1,7 +1,9 @@
 //! Logical vote nibbles (`Packed`) and the software `Interpolation` state,
 //! which maps a requested value and duration onto a bounded state table and
 //! steps between adjacent table entries as time advances.
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 /// Logical source vote nibbles, not controller raw register codes or settlement.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -30,9 +32,11 @@ pub struct Interpolation {
     target: u32,
 }
 impl Interpolation {
-    pub(super) fn initialized(table: Vec<u32>) -> Result<Self, &'static str> {
+    pub(super) fn initialized(table: Vec<u32>) -> Result<Self> {
         if table.is_empty() || table.len() > 16 {
-            return Err("native interpolation needs a bounded nonempty source state table");
+            return Err(refuse!(
+                "native interpolation needs a bounded nonempty source state table"
+            ));
         }
         Ok(Self {
             table,

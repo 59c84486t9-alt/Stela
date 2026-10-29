@@ -7,8 +7,10 @@
 //! windows and DCS/PTD. See docs/research/apple-mcc.md for the source contract
 //! and missing all-access cache accounting. No Apple firmware is executed.
 use super::Prepared;
+use crate::Result;
 use crate::platform::apple::amcc::Amcc;
 use alloc::sync::Arc;
+use stela_contracts::Refusal;
 use stela_contracts::bus::Access;
 use stela_contracts::bus::Direction;
 use stela_contracts::bus::Lifecycle;
@@ -17,6 +19,7 @@ use stela_contracts::bus::MmioDevice;
 use stela_contracts::bus::MmioError;
 use stela_contracts::bus::Width;
 use stela_contracts::bus::refuse;
+use stela_contracts::refuse;
 use stela_engine::memory::CanonicalRamService;
 use stela_engine::memory::RegisteredSystemRam;
 use stela_soc_data::amcc::Locked;
@@ -74,12 +77,16 @@ impl LockResource {
         source: MemoryController,
         programmed: Programmed,
         lifecycle: LifecycleState,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         if lifecycle.reset || !lifecycle.retention {
-            return Err("T8112 AMCC requires explicit retained initialized lock state");
+            return Err(refuse!(
+                "T8112 AMCC requires explicit retained initialized lock state"
+            ));
         }
         let [physical] = source.apertures[..] else {
-            return Err("T8112 AMCC lock join requires its one source aperture");
+            return Err(refuse!(
+                "T8112 AMCC lock join requires its one source aperture"
+            ));
         };
         let layout = source.layout;
         let limit = |offset| Register {
@@ -93,7 +100,7 @@ impl LockResource {
             value: 1,
         };
         let Some(group) = layout.groups[0] else {
-            return Err("T8112 AMCC source omits CTRR-A");
+            return Err(refuse!("T8112 AMCC source omits CTRR-A"));
         };
         if layout.planes != PLANES
             || layout.stride != STRIDE
@@ -109,34 +116,42 @@ impl LockResource {
             || owner.descriptor.cache.shared != SHARED
             || owner.descriptor.cache.broadcast != BROADCAST
         {
-            return Err("T8112 AMCC lock/cache placement differs from its original source profile");
+            return Err(refuse!(
+                "T8112 AMCC lock/cache placement differs from its original source profile"
+            ));
         }
         let end = physical
             .checked_add(MMIO_BYTES)
-            .ok_or("T8112 AMCC aperture overflows")?;
+            .ok_or(refuse!("T8112 AMCC aperture overflows"))?;
         if !physical.is_multiple_of(STRIDE)
             || physical.checked_add(DCS_OFFSET) != Some(owner.descriptor.channels.0)
         {
-            return Err("T8112 AMCC planes and DCS do not share their source physical placement");
+            return Err(refuse!(
+                "T8112 AMCC planes and DCS do not share their source physical placement"
+            ));
         }
         let ptd = owner.descriptor.ptd.physical;
         if physical < ptd + stela_soc_data::ptd::PTD_BYTES && ptd < end {
-            return Err("T8112 AMCC ownership overlaps the actual PTD bank");
+            return Err(refuse!("T8112 AMCC ownership overlaps the actual PTD bank"));
         }
         for (start, _, bytes) in owner.ram.placements() {
             let top = start
                 .checked_add(bytes as u64)
-                .ok_or("canonical RAM extent overflows")?;
+                .ok_or(refuse!("canonical RAM extent overflows"))?;
             if physical < top && start < end {
-                return Err("T8112 AMCC ownership overlaps its canonical guest RAM");
+                return Err(refuse!(
+                    "T8112 AMCC ownership overlaps its canonical guest RAM"
+                ));
             }
         }
         for (start, bytes) in programmed.into_iter().flatten() {
             let top = start
                 .checked_add(bytes)
-                .ok_or("AMCC programmed region overflows")?;
+                .ok_or(refuse!("AMCC programmed region overflows"))?;
             if bytes == 0 || !covers(&owner.ram, start, top) {
-                return Err("AMCC programmed region is outside its actual canonical RAM");
+                return Err(refuse!(
+                    "AMCC programmed region is outside its actual canonical RAM"
+                ));
             }
         }
         // The caller declares limits and clear controls in NEW software backing.
@@ -179,40 +194,42 @@ impl LockResource {
     }
     /// Identity/generation preflight only. A held synchronous RAM service does
     /// not prove outer-cache residency, flush, invalidate, quota or source DSB.
-    pub fn check_ram_service(&self, memory: &CanonicalRamService<'_>) -> Result<(), &'static str> {
+    pub fn check_ram_service(&self, memory: &CanonicalRamService<'_>) -> Result<()> {
         self.accessible()?;
         if !memory.belongs_to(&self.ram) {
-            return Err("AMCC borrowed another actual canonical RAM owner");
+            return Err(refuse!("AMCC borrowed another actual canonical RAM owner"));
         }
         memory
             .validate_current()
-            .map_err(|_| "AMCC lost its actual RAM generation/writer hold")
+            .map_err(|_| refuse!("AMCC lost its actual RAM generation/writer hold"))
     }
-    pub(super) fn accessible(&self) -> Result<(), &'static str> {
+    pub(super) fn accessible(&self) -> Result<()> {
         let state = self.lifecycle;
         if !state.powered || !state.clocked || state.quiesced || state.reset {
-            return Err("T8112 AMCC lock resource is paused by its actual lifecycle owner");
+            return Err(refuse!(
+                "T8112 AMCC lock resource is paused by its actual lifecycle owner"
+            ));
         }
         Ok(())
     }
     fn check(&self, offset: u64, width: Width, direction: Direction) -> Result<(), MmioError> {
-        let fail = |reason| refuse(self.name(), offset, width, direction, reason);
+        let fail = |reason: Refusal| refuse(self.name(), offset, width, direction, reason);
         self.accessible().map_err(fail)?;
         if offset
             .checked_add(width.bytes())
             .is_none_or(|end| end > MMIO_BYTES)
         {
-            return Err(fail(
-                "AMCC access exceeds its source aperture/broadcast union",
-            ));
+            return Err(fail(refuse!(
+                "AMCC access exceeds its source aperture/broadcast union"
+            )));
         }
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(fail(
-                "AMCC lock access requires one aligned full32 source word",
-            ));
+            return Err(fail(refuse!(
+                "AMCC lock access requires one aligned full32 source word"
+            )));
         }
         if offset >= STRIDE * u64::from(PLANES) || !LOCK_REGISTERS.contains(&(offset % STRIDE)) {
-            return Err(fail(self.cache_requirement().reason()));
+            return Err(fail(self.cache_requirement().reason().into()));
         }
         Ok(())
     }
@@ -238,11 +255,11 @@ fn covers(ram: &RegisteredSystemRam, start: u64, end: u64) -> bool {
     false
 }
 impl Lifecycle for LockResource {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         if proposed.reset || !proposed.retention {
-            return Err(
-                "T8112 AMCC destructive reset/power loss has no qualified lock/cache owner",
-            );
+            return Err(refuse!(
+                "T8112 AMCC destructive reset/power loss has no qualified lock/cache owner"
+            ));
         }
         Ok(())
     }

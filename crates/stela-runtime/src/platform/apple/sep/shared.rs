@@ -11,7 +11,9 @@ use super::{
     super::asc::Message,
     message::{self, Frame},
 };
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 const ENTRY_BYTES: u64 = 16;
@@ -31,14 +33,14 @@ pub struct Region {
 impl Region {
     /// `AppleSEPBooter::bootSEP`, 0x2d73ddc..0x2d73e68. This is a
     /// normal service-0xfe frame with a 16-bit page count across op/param.
-    pub fn from_message(message: Message) -> Result<Self, &'static str> {
+    pub fn from_message(message: Message) -> Result<Self> {
         let frame = Frame::from_mailbox(message)?;
         if frame.service != message::BOOT || frame.tag != 0 {
-            return Err("SEP shared-memory frame service/tag is invalid");
+            return Err(refuse!("SEP shared-memory frame service/tag is invalid"));
         }
         let pages = u16::from_le_bytes([frame.opcode, frame.parameter]);
         if pages == 0 || frame.data == 0 {
-            return Err("SEP shared-memory address or length is zero");
+            return Err(refuse!("SEP shared-memory address or length is zero"));
         }
         Ok(Self {
             address: u64::from(frame.data) << WIRE_PAGE_SHIFT,
@@ -46,17 +48,17 @@ impl Region {
         })
     }
 
-    pub fn subregion(self, offset: u64, bytes: u64) -> Result<Self, &'static str> {
+    pub fn subregion(self, offset: u64, bytes: u64) -> Result<Self> {
         if bytes == 0 || offset.checked_add(bytes).is_none_or(|end| end > self.bytes) {
-            return Err("SEP channel extent is outside its region");
+            return Err(refuse!("SEP channel extent is outside its region"));
         }
         let address = self
             .address
             .checked_add(offset)
-            .ok_or("SEP channel address overflows")?;
+            .ok_or(refuse!("SEP channel address overflows"))?;
         address
             .checked_add(bytes)
-            .ok_or("SEP channel extent overflows")?;
+            .ok_or(refuse!("SEP channel extent overflows"))?;
         Ok(Self { address, bytes })
     }
 }
@@ -84,14 +86,14 @@ impl Layout {
             || !region.bytes.is_multiple_of(page)
             || region.bytes < page
         {
-            return Err(bad(
-                "SEP shared-memory alignment or page size is unsupported",
-            ));
+            return Err(bad(refuse!(
+                "SEP shared-memory alignment or page size is unsupported"
+            )));
         }
         region
             .address
             .checked_add(region.bytes)
-            .ok_or(bad("SEP shared-memory extent overflows"))?;
+            .ok_or(bad(refuse!("SEP shared-memory extent overflows")))?;
         let mut channels: Vec<Channel> = Vec::new();
         let mut directory_end = None;
         for index in 0..=MAX_CHANNELS {
@@ -102,31 +104,33 @@ impl Layout {
             let base = u64::from_le_bytes(entry[8..].try_into().unwrap());
             if name == NULL {
                 if bytes != 0 || base != 0 {
-                    return Err(bad("SEP shared-memory terminator is malformed"));
+                    return Err(bad(refuse!("SEP shared-memory terminator is malformed")));
                 }
                 directory_end = Some(((index as u64 + 1) * ENTRY_BYTES).next_multiple_of(page));
                 break;
             }
             if index == MAX_CHANNELS {
-                return Err(bad(
-                    "SEP shared-memory directory exceeds the resource bound",
-                ));
+                return Err(bad(refuse!(
+                    "SEP shared-memory directory exceeds the resource bound"
+                )));
             }
             if channels.iter().any(|c| c.name == name) {
-                return Err(bad("SEP shared-memory channel name is duplicated"));
+                return Err(bad(refuse!("SEP shared-memory channel name is duplicated")));
             }
             if bytes == 0 || !bytes.is_multiple_of(page) || !base.is_multiple_of(page) {
-                return Err(bad(
-                    "SEP shared-memory channel alignment or size is invalid",
-                ));
+                return Err(bad(refuse!(
+                    "SEP shared-memory channel alignment or size is invalid"
+                )));
             }
             let standalone = name == TXMB;
             let channel = if standalone {
                 if base == 0 || bytes != page {
-                    return Err(bad("SEP TXMB must name one separately mapped page"));
+                    return Err(bad(refuse!(
+                        "SEP TXMB must name one separately mapped page"
+                    )));
                 }
                 base.checked_add(bytes)
-                    .ok_or(bad("SEP standalone channel extent overflows"))?;
+                    .ok_or(bad(refuse!("SEP standalone channel extent overflows")))?;
                 Region {
                     address: base,
                     bytes,
@@ -140,19 +144,20 @@ impl Layout {
                 standalone,
             });
         }
-        let directory_end =
-            directory_end.ok_or(bad("SEP shared-memory directory has no terminator"))?;
+        let directory_end = directory_end.ok_or(bad(refuse!(
+            "SEP shared-memory directory has no terminator"
+        )))?;
         for (index, channel) in channels.iter().enumerate() {
             if channel.region.address < region.address + directory_end
                 && region.address < channel.region.address + channel.region.bytes
             {
-                return Err(bad("SEP channel overlaps its directory"));
+                return Err(bad(refuse!("SEP channel overlaps its directory")));
             }
             for other in &channels[..index] {
                 if channel.region.address < other.region.address + other.region.bytes
                     && other.region.address < channel.region.address + channel.region.bytes
                 {
-                    return Err(bad("SEP shared-memory channel IOVAs overlap"));
+                    return Err(bad(refuse!("SEP shared-memory channel IOVAs overlap")));
                 }
             }
         }
@@ -165,9 +170,9 @@ impl Layout {
 /// bits in raw mode: there is no service byte to mask away. Only a caller
 /// already in the timebase phase may interpret this word as a timebase.
 #[cfg(test)]
-pub fn raw_timebase(message: Message) -> Result<u64, &'static str> {
+pub fn raw_timebase(message: Message) -> Result<u64> {
     if message.endpoint != 0 {
-        return Err("SEP raw timebase requires ASC endpoint zero");
+        return Err(refuse!("SEP raw timebase requires ASC endpoint zero"));
     }
     Ok(message.payload)
 }

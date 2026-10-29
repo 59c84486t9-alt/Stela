@@ -12,7 +12,9 @@
 )]
 pub mod registered;
 
-use alloc::{format, string::String, vec::Vec};
+use crate::Result;
+use alloc::vec::Vec;
+use stela_contracts::refuse;
 use stela_engine::machine::Host;
 use stela_formats::boot_bundle::LoadedRegion;
 use stela_loader::{apple_device_tree::DeviceTree, boot_args};
@@ -43,39 +45,46 @@ pub struct LiveTree {
     bytes: Vec<u8>,
 }
 
-fn buffer(length: usize) -> Result<Vec<u8>, String> {
+fn buffer(length: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(length)
-        .map_err(|_| "live DeviceTree allocation failed")?;
+        .map_err(|_| refuse!("live DeviceTree allocation failed"))?;
     bytes.resize(length, 0);
     Ok(bytes)
 }
-fn region<'a>(regions: &'a [LoadedRegion], name: &str) -> Result<&'a LoadedRegion, String> {
+fn region<'a>(regions: &'a [LoadedRegion], name: &str) -> Result<&'a LoadedRegion> {
     let mut selected = regions.iter().filter(|r| r.name == name);
     let r = selected
         .next()
-        .ok_or_else(|| format!("loaded bundle has no {name} region"))?;
+        .ok_or_else(|| refuse!("loaded bundle has no {name} region", name))?;
     if selected.next().is_some()
         || r.bytes == 0
         || r.bytes > r.memory_bytes
         || r.guest_pa.checked_add(r.memory_bytes).is_none()
     {
-        return Err(format!("loaded {name} region is ambiguous or invalid"));
+        return Err(refuse!(
+            "loaded {name} region is ambiguous or invalid",
+            name
+        ));
     }
     Ok(r)
 }
-fn reservation(tree: &DeviceTree, physical: u64, bytes: u64) -> Result<(), String> {
+fn reservation(tree: &DeviceTree, physical: u64, bytes: u64) -> Result<()> {
     let p = tree
         .node("/chosen/memory-map")
         .and_then(|n| n.property("DeviceTree"))
-        .ok_or("live DeviceTree has no retained memory-map allocation")?;
+        .ok_or(refuse!(
+            "live DeviceTree has no retained memory-map allocation"
+        ))?;
     if p.placeholder
         || p.value.len() != 16
         || p.value[..8] != physical.to_le_bytes()
         || p.value[8..] != bytes.to_le_bytes()
     {
-        return Err("live DeviceTree memory-map differs from its loaded allocation".into());
+        return Err(refuse!(
+            "live DeviceTree memory-map differs from its loaded allocation"
+        ));
     }
     Ok(())
 }
@@ -83,7 +92,7 @@ fn reservation(tree: &DeviceTree, physical: u64, bytes: u64) -> Result<(), Strin
 impl LiveTree {
     /// The caller excludes guest entry, guest DMA and changes to the loaded RAM
     /// mapping throughout capture, projection and consuming publication.
-    pub fn capture(ram: &mut impl Ram, regions: &[LoadedRegion], x0: u64) -> Result<Self, String> {
+    pub fn capture(ram: &mut impl Ram, regions: &[LoadedRegion], x0: u64) -> Result<Self> {
         let tree = region(regions, "DeviceTree")?;
         let args_region = region(regions, "BootArgs")?;
         if x0 != args_region.guest_pa
@@ -91,13 +100,16 @@ impl LiveTree {
             || !(tree.guest_pa + tree.memory_bytes <= args_region.guest_pa
                 || args_region.guest_pa + args_region.memory_bytes <= tree.guest_pa)
         {
-            return Err("loaded DeviceTree and boot_args allocations disagree or overlap".into());
+            return Err(refuse!(
+                "loaded DeviceTree and boot_args allocations disagree or overlap"
+            ));
         }
         let mut args = [0; boot_args::BYTES];
         if !ram.read(x0, &mut args) {
-            return Err("loaded boot_args could not be read from guest RAM".into());
+            return Err(refuse!("loaded boot_args could not be read from guest RAM"));
         }
-        let decoded = boot_args::decode(&args).map_err(|e| format!("live boot_args: {e}"))?;
+        let decoded =
+            boot_args::decode(&args).map_err(|error| refuse!("live boot_args: {error}", %error))?;
         let physical = decoded
             .device_tree
             .checked_sub(decoded.virt_base)
@@ -107,17 +119,20 @@ impl LiveTree {
             || physical != Some(tree.guest_pa)
             || u64::from(decoded.device_tree_length) != tree.bytes
         {
-            return Err(
+            return Err(refuse!(
                 "live boot_args DeviceTree pointer/length/layout differs from the loaded region"
-                    .into(),
-            );
+            ));
         }
-        let mut bytes =
-            buffer(usize::try_from(tree.bytes).map_err(|_| "live DeviceTree length overflows")?)?;
+        let mut bytes = buffer(
+            usize::try_from(tree.bytes).map_err(|_| refuse!("live DeviceTree length overflows"))?,
+        )?;
         if !ram.read(tree.guest_pa, &mut bytes) {
-            return Err("loaded DeviceTree could not be read from guest RAM".into());
+            return Err(refuse!(
+                "loaded DeviceTree could not be read from guest RAM"
+            ));
         }
-        let parsed = DeviceTree::parse(&bytes).map_err(|e| format!("live DeviceTree: {e}"))?;
+        let parsed = DeviceTree::parse(&bytes)
+            .map_err(|error| refuse!("live DeviceTree: {error}", %error))?;
         reservation(&parsed, tree.guest_pa, tree.memory_bytes)?;
         Ok(Self {
             physical: tree.guest_pa,
@@ -134,12 +149,15 @@ impl LiveTree {
     /// Check the post-patch boot_args snapshot, not the manifest's
     /// command line. The source factory separately checks all DT providers.
     /// Even an explicit zero requires a separately checked override path.
-    pub fn require_no_harvesting_override(&self) -> Result<(), String> {
-        let args = boot_args::decode(&self.args).map_err(|e| format!("live boot_args: {e}"))?;
+    pub fn require_no_harvesting_override(&self) -> Result<()> {
+        let args = boot_args::decode(&self.args)
+            .map_err(|error| refuse!("live boot_args: {error}", %error))?;
         if args.command_line.split_ascii_whitespace().any(|word| {
             word.split('=').next().unwrap_or("").trim_start_matches('-') == "acc-harvesting"
         }) {
-            return Err("assigned source requires no acc-harvesting boot-argument override".into());
+            return Err(refuse!(
+                "assigned source requires no acc-harvesting boot-argument override"
+            ));
         }
         Ok(())
     }
@@ -151,18 +169,14 @@ impl LiveTree {
         dead_code,
         reason = "retained live-tree operations serve later source-qualified topology publication"
     )] // Adoption also needs the Plan/RAM/device owners.
-    pub fn publish(self, ram: &mut impl Ram, projected: &DeviceTree) -> Result<Self, String> {
+    pub fn publish(self, ram: &mut impl Ram, projected: &DeviceTree) -> Result<Self> {
         self.publish_inner(ram, projected, false)
     }
 
     /// Publish the original driver's cacheless argument together with
     /// the assigned topology, only after the parent constructed its matching
     /// empty cache and canonical RAM owners. This changes no bundle schema.
-    pub fn publish_cacheless(
-        self,
-        ram: &mut impl Ram,
-        projected: &DeviceTree,
-    ) -> Result<Self, String> {
+    pub fn publish_cacheless(self, ram: &mut impl Ram, projected: &DeviceTree) -> Result<Self> {
         self.publish_inner(ram, projected, true)
     }
 
@@ -171,26 +185,28 @@ impl LiveTree {
         ram: &mut impl Ram,
         projected: &DeviceTree,
         cacheless: bool,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         reservation(projected, self.physical, self.reservation_bytes)?;
         let bytes = projected.serialize();
         if bytes.len() > self.bytes.len() {
-            return Err(
-                "assigned DeviceTree projection grows beyond its original data span".into(),
-            );
+            return Err(refuse!(
+                "assigned DeviceTree projection grows beyond its original data span"
+            ));
         }
-        let length =
-            u32::try_from(bytes.len()).map_err(|_| "projected DeviceTree length overflows")?;
+        let length = u32::try_from(bytes.len())
+            .map_err(|_| refuse!("projected DeviceTree length overflows"))?;
         // Prepare every argument byte before the first guest RAM effect.
         // Preserve unrelated fields and opaque padding from the live snapshot.
         let mut next_args = self.args;
         next_args[boot_args::offset::DEVICE_TREE_LENGTH..boot_args::offset::DEVICE_TREE_LENGTH + 4]
             .copy_from_slice(&length.to_le_bytes());
         if cacheless {
-            let decoded =
-                boot_args::decode(&self.args).map_err(|e| format!("live boot_args: {e}"))?;
+            let decoded = boot_args::decode(&self.args)
+                .map_err(|error| refuse!("live boot_args: {error}", %error))?;
             let line = stela_loader::boot_policy::mcc::cacheless_arguments(&decoded.command_line)
-                .map_err(|e| format!("cacheless original boot arguments: {e}"))?;
+                .map_err(
+                |error| refuse!("cacheless original boot arguments: {error}", %error),
+            )?;
             let at = boot_args::offset::COMMAND_LINE;
             next_args[at..at + line.len()].copy_from_slice(line.as_bytes());
             next_args[at + line.len()] = 0;
@@ -202,12 +218,16 @@ impl LiveTree {
             || old != self.bytes
             || args != self.args
         {
-            return Err("live DeviceTree publication snapshot is stale or inaccessible".into());
+            return Err(refuse!(
+                "live DeviceTree publication snapshot is stale or inaccessible"
+            ));
         }
         old.fill(0);
         old[..bytes.len()].copy_from_slice(&bytes);
         if !ram.write(self.physical, &old) {
-            return Err("DeviceTree publication failed; guest entry is forbidden".into());
+            return Err(refuse!(
+                "DeviceTree publication failed; guest entry is forbidden"
+            ));
         }
         let arguments_written = if cacheless {
             ram.write(self.args_physical, &next_args)
@@ -216,10 +236,9 @@ impl LiveTree {
             ram.write(length_at, &length.to_le_bytes())
         };
         if !arguments_written {
-            return Err(
+            return Err(refuse!(
                 "DeviceTree was written but boot_args publication failed; guest entry is forbidden"
-                    .into(),
-            );
+            ));
         }
         self.args = next_args;
         ram.fence();
@@ -229,7 +248,9 @@ impl LiveTree {
             || !ram.read(self.args_physical, &mut args)
             || args != self.args
         {
-            return Err("DeviceTree publication readback failed; guest entry is forbidden".into());
+            return Err(refuse!(
+                "DeviceTree publication readback failed; guest entry is forbidden"
+            ));
         }
         self.bytes = bytes;
         Ok(self)
@@ -459,6 +480,7 @@ mod tests {
             live.publish(&mut ram, &tree)
                 .err()
                 .expect("a failed boot_args publication must refuse entry")
+                .to_string()
                 .contains("guest entry is forbidden")
         );
         assert_eq!(
@@ -523,6 +545,7 @@ mod tests {
             live.publish_cacheless(&mut ram, &tree)
                 .err()
                 .unwrap()
+                .to_string()
                 .contains("guest entry is forbidden")
         );
         assert_eq!(&ram.bytes[0x1000..0x1000 + boot_args::BYTES], old_args);

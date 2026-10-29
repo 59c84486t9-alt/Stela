@@ -1,5 +1,7 @@
 use super::super::scanout::PixelFormat;
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 use stela_formats::builds::DEFAULT;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::test_support::Ram};
 
@@ -10,7 +12,7 @@ impl Scanout for TestScreen {
     fn mode(&self) -> Mode {
         self.0
     }
-    fn present(&mut self, _rows: &[u8]) -> Result<(), &'static str> {
+    fn present(&mut self, _rows: &[u8]) -> Result<()> {
         *self.1.borrow_mut() += 1;
         Ok(())
     }
@@ -56,7 +58,7 @@ fn with_port<T>(ram: &mut Ram, run: impl FnOnce(&mut Port<'_, '_>) -> T) -> T {
     run(&mut port)
 }
 
-fn dma(coprocessor: &mut Coprocessor, ram: &mut Ram) -> Result<Vec<Message>, &'static str> {
+fn dma(coprocessor: &mut Coprocessor, ram: &mut Ram) -> Result<Vec<Message>> {
     with_port(ram, |port| {
         let mut outbox = Vec::new();
         coprocessor.dma(port, &mut outbox)?;
@@ -164,7 +166,7 @@ fn the_link_comes_up_and_answers_through_the_coprocessors_dart() {
     assert!(matches!(coprocessor.take_log(), Some(Log::Call { tag, .. }) if &tag == b"A451"));
 }
 
-fn iop_power(coprocessor: &mut Coprocessor, state: u64) -> Result<Vec<Message>, &'static str> {
+fn iop_power(coprocessor: &mut Coprocessor, state: u64) -> Result<Vec<Message>> {
     let mut out = Vec::new();
     coprocessor.receive(
         Message {
@@ -260,7 +262,9 @@ fn iop_sleep_to_wake_resumes_the_kept_rpc_region_without_a_hello() {
         assert!(quiesced(&coprocessor.link));
         assert_eq!(
             iop_power(&mut coprocessor, 0),
-            Err("DCP IOP memory-loss power transition is not modeled")
+            Err(refuse!(
+                "DCP IOP memory-loss power transition is not modeled"
+            ))
         );
         iop_power(&mut coprocessor, 0x220).unwrap();
         assert!(quiesced(&coprocessor.link));
@@ -627,7 +631,7 @@ fn an_unrepresentable_external_identity_refuses_before_publication() {
     let (scanout, _) = screen(4, 2);
     assert!(matches!(
         Coprocessor::for_external(scanout, None, ExternalIdentity::Numbered(10), DEFAULT),
-        Err("DCP external pipe ordinal exceeds the native single-character identity")
+        Err(e) if e == refuse!("DCP external pipe ordinal exceeds the native single-character identity")
     ));
 }
 
@@ -693,7 +697,9 @@ fn check_presented_swap(identity: ExternalIdentity) {
             },
             &mut no_ack
         ),
-        Err("DCP IOP sleep with unfinished RPC, scanout or AFK work")
+        Err(refuse!(
+            "DCP IOP sleep with unfinished RPC, scanout or AFK work"
+        ))
     );
     assert!(no_ack.is_empty());
     assert_eq!(coprocessor.rtkit.iop_power(), 0x20);
@@ -715,7 +721,9 @@ fn check_presented_swap(identity: ExternalIdentity) {
             },
             &mut no_ack
         ),
-        Err("DCP IOP memory-loss power transition is not modeled")
+        Err(refuse!(
+            "DCP IOP memory-loss power transition is not modeled"
+        ))
     );
     assert!(no_ack.is_empty());
     assert_eq!(coprocessor.rtkit.iop_power(), 0x20);

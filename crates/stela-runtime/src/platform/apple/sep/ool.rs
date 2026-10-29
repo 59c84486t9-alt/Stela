@@ -12,6 +12,8 @@ use super::{
     message::{self, Frame},
     shared::Region,
 };
+use crate::Result;
+use stela_contracts::refuse;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 const SET_INPUT_ADDRESS: u8 = 2;
@@ -29,12 +31,12 @@ struct Buffer {
 }
 
 impl Buffer {
-    fn range(&self, offset: u64, bytes: usize) -> Result<Region, &'static str> {
+    fn range(&self, offset: u64, bytes: usize) -> Result<Region> {
         if self.pending.is_some() {
-            return Err("SEP OOL registration is incomplete");
+            return Err(refuse!("SEP OOL registration is incomplete"));
         }
         self.region
-            .ok_or("SEP OOL buffer is not registered")?
+            .ok_or(refuse!("SEP OOL buffer is not registered"))?
             .subregion(offset, bytes as u64)
     }
 }
@@ -57,9 +59,9 @@ impl Buffers {
         self.input.region.map_or(0, |region| region.bytes)
     }
 
-    pub fn new(service: u8) -> Result<Self, &'static str> {
+    pub fn new(service: u8) -> Result<Self> {
         if service == message::CONTROL || service > super::endpoint::MAX_SERVICE {
-            return Err("SEP OOL owner is not an application service");
+            return Err(refuse!("SEP OOL owner is not an application service"));
         }
         Ok(Self {
             service,
@@ -72,31 +74,37 @@ impl Buffers {
     /// The caller must separately implement the control transaction contract.
     /// No registration probes memory by overwriting guest bytes. Translation
     /// permissions and faults are checked on every DMA operation.
-    pub fn record(&mut self, frame: Frame) -> Result<(), &'static str> {
+    pub fn record(&mut self, frame: Frame) -> Result<()> {
         if frame.service != message::CONTROL || frame.tag == 0 || frame.parameter != self.service {
-            return Err("SEP OOL setup service, tag or owner is invalid");
+            return Err(refuse!("SEP OOL setup service, tag or owner is invalid"));
         }
         let (buffer, length) = match frame.opcode {
             SET_INPUT_LENGTH => (&mut self.input, true),
             SET_OUTPUT_LENGTH => (&mut self.output, true),
             SET_INPUT_ADDRESS => (&mut self.input, false),
             SET_OUTPUT_ADDRESS => (&mut self.output, false),
-            _ => return Err("SEP OOL clear, relay or DMA command is not modeled"),
+            _ => {
+                return Err(refuse!(
+                    "SEP OOL clear, relay or DMA command is not modeled"
+                ));
+            }
         };
         if length {
             if frame.data == 0 || frame.data > MAX_BYTES {
-                return Err("SEP OOL length is zero or exceeds the resource bound");
+                return Err(refuse!(
+                    "SEP OOL length is zero or exceeds the resource bound"
+                ));
             }
             if buffer.pending.is_some() {
-                return Err("SEP OOL length is already awaiting an address");
+                return Err(refuse!("SEP OOL length is already awaiting an address"));
             }
             buffer.pending = Some(frame.data);
         } else {
             let bytes = buffer
                 .pending
-                .ok_or("SEP OOL address arrived before its length")?;
+                .ok_or(refuse!("SEP OOL address arrived before its length"))?;
             if frame.data == 0 {
-                return Err("SEP OOL address is zero");
+                return Err(refuse!("SEP OOL address is zero"));
             }
             let region = Region {
                 address: u64::from(frame.data) << PAGE_SHIFT,
@@ -105,7 +113,7 @@ impl Buffers {
             region
                 .address
                 .checked_add(region.bytes)
-                .ok_or("SEP OOL extent overflows")?;
+                .ok_or(refuse!("SEP OOL extent overflows"))?;
             buffer.region = Some(region);
             buffer.pending = None;
         }

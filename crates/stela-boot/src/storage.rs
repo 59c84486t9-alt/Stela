@@ -9,7 +9,9 @@
 mod bluetooth_platform;
 #[cfg(feature = "diagnostics")]
 mod media_check;
+use crate::Result;
 use stela_boot_core::storage as options;
+use stela_contracts::refuse;
 #[cfg(feature = "diagnostics")]
 mod reset_check;
 pub use options::split;
@@ -70,14 +72,14 @@ pub fn prepare(
     options: &[u8],
     firmware: Option<Arc<stela_drivers::firmware::Catalog>>,
     wifi_platform: stela_drivers::net::wifi::intel::platform::Observations,
-) -> Result<Option<Prepared>, &'static str> {
-    let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
+) -> Result<Option<Prepared>> {
+    let text = core::str::from_utf8(options).map_err(|_| refuse!("stela.cfg is not UTF-8"))?;
     let (open, check, _) = split(text)?;
     let usb_reset_check = options::reset_requested(text, &open, &check)?;
     let usb_media_check = options::media_requested(text, &open, &check)?;
     #[cfg(not(feature = "diagnostics"))]
     if usb_reset_check || usb_media_check {
-        return Err("USB checks require a diagnostics build");
+        return Err(refuse!("USB checks require a diagnostics build"));
     }
     if open.is_empty() && check.is_empty() {
         return Ok(None);
@@ -177,11 +179,12 @@ fn root_bridges() -> Vec<(u16, core::ops::RangeInclusive<u8>)> {
 /// What the storage drivers need after ExitBootServices: the ECAM windows,
 /// DMA pages below 4 GiB, the TSC rate and every range to map uncached.
 /// Runs before ExitBootServices.
-pub fn discover() -> Result<Handoff, &'static str> {
-    let rsdp = rsdp().ok_or("firmware has no ACPI tables")?;
+pub fn discover() -> Result<Handoff> {
+    let rsdp = rsdp().ok_or(refuse!("firmware has no ACPI tables"))?;
     // SAFETY: the firmware's RSDP, its tables mapped while boot services last.
-    let mcfg = unsafe { acpi::find(rsdp, b"MCFG") }.map_err(|_| "no valid ACPI MCFG table")?;
-    let mcfg = acpi::mcfg(mcfg).map_err(|_| "invalid ACPI MCFG table")?;
+    let mcfg =
+        unsafe { acpi::find(rsdp, b"MCFG") }.map_err(|_| refuse!("no valid ACPI MCFG table"))?;
+    let mcfg = acpi::mcfg(mcfg).map_err(|_| refuse!("invalid ACPI MCFG table"))?;
     let bridges = root_bridges();
     let ecam = if bridges.is_empty() {
         output::arguments(format_args!(
@@ -218,7 +221,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
     let (dma, pages) = match allocate(DMA_PAGES + extra) {
         Ok(dma) => (dma, DMA_PAGES + extra),
         Err(_) => (
-            allocate(DMA_PAGES).map_err(|_| "firmware has no DMA pages below 4 GiB")?,
+            allocate(DMA_PAGES).map_err(|_| refuse!("firmware has no DMA pages below 4 GiB"))?,
             DMA_PAGES,
         ),
     };
@@ -269,7 +272,9 @@ pub fn discover() -> Result<Handoff, &'static str> {
             output::arguments(format_args!(
                 "PCI firmware resource buffer release failed: {status:?}\n"
             ));
-            return Err("PCI firmware resource buffer remains retained; handoff refused");
+            return Err(refuse!(
+                "PCI firmware resource buffer remains retained; handoff refused"
+            ));
         }
         Err(error) => output::arguments(format_args!(
             "PCI firmware observation unavailable: {error}; native owned discovery required\n"
@@ -292,7 +297,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
 
 impl Prepared {
     /// Map ECAM and the controllers' registers uncached.
-    pub fn map(&self, tables: &mut Tables) -> Result<(), &'static str> {
+    pub fn map(&self, tables: &mut Tables) -> Result<()> {
         self.handoff
             .mapped
             .iter()

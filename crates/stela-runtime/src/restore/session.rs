@@ -10,8 +10,9 @@ use super::{
     store::{MAX_READ_BYTES, Store},
     stream::{ByteStream, Endian, Framed, Output},
 };
-use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 use core::task::Poll;
+use stela_contracts::refuse;
 use stela_formats::payload::ReadAt;
 pub const PORT: u16 = 62078;
 pub const PROTOCOL: u64 = 15;
@@ -254,7 +255,7 @@ impl Session {
         }
         result.map_err(|e| match e {
             Error::Refused { .. } => e,
-            _ => super::refuse(format!("{e}"), &message),
+            _ => super::refuse(refuse!("restore message: {e}", ?e), &message),
         })
     }
     fn receive_inner<R: ReadAt>(&mut self, m: &Value, answers: &mut Answers<R>) -> Result<Action> {
@@ -452,7 +453,7 @@ impl Session {
             .ok_or(Error::Invalid("unknown/already completed restore job"))?;
         if let Err(e) = result {
             self.phase = Phase::Failed;
-            return Err(super::refuse(format!("job failed: {e}"), &request));
+            return Err(super::refuse(refuse!("job failed: {e}", ?e), &request));
         }
         Ok(())
     }
@@ -525,7 +526,7 @@ impl Job {
         if matches!(r, Poll::Ready(Err(_))) {
             self.failed = true;
         }
-        r.map(|r| r.map_err(|e| super::refuse(format!("transfer failed: {e}"), &self.request)))
+        r.map(|r| r.map_err(|e| super::refuse(refuse!("transfer failed: {e}", ?e), &self.request)))
     }
     /// Read ahead what the job sends next ([`super::asr::Sender::prefetch`]),
     /// up to `chunks` reads.

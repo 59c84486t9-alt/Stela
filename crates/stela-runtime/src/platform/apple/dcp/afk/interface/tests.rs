@@ -1,21 +1,23 @@
 use super::*;
+use crate::Result;
 use alloc::rc::Rc;
 use core::cell::RefCell;
+use stela_contracts::refuse;
 
 #[derive(Default)]
 struct Memory(BTreeMap<u64, u8>);
 
 impl Bus for Memory {
-    fn read(&mut self, address: u64, bytes: &mut [u8]) -> Result<(), &'static str> {
+    fn read(&mut self, address: u64, bytes: &mut [u8]) -> Result<()> {
         for (offset, byte) in bytes.iter_mut().enumerate() {
             *byte = *self
                 .0
                 .get(&(address + offset as u64))
-                .ok_or("unmapped input")?;
+                .ok_or(refuse!("unmapped input"))?;
         }
         Ok(())
     }
-    fn write(&mut self, address: u64, bytes: &[u8]) -> Result<(), &'static str> {
+    fn write(&mut self, address: u64, bytes: &[u8]) -> Result<()> {
         self.0.extend(
             bytes
                 .iter()
@@ -35,7 +37,7 @@ struct Effects {
 struct Echo(Rc<RefCell<Effects>>);
 
 impl Service for Echo {
-    fn handle(&mut self, kind: u8, payload: &[u8]) -> Result<(i32, Vec<u8>), &'static str> {
+    fn handle(&mut self, kind: u8, payload: &[u8]) -> Result<(i32, Vec<u8>)> {
         assert_eq!(kind, 0xc0);
         self.0.borrow_mut().calls += 1;
         Ok((0, payload.iter().rev().copied().collect()))
@@ -79,7 +81,7 @@ fn receive(
     number: u16,
     bytes: &[u8],
     memory: &mut Memory,
-) -> Result<Option<Vec<u8>>, &'static str> {
+) -> Result<Option<Vec<u8>>> {
     interfaces
         .receive(number, bytes.len() as u32, bytes, memory, None)?
         .map(|response| {
@@ -96,8 +98,8 @@ struct Producer {
 }
 struct Client(Rc<RefCell<Producer>>);
 impl Service for Client {
-    fn handle(&mut self, _: u8, _: &[u8]) -> Result<(i32, Vec<u8>), &'static str> {
-        Err("no incoming command contract")
+    fn handle(&mut self, _: u8, _: &[u8]) -> Result<(i32, Vec<u8>)> {
+        Err(refuse!("no incoming command contract"))
     }
     fn transport_closed(&mut self) {}
     fn pending(&self) -> bool {
@@ -115,7 +117,7 @@ impl Service for Client {
                 reply_bytes: 16,
             })
     }
-    fn complete(&mut self, cookie: u64, status: i32, bytes: Vec<u8>) -> Result<(), &'static str> {
+    fn complete(&mut self, cookie: u64, status: i32, bytes: Vec<u8>) -> Result<()> {
         self.0
             .borrow_mut()
             .completions
@@ -327,7 +329,9 @@ fn peer_publication_refuses_without_inventing_an_importer_or_service_effect() {
     for number in [1, 99] {
         assert_eq!(
             receive(&mut interfaces, number, &publication, &mut memory),
-            Err("DCP AFKEPV2 peer service publication has no importer owner")
+            Err(refuse!(
+                "DCP AFKEPV2 peer service publication has no importer owner"
+            ))
         );
     }
     assert_eq!(interfaces.services.len(), 2);
@@ -400,7 +404,7 @@ fn bad_framing_or_dma_faults_do_not_execute_a_service() {
     packet[44] = 1;
     assert_eq!(
         receive(&mut interfaces, 1, &packet, &mut memory),
-        Err("unmapped input")
+        Err(refuse!("unmapped input"))
     );
     assert_eq!(effects.borrow().calls, 0);
 }

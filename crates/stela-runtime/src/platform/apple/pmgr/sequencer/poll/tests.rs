@@ -244,7 +244,7 @@ fn mounted_partial_read_error_preserves_mmio_effect_and_cannot_be_replayed() {
         .read(actual.address, actual.width, &mut access)
         .unwrap_err();
     assert_eq!(
-        cursor.finish_read(&claim, Outcome::Uncertain(error)),
+        cursor.finish_read(&claim, Outcome::Uncertain(error.clone())),
         Err(FinishError::Uncertain(error))
     );
     assert_eq!(value.get(), 0);

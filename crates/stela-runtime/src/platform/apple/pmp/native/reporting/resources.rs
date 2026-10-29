@@ -1,6 +1,7 @@
 //! Owners required by the source endpoint. No successful defaults.
 use super::super::platform::owner::Completion;
 use super::wire::Buffer;
+use crate::Result;
 use alloc::rc::Rc;
 use stela_contracts::bus::Access;
 
@@ -32,7 +33,7 @@ impl WaitKey {
 pub trait Mapping {
     fn geometry(&self) -> Buffer;
     /// Runtime104b23c equivalent, derived by the cache/map owner.
-    fn synchronization_granule(&self) -> Result<u64, &'static str>;
+    fn synchronization_granule(&self) -> Result<u64>;
     fn write(
         &mut self,
         request: &Request,

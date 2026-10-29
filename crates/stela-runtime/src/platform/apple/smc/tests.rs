@@ -1,4 +1,5 @@
 use super::*;
+use stela_contracts::refuse;
 
 const BASE: u64 = 0x2_3fe0_0000;
 /// The keys the J473AP DeviceTree's `pKW4` functions name.
@@ -226,7 +227,7 @@ fn write_observations_report_losses() {
     let mut replies = Vec::new();
     assert_eq!(
         smc.receive(payload, &mut replies),
-        Err("SMC MBSE command is not modeled")
+        Err(refuse!("SMC MBSE command is not modeled"))
     );
     assert!(replies.is_empty());
     assert_eq!(
@@ -234,7 +235,7 @@ fn write_observations_report_losses() {
         Some(WriteLog {
             request: payload,
             system_event: Some(0),
-            reply: Err("SMC MBSE command is not modeled"),
+            reply: Err(refuse!("SMC MBSE command is not modeled")),
             dropped_before: 0,
         })
     );

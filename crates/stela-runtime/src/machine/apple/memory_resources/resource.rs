@@ -2,10 +2,12 @@
 use super::Prepared;
 use super::t6020;
 use super::t8112;
+use crate::Result;
 use stela_contracts::bus::Access;
 use stela_contracts::bus::Bus;
 use stela_contracts::bus::DeviceId;
 use stela_contracts::bus::Width;
+use stela_contracts::refuse;
 use stela_engine::memory::CanonicalRamService;
 
 pub(in crate::machine::apple) enum Resource<'a> {
@@ -35,7 +37,7 @@ impl Resource<'_> {
         offset: u64,
         width: Width,
         memory: &CanonicalRamService<'_>,
-    ) -> Result<u64, &'static str> {
+    ) -> Result<u64> {
         match self {
             // SAFETY: the caller's contract for this method is the same as the delegate's.
             Self::Direct(owner) => unsafe { owner.read_ram_drain(offset, width, memory) },
@@ -55,7 +57,7 @@ impl Resource<'_> {
         value: u64,
         now: u64,
         memory: &CanonicalRamService<'_>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         match self {
             // SAFETY: the caller's contract for this method is the same as the delegate's.
             Self::Direct(owner) => unsafe {
@@ -83,11 +85,13 @@ impl Resource<'_> {
         offset: u64,
         bytes: u8,
         access: &mut Access<'_>,
-    ) -> Result<[u64; 2], &'static str> {
+    ) -> Result<[u64; 2]> {
         match self {
             Self::Direct(owner) => owner.read_pair_values(offset, bytes, access),
             Self::T8112(owner) => owner.read_pair_values(offset, bytes, access),
-            Self::T6020(_) => Err("T602x paired PTD consumption has no qualified source owner"),
+            Self::T6020(_) => Err(refuse!(
+                "T602x paired PTD consumption has no qualified source owner"
+            )),
         }
     }
     /// Physical ownership only. This remains visible when publication effects
@@ -101,24 +105,26 @@ impl Resource<'_> {
     }
     /// A shared publication view requires the implemented protocol,
     /// independently of the physically owned bank's extent.
-    pub(in crate::machine::apple) fn publication_binding(
-        &self,
-    ) -> Result<(u64, u64, u64), &'static str> {
+    pub(in crate::machine::apple) fn publication_binding(&self) -> Result<(u64, u64, u64)> {
         match self {
             Self::Direct(owner) => Ok(owner.publication_binding()),
             Self::T8112(owner) => Ok(owner.publication_binding()),
-            Self::T6020(_) => Err("T602x PTD publication has no qualified source owner"),
+            Self::T6020(_) => Err(refuse!(
+                "T602x PTD publication has no qualified source owner"
+            )),
         }
     }
     pub(in crate::machine::apple) fn display_publication_view(
         &self,
         physical: u64,
         bytes: u64,
-    ) -> Result<(u64, u64, u64), &'static str> {
+    ) -> Result<(u64, u64, u64)> {
         match self {
             Self::Direct(owner) => owner.display_publication_view(physical, bytes),
             Self::T8112(owner) => owner.display_publication_view(physical, bytes),
-            Self::T6020(_) => Err("T602x display PTD alias has no qualified source owner"),
+            Self::T6020(_) => Err(refuse!(
+                "T602x display PTD alias has no qualified source owner"
+            )),
         }
     }
     pub(in crate::machine::apple) fn locked_regions(&self) -> Option<stela_soc_data::amcc::Locked> {

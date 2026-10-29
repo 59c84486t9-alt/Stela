@@ -124,6 +124,7 @@ fn another_soc_aperture_geometry_compatible_or_domain_cannot_inherit_a_binding()
         assert!(
             states(&bytes, "pmgr1,t8112", domains())
                 .unwrap_err()
+                .to_string()
                 .contains("ambiguous")
         );
     }

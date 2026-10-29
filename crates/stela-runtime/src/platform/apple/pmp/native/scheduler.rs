@@ -22,17 +22,19 @@ use core::{
     cell::{Cell, RefCell},
     sync::atomic::{Ordering, fence},
 };
+use stela_contracts::Refusal;
 use stela_contracts::bus::Access;
+use stela_contracts::refuse;
 
 mod dispatch;
 mod waits;
 pub use waits::{Key, Lease, Wait};
 
 type Result<T> = core::result::Result<T, Error>;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    Contract(&'static str),
-    Callback(&'static str),
+    Contract(Refusal),
+    Callback(Refusal),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueueConfiguration {
@@ -98,7 +100,7 @@ impl Queue {
         let state = self
             .runtime
             .upgrade()
-            .ok_or(Error::Contract("native scheduler abandoned"))?;
+            .ok_or(Error::Contract(refuse!("native scheduler abandoned")))?;
         let config = state.borrow().queues[self.id].config.clone();
         Ok(config)
     }
@@ -133,7 +135,7 @@ impl Work {
         let state = self
             .runtime
             .upgrade()
-            .ok_or(Error::Contract("native scheduler abandoned"))?;
+            .ok_or(Error::Contract(refuse!("native scheduler abandoned")))?;
         let s = state.borrow();
         Ok(s.works[self.id].queue.map(|id| Queue {
             runtime: self.runtime.clone(),
@@ -150,7 +152,7 @@ impl Work {
         invocation.check_current()?;
         if !self.runtime.ptr_eq(&invocation.runtime) || invocation.frame.kind != Kind::Work(self.id)
         {
-            return Err(Error::Contract("foreign native work dispatch"));
+            return Err(Error::Contract(refuse!("foreign native work dispatch")));
         }
         Ok(())
     }
@@ -225,7 +227,7 @@ impl Invocation {
         let state = self
             .runtime
             .upgrade()
-            .ok_or(Error::Contract("native scheduler abandoned"))?;
+            .ok_or(Error::Contract(refuse!("native scheduler abandoned")))?;
         let s = state.borrow();
         Ok(match self.frame.kind {
             Kind::Work(id) => Some(s.work_handle(&state, id)),
@@ -236,15 +238,15 @@ impl Invocation {
         let state = self
             .runtime
             .upgrade()
-            .ok_or(Error::Contract("native scheduler abandoned"))?;
+            .ok_or(Error::Contract(refuse!("native scheduler abandoned")))?;
         let s = state.borrow();
         if self.frame.status.get() != Status::Active
             || !self.frame.executing.get()
             || !s.context.last().is_some_and(|f| Rc::ptr_eq(f, &self.frame))
         {
-            return Err(Error::Contract(
-                "native invocation is stale or not executing",
-            ));
+            return Err(Error::Contract(refuse!(
+                "native invocation is stale or not executing"
+            )));
         }
         Ok(())
     }
@@ -259,7 +261,7 @@ pub enum Progress {
     Retired {
         invocation: Invocation,
         source_return: u32,
-        refusal: Option<&'static str>,
+        refusal: Option<Refusal>,
     },
 }
 struct QueueState {
@@ -278,7 +280,7 @@ struct QueueState {
 struct Target {
     callback: Option<Box<dyn Callback>>,
     frame: Option<Rc<Frame>>,
-    retired: Option<(u32, Option<&'static str>)>,
+    retired: Option<(u32, Option<Refusal>)>,
 }
 struct WorkState {
     cells: Rc<WorkCells>,
@@ -303,15 +305,15 @@ struct State {
 }
 impl State {
     fn next_serial(&self) -> Result<u64> {
-        self.serial
-            .checked_add(1)
-            .ok_or(Error::Contract("native scheduler serial exhausted"))
+        self.serial.checked_add(1).ok_or(Error::Contract(refuse!(
+            "native scheduler serial exhausted"
+        )))
     }
     fn thread(&mut self, priority: u8) -> Result<Rc<Thread>> {
         let id = self
             .next_thread
             .checked_add(1)
-            .ok_or(Error::Contract("native thread IDs exhausted"))?;
+            .ok_or(Error::Contract(refuse!("native thread IDs exhausted")))?;
         self.next_thread = id;
         Ok(Rc::new(Thread {
             id,
@@ -367,13 +369,17 @@ impl Runtime {
     }
     fn check_runtime(&self, other: &Weak<RefCell<State>>) -> Result<()> {
         if !Rc::downgrade(&self.state).ptr_eq(other) {
-            return Err(Error::Contract("foreign native scheduler resource"));
+            return Err(Error::Contract(refuse!(
+                "foreign native scheduler resource"
+            )));
         }
         Ok(())
     }
     pub fn create_queue(&self, config: QueueConfiguration) -> Result<Queue> {
         if config.name.is_empty() || config.stack_bytes == 0 || config.priority >= 64 {
-            return Err(Error::Contract("invalid native queue source configuration"));
+            return Err(Error::Contract(refuse!(
+                "invalid native queue source configuration"
+            )));
         }
         let mut s = self.state.borrow_mut();
         let thread = s.thread(config.priority)?;
@@ -447,11 +453,11 @@ impl Runtime {
             .and_then(|()| self.check_runtime(&work.runtime))
             .is_err()
         {
-            return Completion::Refused("foreign native queue/work registration");
+            return Completion::Refused(refuse!("foreign native queue/work registration"));
         }
         let mut s = self.state.borrow_mut();
         if s.works[work.id].queue.is_some() {
-            return Completion::Refused("native work already registered");
+            return Completion::Refused(refuse!("native work already registered"));
         }
         let current = s.context.last().map(|f| f.thread.clone());
         let q = &s.queues[queue.id];
@@ -498,7 +504,7 @@ impl Runtime {
     pub fn wake(&self, work: &Work) -> Result<()> {
         self.check_runtime(&work.runtime)?;
         if !work.enabled() {
-            return Err(Error::Contract("source native work is disabled"));
+            return Err(Error::Contract(refuse!("source native work is disabled")));
         }
         let mut s = self.state.borrow_mut();
         fence(Ordering::Release);
@@ -523,9 +529,9 @@ impl Runtime {
         callback: C,
     ) -> Result<Immediate> {
         if name.is_empty() || priority >= 64 {
-            return Err(Error::Contract(
-                "invalid native immediate callback configuration",
-            ));
+            return Err(Error::Contract(refuse!(
+                "invalid native immediate callback configuration"
+            )));
         }
         let mut s = self.state.borrow_mut();
         let thread = s.thread(priority)?;

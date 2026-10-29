@@ -1,5 +1,7 @@
 use super::*;
+use crate::Result;
 use crate::platform::apple::sep::endpoint::Service;
+use stela_contracts::refuse;
 
 fn shm(address: u64, pages: u16) -> Frame {
     Frame {
@@ -21,7 +23,7 @@ fn control(tag: u8, opcode: u8, parameter: u8, data: u32) -> Frame {
     }
 }
 
-fn counter() -> impl FnMut(&mut [u8]) -> Result<(), &'static str> {
+fn counter() -> impl FnMut(&mut [u8]) -> Result<()> {
     let mut next = 0u8;
     move |bytes: &mut [u8]| {
         for byte in bytes {
@@ -54,7 +56,7 @@ fn active(security: Option<SecurityMode>) -> SepOs {
     os
 }
 
-fn reply(os: &mut SepOs, frame: Frame) -> Result<Vec<Frame>, &'static str> {
+fn reply(os: &mut SepOs, frame: Frame) -> Result<Vec<Frame>> {
     let mut outbox = Vec::new();
     os.receive(frame, &mut counter(), &mut outbox)?;
     Ok(outbox
@@ -63,7 +65,7 @@ fn reply(os: &mut SepOs, frame: Frame) -> Result<Vec<Frame>, &'static str> {
         .collect())
 }
 
-fn map_shared(os: &mut SepOs, frame: Frame) -> Result<Vec<Frame>, &'static str> {
+fn map_shared(os: &mut SepOs, frame: Frame) -> Result<Vec<Frame>> {
     let region = Region::from_message(frame.mailbox())?;
     assert!(reply(os, frame)?.is_empty());
     let mut ram = stela_contracts::dma::test_support::Ram::new(region.address, 0x4000);
@@ -189,7 +191,7 @@ impl stela_contracts::dma::Iommu for Identity {
 fn dma_step(
     os: &mut SepOs,
     ram: &mut stela_contracts::dma::test_support::Ram,
-) -> (Result<(), &'static str>, Vec<Frame>) {
+) -> (Result<()>, Vec<Frame>) {
     let mut latch = stela_contracts::interrupt::InterruptLatch::new();
     let mut access = stela_contracts::bus::Access::new(0, 0, &mut latch);
     let mut port = Port {
@@ -214,10 +216,7 @@ fn dma_step(
     (result, frames)
 }
 
-fn dma(
-    os: &mut SepOs,
-    ram: &mut stela_contracts::dma::test_support::Ram,
-) -> Result<Vec<Frame>, &'static str> {
+fn dma(os: &mut SepOs, ram: &mut stela_contracts::dma::test_support::Ram) -> Result<Vec<Frame>> {
     let (result, frames) = dma_step(os, ram);
     result.map(|()| frames)
 }
@@ -357,7 +356,9 @@ fn one_failed_request_does_not_discard_other_transactions_or_their_replies() {
     assert!(os.dma_pending());
     assert_eq!(
         dma(&mut os, &mut ram),
-        Err("xART commit-hash types other than the manifest hash are not recovered")
+        Err(refuse!(
+            "xART commit-hash types other than the manifest hash are not recovered"
+        ))
     );
     assert!(os.dma_pending());
     let third = dma(&mut os, &mut ram).unwrap();
@@ -386,7 +387,9 @@ fn an_xart_refusal_is_answered_enotsup_from_the_dma_step() {
     assert_eq!(
         dma_step(&mut os, &mut ram),
         (
-            Err("xART commit-hash types other than the manifest hash are not recovered"),
+            Err(refuse!(
+                "xART commit-hash types other than the manifest hash are not recovered"
+            )),
             alloc::vec![xart::unsupported(commit_hash)]
         )
     );
@@ -606,10 +609,10 @@ fn recovery_policy_nonce_commands_use_the_registered_buffers_and_shared_store() 
 
 struct UnusedPayload;
 impl Payload for UnusedPayload {
-    fn input(&mut self, _: &mut [u8]) -> Result<(), &'static str> {
+    fn input(&mut self, _: &mut [u8]) -> Result<()> {
         panic!("no input expected")
     }
-    fn output(&mut self, _: &[u8]) -> Result<(), &'static str> {
+    fn output(&mut self, _: &[u8]) -> Result<()> {
         panic!("no output expected")
     }
 }

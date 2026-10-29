@@ -1,5 +1,7 @@
 use super::super::observe;
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::dma::Iommu, stela_contracts::dma::Memory,
     stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::InterruptLatch,
@@ -36,7 +38,7 @@ fn entropy() -> Box<dyn Entropy> {
     })
 }
 
-fn deliver(fw: &mut SepFirmware, image: &[u8], fault: bool) -> Result<Vec<Message>, &'static str> {
+fn deliver(fw: &mut SepFirmware, image: &[u8], fault: bool) -> Result<Vec<Message>> {
     const ADDRESS: u64 = 0x4000;
     let mut ram = Ram::new(ADDRESS, 0x8000);
     ram.bytes[..image.len()].copy_from_slice(image);
@@ -73,7 +75,7 @@ fn deliver(fw: &mut SepFirmware, image: &[u8], fault: bool) -> Result<Vec<Messag
 
 /// Run the firmware's queued DMA over `ram` through an identity DART
 /// (faulting when `fault`), returning the messages it produced.
-fn dma(fw: &mut SepFirmware, ram: &mut Ram, fault: bool) -> Result<Vec<Message>, &'static str> {
+fn dma(fw: &mut SepFirmware, ram: &mut Ram, fault: bool) -> Result<Vec<Message>> {
     let mut iommu = Identity { fault };
     let mut latch = InterruptLatch::new();
     let mut access = Access::new(0, 0, &mut latch);
@@ -189,7 +191,7 @@ fn refused_service_requests_get_their_failure_answer_from_the_dma_step() {
             memory: &mut ram,
             access: &mut access,
         };
-        assert_eq!(fw.dma(&mut port, &mut produced), Err(reason));
+        assert_eq!(fw.dma(&mut port, &mut produced), Err(reason.into()));
         assert_eq!(produced, [keystore::failure(request).mailbox()]);
     }
 }
@@ -226,7 +228,11 @@ fn malformed_payloads_and_dma_faults_refuse_without_a_boot_ack() {
             false,
             "SEP firmware payload type differs from the ROM request",
         ),
-        (sepi.as_slice(), true, "SEP firmware DMA fault in dart-sep"),
+        (
+            sepi.as_slice(),
+            true,
+            "SEP firmware DMA fault in dart-sep (code=0x7)",
+        ),
     ] {
         let mut fw = SepFirmware::new(
             entropy(),
@@ -236,7 +242,10 @@ fn malformed_payloads_and_dma_faults_refuse_without_a_boot_ack() {
             state::Location::Volatile,
         );
         booted(&mut fw);
-        assert_eq!(deliver(&mut fw, image, fault), Err(refusal));
+        assert_eq!(
+            deliver(&mut fw, image, fault).map_err(|error| error.to_string()),
+            Err(refusal.into())
+        );
         assert!(fw.evidence().is_none());
         assert!(!fw.booted());
     }
@@ -251,7 +260,7 @@ fn state_open_failure_preserves_the_rom_request_without_an_acceptance() {
     let mut fw = SepFirmware::new(
         Box::new(move |bytes: &mut [u8]| {
             if source.get() {
-                return Err("entropy unavailable");
+                return Err(refuse!("entropy unavailable"));
             }
             bytes.fill(0xa5);
             Ok(())
@@ -263,7 +272,10 @@ fn state_open_failure_preserves_the_rom_request_without_an_acceptance() {
     );
     booted(&mut fw);
     let image = stela_formats::img4::test_support::im4p(b"sepi", b"native SEP fixture");
-    assert_eq!(deliver(&mut fw, &image, false), Err("entropy unavailable"));
+    assert_eq!(
+        deliver(&mut fw, &image, false),
+        Err(refuse!("entropy unavailable"))
+    );
     assert!(fw.dma_pending());
     assert!(fw.evidence().is_none());
     assert!(fw.state.is_some());
@@ -349,7 +361,7 @@ fn error_replies_follow_each_phase_protocol_and_refuse_without_one() {
         .mailbox()
     };
     let reply = |fw: &mut SepFirmware, message| {
-        fw.error_reply(message, "unimplemented")
+        fw.error_reply(message, &refuse!("unimplemented"))
             .map(|replies| Frame::from_mailbox(replies[0]).unwrap())
     };
     let rom = reply(&mut fw, request(message::ROM, 2, 0x30)).unwrap();

@@ -3,6 +3,7 @@ use super::*;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use owner::{Completion, EffectValue};
+use stela_contracts::refuse;
 use {
     crate::machine::apple::memory_resources::t8112::Prepared,
     crate::machine::apple::memory_resources::t8112::cache::EmptyResource,
@@ -16,14 +17,14 @@ impl native::Resources for MissingResources {
         native::Inventory { power_groups: 1 }
     }
     fn refresh_power_states(&mut self, _: &native::Request, _: &mut Access<'_>) -> native::Refresh {
-        native::Refresh::Refused("authored whole native startup remains unavailable")
+        native::Refresh::Refused(refuse!("authored whole native startup remains unavailable"))
     }
     fn snapshot_observer_packets(
         &mut self,
         _: &native::Request,
         _: &mut Access<'_>,
     ) -> native::Refresh {
-        native::Refresh::Refused("authored packet observer unavailable")
+        native::Refresh::Refused(refuse!("authored packet observer unavailable"))
     }
     fn effect(
         &mut self,
@@ -33,7 +34,7 @@ impl native::Resources for MissingResources {
         _: &native::Packets,
         _: &mut Access<'_>,
     ) -> native::Step {
-        native::Step::Refused("authored whole resource effect unavailable")
+        native::Step::Refused(refuse!("authored whole resource effect unavailable"))
     }
 }
 struct NoProviders;
@@ -44,7 +45,7 @@ impl ingestion::Backend for NoProviders {
         _: &ingestion::Call,
         _: &mut Access<'_>,
     ) -> Completion<ingestion::Value> {
-        Completion::Refused("authored AMCC provider unavailable")
+        Completion::Refused(refuse!("authored AMCC provider unavailable"))
     }
 }
 struct ManagerBackend {
@@ -67,7 +68,7 @@ impl owner::Backend for ManagerBackend {
             owner::Observation::ProviderStates { .. } => owner::Value::ProviderStateCount(8),
             owner::Observation::Observer { .. } => owner::Value::ObserverWord(0xf0),
             owner::Observation::ConsumeFreshnessValue { .. } => {
-                return Completion::Refused("authored freshness source not reached");
+                return Completion::Refused(refuse!("authored freshness source not reached"));
             }
             owner::Observation::DeviceRequest { .. } => owner::Value::Payload(0),
             owner::Observation::CounterControls => owner::Value::Controls(Vec::new()),
@@ -161,11 +162,11 @@ struct InvokeMetrics(CallbackSlot);
 impl scheduler::Callback for InvokeMetrics {
     fn advance(&mut self, i: &scheduler::Invocation, a: &mut Access<'_>) -> Completion<u32> {
         let Some(fixture) = self.0.borrow().upgrade() else {
-            return Completion::Refused("authored MC service owner absent");
+            return Completion::Refused(refuse!("authored MC service owner absent"));
         };
         let mut fixture = fixture.borrow_mut();
         let Some(f) = fixture.as_mut() else {
-            return Completion::Refused("authored MC service owner moved");
+            return Completion::Refused(refuse!("authored MC service owner moved"));
         };
         match f.service.dispatch_metrics(
             i,
@@ -181,10 +182,10 @@ impl scheduler::Callback for InvokeMetrics {
                 refusal: None,
             },
             Ok(Progress::Busy { deadline }) => Completion::Busy { deadline },
-            Ok(_) => Completion::Refused("authored MC callback returned unrelated stage"),
+            Ok(_) => Completion::Refused(refuse!("authored MC callback returned unrelated stage")),
             Err(Error::Metrics(metrics::Error::Contract(e) | metrics::Error::Backend(e)))
             | Err(Error::Contract(e)) => Completion::Refused(e),
-            Err(_) => Completion::Refused("authored MC callback source check refused"),
+            Err(_) => Completion::Refused(refuse!("authored MC callback source check refused")),
         }
     }
 }
@@ -211,7 +212,7 @@ impl metrics::Backend for Destinations {
         }
         if matches!(effect, metrics::Effect::Trace { .. }) && sink.refuse_trace {
             sink.refuse_trace = false;
-            return Completion::Refused("authored trace destination refused");
+            return Completion::Refused(refuse!("authored trace destination refused"));
         }
         if matches!(effect, metrics::Effect::DrainWait) && !sink.notified {
             return Completion::Busy { deadline: None };
@@ -268,7 +269,7 @@ impl metrics::Backend for Destinations {
             sink.retire_exit = false;
             return Completion::Retired {
                 value: (),
-                refusal: Some("authored retired exit trace refusal"),
+                refusal: Some(refuse!("authored retired exit trace refusal")),
             };
         }
         Completion::Retired {
@@ -840,9 +841,9 @@ fn retired_exit_trace_refusal_keeps_single_ack_and_does_not_replay_trace() {
     f.service.begin_event().unwrap();
     assert_eq!(
         f.finish(),
-        Err(Error::Metrics(metrics::Error::Backend(
+        Err(Error::Metrics(metrics::Error::Backend(refuse!(
             "authored retired exit trace refusal"
-        )))
+        ))))
     );
     assert_eq!(f.latest(213), Some(0x789));
     assert_eq!(
@@ -951,9 +952,9 @@ fn native_owner_abandonment_invalidates_kept_service_before_effects() {
             &mut f.cache.quota_view(),
             &mut Access::new(0, 1000, &mut f.latch)
         ),
-        Err(Error::Contract(
+        Err(Error::Contract(refuse!(
             "PMP cache service native owner was abandoned"
-        ))
+        )))
     );
     assert_eq!(f.memory.publication_bank().requests().len(), before);
     assert_ne!(

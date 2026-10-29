@@ -1,7 +1,9 @@
 //! Cold fixed-physical-core adapter over the boot's existing physical reservations.
 //! Final Apple topology/device/DMA/reset admission belongs to the mount. This
 //! constructs the checked Machine; it never certifies legacy raw V1.
+use crate::Result;
 use stela_boot_core::worker_bindings as bindings;
+use stela_contracts::refuse;
 
 use super::{executor::Executors, firmware::Capture, transport::FixedWorkers};
 use crate::{apic::Apic, engine::host, handoff::Handoff, layout};
@@ -37,7 +39,7 @@ pub(crate) type CanonicalMachine<'a, D> =
 pub(crate) unsafe fn reserve(
     handoff: &'static Handoff,
     ranges: &[host::RamRange],
-) -> Result<Arc<RegisteredSystemRam>, &'static str> {
+) -> Result<Arc<RegisteredSystemRam>> {
     // SAFETY: forwarded unchanged loader ownership and closed-writer contract.
     unsafe { reserve_with_limit(handoff, ranges, None) }
 }
@@ -54,7 +56,7 @@ pub(crate) unsafe fn reserve_for_workers(
     ranges: &[host::RamRange],
     capture: &Capture,
     executors: &Executors,
-) -> Result<Arc<RegisteredSystemRam>, &'static str> {
+) -> Result<Arc<RegisteredSystemRam>> {
     let cores = handoff.native_resources.cores as usize;
     let count = capture.processor_count as usize;
     if cores == 0
@@ -63,28 +65,30 @@ pub(crate) unsafe fn reserve_for_workers(
         || count != capture.processors.len()
         || executors.processors().len() + 1 != cores
     {
-        return Err("canonical target has an invalid assigned physical roster");
+        return Err(refuse!(
+            "canonical target has an invalid assigned physical roster"
+        ));
     }
     let selected = |slot: usize| {
         capture.processors[..count]
             .get(capture.selected[slot] as usize)
             .copied()
-            .ok_or("canonical target selected worker is absent")
+            .ok_or(refuse!("canonical target selected worker is absent"))
     };
     // SAFETY: current installed BSP with IF clear, before any guest entry.
     // The fresh observation is only a capability ceiling; registration below
     // captures its own current-processor permission independently.
     let bsp = unsafe { super::firmware::observe() }
-        .map_err(|_| "canonical target BSP observation refused")?;
+        .map_err(|_| refuse!("canonical target BSP observation refused"))?;
     if !bsp.matches(selected(0)?) {
-        return Err("canonical target BSP differs from assigned worker");
+        return Err(refuse!("canonical target BSP differs from assigned worker"));
     }
     let five_level = matches!(
         handoff.placement,
         stela_engine::machine::mmu::placement::Placement::FiveLevel
     );
     bsp.qualify_native(five_level)
-        .map_err(|_| "canonical target BSP floor refused")?;
+        .map_err(|_| refuse!("canonical target BSP floor refused"))?;
     let mut observations = Vec::with_capacity(cores);
     observations.push(&bsp);
     for slot in 1..cores {
@@ -93,18 +97,18 @@ pub(crate) unsafe fn reserve_for_workers(
             .processors()
             .iter()
             .find(|processor| processor.slot() == slot)
-            .ok_or("canonical target assigned AP is absent")?;
+            .ok_or(refuse!("canonical target assigned AP is absent"))?;
         let observed = actual.observation();
         if actual.apic_id() != expected.apic_id || !observed.matches(expected) {
-            return Err("canonical target AP differs from assigned worker");
+            return Err(refuse!("canonical target AP differs from assigned worker"));
         }
         observed
             .qualify_native(five_level)
-            .map_err(|_| "canonical target AP floor refused")?;
+            .map_err(|_| refuse!("canonical target AP floor refused"))?;
         observations.push(observed);
     }
     let limit = super::topology::common_native_target(&observations)
-        .map_err(|_| "canonical target assigned observations refused")?;
+        .map_err(|_| refuse!("canonical target assigned observations refused"))?;
     // SAFETY: same loader owner and closed writers, with a policy-only limit.
     unsafe { reserve_with_limit(handoff, ranges, Some(limit)) }
 }
@@ -113,7 +117,7 @@ unsafe fn reserve_with_limit(
     handoff: &'static Handoff,
     ranges: &[host::RamRange],
     limit: Option<stela_compiler::TargetCpu>,
-) -> Result<Arc<RegisteredSystemRam>, &'static str> {
+) -> Result<Arc<RegisteredSystemRam>> {
     let (cr0, cr3, cr4, flags, efer): (u64, u64, u64, u64, u64);
     // SAFETY: the same cold CPL0 owner required by registration. Read only
     // live BSP controls, without changing firmware MTRR visibility or using
@@ -129,14 +133,14 @@ unsafe fn reserve_with_limit(
         "NATIVE RAM BSP cr0={cr0:#x} cr3={cr3:#x} cr4={cr4:#x} efer={efer:#x} rflags={flags:#x}\n"
     ));
     if ranges.is_empty() {
-        return Err("canonical guest RAM has no loader reservations");
+        return Err(refuse!("canonical guest RAM has no loader reservations"));
     }
     let mut registered = Vec::with_capacity(ranges.len());
     for range in ranges {
         let end = range
             .host
             .checked_add(range.bytes)
-            .ok_or("canonical guest RAM extent wraps")?;
+            .ok_or(refuse!("canonical guest RAM extent wraps"))?;
         if range.bytes == 0
             || !handoff.guest[..handoff.guest_count]
                 .iter()
@@ -148,20 +152,22 @@ unsafe fn reserve_with_limit(
                             .is_some_and(|top| end <= top)
                 })
         {
-            return Err("canonical guest RAM is outside actual loader ownership");
+            return Err(refuse!(
+                "canonical guest RAM is outside actual loader ownership"
+            ));
         }
-        let bytes =
-            usize::try_from(range.bytes).map_err(|_| "canonical guest RAM exceeds host size")?;
+        let bytes = usize::try_from(range.bytes)
+            .map_err(|_| refuse!("canonical guest RAM exceeds host size"))?;
         let cpu = layout::physical(range.host);
         // SAFETY: exact loader reservation; no root/control migration
         // or native/host producer can race this pre-entry validation.
         unsafe { crate::native_memory::qualify_reserved_writeback(cpu, range.host, bytes) }
-            .map_err(|_| "canonical guest RAM mapping/effective WB type is unqualified")?;
+            .map_err(|_| refuse!("canonical guest RAM mapping/effective WB type is unqualified"))?;
         registered.push(ReservedSystemRamRange {
             source_pa: range.guest,
             host_pa: range.host,
             host_base: NonNull::new(cpu as *mut u8)
-                .ok_or("canonical guest RAM has null mapping")?,
+                .ok_or(refuse!("canonical guest RAM has null mapping"))?,
             bytes,
         });
     }
@@ -193,7 +199,7 @@ unsafe fn reserve_with_limit(
         crate::output::arguments(format_args!(
             "NATIVE RAM registration refused cause={error:?}\n"
         ));
-        "canonical boot RAM registration refused"
+        refuse!("canonical boot RAM registration refused: {error}", ?error)
     })
 }
 
@@ -226,7 +232,7 @@ pub(crate) struct Preparation<'host, 'plan, D> {
 #[cfg(feature = "diagnostics")]
 pub(crate) unsafe fn prepare<'host, D: Devices>(
     preparation: Preparation<'host, '_, D>,
-) -> Result<CanonicalMachine<'host, D>, &'static str> {
+) -> Result<CanonicalMachine<'host, D>> {
     // SAFETY: forwarded cold construction contract; diagnostic callers
     // keep any already prepared CPU lock state.
     unsafe { prepare_with_locks(preparation, false, None) }
@@ -242,7 +248,7 @@ pub(crate) unsafe fn prepare_with_locks<'host, D: Devices>(
     preparation: Preparation<'host, '_, D>,
     trace_artifacts: bool,
     core_locks: Option<stela_engine::machine::ctrr::CoreLocks>,
-) -> Result<CanonicalMachine<'host, D>, &'static str> {
+) -> Result<CanonicalMachine<'host, D>> {
     let Preparation {
         handoff,
         capture,
@@ -264,7 +270,9 @@ pub(crate) unsafe fn prepare_with_locks<'host, D: Devices>(
         || reserved > capture.core_count as usize
         || executors.processors().len() + 1 != reserved
     {
-        return Err("canonical active PE roster exceeds the retained physical workers");
+        return Err(refuse!(
+            "canonical active PE roster exceeds the retained physical workers"
+        ));
     }
     bindings::validate(cores, reserved, boot_processor, assignments)?;
     for binding in assignments.iter().filter(|binding| binding.worker.0 != 0) {
@@ -275,15 +283,17 @@ pub(crate) unsafe fn prepare_with_locks<'host, D: Devices>(
             .iter()
             .find(|processor| processor.slot() == slot)
         else {
-            return Err("assigned AP executor is absent");
+            return Err(refuse!("assigned AP executor is absent"));
         };
         if processor.apic_id() != selected.apic_id || !processor.observation().matches(selected) {
-            return Err("actual AP executor differs from its assigned physical binding");
+            return Err(refuse!(
+                "actual AP executor differs from its assigned physical binding"
+            ));
         }
     }
     let bsp = capture.processors[capture.selected[0] as usize];
-    let apic =
-        u32::try_from(bsp.apic_id).map_err(|_| "canonical BSP APIC identity exceeds transport")?;
+    let apic = u32::try_from(bsp.apic_id)
+        .map_err(|_| refuse!("canonical BSP APIC identity exceeds transport"))?;
     owner.bind_worker(WorkerId(0), apic)?;
     // SAFETY: registered owner, pristine GS-local dispatch; every later
     // access goes through this same canonical RAM, never old raw V1 stores.
@@ -302,17 +312,19 @@ pub(crate) unsafe fn prepare_with_locks<'host, D: Devices>(
     }
     machine
         .install_shared_memory_for_active_processors(ram, &EventDomain::new())
-        .map_err(|_| "cold source controls/canonical CPU ownership refused before entry")?;
+        .map_err(|_| {
+            refuse!("cold source controls/canonical CPU ownership refused before entry")
+        })?;
     // Initial handoff bindings must settle before any physical worker owner
     // publishes. Later changes require the complete held native cohort.
     if !processor_power.is_empty() {
         machine
             .bind_processor_power(processor_power)
-            .map_err(|_| "canonical initial processor power bindings refused")?;
+            .map_err(|_| refuse!("canonical initial processor power bindings refused"))?;
     }
     let owners = machine
         .bind_assigned_native_workers(assignments)
-        .map_err(|_| "canonical assigned physical roster binding refused")?;
+        .map_err(|_| refuse!("canonical assigned physical roster binding refused"))?;
     machine.initialize_native_transport(owners);
     Ok(machine)
 }

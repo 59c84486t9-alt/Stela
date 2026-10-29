@@ -3,6 +3,8 @@
 //! `AppleSEPManager::_sendMessageGated`, kernel file 0x2d6ac90..0x2d6ad14:
 //! four byte fields followed by a data word, sent on ASC endpoint zero.
 use super::super::asc::Message;
+use crate::Result;
+use stela_contracts::refuse;
 
 pub const TRANSPORT: u8 = 0;
 pub const CONTROL: u8 = 0;
@@ -34,9 +36,11 @@ impl Frame {
         }
     }
 
-    pub fn from_mailbox(message: Message) -> Result<Self, &'static str> {
+    pub fn from_mailbox(message: Message) -> Result<Self> {
         if message.endpoint != TRANSPORT {
-            return Err("SEP messages require ASC endpoint zero; service ID is in the payload");
+            return Err(refuse!(
+                "SEP messages require ASC endpoint zero; service ID is in the payload"
+            ));
         }
         Ok(Self::from_payload(message.payload))
     }

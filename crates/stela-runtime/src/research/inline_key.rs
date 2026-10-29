@@ -22,8 +22,10 @@
 //! install path itself rides the unrecovered `sks` service. Until both are
 //! recovered no key is installed, so the ANS key path still refuses; this
 //! module is the interface and the verified cipher they will use.
+use crate::Result;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
 use alloc::collections::BTreeMap;
+use stela_contracts::refuse;
 use stela_crypto::{Aes128, Aes256};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -41,9 +43,11 @@ impl InlineKey {
     /// Encrypt (`encrypt`) or decrypt a sector in place with this key and the
     /// data-unit number `sector`. The length must be a nonzero multiple of the
     /// 16-byte block.
-    fn transform(&self, sector: u64, data: &mut [u8], encrypt: bool) -> Result<(), &'static str> {
+    fn transform(&self, sector: u64, data: &mut [u8], encrypt: bool) -> Result<()> {
         if data.is_empty() || !data.len().is_multiple_of(BLOCK) {
-            return Err("AES-XTS sector length is not a multiple of the 16-byte block");
+            return Err(refuse!(
+                "AES-XTS sector length is not a multiple of the 16-byte block"
+            ));
         }
         match self {
             InlineKey::Aes128(key) => {
@@ -78,11 +82,11 @@ fn xts<C: BlockEncrypt<BlockSize = aes::cipher::consts::U16> + BlockDecrypt + Ke
     sector: u64,
     data: &mut [u8],
     encrypt: bool,
-) -> Result<(), &'static str> {
+) -> Result<()> {
     let data_cipher =
-        C::new_from_slice(data_key).map_err(|_| "AES-XTS data key length is invalid")?;
+        C::new_from_slice(data_key).map_err(|_| refuse!("AES-XTS data key length is invalid"))?;
     let tweak_cipher =
-        C::new_from_slice(tweak_key).map_err(|_| "AES-XTS tweak key length is invalid")?;
+        C::new_from_slice(tweak_key).map_err(|_| refuse!("AES-XTS tweak key length is invalid"))?;
     // The tweak starts as the 16-byte little-endian sector number encrypted
     // under the tweak key.
     let mut tweak = [0u8; BLOCK];
@@ -158,16 +162,10 @@ impl InlineKeys {
     /// Transform `data` (one sector, a block multiple) for `slot` with the
     /// data-unit number `sector`. Refuses when the slot holds no key, so a
     /// referenced-but-uninstalled key never silently passes data in the clear.
-    pub fn transform(
-        &self,
-        slot: u32,
-        sector: u64,
-        data: &mut [u8],
-        encrypt: bool,
-    ) -> Result<(), &'static str> {
+    pub fn transform(&self, slot: u32, sector: u64, data: &mut [u8], encrypt: bool) -> Result<()> {
         self.slots
             .get(&slot)
-            .ok_or("ANS inline key slot holds no SEP-installed key")?
+            .ok_or(refuse!("ANS inline key slot holds no SEP-installed key"))?
             .transform(sector, data, encrypt)
     }
 }

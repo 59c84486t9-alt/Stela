@@ -5,11 +5,14 @@
 //! executes. Mailboxes are paired RTKit slots; mappings keep the real
 //! DMA broker. Startup never supplies an AP allocation or echoes an AP message.
 use super::{dma, platform::owner::Completion, reporting, scheduler, trace};
+use crate::Result;
 use alloc::{
     boxed::Box,
     rc::{Rc, Weak},
 };
 use core::cell::{Cell, RefCell};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     crate::platform::apple::rtkit, crate::platform::apple::rtkit::channel,
     stela_contracts::bus::Access,
@@ -31,25 +34,26 @@ fn done<T>(value: T) -> Completion<T> {
         refusal: None,
     }
 }
-fn runtime(weak: &scheduler::WeakRuntime) -> Result<scheduler::Runtime, &'static str> {
-    weak.upgrade().ok_or("native services scheduler abandoned")
+fn runtime(weak: &scheduler::WeakRuntime) -> Result<scheduler::Runtime> {
+    weak.upgrade()
+        .ok_or(refuse!("native services scheduler abandoned"))
 }
-fn current(weak: &scheduler::WeakRuntime) -> Result<scheduler::Invocation, &'static str> {
-    runtime(weak)?
-        .current()
-        .ok_or("native service requires actual cooperative invocation")
+fn current(weak: &scheduler::WeakRuntime) -> Result<scheduler::Invocation> {
+    runtime(weak)?.current().ok_or(refuse!(
+        "native service requires actual cooperative invocation"
+    ))
 }
-fn owner<T>(slot: &Slot<T>) -> Result<Rc<RefCell<T>>, &'static str> {
+fn owner<T>(slot: &Slot<T>) -> Result<Rc<RefCell<T>>> {
     slot.borrow()
         .upgrade()
-        .ok_or("native service owner abandoned")
+        .ok_or(refuse!("native service owner abandoned"))
 }
-fn trace_error(error: trace::Error) -> &'static str {
+fn trace_error(error: trace::Error) -> Refusal {
     match error {
         trace::Error::Contract(e) | trace::Error::Backend(e) => e,
     }
 }
-fn schedule_error(error: scheduler::Error) -> &'static str {
+fn schedule_error(error: scheduler::Error) -> Refusal {
     match error {
         scheduler::Error::Contract(e) | scheduler::Error::Callback(e) => e,
     }
@@ -87,7 +91,7 @@ impl Services {
     pub unsafe fn t8112(
         broker: dma::Broker,
         clock: Clock,
-    ) -> Result<(Self, rtkit::SystemEndpoints), &'static str> {
+    ) -> Result<(Self, rtkit::SystemEndpoints)> {
         let runtime = scheduler::Runtime::new();
         let global = runtime.global_reporting_queue().map_err(schedule_error)?;
         let (report_endpoint, report_mailbox) = channel::channel();
@@ -206,12 +210,12 @@ impl Services {
     }
     /// Source lifecycle DATA request; the registered native callback
     /// performs pause/flush/wait/resume under the real global queue lease.
-    pub fn begin_trace_lifecycle(&mut self, prior: u32, next: u32) -> Result<(), &'static str> {
+    pub fn begin_trace_lifecycle(&mut self, prior: u32, next: u32) -> Result<()> {
         if !self.trace_initialized() {
-            return Err("trace lifecycle before source initialization");
+            return Err(refuse!("trace lifecycle before source initialization"));
         }
         if !self.trace_shared.lifecycle_input.borrow().is_empty() {
-            return Err("trace lifecycle input already retained");
+            return Err(refuse!("trace lifecycle input already retained"));
         }
         self.trace_shared
             .lifecycle_input
@@ -221,7 +225,7 @@ impl Services {
     }
     /// Bounded inbox/startup dispatch plus one queued-work step.
     /// Independent reporting ACK input can retire while registration waits.
-    pub fn advance(&mut self, access: &mut Access<'_>) -> Result<Progress, &'static str> {
+    pub fn advance(&mut self, access: &mut Access<'_>) -> Result<Progress> {
         if self.report_shared.started() {
             if !self.report_shared.ready.get() {
                 self.runtime
@@ -257,8 +261,10 @@ impl Services {
     /// Memory-loss/replacement is not an implicit Drop reset. Reporting's real
     /// exit and trace mapping ownership must be joined to a source
     /// lifecycle invocation before RTKit reset is admitted.
-    pub fn check_reset(&self) -> Result<(), &'static str> {
-        Err("native reporting/trace memory-loss lifecycle is not joined to RTKit reset")
+    pub fn check_reset(&self) -> Result<()> {
+        Err(refuse!(
+            "native reporting/trace memory-loss lifecycle is not joined to RTKit reset"
+        ))
     }
 }
 

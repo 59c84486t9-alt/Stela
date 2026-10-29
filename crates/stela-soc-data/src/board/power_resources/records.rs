@@ -4,6 +4,8 @@
 //! _getDeviceParentsID (0x2b7cca0), _getDevicePsRegGroup (0x2b7bd4c)
 //! and _getDevicePsRegIndex (0x2b7bda4) define these separate layouts.
 //! The low flag byte is distinct from the adjacent cluster/legacy-ID fields.
+use crate::Result;
+use stela_contracts::refuse;
 
 pub(super) const BYTES: usize = 48;
 pub(super) const VIRTUAL: u8 = 1 << 4;
@@ -30,14 +32,14 @@ impl Layout {
     pub(super) fn select<'a>(
         registers: Option<&'a [u8]>,
         groups: Option<&'a [u8]>,
-    ) -> Result<(Self, &'a [u8]), &'static str> {
+    ) -> Result<(Self, &'a [u8])> {
         let registers = registers.filter(|bytes| !bytes.is_empty());
         let groups = groups.filter(|bytes| !bytes.is_empty());
         match (registers, groups) {
             (Some(bytes), None) => Ok((Self::V1, bytes)),
             (None, Some(bytes)) => Ok((Self::V2, bytes)),
-            (None, None) => Err("PMGR has neither ps-regs nor ps-groups"),
-            (Some(_), Some(_)) => Err("PMGR has ambiguous ps-regs and ps-groups layouts"),
+            (None, None) => Err(refuse!("PMGR has neither ps-regs nor ps-groups")),
+            (Some(_), Some(_)) => Err(refuse!("PMGR has ambiguous ps-regs and ps-groups layouts")),
         }
     }
 }
@@ -59,7 +61,7 @@ pub(super) struct Record<'a> {
 }
 
 impl<'a> Record<'a> {
-    pub(super) fn parse(layout: Layout, bytes: &'a [u8; BYTES]) -> Result<Self, &'static str> {
+    pub(super) fn parse(layout: Layout, bytes: &'a [u8; BYTES]) -> Result<Self> {
         let id16 = u16::from_le_bytes([bytes[ID16], bytes[ID16 + 1]]);
         let id = if id16 != 0 {
             id16
@@ -79,7 +81,9 @@ impl<'a> Record<'a> {
             {
                 *parent = u16::from_le_bytes(*pair);
                 if *parent == u16::MAX {
-                    return Err("PMGR record contains the invalid 16-bit parent sentinel");
+                    return Err(refuse!(
+                        "PMGR record contains the invalid 16-bit parent sentinel"
+                    ));
                 }
             }
         }
@@ -89,7 +93,7 @@ impl<'a> Record<'a> {
             .position(|&byte| byte == 0)
             .unwrap_or(raw_name.len());
         let name = core::str::from_utf8(&raw_name[..end])
-            .map_err(|_| "PMGR record has a non-UTF-8 name")?;
+            .map_err(|_| refuse!("PMGR record has a non-UTF-8 name"))?;
         let location = if bytes[0] & VIRTUAL != 0 {
             None
         } else {
@@ -97,7 +101,9 @@ impl<'a> Record<'a> {
                 Layout::V1 => {
                     let index = u32::from(bytes[V1_INDEX]);
                     if index >= 32 {
-                        return Err("PMGR v1 power-state index exceeds its native 32-slot bank");
+                        return Err(refuse!(
+                            "PMGR v1 power-state index exceeds its native 32-slot bank"
+                        ));
                     }
                     (bytes[V1_GROUP], index)
                 }
@@ -107,17 +113,23 @@ impl<'a> Record<'a> {
                     // The original index helper extracts [23:3]. The low
                     // three bits have no checked placement meaning here.
                     if packed & ((1 << INDEX_SHIFT) - 1) != 0 {
-                        return Err("PMGR v2 power-state location has unqualified low bits");
+                        return Err(refuse!(
+                            "PMGR v2 power-state location has unqualified low bits"
+                        ));
                     }
                     let index = (packed >> INDEX_SHIFT) & V2_INDEX_MASK;
                     if index == NO_V2_INDEX {
-                        return Err("PMGR v2 record contains the invalid power-state index");
+                        return Err(refuse!(
+                            "PMGR v2 record contains the invalid power-state index"
+                        ));
                     }
                     (bytes[V2_GROUP], index)
                 }
             };
             if group == NO_GROUP {
-                return Err("PMGR physical record contains the no-power-state group");
+                return Err(refuse!(
+                    "PMGR physical record contains the no-power-state group"
+                ));
             }
             Some(Location {
                 group: usize::from(group),

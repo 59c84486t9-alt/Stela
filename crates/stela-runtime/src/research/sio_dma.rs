@@ -18,7 +18,9 @@ pub mod setup;
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use stela_contracts::Refusal;
 use stela_contracts::bus::LifecycleState;
+use stela_contracts::refuse;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 const SLOT_BYTES: u64 = 12;
@@ -70,9 +72,9 @@ impl Completion {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    Unsupported(&'static str),
+    Unsupported(Refusal),
     Dma(DmaError),
 }
 impl From<DmaError> for Error {
@@ -95,17 +97,21 @@ pub struct Configuration {
 impl Pool {
     fn address(self, slot: u32, bytes: u64) -> Result<u64, Error> {
         if self.slots == 0 || self.slots > MAX_POOL_SLOTS || self.iova & 0xfff != 0 {
-            return Err(Error::Unsupported(
-                "SIO descriptor pool geometry is not qualified",
-            ));
+            return Err(Error::Unsupported(refuse!(
+                "SIO descriptor pool geometry is not qualified"
+            )));
         }
         let pool_bytes = u64::from(self.slots) * SLOT_BYTES;
         self.iova
             .checked_add(pool_bytes)
-            .ok_or(Error::Unsupported("SIO descriptor pool exceeds I/O space"))?;
+            .ok_or(Error::Unsupported(refuse!(
+                "SIO descriptor pool exceeds I/O space"
+            )))?;
         let offset = u64::from(slot) * SLOT_BYTES;
         if offset.checked_add(bytes).is_none_or(|end| end > pool_bytes) {
-            return Err(Error::Unsupported("SIO descriptor exceeds its pool"));
+            return Err(Error::Unsupported(refuse!(
+                "SIO descriptor exceeds its pool"
+            )));
         }
         Ok(self.iova + offset)
     }
@@ -149,9 +155,9 @@ impl Channel {
             || fifo_bytes == 0
             || fifo_bytes > u16::MAX as usize
         {
-            return Err(Error::Unsupported(
-                "SIO transmit channel geometry is not qualified",
-            ));
+            return Err(Error::Unsupported(refuse!(
+                "SIO transmit channel geometry is not qualified"
+            )));
         }
         Ok(Self {
             number,
@@ -215,9 +221,9 @@ impl Channel {
             || !self.fifo.is_empty()
             || !self.completions.is_empty()
         {
-            return Err(Error::Unsupported(
-                "SIO configuration still has suspended or owned channel work",
-            ));
+            return Err(Error::Unsupported(refuse!(
+                "SIO configuration still has suspended or owned channel work"
+            )));
         }
         let address = pool.address(slot, HEADER_BYTES as u64)?;
         let mut data = [0; HEADER_BYTES];
@@ -234,9 +240,9 @@ impl Channel {
             || limit != fifo
             || threshold != fifo
         {
-            return Err(Error::Unsupported(
-                "SIO DMA configuration fields are not qualified",
-            ));
+            return Err(Error::Unsupported(refuse!(
+                "SIO DMA configuration fields are not qualified"
+            )));
         }
         self.stopped = false;
         self.configuration = Some(Configuration {
@@ -259,9 +265,9 @@ impl Channel {
         port: &mut Port<'_, '_>,
     ) -> Result<u64, Error> {
         if payload as u8 != self.number || payload >> 24 & 0xff != 0 {
-            return Err(Error::Unsupported(
-                "SIO request channel or parameter is not qualified",
-            ));
+            return Err(Error::Unsupported(refuse!(
+                "SIO request channel or parameter is not qualified"
+            )));
         }
         let tag = (payload >> 8) as u8;
         let kind = (payload >> 16) as u8;
@@ -270,15 +276,15 @@ impl Channel {
             5 => self.configure(pool, slot, port)?,
             6 if self.configuration.is_some() => self.submit(pool, slot, tag, port)?,
             6 => {
-                return Err(Error::Unsupported(
-                    "SIO channel has no committed DMA configuration",
-                ));
+                return Err(Error::Unsupported(refuse!(
+                    "SIO channel has no committed DMA configuration"
+                )));
             }
             8 if slot == 0 => self.terminate()?,
             _ => {
-                return Err(Error::Unsupported(
-                    "SIO control or cancellation command is not qualified",
-                ));
+                return Err(Error::Unsupported(refuse!(
+                    "SIO control or cancellation command is not qualified"
+                )));
             }
         }
         Ok(u64::from(self.number) | u64::from(tag) << 8 | 0x65 << 16 | u64::from(kind) << 32)
@@ -293,9 +299,9 @@ impl Channel {
     /// further FIFO consumption and report delivery exactly once.
     pub fn terminate(&mut self) -> Result<(), Error> {
         if !self.available() {
-            return Err(Error::Unsupported(
-                "SIO termination while the channel is suspended is not qualified",
-            ));
+            return Err(Error::Unsupported(refuse!(
+                "SIO termination while the channel is suspended is not qualified"
+            )));
         }
         self.stopped = true;
         if let Some(transfer) = self.transfer.take() {
@@ -319,15 +325,15 @@ impl Channel {
         port: &mut Port<'_, '_>,
     ) -> Result<(), Error> {
         if !self.active() {
-            return Err(Error::Unsupported("SIO DMA channel is suspended"));
+            return Err(Error::Unsupported(refuse!("SIO DMA channel is suspended")));
         }
         if self.transfer.is_some()
             || !self.fifo.is_empty()
             || self.completions.iter().any(|entry| entry.tag == tag)
         {
-            return Err(Error::Unsupported(
-                "SIO DMA command, FIFO or completion still owns channel work",
-            ));
+            return Err(Error::Unsupported(refuse!(
+                "SIO DMA command, FIFO or completion still owns channel work"
+            )));
         }
         let address = pool.address(slot, HEADER_BYTES as u64)?;
         let offset = address - pool.iova;
@@ -343,17 +349,17 @@ impl Channel {
                 .chain(&header[COUNT_OFFSET + 4..])
                 .any(|byte| *byte != 0)
         {
-            return Err(Error::Unsupported(
-                "SIO descriptor header fields or empty transfer are not qualified",
-            ));
+            return Err(Error::Unsupported(refuse!(
+                "SIO descriptor header fields or empty transfer are not qualified"
+            )));
         }
         let end = offset
             .checked_add(HEADER_BYTES as u64)
             .and_then(|start| start.checked_add(u64::from(count) * SEGMENT_BYTES as u64))
             .filter(|end| *end <= pool_bytes)
-            .ok_or(Error::Unsupported(
-                "SIO scatter/gather list exceeds its pool",
-            ))?;
+            .ok_or(Error::Unsupported(refuse!(
+                "SIO scatter/gather list exceeds its pool"
+            )))?;
         // Pool bounds cap allocations; never allocate from an unchecked guest count.
         let mut segments = Vec::with_capacity(count as usize);
         let mut next = offset + HEADER_BYTES as u64;
@@ -376,11 +382,15 @@ impl Channel {
                             .is_multiple_of(u64::from(configuration.word_bytes))
                 })
             {
-                return Err(Error::Unsupported("SIO segment range is not qualified"));
+                return Err(Error::Unsupported(refuse!(
+                    "SIO segment range is not qualified"
+                )));
             }
-            total = total.checked_add(segment.bytes).ok_or(Error::Unsupported(
-                "SIO completion byte count exceeds the recovered wire field",
-            ))?;
+            total = total
+                .checked_add(segment.bytes)
+                .ok_or(Error::Unsupported(refuse!(
+                    "SIO completion byte count exceeds the recovered wire field"
+                )))?;
             segments.push(segment);
             next += SEGMENT_BYTES as u64;
         }
@@ -415,7 +425,9 @@ impl Channel {
             let address = segment.iova + u64::from(transfer.offset);
             let page = port.iommu.page();
             if page == 0 {
-                return Err(Error::Unsupported("SIO DMA translation page is zero"));
+                return Err(Error::Unsupported(refuse!(
+                    "SIO DMA translation page is zero"
+                )));
             }
             let bytes = (self.capacity - self.fifo.len())
                 .min((segment.bytes - transfer.offset) as usize)
@@ -465,9 +477,9 @@ impl Channel {
 
     pub fn acknowledge_completion(&mut self, expected: Completion) -> Result<(), Error> {
         if self.completions.front() != Some(&expected) {
-            return Err(Error::Unsupported(
-                "SIO completion delivery does not match its owner",
-            ));
+            return Err(Error::Unsupported(refuse!(
+                "SIO completion delivery does not match its owner"
+            )));
         }
         self.completions.pop_front();
         Ok(())
@@ -478,9 +490,9 @@ impl Channel {
     /// physical reset/cancellation is recovered, destructive edges refuse.
     pub fn check_lifecycle(&self, state: LifecycleState) -> Result<(), Error> {
         if state.reset || !state.powered && !state.retention {
-            return Err(Error::Unsupported(
-                "SIO/DPA physical reset and memory-loss cancellation remain unqualified",
-            ));
+            return Err(Error::Unsupported(refuse!(
+                "SIO/DPA physical reset and memory-loss cancellation remain unqualified"
+            )));
         }
         Ok(())
     }

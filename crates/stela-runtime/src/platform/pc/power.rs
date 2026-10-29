@@ -32,6 +32,9 @@
 //! I/O space is refused. A hardware-reduced platform has no PM1 blocks, so
 //! it has no fixed button.
 use super::acpi::{self, AcpiError};
+use crate::Result;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 
 const HEADER: usize = 36;
 
@@ -140,7 +143,7 @@ pub struct SleepRegisters {
     pub status: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HostPower {
     /// PM1a and PM1b; PM1a is required for any PM1 use.
     pub pm1: [Option<Pm1>; 2],
@@ -157,7 +160,7 @@ pub struct HostPower {
     /// A hardware-reduced platform's sleep registers.
     pub sleep_registers: Option<SleepRegisters>,
     /// What was found and refused, for the mount's report.
-    pub refused: Option<&'static str>,
+    pub refused: Option<Refusal>,
 }
 
 impl HostPower {
@@ -209,11 +212,11 @@ fn gas(bytes: &[u8], offset: usize) -> Option<(u8, u64)> {
 
 /// An I/O port block: the X_ field when present, else the 32-bit one
 /// (none for a register only the extended form gives).
-fn port(fadt: &[u8], legacy: Option<usize>, extended: usize) -> Result<Option<u16>, &'static str> {
+fn port(fadt: &[u8], legacy: Option<usize>, extended: usize) -> Result<Option<u16>> {
     let address = match gas(fadt, extended) {
         Some((SYSTEM_IO, address)) if address != 0 => address,
         Some((_, address)) if address != 0 => {
-            return Err("an ACPI register block outside system I/O space");
+            return Err(refuse!("an ACPI register block outside system I/O space"));
         }
         _ => legacy
             .and_then(|legacy| u32_at(fadt, legacy))
@@ -223,11 +226,11 @@ fn port(fadt: &[u8], legacy: Option<usize>, extended: usize) -> Result<Option<u1
         0 => Ok(None),
         address => u16::try_from(address)
             .map(Some)
-            .map_err(|_| "an ACPI register block above the I/O space"),
+            .map_err(|_| refuse!("an ACPI register block above the I/O space")),
     }
 }
 
-fn reset_register(fadt: &[u8]) -> Result<Option<(ResetRegister, u8)>, &'static str> {
+fn reset_register(fadt: &[u8]) -> Result<Option<(ResetRegister, u8)>> {
     if u32_at(fadt, FLAGS).unwrap_or(0) & RESET_SUPPORTED == 0 {
         return Ok(None);
     }
@@ -237,22 +240,22 @@ fn reset_register(fadt: &[u8]) -> Result<Option<(ResetRegister, u8)>, &'static s
     };
     let register = match space {
         SYSTEM_IO => ResetRegister::Io(
-            u16::try_from(address).map_err(|_| "a reset register above the I/O space")?,
+            u16::try_from(address).map_err(|_| refuse!("a reset register above the I/O space"))?,
         ),
         PCI_CONFIGURATION => ResetRegister::PciConfiguration {
             device: u8::try_from(address >> 32 & 0xffff)
                 .ok()
                 .filter(|device| *device < 32)
-                .ok_or("a PCI reset register device above 31")?,
+                .ok_or(refuse!("a PCI reset register device above 31"))?,
             function: u8::try_from(address >> 16 & 0xffff)
                 .ok()
                 .filter(|function| *function < 8)
-                .ok_or("a PCI reset register function above 7")?,
+                .ok_or(refuse!("a PCI reset register function above 7"))?,
             offset: u8::try_from(address & 0xffff)
-                .map_err(|_| "a PCI reset register past configuration header space")?,
+                .map_err(|_| refuse!("a PCI reset register past configuration header space"))?,
         },
-        SYSTEM_MEMORY => return Err("a memory-space reset register"),
-        _ => return Err("a reset register in an unmodeled address space"),
+        SYSTEM_MEMORY => return Err(refuse!("a memory-space reset register")),
+        _ => return Err(refuse!("a reset register in an unmodeled address space")),
     };
     Ok(Some((register, value)))
 }
@@ -265,7 +268,7 @@ pub fn fadt(table: &[u8]) -> Result<(HostPower, u64), AcpiError> {
     }
     let flags = u32_at(table, FLAGS).ok_or(BAD)?;
     let mut power = HostPower::default();
-    let mut refuse = |reason| {
+    let mut refuse = |reason: Refusal| {
         power.refused.get_or_insert(reason);
     };
     let dsdt = match u64_at(table, X_DSDT) {
@@ -288,7 +291,9 @@ pub fn fadt(table: &[u8]) -> Result<(HostPower, u64), AcpiError> {
             (Ok(Some(control)), Ok(Some(status))) => {
                 sleep_registers = Some(SleepRegisters { control, status });
             }
-            (Ok(_), Ok(_)) => refuse("a hardware-reduced platform without sleep registers"),
+            (Ok(_), Ok(_)) => refuse(refuse!(
+                "a hardware-reduced platform without sleep registers"
+            )),
             (Err(reason), _) | (_, Err(reason)) => refuse(reason),
         }
     } else {
@@ -309,10 +314,12 @@ pub fn fadt(table: &[u8]) -> Result<(HostPower, u64), AcpiError> {
         }
         if pm1[0].is_none() {
             pm1 = [None; 2];
-            refuse("no PM1a event and control blocks");
+            refuse(refuse!("no PM1a event and control blocks"));
         } else if event_bytes < 4 || event_bytes % 2 != 0 {
             pm1 = [None; 2];
-            refuse("a PM1 event block shorter than its status and enable registers");
+            refuse(refuse!(
+                "a PM1 event block shorter than its status and enable registers"
+            ));
         }
     }
     let mut gpe = [None; 2];
@@ -324,7 +331,7 @@ pub fn fadt(table: &[u8]) -> Result<(HostPower, u64), AcpiError> {
         let bytes = table.get(length).copied().unwrap_or(0);
         match port(table, Some(legacy), extended) {
             Ok(Some(port)) if bytes != 0 && bytes % 2 == 0 => *slot = Some(Gpe { port, bytes }),
-            Ok(Some(_)) => refuse("a GPE block of no whole status and enable halves"),
+            Ok(Some(_)) => refuse(refuse!("a GPE block of no whole status and enable halves")),
             Ok(None) => {}
             Err(reason) => refuse(reason),
         }
@@ -402,7 +409,7 @@ pub unsafe fn discover(rsdp: u64) -> Result<HostPower, AcpiError> {
             None => {
                 power
                     .refused
-                    .get_or_insert("no static \\_S5 package in the DSDT");
+                    .get_or_insert(refuse!("no static \\_S5 package in the DSDT"));
             }
         }
     }
@@ -485,7 +492,10 @@ mod tests {
         assert_eq!(power.reset, None);
         assert_eq!(power.pm1, [None, None]);
         assert!(!power.fixed_power_button);
-        assert_eq!(power.refused, Some("a memory-space reset register"));
+        assert_eq!(
+            power.refused,
+            Some(refuse!("a memory-space reset register"))
+        );
         // A control-method button and a hardware-reduced platform.
         let mut table = q35();
         table[FLAGS] |= CONTROL_METHOD_POWER_BUTTON as u8;
@@ -496,7 +506,9 @@ mod tests {
         assert!(power.reset.is_some());
         assert_eq!(
             power.refused,
-            Some("a hardware-reduced platform without sleep registers")
+            Some(refuse!(
+                "a hardware-reduced platform without sleep registers"
+            ))
         );
         // Its sleep registers, in I/O space.
         for (offset, address) in [(SLEEP_CONTROL, 0x404u64), (SLEEP_STATUS, 0x400)] {

@@ -13,7 +13,9 @@
 //! descriptors say so (bmAttributes bit 5 clear), and SET_FEATURE of
 //! DEVICE_REMOTE_WAKEUP or TEST_MODE STALLs.
 use super::{Reply, Token};
+use crate::Result;
 use alloc::{string::String, vec::Vec};
+use stela_contracts::refuse;
 
 pub const EP0_PACKET: usize = 64;
 
@@ -202,7 +204,7 @@ impl Control {
     }
 
     /// A bus reset: back to the Default state (9.1.1.3).
-    pub fn reset(&mut self, requests: &mut dyn Requests) -> Result<(), &'static str> {
+    pub fn reset(&mut self, requests: &mut dyn Requests) -> Result<()> {
         self.address = 0;
         self.stage = Stage::Idle;
         if self.configuration != 0 {
@@ -220,10 +222,11 @@ impl Control {
         token: Token,
         data: &mut [u8],
         requests: &mut dyn Requests,
-    ) -> Result<Reply, &'static str> {
+    ) -> Result<Reply> {
         Ok(match token {
             Token::Setup => {
-                let bytes = <[u8; 8]>::try_from(&*data).map_err(|_| "a SETUP packet is 8 bytes")?;
+                let bytes = <[u8; 8]>::try_from(&*data)
+                    .map_err(|_| refuse!("a SETUP packet is 8 bytes"))?;
                 self.setup(Setup::parse(bytes), requests);
                 Reply::Ack(8)
             }
@@ -475,18 +478,13 @@ pub(crate) mod tests {
     }
 
     impl BusPeer for Echo {
-        fn reset(&mut self) -> Result<(), &'static str> {
+        fn reset(&mut self) -> Result<()> {
             let mut inner = (self.configured, core::mem::take(&mut self.stored));
             let result = self.control.reset(&mut inner);
             (self.configured, self.stored) = inner;
             result
         }
-        fn packet(
-            &mut self,
-            endpoint: u8,
-            token: Token,
-            data: &mut [u8],
-        ) -> Result<Reply, &'static str> {
+        fn packet(&mut self, endpoint: u8, token: Token, data: &mut [u8]) -> Result<Reply> {
             assert_eq!(endpoint, 0);
             let mut inner = (self.configured, core::mem::take(&mut self.stored));
             let reply = self.control.packet(token, data, &mut inner);

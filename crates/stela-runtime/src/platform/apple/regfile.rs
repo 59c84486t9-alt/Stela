@@ -2,8 +2,10 @@
 //! share a width and a role the model gives meaning to. An offset no span
 //! covers, or an access of another width, has no described meaning and
 //! refuses.
+use crate::Result;
 use alloc::collections::BTreeMap;
 use stela_contracts::bus::Width;
+use stela_contracts::refuse;
 
 /// Registers `[start, end)` of `width`, one every `width` bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,16 +28,16 @@ impl<R> Span<R> {
 }
 
 /// The role of the register at `offset` among `spans`.
-pub fn role<R: Copy>(spans: &[Span<R>], offset: u64, width: Width) -> Result<R, &'static str> {
+pub fn role<R: Copy>(spans: &[Span<R>], offset: u64, width: Width) -> Result<R> {
     let span = spans
         .iter()
         .find(|span| (span.start..span.end).contains(&offset))
-        .ok_or("register without described meaning")?;
+        .ok_or(refuse!("register without described meaning"))?;
     if width != span.width {
-        return Err("register access of another width");
+        return Err(refuse!("register access of another width"));
     }
     if !(offset - span.start).is_multiple_of(width.bytes()) {
-        return Err("access between registers");
+        return Err(refuse!("access between registers"));
     }
     Ok(span.role)
 }

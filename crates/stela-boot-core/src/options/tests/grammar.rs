@@ -1,5 +1,6 @@
 //! Grammar decisions whose value consumption and error priority are observable.
 use super::*;
+use stela_contracts::refuse;
 
 #[test]
 fn duplicate_checks_keep_their_value_precedence() {
@@ -187,11 +188,11 @@ fn host_repeats_overwrite_but_late_value_errors_precede_exclusivity() {
 fn url_compatibility_adapter_keeps_the_same_diagnostic() {
     for (url, error) in [("http://h", Error::UrlPath), ("http:///p", Error::UrlHost)] {
         assert_eq!(parse_url(url), Err(error));
-        assert_eq!(split_url(url), Err(error.message()));
+        assert_eq!(split_url(url), Err(error.message().into()));
     }
     assert_eq!(
         split_url("https://h/p"),
-        Err("only http:// URLs are supported")
+        Err(refuse!("only http:// URLs are supported"))
     );
     assert_eq!(split_url("http://h/p"), Ok(("h", "/p")));
 }

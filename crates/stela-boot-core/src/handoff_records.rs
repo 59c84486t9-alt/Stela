@@ -1,6 +1,8 @@
 //! Fixed-size records the loader phase hands the engine phase: physical
 //! regions, boot-bundle files and the storage drivers' handoff.
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 pub const MAX_NAME: usize = 48;
 pub const MAX_ECAM: usize = 4;
@@ -76,9 +78,9 @@ impl Storage {
         }
     }
 
-    pub fn new(handoff: &stela_drivers::Handoff) -> Result<Self, &'static str> {
+    pub fn new(handoff: &stela_drivers::Handoff) -> Result<Self> {
         if handoff.ecam.len() > MAX_ECAM || handoff.mapped.len() > MAX_MAPPED {
-            return Err("too many storage ranges for the engine handoff");
+            return Err(refuse!("too many storage ranges for the engine handoff"));
         }
         let mut storage = Self::absent();
         storage.present = true;

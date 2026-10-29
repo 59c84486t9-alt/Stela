@@ -1,9 +1,11 @@
 //! Host-owned durable FDR storage. The loader identifies one preallocated
 //! file; the engine writes only its existing FAT clusters through host drivers.
 use super::bundle::Bytes;
+use crate::Result;
 use crate::{firmware, handoff::Region, output, paging::PAGE};
-use alloc::{boxed::Box, format, string::String};
+use alloc::boxed::Box;
 use sha2::Digest;
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use stela_drivers::block::{BlockDevice, Shared};
 use stela_runtime::{
@@ -27,24 +29,28 @@ pub struct Placement<'a> {
 }
 
 impl<'a> Placement<'a> {
-    pub fn parse(bytes: &'a [u8]) -> Result<Self, String> {
+    pub fn parse(bytes: &'a [u8]) -> Result<Self> {
         if bytes.len() < HEADER || &bytes[..8] != MAGIC {
-            return Err(String::from("invalid FDR storage placement"));
+            return Err(refuse!("invalid FDR storage placement"));
         }
         let word = |at| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("word")) as usize;
         let path_end = HEADER
             .checked_add(word(24))
-            .ok_or("FDR placement overflow")?;
+            .ok_or(refuse!("FDR placement overflow"))?;
         let end = path_end
             .checked_add(word(28))
-            .ok_or("FDR placement overflow")?;
+            .ok_or(refuse!("FDR placement overflow"))?;
         if end != bytes.len() || word(64) > 1 {
-            return Err(String::from("invalid FDR placement length/flags"));
+            return Err(refuse!("invalid FDR placement length/flags"));
         }
-        let path = core::str::from_utf8(bytes.get(HEADER..path_end).ok_or("FDR path bounds")?)
-            .map_err(|_| "FDR path is not UTF-8")?;
+        let path = core::str::from_utf8(
+            bytes
+                .get(HEADER..path_end)
+                .ok_or(refuse!("FDR path bounds"))?,
+        )
+        .map_err(|_| refuse!("FDR path is not UTF-8"))?;
         if !stela_formats::payload::safe_path(path) {
-            return Err(String::from("invalid FDR state file path"));
+            return Err(refuse!("invalid FDR state file path"));
         }
         Ok(Self {
             partition: Guid(bytes[8..24].try_into().expect("GUID")),
@@ -57,26 +63,20 @@ impl<'a> Placement<'a> {
 
 /// One existing handoff slot carries placement plus selected diagnostic. No
 /// extra file slot is consumed, and committed state keeps the seed identity.
-pub fn prepare(
-    partition: [u8; 16],
-    path: &str,
-    seed: &[u8],
-    image: &[u8],
-) -> Result<Region, String> {
-    let initial = Diagnostic::decode(seed).map_err(|e| format!("FDR seed: {e}"))?;
-    let snapshot = fdr_store::read_image(image).map_err(|e| format!("FDR stored state: {e}"))?;
+pub fn prepare(partition: [u8; 16], path: &str, seed: &[u8], image: &[u8]) -> Result<Region> {
+    let initial = Diagnostic::decode(seed).map_err(|error| refuse!("FDR seed: {error}", %error))?;
+    let snapshot = fdr_store::read_image(image)
+        .map_err(|error| refuse!("FDR stored state: {error}", %error))?;
     if let Some(snapshot) = &snapshot {
-        let stored =
-            Diagnostic::decode(snapshot).map_err(|e| format!("FDR stored binding: {e}"))?;
+        let stored = Diagnostic::decode(snapshot)
+            .map_err(|error| refuse!("FDR stored binding: {error}", %error))?;
         if !initial.same_identity(&stored) {
-            return Err(String::from(
-                "FDR stored state belongs to another machine/build",
-            ));
+            return Err(refuse!("FDR stored state belongs to another machine/build"));
         }
     }
     let diagnostic = snapshot.as_deref().unwrap_or(seed);
     let bytes = HEADER + path.len() + diagnostic.len();
-    let physical = firmware::pages(bytes.div_ceil(PAGE)).map_err(String::from)?;
+    let physical = firmware::pages(bytes.div_ceil(PAGE))?;
     // SAFETY: fresh loader pages, kept for the whole boot.
     let buffer = unsafe { core::slice::from_raw_parts_mut(physical as *mut u8, bytes) };
     buffer.fill(0);
@@ -101,36 +101,34 @@ pub fn prepare(
     })
 }
 
-pub fn writer(
-    partition: Box<dyn BlockDevice>,
-    placement: &Placement<'_>,
-) -> Result<FdrCommit, String> {
+pub fn writer(partition: Box<dyn BlockDevice>, placement: &Placement<'_>) -> Result<FdrCommit> {
     let block = u64::from(partition.identity().block_size);
-    let mut volume = Fat32::open(Bytes::new(partition)).map_err(|e| format!("FDR FAT: {e}"))?;
+    let mut volume =
+        Fat32::open(Bytes::new(partition)).map_err(|error| refuse!("FDR FAT: {error}", %error))?;
     let file = volume
         .file(placement.path)
-        .map_err(|e| format!("FDR state file: {e}"))?;
+        .map_err(|error| refuse!("FDR state file: {error}", %error))?;
     if file.bytes != fdr_store::FILE_BYTES as u64 {
-        return Err(String::from("FDR state file must be exactly 4 MiB"));
+        return Err(refuse!("FDR state file must be exactly 4 MiB"));
     }
     let runs = boot_log::file_runs(&file, block, fdr_store::FILE_BYTES as u64)
-        .map_err(|e| format!("FDR state extents: {e}"))?;
+        .map_err(|error| refuse!("FDR state extents: {error}", %error))?;
     let partition = volume.into_inner().into_inner();
     let mut device = Shared::new(partition)
         .runs(runs)
-        .map_err(|e| format!("FDR state view: {e}"))?;
-    let mut journal =
-        fdr_store::Journal::open(&mut device).map_err(|e| format!("FDR journal: {e}"))?;
+        .map_err(|error| refuse!("FDR state view: {error}", %error))?;
+    let mut journal = fdr_store::Journal::open(&mut device)
+        .map_err(|error| refuse!("FDR journal: {error}", %error))?;
     let actual = journal.snapshot().map(digest);
     if actual != placement.snapshot {
-        return Err(String::from(
-            "FDR state changed between firmware and engine reads",
+        return Err(refuse!(
+            "FDR state changed between firmware and engine reads"
         ));
     }
     Ok(Box::new(move |bytes| {
-        journal
-            .commit(&mut device, bytes)
-            .map_err(|e| restore::Error::Transport(format!("FDR durable commit: {e}")))?;
+        journal.commit(&mut device, bytes).map_err(|error| {
+            restore::Error::Transport(refuse!("FDR durable commit: {error}", %error))
+        })?;
         output::arguments(format_args!(
             "FDR COMMIT durable bytes={} sha256={} flushed/readback verified\n",
             bytes.len(),

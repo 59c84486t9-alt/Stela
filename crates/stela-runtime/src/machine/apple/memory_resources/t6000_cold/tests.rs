@@ -4,6 +4,7 @@ use alloc::{boxed::Box, vec};
 use core::{cell::UnsafeCell, ptr::NonNull};
 use stela_contracts::bus::Access;
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 use stela_engine::memory::ReservedSystemRamRange;
 use stela_engine::memory::system_ram::fixture;
 use stela_soc_data::board::ClockRole;
@@ -327,7 +328,7 @@ fn physical_alias_parents_cannot_hide_unresolved_virtual_root_or_intermediate_in
         assert!(
             matches!(Plan::prepare_resources(&controller, &direct, &power, &ram,
                 [None; 4], &configuration()),
-                Err(reason) if reason == "cold T6000 requested input has an unresolved virtual ancestor")
+                Err(reason) if reason == refuse!("cold T6000 requested input has an unresolved virtual ancestor"))
         );
         // The same alias ancestry is supported when V resolves
         // to a physical ancestor. No arbitrary virtual-input veto.
@@ -386,7 +387,7 @@ fn all_geometry_ram_locks_controls_and_live_source_are_preflighted() {
     assert!(
         matches!(Plan::prepare_resources(&missing_status, &direct, &power, &ram,
             [None; 4], &config), Err(reason) if reason ==
-            "cold T6000 requires its source PTD geometry and shared way-command status")
+            refuse!("cold T6000 requires its source PTD geometry and shared way-command status"))
     );
     let mut bad = direct.clone();
     bad.ptd_entries = 377;

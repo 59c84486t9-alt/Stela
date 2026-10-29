@@ -81,10 +81,13 @@
 //! key functions, HDCP keys, the DSB, SKG, WRITE_REG and H16 scrambled-key
 //! commands, DKey distribution, DATA bit 24 and the reserved bits of the
 //! address words are refused until their values or behavior are known.
+use crate::Result;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use alloc::collections::VecDeque;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 #[cfg(test)]
 use stela_soc_data::aes::DEFAULT_ADDRESS_WIDTH;
 #[cfg(test)]
@@ -281,7 +284,7 @@ pub struct Aes {
     started: bool,
     /// Unsupported DMA may already have committed RAM and chaining state.
     /// Keep the cause until a checked recovery can authorize execution.
-    dma_failure: Option<&'static str>,
+    dma_failure: Option<Refusal>,
     fifo: VecDeque<u32>,
     overflow: bool,
     watermark: u32,
@@ -295,11 +298,7 @@ pub struct Aes {
 impl Aes {
     /// An engine as the ADT describes it in `config`, interrupting on
     /// `irq`, whose UID1 key is `uid` (disabled without one).
-    pub fn new(
-        config: Config,
-        irq: Option<AicInput>,
-        uid: Option<[u8; 32]>,
-    ) -> Result<Self, &'static str> {
+    pub fn new(config: Config, irq: Option<AicInput>, uid: Option<[u8; 32]>) -> Result<Self> {
         config.validate()?;
         let disabled = match uid {
             Some(_) => DISABLE_ALL_BUT_UID1,
@@ -371,22 +370,26 @@ impl Aes {
         })
     }
 
-    fn write_key_disable(&mut self, offset: u64, value: u32) -> Result<(), &'static str> {
+    fn write_key_disable(&mut self, offset: u64, value: u32) -> Result<()> {
         if offset == u64::from(self.config.key_disable.word) {
             if value & !DISABLE_KNOWN != 0 {
-                return Err("AES key-disable reserved bits");
+                return Err(refuse!("AES key-disable reserved bits"));
             }
             if value & self.own_words() != 0 {
-                return Err("AES key-disable bit of a key with its own disable word");
+                return Err(refuse!(
+                    "AES key-disable bit of a key with its own disable word"
+                ));
             }
             self.disabled |= value;
             return Ok(());
         }
         let bit = self
             .own_word(offset)
-            .ok_or("unknown AES key-disable register")?;
+            .ok_or(refuse!("unknown AES key-disable register"))?;
         if value != KEY_DISABLE {
-            return Err("AES key-disable word value other than the disable value");
+            return Err(refuse!(
+                "AES key-disable word value other than the disable value"
+            ));
         }
         self.disabled |= bit;
         Ok(())
@@ -407,15 +410,15 @@ impl Aes {
         self.accessible().is_ok() && !self.lifecycle.quiesced
     }
 
-    fn accessible(&self) -> Result<(), &'static str> {
+    fn accessible(&self) -> Result<()> {
         if !self.lifecycle.powered {
-            return Err("AES power domain is off");
+            return Err(refuse!("AES power domain is off"));
         }
         if !self.lifecycle.clocked {
-            return Err("AES clock is gated");
+            return Err(refuse!("AES clock is gated"));
         }
         if self.lifecycle.reset {
-            return Err("AES physical reset is asserted");
+            return Err(refuse!("AES physical reset is asserted"));
         }
         Ok(())
     }
@@ -482,7 +485,7 @@ impl Aes {
                 "AES DMA while PMGR inhibits execution",
             ));
         }
-        if let Some(reason) = self.dma_failure {
+        if let Some(reason) = self.dma_failure.clone() {
             return Err(refuse(
                 NAME,
                 self.command_fifo(),
@@ -713,7 +716,7 @@ impl Aes {
                 Ok(())
             }
             DmaError::Unsupported(reason) => {
-                self.dma_failure = Some(reason);
+                self.dma_failure = Some(reason.clone());
                 Err(refuse(
                     NAME,
                     self.command_fifo(),
@@ -736,13 +739,13 @@ fn key_bytes(command: u32) -> usize {
 }
 
 impl Lifecycle for Aes {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         if !self.lifecycle.reset && proposed.reset
             || self.lifecycle.powered && !proposed.powered && !proposed.retention
         {
-            return Err(
-                "AES physical reset or nonretained power loss requires qualified key-disable, context and entropy restore semantics",
-            );
+            return Err(refuse!(
+                "AES physical reset or nonretained power loss requires qualified key-disable, context and entropy restore semantics"
+            ));
         }
         Ok(())
     }
@@ -769,10 +772,10 @@ impl MmioDevice for Aes {
         width: Width,
         _access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         self.accessible().map_err(fail)?;
         if width != Width::Word {
-            return Err(fail("AES registers are 32-bit"));
+            return Err(fail(refuse!("AES registers are 32-bit")));
         }
         let offset = match self.space(offset) {
             Space::Block(offset) => offset,
@@ -780,9 +783,9 @@ impl MmioDevice for Aes {
                 let value = self.read_key_disable(at);
                 return value
                     .map(u64::from)
-                    .ok_or_else(|| fail("unknown AES key-disable register"));
+                    .ok_or_else(|| fail(refuse!("unknown AES key-disable register")));
             }
-            Space::DKey(at) => return Err(fail(self.dkey_refusal(at))),
+            Space::DKey(at) => return Err(fail(self.dkey_refusal(at).into())),
         };
         let value = match offset {
             CONTROL => 0,
@@ -792,7 +795,7 @@ impl MmioDevice for Aes {
             WATERMARKS => self.watermark,
             FIFO_STATUS => self.fifo_status(),
             FLAG_COMMAND => self.flag,
-            _ => return Err(fail("unknown AES register")),
+            _ => return Err(fail(refuse!("unknown AES register"))),
         };
         Ok(u64::from(value))
     }
@@ -804,32 +807,32 @@ impl MmioDevice for Aes {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         self.accessible().map_err(fail)?;
         if self.lifecycle.quiesced
             && (offset == self.command_fifo()
                 || offset == CONTROL && value == u64::from(CONTROL_START))
         {
-            return Err(fail("AES command submission while PMGR quiesced"));
+            return Err(fail(refuse!("AES command submission while PMGR quiesced")));
         }
         if width != Width::Word {
-            return Err(fail("AES registers are 32-bit"));
+            return Err(fail(refuse!("AES registers are 32-bit")));
         }
         let value = value as u32;
         let offset = match self.space(offset) {
             Space::Block(offset) => offset,
             Space::KeyDisable(at) => return self.write_key_disable(at, value).map_err(fail),
-            Space::DKey(at) => return Err(fail(self.dkey_refusal(at))),
+            Space::DKey(at) => return Err(fail(self.dkey_refusal(at).into())),
         };
         match offset {
             CONTROL => match value {
                 CONTROL_START => self.started = true,
                 CONTROL_STOP => self.started = false,
-                _ => return Err(fail("AES CONTROL other than START or STOP")),
+                _ => return Err(fail(refuse!("AES CONTROL other than START or STOP"))),
             },
             INT_STATUS => self.int_status &= !value,
             INT_ENABLE if value & !INT_KNOWN == 0 => self.int_enable = value,
-            INT_ENABLE => return Err(fail("AES INT_ENABLE reserved bits")),
+            INT_ENABLE => return Err(fail(refuse!("AES INT_ENABLE reserved bits"))),
             WATERMARKS => self.watermark = value & WATERMARK,
             CLEAR_FIFO => {
                 if value & 1 != 0 {
@@ -838,7 +841,7 @@ impl MmioDevice for Aes {
                 }
             }
             _ if offset == self.command_fifo() => {
-                if let Some(reason) = self.dma_failure {
+                if let Some(reason) = self.dma_failure.clone() {
                     return Err(fail(reason));
                 }
                 if self.fifo.len() < FIFO_WORDS {
@@ -848,7 +851,7 @@ impl MmioDevice for Aes {
                     self.int_status |= INT_FIFO_OVERFLOW;
                 }
             }
-            _ => return Err(fail("unknown AES register")),
+            _ => return Err(fail(refuse!("unknown AES register"))),
         }
         self.signal(access);
         Ok(())

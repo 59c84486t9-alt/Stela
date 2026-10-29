@@ -4,17 +4,17 @@ use super::Identity;
 use super::Node;
 use super::PMGR2_ARCH;
 use super::SOCS;
-use super::String;
 use super::Vec;
 use super::WakeLayout;
 use super::apertures;
 use super::cluster;
 use super::energy;
-use super::format;
 use super::fuse;
 use super::power_resources::PMGR_DEVICE;
 use super::wake;
+use crate::Result;
 use crate::pmgr::dvfs;
+use stela_contracts::refuse;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeBank {
@@ -101,7 +101,7 @@ impl From<dvfs::UnqualifiedEffects> for PmgrBankRefusal {
 /// is unavailable. An unsupported family is not permission to discard malformed
 /// data. The 26A434 v1 driver records are described by the parser below and
 /// `power_resources::records`; v2 performance metadata has a separate envelope.
-fn validate_bank_records(node: &Node<'_>) -> Result<(), String> {
+fn validate_bank_records(node: &Node<'_>) -> Result<()> {
     for (name, bytes) in [
         ("devices", PMGR_DEVICE),
         ("clocks", 24),
@@ -121,7 +121,7 @@ fn validate_bank_records(node: &Node<'_>) -> Result<(), String> {
             .property(name)
             .is_some_and(|raw| !raw.len().is_multiple_of(bytes))
         {
-            return Err(format!("/arm-io/pmgr {name} has incomplete records"));
+            return Err(refuse!("/arm-io/pmgr {name} has incomplete records", name));
         }
     }
     for name in [
@@ -131,7 +131,10 @@ fn validate_bank_records(node: &Node<'_>) -> Result<(), String> {
         "bridge-counter-version",
     ] {
         if node.property(name).is_some_and(|raw| raw.len() != 4) {
-            return Err(format!("/arm-io/pmgr {name} is not one complete word"));
+            return Err(refuse!(
+                "/arm-io/pmgr {name} is not one complete word",
+                name
+            ));
         }
     }
     if let Some(count) = node.first_u32("#bridges") {
@@ -140,16 +143,16 @@ fn validate_bank_records(node: &Node<'_>) -> Result<(), String> {
                 .property(name)
                 .is_some_and(|raw| raw.len() / 4 != count as usize)
             {
-                return Err(format!("/arm-io/pmgr {name} disagrees with #bridges"));
+                return Err(refuse!("/arm-io/pmgr {name} disagrees with #bridges", name));
             }
         }
     }
     if node.first_u32("bridge-settings-version") == Some(1)
         && node.first_u32("bridge-counter-version") == Some(3)
     {
-        let count = node
-            .first_u32("#bridges")
-            .ok_or("PMGR has no bridge count for its known source table")?;
+        let count = node.first_u32("#bridges").ok_or(refuse!(
+            "PMGR has no bridge count for its known source table"
+        ))?;
         super::power_resources::bridges::Records::new(node, count as usize)?;
     }
     Ok(())
@@ -162,7 +165,7 @@ pub(super) fn pmgr_registers(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     chip_id: u32,
-) -> Result<PmgrRegisters, String> {
+) -> Result<PmgrRegisters> {
     let mut result = PmgrRegisters::default();
     let Some(soc) = SOCS.iter().find(|soc| soc.chip_id == chip_id) else {
         return Ok(result);
@@ -174,7 +177,7 @@ pub(super) fn pmgr_registers(
     validate_bank_records(&node)?;
     // Each source view is checked in full before any optional model is kept.
     let reg: Vec<Option<(u64, u64)>> = apertures::registers(&node)
-        .ok_or("PMGR reg has incomplete physical pairs")?
+        .ok_or(refuse!("PMGR reg has incomplete physical pairs"))?
         .into_iter()
         .enumerate()
         .map(|(index, (offset, bytes))| {
@@ -183,7 +186,7 @@ pub(super) fn pmgr_registers(
             } else {
                 translate(offset, bytes)
                     .map(|physical| Some((physical, bytes)))
-                    .ok_or_else(|| format!("PMGR reg[{index}] complete view {offset:#x}/{bytes:#x} is outside or ambiguous in its bus domain"))
+                    .ok_or_else(|| refuse!("PMGR reg[{index}] complete view {offset:#x}/{bytes:#x} is outside or ambiguous in its bus domain", index, offset, bytes))
             }
         })
         .collect::<Result<_, _>>()?;
@@ -207,7 +210,7 @@ pub(super) fn pmgr_registers(
                 .copied()
                 .flatten()
                 .filter(|&(_, bytes)| bytes == fuse::FUSE_BYTES)
-                .ok_or_else(|| format!("/arm-io/pmgr reg[{index}] is not the eFuse block"))
+                .ok_or_else(|| refuse!("/arm-io/pmgr reg[{index}] is not the eFuse block", index))
         })
         .transpose()?;
     if node.property("bridge-reg-index").is_some() && soc.bridge_fields.is_none() {
@@ -297,7 +300,7 @@ pub(super) fn pmgr_registers(
     Ok(result)
 }
 
-fn validate_clusters(reg: &[Option<(u64, u64)>], clusters: &[CpuCluster]) -> Result<(), String> {
+fn validate_clusters(reg: &[Option<(u64, u64)>], clusters: &[CpuCluster]) -> Result<()> {
     let covered = |start: u64, bytes: u64| {
         reg.iter().flatten().any(|&(base, size)| {
             start
@@ -310,15 +313,15 @@ fn validate_clusters(reg: &[Option<(u64, u64)>], clusters: &[CpuCluster]) -> Res
         let cpm_base = cluster
             .base
             .checked_add(crate::cpm::T8112_OFFSET)
-            .ok_or("CPM base overflows")?;
+            .ok_or(refuse!("CPM base overflows"))?;
         for offset in crate::cpm::offsets(cluster.counter_map) {
             if !covered(cpm_base + offset, 8) {
-                return Err("PMGR reg does not cover a CPM power register".into());
+                return Err(refuse!("PMGR reg does not cover a CPM power register"));
             }
         }
         for offset in cluster::SCRATCH {
             if !covered(cluster.base + offset, 8) {
-                return Err("PMGR reg does not cover CPU state scratch".into());
+                return Err(refuse!("PMGR reg does not cover CPU state scratch"));
             }
         }
         let window = cluster.base + cluster::ACC_OFFSET;
@@ -326,9 +329,9 @@ fn validate_clusters(reg: &[Option<(u64, u64)>], clusters: &[CpuCluster]) -> Res
         if !reg.contains(&Some((window, cluster::ACC_BYTES)))
             || !covered(cluster.base + cluster::PSTATE_OFFSET, table)
         {
-            return Err(format!(
-                "/arm-io/pmgr reg does not place the CPU cluster at {:#x}",
-                cluster.base
+            return Err(refuse!(
+                "/arm-io/pmgr reg does not place the CPU cluster at {base:#x}",
+                base = cluster.base
             ));
         }
     }
@@ -348,7 +351,7 @@ pub(super) fn cpu_start(
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     chip_id: u32,
     processors: &[Identity],
-) -> Result<Option<(u64, u8)>, String> {
+) -> Result<Option<(u64, u8)>> {
     let Some(soc) = SOCS.iter().find(|soc| soc.chip_id == chip_id) else {
         return Ok(None);
     };
@@ -359,38 +362,39 @@ pub(super) fn cpu_start(
         return Ok(None);
     }
     let (name, node) = if pmgr.compatible(PMGR2_ARCH) {
-        let child = io
-            .child("pmgr-child")
-            .ok_or("/arm-io/pmgr is pmgr2,arch without /arm-io/pmgr-child")?;
+        let child = io.child("pmgr-child").ok_or(refuse!(
+            "/arm-io/pmgr is pmgr2,arch without /arm-io/pmgr-child"
+        ))?;
         ("pmgr-child", child)
     } else {
         ("pmgr", pmgr)
     };
     let (base, bytes) = apertures::registers(&node)
         .and_then(|reg| reg.first().copied())
-        .ok_or_else(|| format!("/arm-io/{name} has no reg"))?;
+        .ok_or_else(|| refuse!("/arm-io/{name} has no reg", name))?;
     let clusters = processors
         .iter()
         .map(|pe| ((pe.mpidr >> 8) & 0xff) as u8 + 1)
         .max()
         .unwrap_or(0);
     if offset + crate::cpustart::bytes(clusters) > bytes {
-        return Err(format!(
-            "/arm-io/{name} reg[0] does not hold the CPU start registers"
+        return Err(refuse!(
+            "/arm-io/{name} reg[0] does not hold the CPU start registers",
+            name
         ));
     }
     let physical = translate(base + offset, crate::cpustart::bytes(clusters))
-        .ok_or_else(|| format!("/arm-io/{name} reg[0] is outside /arm-io ranges"))?;
+        .ok_or_else(|| refuse!("/arm-io/{name} reg[0] is outside /arm-io ranges", name))?;
     Ok(Some((physical, clusters)))
 }
 
 /// Special CPU event types2/7 select E/P ACC accessors, not the SOC-bank
 /// selector formula (kernel 0x2b93ac4..0x2b93cec). Byte6 is the event index.
-fn acc_events(node: &Node<'_>, clusters: usize) -> Result<Vec<Vec<u8>>, String> {
+fn acc_events(node: &Node<'_>, clusters: usize) -> Result<Vec<Vec<u8>>> {
     let mut events = alloc::vec![Vec::new();clusters];
     let data = node.property("events").unwrap_or_default();
     if !data.len().is_multiple_of(24) {
-        return Err("ACC events property is not whole records".into());
+        return Err(refuse!("ACC events property is not whole records"));
     }
     for entry in data.as_chunks::<24>().0 {
         let cluster = match entry[2] {
@@ -400,9 +404,9 @@ fn acc_events(node: &Node<'_>, clusters: usize) -> Result<Vec<Vec<u8>>, String> 
         };
         let bank = events
             .get_mut(cluster)
-            .ok_or("ACC event names a missing CPU cluster")?;
+            .ok_or(refuse!("ACC event names a missing CPU cluster"))?;
         if entry[6] >= 27 {
-            return Err("ACC event selector exceeds the accessor range".into());
+            return Err(refuse!("ACC event selector exceeds the accessor range"));
         }
         if !bank.contains(&entry[6]) {
             bank.push(entry[6]);
@@ -418,44 +422,47 @@ fn place_bridges(
     node: &Node<'_>,
     reg: &[Option<(u64, u64)>],
     fields: Option<&[&[(u64, u32)]]>,
-) -> Result<Vec<BridgeBank>, String> {
+) -> Result<Vec<BridgeBank>> {
     let Some(first) = node.first_u32("bridge-reg-index") else {
         return Ok(Vec::new());
     };
-    let fields = fields.ok_or("this SoC has no documented bridge register layouts")?;
+    let fields = fields.ok_or(refuse!(
+        "this SoC has no documented bridge register layouts"
+    ))?;
     let count = node
         .first_u32("#bridges")
-        .ok_or("PMGR has no bridge count")? as usize;
+        .ok_or(refuse!("PMGR has no bridge count"))? as usize;
     if count > fields.len()
         || node.first_u32("bridge-settings-version") != Some(1)
         || node.first_u32("bridge-counter-version") != Some(3)
     {
-        return Err("unsupported bridge count or configuration version".into());
+        return Err(refuse!("unsupported bridge count or configuration version"));
     }
     let records = super::power_resources::bridges::Records::new(node, count)?;
     let mut banks = Vec::new();
     let optional = node.first_u32("optional-bridge-mask").unwrap_or(0);
     if optional != 0 {
-        return Err("optional bridge suppression requires an established selection policy".into());
+        return Err(refuse!(
+            "optional bridge suppression requires an established selection policy"
+        ));
     }
     for (id, tunables) in fields.iter().enumerate().take(count) {
         let index = (first as usize)
             .checked_add(id)
-            .ok_or("bridge reg index overflows")?;
+            .ok_or(refuse!("bridge reg index overflows"))?;
         let (physical, bytes) = reg
             .get(index)
             .copied()
             .flatten()
-            .ok_or("bridge names an unmapped DT reg window")?;
+            .ok_or(refuse!("bridge names an unmapped DT reg window"))?;
         let record = records.record(id).expect("validated bridge ordinal");
         let model =
-            crate::bridge::Layout::new(tunables, record.header, &record.configs, record.axi)
-                .map_err(String::from)?;
+            crate::bridge::Layout::new(tunables, record.header, &record.configs, record.axi)?;
         for (o, n) in model.spans() {
             if o.checked_add(n).is_none_or(|end| end > bytes)
                 || physical.checked_add(o + n).is_none()
             {
-                return Err("bridge configuration lies outside its DT range".into());
+                return Err(refuse!("bridge configuration lies outside its DT range"));
             }
         }
         banks.push(BridgeBank {
@@ -472,19 +479,15 @@ fn place_bridges(
 
 /// SOC DPE direct split-word records have group 0x1d, die mask 1,
 /// command flag 0, split flag 1 and width 64 (PMGR parser 0x2b7796c).
-fn place_soc_dpe(
-    node: &Node<'_>,
-    reg: &[Option<(u64, u64)>],
-    index: usize,
-) -> Result<SocDpe, String> {
+fn place_soc_dpe(node: &Node<'_>, reg: &[Option<(u64, u64)>], index: usize) -> Result<SocDpe> {
     let (physical, bytes) = reg
         .get(index)
         .copied()
         .flatten()
-        .ok_or("SOC DPE has no mapped DT reg bank")?;
+        .ok_or(refuse!("SOC DPE has no mapped DT reg bank"))?;
     let data = node.property("hw-dpe-reg").unwrap_or_default();
     if !data.len().is_multiple_of(40) {
-        return Err("SOC DPE hw-dpe-reg has partial records".into());
+        return Err(refuse!("SOC DPE hw-dpe-reg has partial records"));
     }
     let mut samples = Vec::new();
     for entry in data.as_chunks::<40>().0 {
@@ -492,18 +495,18 @@ fn place_soc_dpe(
             continue;
         }
         if entry[18] != 1 || entry[20] != 1 || entry[23] != 64 {
-            return Err("unsupported SOC DPE sampling flags".into());
+            return Err(refuse!("unsupported SOC DPE sampling flags"));
         }
         let address = u64::from_le_bytes(entry[..8].try_into().expect("8 bytes"));
         let offset = address
             .checked_sub(physical)
-            .ok_or("SOC DPE sample below its reg bank")?;
+            .ok_or(refuse!("SOC DPE sample below its reg bank"))?;
         samples.push((offset, crate::dpe::RESTORE.contains(&offset)));
     }
-    let model = crate::dpe::Layout::new(&samples).map_err(String::from)?;
+    let model = crate::dpe::Layout::new(&samples)?;
     for (o, n) in model.spans() {
         if o.checked_add(n).is_none_or(|end| end > bytes) || physical.checked_add(o + n).is_none() {
-            return Err("SOC DPE register outside its DT bank".into());
+            return Err(refuse!("SOC DPE register outside its DT bank"));
         }
     }
     Ok(SocDpe { physical, samples })
@@ -514,7 +517,7 @@ fn place_soc_dpe(
 fn place_power_banks(
     reg: &[Option<(u64, u64)>],
     layouts: &[(usize, crate::power::Kind)],
-) -> Result<Vec<PowerBank>, String> {
+) -> Result<Vec<PowerBank>> {
     layouts
         .iter()
         .map(|&(index, kind)| {
@@ -522,13 +525,13 @@ fn place_power_banks(
                 .get(index)
                 .copied()
                 .flatten()
-                .ok_or("PMGR power bank names an unmapped reg entry")?;
+                .ok_or(refuse!("PMGR power bank names an unmapped reg entry"))?;
             for offset in kind.offsets() {
                 if offset.checked_add(4).is_none_or(|end| end > bytes)
                     || physical.checked_add(offset + 4).is_none()
                     || !physical.is_multiple_of(4)
                 {
-                    return Err("PMGR power register lies outside its DT range".into());
+                    return Err(refuse!("PMGR power register lies outside its DT range"));
                 }
             }
             Ok(PowerBank { physical, kind })
@@ -539,26 +542,22 @@ fn place_power_banks(
 /// `ap-wake-sources` is (u32 source, 32-byte name), kernel parser
 /// `ApplePMGR` and `setAPWakeupSources` 0x2fa3f84. Reported sources are
 /// validated against hardware capabilities, not used as a reset mask.
-fn wake_bank(
-    node: &Node<'_>,
-    reg: &[Option<(u64, u64)>],
-    layout: WakeLayout,
-) -> Result<WakeBank, String> {
+fn wake_bank(node: &Node<'_>, reg: &[Option<(u64, u64)>], layout: WakeLayout) -> Result<WakeBank> {
     const RECORD: usize = 36;
     let (base, bytes) = reg
         .get(layout.reg)
         .copied()
         .flatten()
-        .ok_or("PMGR AOP wake masks have no mapped reg bank")?;
+        .ok_or(refuse!("PMGR AOP wake masks have no mapped reg bank"))?;
     if bytes < wake::OFFSET + wake::BYTES {
-        return Err("PMGR AOP wake masks exceed their reg bank".into());
+        return Err(refuse!("PMGR AOP wake masks exceed their reg bank"));
     }
     base.checked_add(wake::OFFSET + wake::BYTES)
-        .ok_or("PMGR AOP wake mask span overflows")?;
+        .ok_or(refuse!("PMGR AOP wake mask span overflows"))?;
     let physical = base + wake::OFFSET;
     let data = node.property("ap-wake-sources").unwrap_or_default();
     if !data.len().is_multiple_of(RECORD) {
-        return Err("PMGR ap-wake-sources is not whole records".into());
+        return Err(refuse!("PMGR ap-wake-sources is not whole records"));
     }
     let mut sources = Vec::new();
     let mut smc_wake = None;
@@ -567,12 +566,14 @@ fn wake_bank(
         if entry[4..].split(|&b| b == 0).next() == Some(SMC_WAKE_SOURCE) {
             smc_wake = u8::try_from(source).ok();
         }
-        let id =
-            u8::try_from(source).map_err(|_| "PMGR wake source exceeds hardware mask width")?;
+        let id = u8::try_from(source)
+            .map_err(|_| refuse!("PMGR wake source exceeds hardware mask width"))?;
         if layout.valid[source as usize / u32::BITS as usize] & (1 << (source % u32::BITS)) == 0
             || sources.contains(&id)
         {
-            return Err("PMGR ap-wake-sources contains an unsupported or duplicate source".into());
+            return Err(refuse!(
+                "PMGR ap-wake-sources contains an unsupported or duplicate source"
+            ));
         }
         sources.push(id);
     }
@@ -591,14 +592,14 @@ const SMC_WAKE_SOURCE: &[u8] = b"SMC.CPUWakeupAP";
 /// `_getPerfCounterOffset` (0x2b8e974) and the selector consumers
 /// (0x2b92ddc..0x2b93010, 0x2b95884..0x2b95964). No physical address or
 /// counter index is inferred from a reporting name or device ID.
-fn performance_banks(node: &Node<'_>, reg: &[Option<(u64, u64)>]) -> Result<Vec<PerfBank>, String> {
+fn performance_banks(node: &Node<'_>, reg: &[Option<(u64, u64)>]) -> Result<Vec<PerfBank>> {
     use crate::perf::{COUNTER_BASE, STRIDE};
     const GROUP: usize = 16;
     const SOURCE: usize = 24;
     const DEVICE_COUNTER: u8 = 0x20;
     let data = node.property("perf-regs").unwrap_or_default();
     if !data.len().is_multiple_of(GROUP) {
-        return Err("/arm-io/pmgr perf-regs is not whole groups".into());
+        return Err(refuse!("/arm-io/pmgr perf-regs is not whole groups"));
     }
     let mut banks = Vec::new();
     let mut counts = Vec::new();
@@ -609,23 +610,25 @@ fn performance_banks(node: &Node<'_>, reg: &[Option<(u64, u64)>]) -> Result<Vec<
         // Version zero defaults to one. Parent/global indirection and the
         // busy protocol of classes 1/2 need separate semantics.
         if !matches!(entry[12], 0 | 3) || entry[13] > 1 || entry[15] != 0 {
-            return Err("/arm-io/pmgr perf-regs has an unsupported class, layout or flags".into());
+            return Err(refuse!(
+                "/arm-io/pmgr perf-regs has an unsupported class, layout or flags"
+            ));
         }
         let (base, bytes) = reg
             .get(index)
             .copied()
             .flatten()
-            .ok_or("/arm-io/pmgr perf-regs names an unmapped reg bank")?;
+            .ok_or(refuse!("/arm-io/pmgr perf-regs names an unmapped reg bank"))?;
         if count == 0
             || !offset.is_multiple_of(4)
             || offset + COUNTER_BASE + u64::from(count) * STRIDE > bytes
         {
-            return Err(
-                "/arm-io/pmgr perf-regs counters are empty or exceed their reg bank".into(),
-            );
+            return Err(refuse!(
+                "/arm-io/pmgr perf-regs counters are empty or exceed their reg bank"
+            ));
         }
         base.checked_add(offset + COUNTER_BASE + u64::from(count) * STRIDE)
-            .ok_or("PMGR performance bank span overflows")?;
+            .ok_or(refuse!("PMGR performance bank span overflows"))?;
         let physical = base + offset;
         banks.push(PerfBank {
             physical,
@@ -636,13 +639,13 @@ fn performance_banks(node: &Node<'_>, reg: &[Option<(u64, u64)>]) -> Result<Vec<
     if banks.is_empty() {
         return Ok(banks);
     }
-    let mut select = |group: u8, index: u8| -> Result<(), String> {
-        let bank = banks
-            .get_mut(usize::from(group))
-            .ok_or("PMGR counter source names a missing perf-regs group")?;
+    let mut select = |group: u8, index: u8| -> Result<()> {
+        let bank = banks.get_mut(usize::from(group)).ok_or(refuse!(
+            "PMGR counter source names a missing perf-regs group"
+        ))?;
         let index = u16::from(index);
         if index >= counts[usize::from(group)] {
-            return Err("PMGR counter source exceeds its perf-regs count".into());
+            return Err(refuse!("PMGR counter source exceeds its perf-regs count"));
         }
         if !bank.selectors.contains(&index) {
             bank.selectors.push(index);
@@ -651,7 +654,7 @@ fn performance_banks(node: &Node<'_>, reg: &[Option<(u64, u64)>]) -> Result<Vec<
     };
     let devices = node.property("devices").unwrap_or_default();
     if !devices.len().is_multiple_of(PMGR_DEVICE) {
-        return Err("/arm-io/pmgr devices is not whole entries".into());
+        return Err(refuse!("/arm-io/pmgr devices is not whole entries"));
     }
     for entry in devices.as_chunks::<PMGR_DEVICE>().0 {
         if entry[0] & DEVICE_COUNTER != 0 {
@@ -661,8 +664,9 @@ fn performance_banks(node: &Node<'_>, reg: &[Option<(u64, u64)>]) -> Result<Vec<
     for property in ["clocks", "power-domains", "events"] {
         let data = node.property(property).unwrap_or_default();
         if !data.len().is_multiple_of(SOURCE) {
-            return Err(format!(
-                "/arm-io/pmgr {property} is not whole counter records"
+            return Err(refuse!(
+                "/arm-io/pmgr {property} is not whole counter records",
+                property
             ));
         }
         for entry in data.as_chunks::<SOURCE>().0 {
@@ -678,7 +682,7 @@ fn performance_banks(node: &Node<'_>, reg: &[Option<(u64, u64)>]) -> Result<Vec<
                         select(entry[5], entry[4])?;
                     }
                     2 | 7 => (),
-                    _ => return Err("PMGR events has an unsupported counter type".into()),
+                    _ => return Err(refuse!("PMGR events has an unsupported counter type")),
                 },
                 _ => (),
             }
@@ -699,11 +703,11 @@ fn energy_banks(
     node: &Node<'_>,
     reg: &[Option<(u64, u64)>],
     clusters: &[CpuCluster],
-) -> Result<Vec<EnergyBank>, String> {
+) -> Result<Vec<EnergyBank>> {
     const RECORD: usize = 40;
     let data = node.property("hw-dpe-reg").unwrap_or_default();
     if !data.len().is_multiple_of(RECORD) {
-        return Err("/arm-io/pmgr hw-dpe-reg is not whole records".into());
+        return Err(refuse!("/arm-io/pmgr hw-dpe-reg is not whole records"));
     }
     let mut banks = Vec::new();
     for entry in data.as_chunks::<RECORD>().0 {
@@ -711,9 +715,9 @@ fn energy_banks(
             continue;
         }
         if entry[18..24] != [1, 0, 0, 1, 0, 64] {
-            return Err(
-                "PMGR CPU hw-dpe-reg has unsupported die, sampling, behavior or width flags".into(),
-            );
+            return Err(refuse!(
+                "PMGR CPU hw-dpe-reg has unsupported die, sampling, behavior or width flags"
+            ));
         }
         let physical = u64::from_le_bytes(entry[..8].try_into().expect("8 bytes"));
         let cpm = clusters
@@ -738,8 +742,9 @@ fn energy_banks(
             || !covered
             || banks.iter().any(|b: &EnergyBank| b.physical == physical)
         {
-            return Err(format!(
-                "/arm-io/pmgr CPU hw-dpe-reg PA {physical:#x} is duplicated or outside its reg bank"
+            return Err(refuse!(
+                "/arm-io/pmgr CPU hw-dpe-reg PA {physical:#x} is duplicated or outside its reg bank",
+                physical
             ));
         }
         banks.push(EnergyBank { physical, cpm });

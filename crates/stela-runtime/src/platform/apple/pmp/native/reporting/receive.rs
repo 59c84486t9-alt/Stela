@@ -7,6 +7,7 @@ use super::{
 use alloc::rc::Rc;
 use core::cell::RefCell;
 use stela_contracts::bus::Access;
+use stela_contracts::refuse;
 
 #[derive(Default)]
 pub(super) struct Inbox {
@@ -29,7 +30,7 @@ impl Receiver {
         access: &mut Access<'_>,
     ) -> Completion<()> {
         if !self.0.borrow().alive {
-            return Completion::Refused("IOReporting endpoint session is not live");
+            return Completion::Refused(refuse!("IOReporting endpoint session is not live"));
         }
         match wire::kind(payload) {
             0 => {
@@ -39,13 +40,17 @@ impl Receiver {
                 };
                 let mut inbox = self.0.borrow_mut();
                 if !inbox.buffer_expected || inbox.buffer.is_some() {
-                    return Completion::Refused("unsolicited/replacement IOReporting AP buffer");
+                    return Completion::Refused(refuse!(
+                        "unsolicited/replacement IOReporting AP buffer"
+                    ));
                 }
                 if buffer.bus == 0
                     || buffer.bytes < wire::REQUEST_BYTES
                     || buffer.bus.checked_add(buffer.bytes).is_none()
                 {
-                    return Completion::Refused("IOReporting AP allocation geometry is incomplete");
+                    return Completion::Refused(refuse!(
+                        "IOReporting AP allocation geometry is incomplete"
+                    ));
                 }
                 inbox.buffer = Some(buffer);
                 inbox.buffer_expected = false;
@@ -65,9 +70,9 @@ impl Receiver {
                 let key = match self.0.borrow().waiter.clone() {
                     Some(key) => key,
                     None => {
-                        return Completion::Refused(
-                            "IOReporting publication ACK has no actual armed waiter",
-                        );
+                        return Completion::Refused(refuse!(
+                            "IOReporting publication ACK has no actual armed waiter"
+                        ));
                     }
                 };
                 let result = wake.publication_ack(&key, access);
@@ -78,7 +83,7 @@ impl Receiver {
                 }
                 result
             }
-            _ => Completion::Refused("unsupported IOReporting AP message kind"),
+            _ => Completion::Refused(refuse!("unsupported IOReporting AP message kind")),
         }
     }
 }

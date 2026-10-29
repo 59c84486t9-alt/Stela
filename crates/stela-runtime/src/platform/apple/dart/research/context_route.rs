@@ -12,6 +12,8 @@
 //! assigned context must agree. A fault cannot identify its physical bank
 //! or incoming SID here and therefore refuses without latching metadata.
 use super::super::{Dart, Model};
+use crate::Result;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::dma::DmaError, stela_contracts::dma::Iommu,
     stela_contracts::dma::Memory,
@@ -41,12 +43,16 @@ impl T6000ContextRoute {
         mapper_phandle: u32,
         context: usize,
         banks: &[&Dart],
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         if client_phandle == 0 || mapper_phandle == 0 || client_phandle == mapper_phandle {
-            return Err("T6000 native USB context route needs distinct client and mapper owners");
+            return Err(refuse!(
+                "T6000 native USB context route needs distinct client and mapper owners"
+            ));
         }
         if context >= STREAMS {
-            return Err("T6000 native USB mapper context exceeds its native profile");
+            return Err(refuse!(
+                "T6000 native USB mapper context exceeds its native profile"
+            ));
         }
         validate_banks(banks)?;
         Ok(Self {
@@ -68,26 +74,32 @@ impl T6000ContextRoute {
     /// Borrow the same full bank cohort for the existing DMA Port. These
     /// borrows prevent MMIO/lifecycle changes while a chunk is checked and
     /// transferred. A proof is never cached across DMA calls.
-    pub fn bind<'a>(&'a self, banks: &'a [&'a Dart]) -> Result<T6000ContextDma<'a>, &'static str> {
+    pub fn bind<'a>(&'a self, banks: &'a [&'a Dart]) -> Result<T6000ContextDma<'a>> {
         validate_banks(banks)?;
         if banks
             .iter()
             .zip(self.banks)
             .any(|(bank, assigned)| !core::ptr::eq(*bank, assigned))
         {
-            return Err("T6000 native USB context route bank ownership changed");
+            return Err(refuse!(
+                "T6000 native USB context route bank ownership changed"
+            ));
         }
         Ok(T6000ContextDma { route: self, banks })
     }
 }
 
-fn validate_banks(banks: &[&Dart]) -> Result<(), &'static str> {
+fn validate_banks(banks: &[&Dart]) -> Result<()> {
     if banks.len() != USB_TRADS || core::ptr::eq(banks[0], banks[1]) {
-        return Err("T6000 native USB context route needs its two distinct TRAD banks");
+        return Err(refuse!(
+            "T6000 native USB context route needs its two distinct TRAD banks"
+        ));
     }
     for bank in banks {
         if !matches!(&bank.model, Model::Legacy(model) if model.context_route_geometry()) {
-            return Err("T6000 native USB context route requires plain 16-SID T6000 TRAD geometry");
+            return Err(refuse!(
+                "T6000 native USB context route requires plain 16-SID T6000 TRAD geometry"
+            ));
         }
     }
     Ok(())
@@ -115,14 +127,14 @@ impl Iommu for T6000ContextDma<'_> {
         _: &mut Access<'_>,
     ) -> Result<u64, DmaError> {
         if stream != self.route.context {
-            return Err(DmaError::Unsupported(
-                "T6000 native USB DMA does not name its assigned logical context",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "T6000 native USB DMA does not name its assigned logical context"
+            )));
         }
         if last < iova || iova / PAGE != last / PAGE {
-            return Err(DmaError::Unsupported(
-                "T6000 context route translation must cover one ordered page chunk",
-            ));
+            return Err(DmaError::Unsupported(refuse!(
+                "T6000 context route translation must cover one ordered page chunk"
+            )));
         }
         let mut physical = None;
         for bank in self.banks {
@@ -132,9 +144,9 @@ impl Iommu for T6000ContextDma<'_> {
             let candidate =
                 model.checked_context_translation(memory, self.route.context, iova, last, write)?;
             if physical.is_some_and(|previous| previous != candidate) {
-                return Err(DmaError::Unsupported(
-                    "T6000 native USB TRAD alternatives have divergent DMA targets",
-                ));
+                return Err(DmaError::Unsupported(refuse!(
+                    "T6000 native USB TRAD alternatives have divergent DMA targets"
+                )));
             }
             physical = Some(candidate);
         }

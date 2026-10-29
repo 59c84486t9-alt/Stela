@@ -18,11 +18,14 @@
 //! CPU halt/resume requires the firmware's explicit lifecycle hooks; it never
 //! repeats cold start or resets the mailboxes. CPU idle remains unsupported,
 //! never inferred from FIFO emptiness.
+use crate::Result;
 use crate::platform::apple::asc::{Firmware, Lines, Message};
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::any::Any;
+use stela_contracts::Refusal;
 use stela_contracts::dma::Port;
 use stela_contracts::interrupt::Wire;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -97,7 +100,7 @@ impl MxWrap {
 
     /// Explicit previous-stage handoff: firmware running, mailboxes enabled.
     /// This does not manufacture the firmware's HELLO or any endpoint reply.
-    pub fn booted(firmware: Box<dyn Firmware>, lines: Lines) -> Result<Self, &'static str> {
+    pub fn booted(firmware: Box<dyn Firmware>, lines: Lines) -> Result<Self> {
         let mut wrapper = Self::new(firmware, lines);
         wrapper.start()?;
         wrapper.a2i_enabled = true;
@@ -117,9 +120,9 @@ impl MxWrap {
         self.running && self.firmware.dma_pending()
     }
 
-    pub fn service_dma(&mut self, port: &mut Port<'_, '_>) -> Result<(), &'static str> {
+    pub fn service_dma(&mut self, port: &mut Port<'_, '_>) -> Result<()> {
         if !self.running {
-            return Err("MxWrap DMA on a stopped coprocessor");
+            return Err(refuse!("MxWrap DMA on a stopped coprocessor"));
         }
         let mut produced = Vec::new();
         let result = self.firmware.dma(port, &mut produced);
@@ -132,7 +135,7 @@ impl MxWrap {
         result
     }
 
-    fn start(&mut self) -> Result<(), &'static str> {
+    fn start(&mut self) -> Result<()> {
         if !self.running {
             let mut produced = Vec::new();
             if self.halted {
@@ -147,7 +150,7 @@ impl MxWrap {
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<(), &'static str> {
+    fn stop(&mut self) -> Result<()> {
         if self.running {
             self.firmware.stop()?;
             self.running = false;
@@ -205,14 +208,18 @@ impl MxWrap {
         }
     }
 
-    fn send(&mut self, endpoint: u64) -> Result<(), &'static str> {
+    fn send(&mut self, endpoint: u64) -> Result<()> {
         if !self.running {
-            return Err("MxWrap send to a stopped coprocessor");
+            return Err(refuse!("MxWrap send to a stopped coprocessor"));
         }
         if endpoint & !ENDPOINT != 0 {
-            return Err("MxWrap message bits above the endpoint are not modeled");
+            return Err(refuse!(
+                "MxWrap message bits above the endpoint are not modeled"
+            ));
         }
-        let payload = self.staged.ok_or("MxWrap send without its payload word")?;
+        let payload = self
+            .staged
+            .ok_or(refuse!("MxWrap send without its payload word"))?;
         let mut produced = Vec::new();
         self.firmware.receive(
             Message {
@@ -239,7 +246,7 @@ impl MmioDevice for MxWrap {
         width: Width,
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         let value = match (offset, width) {
             (A2I_CONTROL, Width::Word) => {
                 u64::from(self.a2i_enabled)
@@ -258,12 +265,18 @@ impl MmioDevice for MxWrap {
                 u64::from(message.endpoint) | (snapshot << 32)
             }
             (I2A_RECV0 | I2A_RECV1, Width::Double) => {
-                return Err(fail("MxWrap load of an empty or disabled outbox"));
+                return Err(fail(refuse!("MxWrap load of an empty or disabled outbox")));
             }
             (CPU_IDLE, Width::Word) => {
-                return Err(fail("MxWrap idle requires the firmware power contract"));
+                return Err(fail(refuse!(
+                    "MxWrap idle requires the firmware power contract"
+                )));
             }
-            _ => return Err(fail("MxWrap register or access width without a model")),
+            _ => {
+                return Err(fail(refuse!(
+                    "MxWrap register or access width without a model"
+                )));
+            }
         };
         Ok(value)
     }
@@ -275,7 +288,7 @@ impl MmioDevice for MxWrap {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         match (offset, width) {
             (CPU_RUN, Width::Word) if value == RUN => self.start().map_err(fail)?,
             (CPU_RUN, Width::Word) if value == STOP => self.stop().map_err(fail)?,
@@ -293,9 +306,9 @@ impl MmioDevice for MxWrap {
                 }
             }
             _ => {
-                return Err(fail(
-                    "MxWrap register, field or access width without a model",
-                ));
+                return Err(fail(refuse!(
+                    "MxWrap register, field or access width without a model"
+                )));
             }
         }
         self.update_lines(access);

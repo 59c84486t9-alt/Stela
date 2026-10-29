@@ -1,7 +1,9 @@
 use super::*;
+use crate::Result;
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use core::cell::Cell;
+use stela_contracts::refuse;
 
 const WINDOW: u64 = 0x8_0000_0000;
 
@@ -9,13 +11,13 @@ const WINDOW: u64 = 0x8_0000_0000;
 struct Memory(BTreeMap<u64, u8>);
 
 impl Bus for Memory {
-    fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
+    fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<()> {
         for (n, byte) in buffer.iter_mut().enumerate() {
             *byte = *self.0.get(&(address + n as u64)).unwrap_or(&0);
         }
         Ok(())
     }
-    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), &'static str> {
+    fn write(&mut self, address: u64, data: &[u8]) -> Result<()> {
         for (n, &byte) in data.iter().enumerate() {
             self.0.insert(address + n as u64, byte);
         }
@@ -71,7 +73,7 @@ fn the_transport_comes_up_through_the_aps_buffer() {
 struct Counted(Rc<Cell<usize>>);
 
 impl interface::Service for Counted {
-    fn handle(&mut self, packet_type: u8, bytes: &[u8]) -> Result<(i32, Vec<u8>), &'static str> {
+    fn handle(&mut self, packet_type: u8, bytes: &[u8]) -> Result<(i32, Vec<u8>)> {
         assert_eq!(packet_type, 0xc0);
         self.0.set(self.0.get() + 1);
         Ok((0, bytes.iter().rev().copied().collect()))
@@ -131,8 +133,8 @@ fn command_entry(interface: u16, body: &[u8]) -> Vec<u8> {
 
 struct Initiator(Rc<Cell<u64>>, Rc<Cell<usize>>);
 impl interface::Service for Initiator {
-    fn handle(&mut self, _: u8, _: &[u8]) -> Result<(i32, Vec<u8>), &'static str> {
-        Err("no incoming commands")
+    fn handle(&mut self, _: u8, _: &[u8]) -> Result<(i32, Vec<u8>)> {
+        Err(refuse!("no incoming commands"))
     }
     fn transport_closed(&mut self) {}
     fn pending(&self) -> bool {
@@ -147,7 +149,7 @@ impl interface::Service for Initiator {
             reply_bytes: 4,
         })
     }
-    fn complete(&mut self, cookie: u64, status: i32, payload: Vec<u8>) -> Result<(), &'static str> {
+    fn complete(&mut self, cookie: u64, status: i32, payload: Vec<u8>) -> Result<()> {
         assert_eq!((cookie, status, payload.as_slice()), (1, 0, &[4][..]));
         self.1.set(self.1.get() + 1);
         Ok(())
@@ -209,8 +211,8 @@ struct Cancelling {
     effects: Rc<core::cell::RefCell<Vec<u64>>>,
 }
 impl interface::Service for Cancelling {
-    fn handle(&mut self, _: u8, _: &[u8]) -> Result<(i32, Vec<u8>), &'static str> {
-        Err("no incoming commands")
+    fn handle(&mut self, _: u8, _: &[u8]) -> Result<(i32, Vec<u8>)> {
+        Err(refuse!("no incoming commands"))
     }
     fn transport_closed(&mut self) {
         self.effects.borrow_mut().push(100 + self.cookie);
@@ -226,12 +228,12 @@ impl interface::Service for Cancelling {
             reply_bytes: 4,
         })
     }
-    fn complete(&mut self, cookie: u64, status: i32, bytes: Vec<u8>) -> Result<(), &'static str> {
+    fn complete(&mut self, cookie: u64, status: i32, bytes: Vec<u8>) -> Result<()> {
         assert_eq!(cookie, self.cookie);
         assert_eq!(status as u32, 0xe000_02d7);
         assert!(bytes.is_empty());
         if self.cookie == 2 && self.fail.replace(false) {
-            return Err("cancellation temporarily unavailable");
+            return Err(refuse!("cancellation temporarily unavailable"));
         }
         self.effects.borrow_mut().push(cookie);
         Ok(())
@@ -277,7 +279,7 @@ fn shutdown_retries_cancellation_progress_before_closing_any_session() {
     out.clear();
     assert_eq!(
         afk.receive(message(SHUTDOWN, 0), &mut out),
-        Err("cancellation temporarily unavailable")
+        Err(refuse!("cancellation temporarily unavailable"))
     );
     assert!(afk.started() && out.is_empty());
     assert_eq!(&*effects.borrow(), &[1]); // Earlier completion stays settled.
@@ -301,15 +303,15 @@ struct Fault<'a> {
 }
 
 impl Bus for Fault<'_> {
-    fn read(&mut self, address: u64, bytes: &mut [u8]) -> Result<(), &'static str> {
+    fn read(&mut self, address: u64, bytes: &mut [u8]) -> Result<()> {
         if self.read == Some(address) {
-            return Err("injected DMA read fault");
+            return Err(refuse!("injected DMA read fault"));
         }
         self.memory.read(address, bytes)
     }
-    fn write(&mut self, address: u64, bytes: &[u8]) -> Result<(), &'static str> {
+    fn write(&mut self, address: u64, bytes: &[u8]) -> Result<()> {
         if self.write == Some(address) {
-            return Err("injected DMA write fault");
+            return Err(refuse!("injected DMA write fault"));
         }
         self.memory.write(address, bytes)
     }
@@ -349,7 +351,7 @@ fn completed_service_effects_survive_each_response_dma_and_pointer_fault() {
                 },
                 &mut out
             ),
-            Err("injected DMA write fault")
+            Err(refuse!("injected DMA write fault"))
         );
         assert_eq!(calls.get(), 1);
         assert!(afk.pending() && !afk.retained_idle());
@@ -726,7 +728,7 @@ fn an_unknown_internal_command_preserves_the_input_entry() {
     afk.receive(message(RECV, 0), &mut out).unwrap();
     assert_eq!(
         afk.dma(&mut memory, &mut out),
-        Err("DCP AFKEPV2 unknown internal command")
+        Err(refuse!("DCP AFKEPV2 unknown internal command"))
     );
     assert_eq!(read_word(&mut memory, WINDOW + 0x4000 + RPTR), 0);
     assert_eq!(read_word(&mut memory, WINDOW + 0x6000 + WPTR), 0);
@@ -776,7 +778,7 @@ fn malformed_ring_headers_refuse_before_reading_entries() {
     afk.receive(message(RECV, 0), &mut out).unwrap();
     assert_eq!(
         afk.dma(&mut memory, &mut out),
-        Err("DCP AFK ring pointer lies outside the ring")
+        Err(refuse!("DCP AFK ring pointer lies outside the ring"))
     );
     memory
         .write(WINDOW + 0x4000 + WPTR, &0u32.to_le_bytes())
@@ -787,7 +789,7 @@ fn malformed_ring_headers_refuse_before_reading_entries() {
     afk.receive(message(RECV, 0), &mut out).unwrap();
     assert_eq!(
         afk.dma(&mut memory, &mut out),
-        Err("DCP AFK ring header size or format changed")
+        Err(refuse!("DCP AFK ring header size or format changed"))
     );
 }
 

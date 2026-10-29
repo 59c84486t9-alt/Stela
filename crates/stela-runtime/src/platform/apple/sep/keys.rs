@@ -5,7 +5,9 @@
 //! neither. Stela requires explicit persistent provisioning and separates the
 //! domains with HMAC-SHA256. docs/research/sep.md defines this Stela policy.
 //! This primitive grants no Image4 trust, AKS wrapping format or keybag state.
+use crate::Result;
 use hmac::{Hmac, Mac};
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use zeroize::Zeroizing;
 
@@ -35,14 +37,18 @@ impl Roots {
         machine: [u8; ROOT_BYTES],
         group: [u8; ROOT_BYTES],
         ecid: u64,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let machine = Zeroizing::new(machine);
         let group = Zeroizing::new(group);
         if machine.iter().all(|&b| b == 0) || group.iter().all(|&b| b == 0) {
-            return Err("SEP roots require nonzero externally provisioned secrets");
+            return Err(refuse!(
+                "SEP roots require nonzero externally provisioned secrets"
+            ));
         }
         if ecid == 0 {
-            return Err("SEP roots require a nonzero ECID from /chosen unique-chip-id");
+            return Err(refuse!(
+                "SEP roots require a nonzero ECID from /chosen unique-chip-id"
+            ));
         }
         Ok(Self {
             machine,
@@ -57,12 +63,12 @@ impl Roots {
     }
 
     /// A machine-bound key; `context` is a public, length-delimited purpose.
-    pub fn uid(&self, context: &[u8]) -> Result<Zeroizing<[u8; ROOT_BYTES]>, &'static str> {
+    pub fn uid(&self, context: &[u8]) -> Result<Zeroizing<[u8; ROOT_BYTES]>> {
         derive(&self.machine, UID_DOMAIN, self.ecid, context)
     }
 
     /// A group-bound key. Sharing the group root never shares UID keys.
-    pub fn gid(&self, context: &[u8]) -> Result<Zeroizing<[u8; ROOT_BYTES]>, &'static str> {
+    pub fn gid(&self, context: &[u8]) -> Result<Zeroizing<[u8; ROOT_BYTES]>> {
         derive(&self.group, GID_DOMAIN, self.ecid, context)
     }
 }
@@ -72,9 +78,9 @@ fn derive(
     domain: &[u8],
     ecid: u64,
     context: &[u8],
-) -> Result<Zeroizing<[u8; ROOT_BYTES]>, &'static str> {
+) -> Result<Zeroizing<[u8; ROOT_BYTES]>> {
     if context.len() > MAX_CONTEXT_BYTES {
-        return Err("SEP key-derivation context is too large");
+        return Err(refuse!("SEP key-derivation context is too large"));
     }
     let mut mac = Hmac::<Sha256>::new_from_slice(root).expect("HMAC accepts 256-bit keys");
     mac.update(domain);

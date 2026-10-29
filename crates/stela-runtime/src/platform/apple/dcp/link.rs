@@ -60,6 +60,8 @@
 //! a little-endian word, the input length, the output length), the input,
 //! then room for the output, which the callee writes in place. The length
 //! in the message word is exactly `12 + input + output`.
+use crate::Result;
+use stela_contracts::refuse;
 
 /// The RTKit endpoint of the IOMFB link service (DCPEXTEndpoint24,
 /// personality `AppleDCPLinkServiceSoC`).
@@ -180,7 +182,7 @@ pub struct Rpc {
 
 impl Word {
     /// Decode a word, or say why it is not one the link library sends.
-    pub fn decode(word: u64) -> Result<Self, &'static str> {
+    pub fn decode(word: u64) -> Result<Self> {
         let subtype = (word >> SUBTYPE_SHIFT) & 3;
         match (word & TYPE, subtype) {
             (0, 0) => Ok(Word::Hello {
@@ -189,7 +191,7 @@ impl Word {
             (0, 1) => Ok(Word::Region {
                 dva: word >> VALUE_SHIFT,
             }),
-            (0, _) => Err("DCP link set-up message has an unknown subtype"),
+            (0, _) => Err(refuse!("DCP link set-up message has an unknown subtype")),
             (1, _) => Ok(Word::Ready {
                 crc: (word >> VALUE_SHIFT) as u32,
                 alignment: (word >> TOKEN_SHIFT) as u16,
@@ -197,7 +199,7 @@ impl Word {
             (2, 0 | 1) => {
                 let index = ((word & INDEX) >> INDEX_SHIFT) as u8;
                 if index >= STREAMS {
-                    return Err("DCP link message names a stream past the fourth");
+                    return Err(refuse!("DCP link message names a stream past the fourth"));
                 }
                 Ok(Word::Rpc(Rpc {
                     answer: subtype == 1,
@@ -215,8 +217,10 @@ impl Word {
                     token: (word >> TOKEN_SHIFT) as u16,
                 }))
             }
-            (2, _) => Err("DCP link RPC message has an unknown subtype"),
-            _ => Err("DCP link message type 3 is not one the link library sends"),
+            (2, _) => Err(refuse!("DCP link RPC message has an unknown subtype")),
+            _ => Err(refuse!(
+                "DCP link message type 3 is not one the link library sends"
+            )),
         }
     }
 
@@ -274,14 +278,16 @@ pub struct RegionHeader {
 impl RegionHeader {
     pub const BYTES: usize = 16;
 
-    pub fn parse(bytes: &[u8; Self::BYTES]) -> Result<Self, &'static str> {
+    pub fn parse(bytes: &[u8; Self::BYTES]) -> Result<Self> {
         let header = Self {
             heap: u64::from_le_bytes(bytes[0..8].try_into().expect("8 bytes")),
             heap_bytes: u32::from_le_bytes(bytes[8..12].try_into().expect("4 bytes")),
             version: u32::from_le_bytes(bytes[12..16].try_into().expect("4 bytes")),
         };
         if header.version != 4 {
-            return Err("DCP link region header is not link_state_init's version 4");
+            return Err(refuse!(
+                "DCP link region header is not link_state_init's version 4"
+            ));
         }
         Ok(header)
     }

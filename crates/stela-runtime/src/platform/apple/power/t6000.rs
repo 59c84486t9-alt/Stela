@@ -15,8 +15,11 @@
 //! micro-PC, cold state or unsupported native operation is manufactured.
 //! A kept pause preserves every input, observation and chronological prefix
 //! across all mapped views.
+use crate::Result;
 use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
@@ -137,12 +140,14 @@ struct State {
     clock_edge_at: Option<u64>,
 }
 impl State {
-    fn accessible(&self) -> Result<(), &'static str> {
+    fn accessible(&self) -> Result<()> {
         if !self.lifecycle.powered || !self.lifecycle.clocked {
-            return Err("T6000 power access while its supplied rail/clock is paused");
+            return Err(refuse!(
+                "T6000 power access while its supplied rail/clock is paused"
+            ));
         }
         if self.lifecycle.reset {
-            return Err("T6000 power access while reset is asserted");
+            return Err(refuse!("T6000 power access while reset is asserted"));
         }
         Ok(())
     }
@@ -313,21 +318,23 @@ pub struct View {
     bank: Bank,
 }
 impl View {
-    fn check(&self, offset: u64, width: Width) -> Result<Observation, &'static str> {
+    fn check(&self, offset: u64, width: Width) -> Result<Observation> {
         let state = self.controller.0.borrow();
         state.accessible()?;
         if width != Width::Word {
-            return Err("T6000 power request requires a 32-bit access");
+            return Err(refuse!("T6000 power request requires a 32-bit access"));
         }
         state
             .words
             .get(&(self.instance, self.bank, offset))
             .copied()
-            .ok_or("T6000 power register is outside supplied actual board geometry")
+            .ok_or(refuse!(
+                "T6000 power register is outside supplied actual board geometry"
+            ))
     }
 }
 impl Lifecycle for View {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         if let Some(clock) = self
             .controller
             .0
@@ -339,9 +346,9 @@ impl Lifecycle for View {
             clock.cycles().map_err(clock::Error::reason)?;
         }
         if proposed.reset || (!proposed.powered && !proposed.retention) {
-            return Err(
-                "T6000 power physical reset/nonretained loss and native cancellation are unqualified",
-            );
+            return Err(refuse!(
+                "T6000 power physical reset/nonretained loss and native cancellation are unqualified"
+            ));
         }
         Ok(())
     }
@@ -361,12 +368,12 @@ impl MmioDevice for View {
         NAME
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         let word = self.check(offset, width).map_err(fail)?;
         if word.known != u32::MAX {
-            return Err(fail(
-                "T6000 power register readback/native progression is unknown",
-            ));
+            return Err(fail(refuse!(
+                "T6000 power register readback/native progression is unknown"
+            )));
         }
         Ok(u64::from(word.value))
     }
@@ -377,7 +384,7 @@ impl MmioDevice for View {
         value: u64,
         _: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         let old = self.check(offset, width).map_err(fail)?;
         let value = value as u32;
         let mut state = self.controller.0.borrow_mut();
@@ -388,9 +395,9 @@ impl MmioDevice for View {
                 || old.known & preserve != preserve
                 || (value ^ old.value) & preserve != 0
             {
-                return Err(fail(
-                    "T6000 ISP reference clock update must preserve captured other fields and set updatebit31",
-                ));
+                return Err(fail(refuse!(
+                    "T6000 ISP reference clock update must preserve captured other fields and set updatebit31"
+                )));
             }
             (
                 RequestKind::IspReferenceClock {
@@ -410,9 +417,9 @@ impl MmioDevice for View {
                 || port >= 4
                 || state.geometry[usize::from(self.instance)].cio_ports & (1 << port) == 0
             {
-                return Err(fail(
-                    "T6000 CIO only qualifies one admitted port request bit",
-                ));
+                return Err(fail(refuse!(
+                    "T6000 CIO only qualifies one admitted port request bit"
+                )));
             }
             // Without the Stela-native execution owner, the AP request
             // and wait alone establish no response or low-bit readback. Keep
@@ -425,9 +432,9 @@ impl MmioDevice for View {
                     || native::View::pending(&state)
                     || !native.accepts_cio(&state.requests)
                 {
-                    return Err(fail(
-                        "T6000 CIO native engine requires known idle/activated command state and exclusive pending ownership",
-                    ));
+                    return Err(fail(refuse!(
+                        "T6000 CIO native engine requires known idle/activated command state and exclusive pending ownership"
+                    )));
                 }
                 // Stela engine command/busy state derives from this real
                 // accepted transaction. Native footer/end retirement, not a
@@ -442,9 +449,9 @@ impl MmioDevice for View {
             (RequestKind::Cio { port }, next)
         } else if offset >= CPM_BASE {
             if old.known != u32::MAX || (value ^ old.value) & !CPM_ENABLE != 0 {
-                return Err(fail(
-                    "T6000 CPM gating must preserve all captured non-enable fields",
-                ));
+                return Err(fail(refuse!(
+                    "T6000 CPM gating must preserve all captured non-enable fields"
+                )));
             }
             (
                 RequestKind::AutomaticGating {
@@ -462,9 +469,9 @@ impl MmioDevice for View {
                 || old.known & preserve != preserve
                 || (value ^ old.value) & preserve != 0
             {
-                return Err(fail(
-                    "T6000 GPCE request fields or uncaptured preserved fields are unqualified",
-                ));
+                return Err(fail(refuse!(
+                    "T6000 GPCE request fields or uncaptured preserved fields are unqualified"
+                )));
             }
             (
                 RequestKind::Complex {
@@ -481,7 +488,7 @@ impl MmioDevice for View {
         let serial = state
             .serial
             .checked_add(1)
-            .ok_or_else(|| fail("T6000 request serial exhausted"))?;
+            .ok_or_else(|| fail(refuse!("T6000 request serial exhausted")))?;
         state.words.insert((self.instance, self.bank, offset), next);
         state.requests.push(Request {
             serial,

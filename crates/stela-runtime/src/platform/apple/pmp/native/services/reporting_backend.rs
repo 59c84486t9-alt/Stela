@@ -1,8 +1,10 @@
 //! Endpoint4 resources and independently dispatched publication ACK.
 use super::*;
+use crate::Result;
 use alloc::{collections::VecDeque, vec::Vec};
 use core::sync::atomic::{Ordering, fence};
 use reporting::resources::{self, WaitKey, Wake};
+use stela_contracts::refuse;
 struct Armed {
     source: WaitKey,
     key: scheduler::Key,
@@ -58,9 +60,11 @@ impl Shared {
     pub fn started(&self) -> bool {
         self.mailbox.borrow().started()
     }
-    fn wake(&self) -> Result<(), &'static str> {
+    fn wake(&self) -> Result<()> {
         let works = self.work.borrow();
-        let work = works.as_ref().ok_or("IOReporting actual Work is absent")?;
+        let work = works
+            .as_ref()
+            .ok_or(refuse!("IOReporting actual Work is absent"))?;
         runtime(&self.runtime)?.wake(work).map_err(schedule_error)
     }
 }
@@ -127,7 +131,9 @@ impl resources::Resources for Resources {
         _: &mut Access<'_>,
     ) -> Completion<()> {
         if endpoint != reporting::wire::ENDPOINT {
-            return Completion::Refused("IOReporting send endpoint differs from bound slot");
+            return Completion::Refused(refuse!(
+                "IOReporting send endpoint differs from bound slot"
+            ));
         }
         if !self.shared.started() {
             return Completion::Busy { deadline: None };
@@ -171,7 +177,9 @@ impl resources::Resources for Resources {
             let Some(armed) = waits.last_mut() else {
                 return Completion::Retired {
                     value: (),
-                    refusal: Some("IOReporting REGISTERED send has no armed source key"),
+                    refusal: Some(refuse!(
+                        "IOReporting REGISTERED send has no armed source key"
+                    )),
                 };
             };
             if !armed.notified {
@@ -219,7 +227,7 @@ impl resources::Resources for Resources {
             .iter()
             .any(|w| w.source.same_waiter(key))
         {
-            return Completion::Refused("IOReporting publication waiter already armed");
+            return Completion::Refused(refuse!("IOReporting publication waiter already armed"));
         }
         let r = match runtime(&self.shared.runtime) {
             Ok(r) => r,
@@ -244,7 +252,7 @@ impl resources::Resources for Resources {
     ) -> Completion<()> {
         let mut waits = self.shared.waits.borrow_mut();
         let Some(index) = waits.iter().position(|w| w.source.same_waiter(key)) else {
-            return Completion::Refused("IOReporting actual publication wait absent");
+            return Completion::Refused(refuse!("IOReporting actual publication wait absent"));
         };
         if waits[index].notified && waits[index].wait.is_none() {
             waits.remove(index);
@@ -294,7 +302,7 @@ impl Wake for ReceiverWake {
     fn publication_ack(&mut self, key: &WaitKey, _: &mut Access<'_>) -> Completion<()> {
         let mut waits = self.shared.waits.borrow_mut();
         let Some(armed) = waits.iter_mut().find(|w| w.source.same_waiter(key)) else {
-            return Completion::Refused("IOReporting ACK has no actual keyed waiter");
+            return Completion::Refused(refuse!("IOReporting ACK has no actual keyed waiter"));
         };
         match runtime(&self.shared.runtime)
             .and_then(|r| r.notify(&armed.key).map_err(schedule_error))
@@ -388,7 +396,7 @@ impl scheduler::Callback for Worker {
             .work
             .borrow()
             .as_ref()
-            .ok_or("IOReporting actual Work lost")
+            .ok_or(refuse!("IOReporting actual Work lost"))
             .and_then(|w| w.validate_dispatch(i).map_err(schedule_error))
         {
             return Completion::Refused(e);
@@ -400,7 +408,9 @@ impl scheduler::Callback for Worker {
         let mut db = match cell.try_borrow_mut() {
             Ok(v) => v,
             Err(_) => {
-                return Completion::Refused("IOReporting owner is executing another native caller");
+                return Completion::Refused(refuse!(
+                    "IOReporting owner is executing another native caller"
+                ));
             }
         };
         if !self.refreshing {
@@ -439,10 +449,12 @@ impl scheduler::Callback for Worker {
                 }
             }
             Ok(reporting::Progress::Busy { deadline }) => Completion::Busy { deadline },
-            Ok(reporting::Progress::Idle) => {
-                Completion::Refused("IOReporting refresh input retired without refresh job")
-            }
-            Ok(_) => Completion::Refused("IOReporting queued worker reached another caller's job"),
+            Ok(reporting::Progress::Idle) => Completion::Refused(refuse!(
+                "IOReporting refresh input retired without refresh job"
+            )),
+            Ok(_) => Completion::Refused(refuse!(
+                "IOReporting queued worker reached another caller's job"
+            )),
             Err(e) => Completion::Refused(e),
         }
     }
@@ -524,7 +536,7 @@ impl scheduler::Callback for Initialize {
                 done(0)
             }
             Ok(reporting::Progress::Busy { deadline }) => Completion::Busy { deadline },
-            Ok(_) => Completion::Refused("IOReporting source enter returned wrong phase"),
+            Ok(_) => Completion::Refused(refuse!("IOReporting source enter returned wrong phase")),
             Err(e) => Completion::Refused(e),
         }
     }

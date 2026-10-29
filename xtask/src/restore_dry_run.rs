@@ -118,7 +118,7 @@ type Reader = Extent<ArchiveFile>;
 
 fn reason(e: &Error) -> String {
     match e {
-        Error::Refused { reason, .. } => reason.clone(),
+        Error::Refused { reason, .. } => reason.to_string(),
         e => format!("{e}"),
     }
 }

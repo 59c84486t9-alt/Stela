@@ -244,7 +244,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 detail: match error {
                     DeviceError::NoDevice => "no device model".into(),
                     DeviceError::Refused(detail) | DeviceError::TransferRefused(detail) => {
-                        detail.clone()
+                        detail.to_string()
                     }
                 },
             }

@@ -112,11 +112,10 @@ impl Check {
                 .join(stela_loader::boot_bundle::DEVICE_TREE_FILE),
         )
         .with_context(|| format!("{} has no DeviceTree", self.bundle.display()))?;
-        let mut board = stela_soc_data::board::board(&tree)
-            .map_err(|reason| anyhow::anyhow!("the engine refuses this board: {reason}"))?;
-        let mount = mount(&self.bundle, &tree, &mut board).map_err(|reason| {
-            anyhow::anyhow!("the engine refuses to mount this board: {reason}")
-        })?;
+        let mut board =
+            stela_soc_data::board::board(&tree).context("the engine refuses this board")?;
+        let mount = mount(&self.bundle, &tree, &mut board)
+            .context("the engine refuses to mount this board")?;
         let hex = |value: u64| format!("{value:#x}");
         let report = serde_json::json!({
             "chip": board.cpus.chip.name(),
@@ -159,7 +158,7 @@ fn mount(
     bundle: &std::path::Path,
     tree: &[u8],
     board: &mut stela_soc_data::board::Board,
-) -> std::result::Result<serde_json::Value, String> {
+) -> Result<serde_json::Value> {
     use stela_runtime::machine::{
         apple::{ConsoleBusy, ConsoleSink, Scanout, ScanoutFormat, ScanoutMode, UsbCables},
         mount,
@@ -215,14 +214,14 @@ fn mount(
                 format: ScanoutFormat::Bgra8888,
             }
         }
-        fn present(&mut self, _: &[u8]) -> std::result::Result<(), &'static str> {
+        fn present(&mut self, _: &[u8]) -> std::result::Result<(), stela_contracts::Refusal> {
             Ok(())
         }
     }
     let manifest = std::fs::read(bundle.join("bundle.json"))
-        .map_err(|error| format!("{} has no manifest: {error}", bundle.display()))?;
+        .with_context(|| format!("{} has no manifest", bundle.display()))?;
     let manifest = stela_formats::boot_bundle::Manifest::parse(&manifest)
-        .map_err(|error| format!("bundle manifest: {error:?}"))?;
+        .map_err(|error| anyhow::anyhow!("bundle manifest: {error:?}"))?;
     // A bundle prepared for no particular machine has no ECID; the SEP
     // takes a stand-in one, as the SSD takes a stand-in disk.
     if let Some(sep) = board.sep.as_mut() {
@@ -240,7 +239,7 @@ fn mount(
         .filter(|file| file.bytes <= 16 << 20)
         .map(|file| Ok((file.name.clone(), std::fs::read(bundle.join(&file.name))?)))
         .collect::<std::io::Result<Vec<_>>>()
-        .map_err(|error| format!("bundle file: {error}"))?;
+        .context("bundle file")?;
     let firmware = |name: &str| {
         files
             .iter()
@@ -292,7 +291,7 @@ fn mount(
                 .as_ref()
                 .map(|target| stela_formats::builds::find(&target.product_build))
                 .transpose()
-                .map_err(|error| error.to_string())?,
+                .map_err(anyhow::Error::msg)?,
         },
         &mut |arguments| log.push(arguments.to_string().trim_end().to_owned()),
     )?;

@@ -1,6 +1,7 @@
 use super::super::generation::{self, GPUS};
 use super::*;
 use stela_contracts::interrupt::InterruptLatch;
+use stela_contracts::refuse;
 
 const MMU_TTBAT: u64 = 0xd0_802c;
 const MMU_TTBA_INVALIDATE: u64 = 0xd0_8030;
@@ -108,6 +109,7 @@ fn native_firmware_pio_walks_the_uat_and_shares_the_ap_register() {
         assert!(
             access_native(&mut sgx, &mut ram, Some(4))
                 .unwrap_err()
+                .to_string()
                 .contains("UAT")
         );
         assert_eq!(read(&mut sgx, GATING_CONTROL), Ok(2));
@@ -115,6 +117,7 @@ fn native_firmware_pio_walks_the_uat_and_shares_the_ap_register() {
         assert!(
             access_native(&mut sgx, &mut ram, Some(4))
                 .unwrap_err()
+                .to_string()
                 .contains("disagrees")
         );
         assert_eq!(read(&mut sgx, GATING_CONTROL), Ok(2));
@@ -135,6 +138,7 @@ fn native_firmware_pio_walks_the_uat_and_shares_the_ap_register() {
         assert!(
             access_native(&mut sgx, &mut ram, Some(0))
                 .unwrap_err()
+                .to_string()
                 .contains("PMGR")
         );
         let running = LifecycleState {
@@ -176,16 +180,18 @@ fn native_firmware_pio_walks_the_uat_and_shares_the_ap_register() {
             power
                 .check_reset()
                 .unwrap_err()
+                .to_string()
                 .contains("restore ownership")
         );
         assert!(
             matches!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Gpu),
-                Err(stela_contracts::dma::DmaError::Unsupported(reason)) if reason.contains("Fender sleep"))
+                Err(stela_contracts::dma::DmaError::Unsupported(reason)) if reason.to_string().contains("Fender sleep"))
         );
         assert!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Firmware).is_ok());
         assert!(
             native_write(&mut sgx, &mut ram, &mut access, 0x2020, 1)
                 .unwrap_err()
+                .to_string()
                 .contains("remains asserted")
         );
         assert!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Gpu).is_err());
@@ -310,8 +316,8 @@ fn physical_gates_inhibit_the_mmu_and_preserve_boot_roots_until_released() {
                 &mut access
             ),
             Err(stela_contracts::dma::DmaError::Unsupported(
-                "SGX DMA while PMGR inhibits execution"
-            ))
+                reason
+            )) if reason == refuse!("SGX DMA while PMGR inhibits execution")
         ));
         assert_eq!(sgx.uat().ttbat(), Some(0x8_0000_0000));
         assert_eq!(sgx.uat().shared_l2(), Some(0x8_0000_4000));

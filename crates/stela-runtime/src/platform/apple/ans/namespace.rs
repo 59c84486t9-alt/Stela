@@ -19,7 +19,9 @@
 //! The host's bytes are never zeroed, which would write the whole medium.
 //! docs/research/ans2.md owns the design (`Formatting the medium`).
 use super::host::HostDisk;
+use crate::Result;
 use alloc::{collections::BTreeMap, vec::Vec};
+use stela_contracts::refuse;
 use stela_drivers::block::BlockDevice;
 #[cfg(test)]
 use stela_drivers::block::BlockError;
@@ -116,38 +118,42 @@ impl Medium {
     pub fn new(
         device: alloc::boxed::Box<dyn BlockDevice>,
         descriptions: &[Description],
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let id = device.identity();
         if !matches!(id.block_size, 512 | BLOCK_BYTES) {
-            return Err("ANS backing block size must be 512 or 4096 bytes");
+            return Err(refuse!("ANS backing block size must be 512 or 4096 bytes"));
         }
         if descriptions.is_empty() || descriptions.len() > 255 {
-            return Err("ANS requires one to 255 namespaces");
+            return Err(refuse!("ANS requires one to 255 namespaces"));
         }
         let ratio = u64::from(BLOCK_BYTES / id.block_size);
         if !id.blocks.is_multiple_of(ratio) {
-            return Err("ANS partition capacity must be a multiple of 4096 bytes");
+            return Err(refuse!(
+                "ANS partition capacity must be a multiple of 4096 bytes"
+            ));
         }
         let total = id.blocks / ratio;
         let mut fixed = 0u64;
         let mut grow = 0;
         for (i, description) in descriptions.iter().enumerate() {
             if description.id as usize != i + 1 || description.kind >= 16 {
-                return Err("ANS namespace IDs/types are invalid");
+                return Err(refuse!("ANS namespace IDs/types are invalid"));
             }
             if description.blocks == 0 {
                 grow += 1;
             }
             fixed = fixed
                 .checked_add(u64::from(description.blocks))
-                .ok_or("ANS namespace size overflow")?;
+                .ok_or(refuse!("ANS namespace size overflow"))?;
         }
         if grow > 1
             || fixed > total
             || (grow == 1 && fixed == total)
             || (grow == 0 && fixed != total)
         {
-            return Err("ANS namespace sizes do not fit the selected partition");
+            return Err(refuse!(
+                "ANS namespace sizes do not fit the selected partition"
+            ));
         }
         let mut first = 0;
         let namespaces = descriptions

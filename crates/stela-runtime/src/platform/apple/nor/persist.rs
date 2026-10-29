@@ -8,52 +8,60 @@
 //! supplies an empty proxy until the guest saves. Committed changes are
 //! stored by erase sector.
 use super::{CAPACITY, Image, SECTOR_SIZE};
-use alloc::{format, string::String, vec, vec::Vec};
+use crate::Result;
+use alloc::{vec, vec::Vec};
+use stela_contracts::refuse;
 use stela_drivers::block::{BlockDevice, Identity, Request};
 
 /// The image `device` holds, and whether it was blank and has just been
 /// initialized.
-pub fn load(device: &mut dyn BlockDevice) -> Result<(Image, bool), String> {
+pub fn load(device: &mut dyn BlockDevice) -> Result<(Image, bool)> {
     let block_size = sector_blocks(device.identity())?.1;
     let mut bytes = vec![0; CAPACITY];
     device
         .read(0, &mut bytes)
-        .map_err(|error| format!("NOR partition read: {error}"))?;
+        .map_err(|error| refuse!("NOR partition read: {error}", ?error))?;
     if bytes.iter().all(|&b| b == 0) {
         let image = Image::fresh();
         device
             .write(0, image.bytes())
             .and_then(|()| device.flush())
-            .map_err(|error| format!("NOR partition initialization: {error}"))?;
+            .map_err(|error| refuse!("NOR partition initialization: {error}", ?error))?;
         return Ok((image, true));
     }
-    let image = Image::from_bytes(bytes).map_err(String::from)?;
+    let image = Image::from_bytes(bytes)?;
     image.boot_bank().map_err(|_| {
-        format!(
+        refuse!(
             "the NOR partition ({block_size}-byte blocks) is neither blank nor an identifiable \
-             NOR image"
+             NOR image",
+            block_size
         )
     })?;
     Ok((image, false))
 }
 
 /// Store the sector at `offset`, durably.
-pub fn store(device: &mut dyn BlockDevice, offset: usize, sector: &[u8]) -> Result<(), String> {
+pub fn store(device: &mut dyn BlockDevice, offset: usize, sector: &[u8]) -> Result<()> {
     let block_size = device.identity().block_size;
     request(device.identity(), offset, sector.to_vec())?
         .run(device)
         .map(drop)
         .map_err(|error| {
-            format!("NOR partition write at {offset:#x} ({block_size}-byte blocks): {error}")
+            refuse!(
+                "NOR partition write at {offset:#x} ({block_size}-byte blocks): {error}",
+                offset,
+                block_size,
+                ?error
+            )
         })
 }
 
 /// The durable write that stores `sector`, at `offset`, on a device of
 /// `identity`.
-pub fn request(identity: &Identity, offset: usize, sector: Vec<u8>) -> Result<Request, String> {
+pub fn request(identity: &Identity, offset: usize, sector: Vec<u8>) -> Result<Request> {
     let per_sector = sector_blocks(identity)?.0;
     if !offset.is_multiple_of(SECTOR_SIZE) || sector.len() != SECTOR_SIZE || offset >= CAPACITY {
-        return Err("a NOR store is one whole sector inside the image".into());
+        return Err(refuse!("a NOR store is one whole sector inside the image"));
     }
     Ok(Request::Write {
         lba: (offset / SECTOR_SIZE) as u64 * per_sector,
@@ -64,12 +72,8 @@ pub fn request(identity: &Identity, offset: usize, sector: Vec<u8>) -> Result<Re
 
 /// Save `bank` into `image`'s next NVRAM bank ([`Image::save_bank`]) and
 /// store every sector it changed; returns the bank written.
-pub fn save_bank(
-    device: &mut dyn BlockDevice,
-    image: &mut Image,
-    bank: &[u8],
-) -> Result<u32, String> {
-    let (written, sectors) = image.save_bank(bank).map_err(String::from)?;
+pub fn save_bank(device: &mut dyn BlockDevice, image: &mut Image, bank: &[u8]) -> Result<u32> {
+    let (written, sectors) = image.save_bank(bank)?;
     for offset in sectors {
         let sector = image.bytes()[offset..offset + SECTOR_SIZE].to_vec();
         store(device, offset, &sector)?;
@@ -79,15 +83,18 @@ pub fn save_bank(
 
 /// Blocks per sector and the block size; the partition must hold the image
 /// in whole sectors.
-fn sector_blocks(identity: &Identity) -> Result<(u64, u32), String> {
+fn sector_blocks(identity: &Identity) -> Result<(u64, u32)> {
     let block_size = identity.block_size;
     if block_size == 0 || !SECTOR_SIZE.is_multiple_of(block_size as usize) {
-        return Err(format!(
-            "NOR partition block size {block_size} does not divide a sector"
+        return Err(refuse!(
+            "NOR partition block size {block_size} does not divide a sector",
+            block_size
         ));
     }
     if identity.read_only || identity.blocks * u64::from(block_size) < CAPACITY as u64 {
-        return Err("the NOR partition is read-only or smaller than the 8 MiB image".into());
+        return Err(refuse!(
+            "the NOR partition is read-only or smaller than the 8 MiB image"
+        ));
     }
     Ok(((SECTOR_SIZE / block_size as usize) as u64, block_size))
 }

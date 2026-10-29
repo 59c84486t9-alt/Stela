@@ -43,13 +43,16 @@
 //!   must admit kept stop/resume explicitly; unsupported reset and
 //!   power-loss flows still refuse. Mailbox controls, staged payload and
 //!   queued responses survive a halt.
+use crate::Result;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeSet, VecDeque};
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::any::Any;
+use stela_contracts::Refusal;
 use stela_contracts::dma::Port;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
     stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
@@ -111,36 +114,38 @@ pub trait Firmware: Any {
     /// numerical address relation or native protocol peer is not that proof.
     /// ASC checks the result at handoff and before every start/resume; the
     /// same backend must keep the owners through its execution/use boundary.
-    fn fetch_entry(&mut self, _iop: u64) -> Result<EntryFetch, &'static str> {
-        Err("original coprocessor instruction fetch ownership is not modeled")
+    fn fetch_entry(&mut self, _iop: u64) -> Result<EntryFetch> {
+        Err(refuse!(
+            "original coprocessor instruction fetch ownership is not modeled"
+        ))
     }
 
     /// Validate loss of native volatile firmware state. Physical reset is
     /// distinct from an RTKit sleep request: no mailbox ACK is generated.
-    fn check_reset(&self) -> Result<(), &'static str> {
-        Err("coprocessor volatile-state reset is not modeled")
+    fn check_reset(&self) -> Result<()> {
+        Err(refuse!("coprocessor volatile-state reset is not modeled"))
     }
     /// Cold reset after `check_reset` succeeded, without starting execution.
-    fn reset(&mut self) -> Result<(), &'static str> {
-        Err("coprocessor volatile-state reset is not modeled")
+    fn reset(&mut self) -> Result<()> {
+        Err(refuse!("coprocessor volatile-state reset is not modeled"))
     }
     /// The coprocessor starts running; messages it sends go to `outbox`.
     /// Start/resume/receive output is provisional until Ok; a refusal must
     /// keep retryable native state and must not commit its success ACK.
-    fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str>;
+    fn start(&mut self, outbox: &mut Vec<Message>) -> Result<()>;
     /// Halt CPU execution while keeping firmware state. Validate before
     /// changing state: a refusal leaves RUN and the mailbox untouched.
     /// Autonomous hardware work must be settled or kept by its owner.
-    fn stop(&mut self) -> Result<(), &'static str> {
-        Err("firmware retained CPU stop is not modeled")
+    fn stop(&mut self) -> Result<()> {
+        Err(refuse!("firmware retained CPU stop is not modeled"))
     }
     /// Resume after an accepted halt, preserving protocol state.
     /// This is distinct from cold `start`; refusal leaves the CPU halted.
-    fn resume(&mut self, _outbox: &mut Vec<Message>) -> Result<(), &'static str> {
-        Err("firmware retained CPU resume is not modeled")
+    fn resume(&mut self, _outbox: &mut Vec<Message>) -> Result<()> {
+        Err(refuse!("firmware retained CPU resume is not modeled"))
     }
     /// The AP sent `message`.
-    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str>;
+    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<()>;
     /// The coprocessor has bus-master work queued (DMA it began when it
     /// received a message), to run before the AP's next mailbox access. The
     /// default coprocessor masters no memory.
@@ -150,17 +155,13 @@ pub trait Firmware: Any {
     /// Perform that queued DMA through `port`, pushing committed mailbox
     /// messages to `outbox`. Earlier output remains committed if a later
     /// transfer fails; keep unfinished native work for retry.
-    fn dma(
-        &mut self,
-        _port: &mut Port<'_, '_>,
-        _outbox: &mut Vec<Message>,
-    ) -> Result<(), &'static str> {
+    fn dma(&mut self, _port: &mut Port<'_, '_>, _outbox: &mut Vec<Message>) -> Result<()> {
         Ok(())
     }
     /// Committed asynchronous messages, collected at each device advance.
     /// Output appended before a later error remains visible; keep only
     /// unfinished native work so retry never duplicates an earlier event.
-    fn poll(&mut self, _outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn poll(&mut self, _outbox: &mut Vec<Message>) -> Result<()> {
         Ok(())
     }
     /// A machine transition the AP's last message asked for, once.
@@ -171,7 +172,7 @@ pub trait Firmware: Any {
     /// not implement (`reason`; docs/design/runtime.md "Unsupported
     /// operations"). `None`, the default, when its protocol has no error reply for that request: the request is then left
     /// unanswered, so the client's own timeout path runs.
-    fn error_reply(&mut self, _message: Message, _reason: &'static str) -> Option<Vec<Message>> {
+    fn error_reply(&mut self, _message: Message, _reason: &Refusal) -> Option<Vec<Message>> {
         None
     }
 }
@@ -223,11 +224,7 @@ pub struct Asc {
 impl Asc {
     /// A wrapper whose coprocessor `running` already (started by the boot
     /// firmware) or waits for the AP to set RUN.
-    pub fn new(
-        mut firmware: Box<dyn Firmware>,
-        running: bool,
-        lines: Lines,
-    ) -> Result<Self, &'static str> {
+    pub fn new(mut firmware: Box<dyn Firmware>, running: bool, lines: Lines) -> Result<Self> {
         let mut outbox = Vec::new();
         if running {
             firmware.start(&mut outbox)?;
@@ -265,7 +262,7 @@ impl Asc {
     /// Emulated boot-chain handoff: native firmware is running and both
     /// mailboxes are enabled before the AP attaches. RTBuddy's preloaded
     /// path waits for HELLO without reinitializing those controls.
-    pub fn booted(firmware: Box<dyn Firmware>, lines: Lines) -> Result<Self, &'static str> {
+    pub fn booted(firmware: Box<dyn Firmware>, lines: Lines) -> Result<Self> {
         let mut asc = Self::new(firmware, true, lines)?;
         asc.a2i_control = CONTROL_ENABLE;
         asc.outbox_enabled = true;
@@ -286,18 +283,22 @@ impl Asc {
     /// This never loads or executes ARM firmware, or derives an entry from a
     /// native Rust implementation address.
     #[cfg(test)]
-    pub fn establish_entry(&mut self, handoff: EntryHandoff) -> Result<(), &'static str> {
+    pub fn establish_entry(&mut self, handoff: EntryHandoff) -> Result<()> {
         self.check_entry_fetch(handoff)?;
         self.auxiliary.establish(handoff)
     }
 
-    fn check_entry_fetch(&mut self, handoff: EntryHandoff) -> Result<(), &'static str> {
+    fn check_entry_fetch(&mut self, handoff: EntryHandoff) -> Result<()> {
         let fetched = self.firmware.fetch_entry(handoff.iop_entry())?;
         if fetched.physical != handoff.physical_entry() {
-            return Err("ASC actual entry translation disagrees with owned physical backing");
+            return Err(refuse!(
+                "ASC actual entry translation disagrees with owned physical backing"
+            ));
         }
         if fetched.instruction != handoff.instruction() {
-            return Err("ASC fetched entry instruction disagrees with original source");
+            return Err(refuse!(
+                "ASC fetched entry instruction disagrees with original source"
+            ));
         }
         Ok(())
     }
@@ -329,9 +330,9 @@ impl Asc {
     /// Run the coprocessor's queued DMA through `port`; any messages it
     /// produces enter the outbox and raise the mailbox interrupt, exactly as
     /// a received message's replies do.
-    pub fn service_dma(&mut self, port: &mut Port<'_, '_>) -> Result<(), &'static str> {
+    pub fn service_dma(&mut self, port: &mut Port<'_, '_>) -> Result<()> {
         if !self.execution_enabled() {
-            return Err("mailbox DMA on a stopped coprocessor");
+            return Err(refuse!("mailbox DMA on a stopped coprocessor"));
         }
         let mut produced = Vec::new();
         let result = self.firmware.dma(port, &mut produced);
@@ -363,15 +364,15 @@ impl Asc {
             && !self.lifecycle.reset
     }
 
-    fn accessible(&self) -> Result<(), &'static str> {
+    fn accessible(&self) -> Result<()> {
         if !self.lifecycle.powered {
-            return Err("ASC power is gated");
+            return Err(refuse!("ASC power is gated"));
         }
         if !self.lifecycle.clocked {
-            return Err("ASC clock is gated");
+            return Err(refuse!("ASC clock is gated"));
         }
         if self.lifecycle.reset {
-            return Err("ASC reset is asserted");
+            return Err(refuse!("ASC reset is asserted"));
         }
         Ok(())
     }
@@ -394,22 +395,26 @@ impl Asc {
         }
     }
 
-    fn deliver(&mut self, result: Result<Vec<Message>, &'static str>) -> Result<(), &'static str> {
+    fn deliver(&mut self, result: Result<Vec<Message>>) -> Result<()> {
         self.outbox.extend(result?);
         Ok(())
     }
 
-    fn send(&mut self, endpoint_word: u64) -> Result<(), &'static str> {
+    fn send(&mut self, endpoint_word: u64) -> Result<()> {
         if self.lifecycle.quiesced {
-            return Err("ASC inbox submission while PMGR quiesced");
+            return Err(refuse!("ASC inbox submission while PMGR quiesced"));
         }
         if !self.running {
-            return Err("mailbox send to a stopped coprocessor");
+            return Err(refuse!("mailbox send to a stopped coprocessor"));
         }
         if endpoint_word & !ENDPOINT != 0 {
-            return Err("mailbox message bits above the endpoint are not modeled");
+            return Err(refuse!(
+                "mailbox message bits above the endpoint are not modeled"
+            ));
         }
-        let payload = self.send0.ok_or("mailbox send without its payload word")?;
+        let payload = self
+            .send0
+            .ok_or(refuse!("mailbox send without its payload word"))?;
         let message = Message {
             endpoint: endpoint_word as u8,
             payload,
@@ -421,8 +426,8 @@ impl Asc {
             // own error reply where its protocol has one, else none, and is
             // reported once per endpoint and refusal.
             Err(reason) => {
-                let error = self.firmware.error_reply(message, reason);
-                if self.reported.insert((message.endpoint, reason)) {
+                let error = self.firmware.error_reply(message, &reason);
+                if self.reported.insert((message.endpoint, reason.what())) {
                     self.unmodeled.push(alloc::format!(
                         "endpoint {:#x} payload {:#018x}: {reason}; {}",
                         message.endpoint,
@@ -442,13 +447,13 @@ impl Asc {
         Ok(())
     }
 
-    fn write_cpu_control(&mut self, value: u64) -> Result<(), &'static str> {
+    fn write_cpu_control(&mut self, value: u64) -> Result<()> {
         if value & !(RUN | CPU_CONTROL_HELD) != 0 {
-            return Err("ASC CPU control bit is not modeled");
+            return Err(refuse!("ASC CPU control bit is not modeled"));
         }
         let run = value & RUN != 0;
         if run && !self.running && self.lifecycle.quiesced {
-            return Err("ASC CPU start while PMGR quiesced");
+            return Err(refuse!("ASC CPU start while PMGR quiesced"));
         }
         if self.running && !run {
             self.firmware.stop()?;
@@ -477,14 +482,16 @@ impl Asc {
 }
 
 impl Lifecycle for Asc {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         let destructive = proposed.reset && !self.lifecycle.reset
             || !proposed.powered && self.lifecycle.powered && !proposed.retention;
         if destructive {
             // A posted word or committed notification still belongs to its
             // sender. Do not erase it or complete the PMGR request first.
             if self.send0.is_some() || !self.outbox.is_empty() {
-                return Err("ASC reset or power loss with owned mailbox messages");
+                return Err(refuse!(
+                    "ASC reset or power loss with owned mailbox messages"
+                ));
             }
             self.firmware.check_reset()?;
         }
@@ -524,7 +531,7 @@ impl MmioDevice for Asc {
         width: Width,
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         self.accessible().map_err(fail)?;
         let value = match (offset, width) {
             (CPU_CONTROL, Width::Word) => self.cpu_control,
@@ -543,17 +550,17 @@ impl MmioDevice for Asc {
             (I2A_RECV0, Width::Double) => self
                 .visible()
                 .then(|| self.outbox[0].payload)
-                .ok_or_else(|| fail("load of an empty outbox"))?,
+                .ok_or_else(|| fail(refuse!("load of an empty outbox")))?,
             (I2A_RECV1, Width::Double) => {
                 if !self.visible() {
-                    return Err(fail("load of an empty outbox"));
+                    return Err(fail(refuse!("load of an empty outbox")));
                 }
                 let waiting = self.outbox.len().min(OCCUPANCY_MAX) as u64;
                 let message = self.outbox.pop_front().expect("visible outbox has a head");
                 self.update_lines(access);
                 u64::from(message.endpoint) | waiting << (32 + OCCUPANCY_SHIFT)
             }
-            _ => return Err(fail("ASC register without a model")),
+            _ => return Err(fail(refuse!("ASC register without a model"))),
         };
         Ok(value)
     }
@@ -565,7 +572,7 @@ impl MmioDevice for Asc {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         self.accessible().map_err(fail)?;
         match (offset, width) {
             (CPU_CONTROL, Width::Word) => self.write_cpu_control(value).map_err(fail)?,
@@ -578,7 +585,7 @@ impl MmioDevice for Asc {
                 self.outbox_enabled = value & CONTROL_ENABLE != 0;
             }
             (A2I_CONTROL | I2A_CONTROL, Width::Word) => {
-                return Err(fail("mailbox control field without a model"));
+                return Err(fail(refuse!("mailbox control field without a model")));
             }
             (A2I_SEND0, Width::Double) => self.send0 = Some(value),
             (A2I_SEND1, Width::Double) => {
@@ -587,7 +594,7 @@ impl MmioDevice for Asc {
                     access.request_transition(request.device, request.transition, request.reason);
                 }
             }
-            _ => return Err(fail("ASC register without a model")),
+            _ => return Err(fail(refuse!("ASC register without a model"))),
         }
         self.update_lines(access);
         Ok(())

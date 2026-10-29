@@ -1,7 +1,9 @@
 //! Bounded inventory of the firmware-loaded PE32+ image. Reads address
 //! loaded RVAs, never file offsets. The callback must read from the kept
 //! UEFI allocation; bounds are checked here before every callback.
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 pub const PAGE: usize = 4096;
 const DOS_HEADER: usize = 64;
@@ -23,18 +25,18 @@ pub struct Extent {
 }
 
 /// Nonallocating: safe to call before the pristine static-state snapshot.
-pub fn loaded_extent(start: usize, bytes: u64) -> Result<Extent, &'static str> {
-    let bytes = usize::try_from(bytes).map_err(|_| "loaded image length exceeds usize")?;
+pub fn loaded_extent(start: usize, bytes: u64) -> Result<Extent> {
+    let bytes = usize::try_from(bytes).map_err(|_| refuse!("loaded image length exceeds usize"))?;
     if start == 0 || !start.is_multiple_of(PAGE) || bytes == 0 || bytes > isize::MAX as usize {
-        return Err("loaded image has invalid base or length");
+        return Err(refuse!("loaded image has invalid base or length"));
     }
     let mapped_bytes = bytes
         .checked_next_multiple_of(PAGE)
         .filter(|&length| length <= isize::MAX as usize)
-        .ok_or("loaded image rounded length overflows")?;
+        .ok_or(refuse!("loaded image rounded length overflows"))?;
     let end = start
         .checked_add(mapped_bytes)
-        .ok_or("loaded image address extent overflows")?;
+        .ok_or(refuse!("loaded image address extent overflows"))?;
     Ok(Extent {
         start,
         bytes,
@@ -57,63 +59,64 @@ struct Reader<F> {
 }
 
 impl<F: FnMut(usize, &mut [u8])> Reader<F> {
-    fn extent(&self, first: usize, bytes: usize) -> Result<usize, &'static str> {
+    fn extent(&self, first: usize, bytes: usize) -> Result<usize> {
         first
             .checked_add(bytes)
             .filter(|&end| end <= self.bytes)
-            .ok_or("loaded image PE field is out of bounds")
+            .ok_or(refuse!("loaded image PE field is out of bounds"))
     }
 
-    fn array<const N: usize>(&mut self, first: usize) -> Result<[u8; N], &'static str> {
+    fn array<const N: usize>(&mut self, first: usize) -> Result<[u8; N]> {
         self.extent(first, N)?;
         let mut bytes = [0; N];
         (self.read)(first, &mut bytes);
         Ok(bytes)
     }
 
-    fn half(&mut self, first: usize) -> Result<u16, &'static str> {
+    fn half(&mut self, first: usize) -> Result<u16> {
         Ok(u16::from_le_bytes(self.array(first)?))
     }
 
-    fn word(&mut self, first: usize) -> Result<u32, &'static str> {
+    fn word(&mut self, first: usize) -> Result<u32> {
         Ok(u32::from_le_bytes(self.array(first)?))
     }
 }
 
 /// Parse metadata through short bounded copies, avoiding a shared Rust slice
 /// over the live image's writable statics while allocating the inventory.
-pub fn sections(
-    bytes: usize,
-    read: impl FnMut(usize, &mut [u8]),
-) -> Result<Vec<Section>, &'static str> {
+pub fn sections(bytes: usize, read: impl FnMut(usize, &mut [u8])) -> Result<Vec<Section>> {
     let mut image = Reader { bytes, read };
     image.extent(0, DOS_HEADER)?;
     if image.half(0)? != 0x5a4d {
-        return Err("loaded image has no DOS signature");
+        return Err(refuse!("loaded image has no DOS signature"));
     }
     let pe = image.word(0x3c)? as usize;
     if pe < DOS_HEADER {
-        return Err("loaded image PE header overlaps DOS header");
+        return Err(refuse!("loaded image PE header overlaps DOS header"));
     }
     let optional = image.extent(pe, PE_HEADER)?;
     if image.word(pe)? != 0x4550 || image.half(pe + 4)? != 0x8664 {
-        return Err("loaded image is not x86-64 PE");
+        return Err(refuse!("loaded image is not x86-64 PE"));
     }
     let count = usize::from(image.half(pe + 6)?);
     let optional_bytes = usize::from(image.half(pe + 20)?);
     if count == 0 || image.half(pe + 22)? & 2 == 0 || optional_bytes < OPTIONAL_HEADER {
-        return Err("loaded image has no complete executable PE32+ headers");
+        return Err(refuse!(
+            "loaded image has no complete executable PE32+ headers"
+        ));
     }
     let table = image.extent(optional, optional_bytes)?;
     if image.half(optional)? != 0x20b || image.half(optional + 68)? != 10 {
-        return Err("loaded image is not a PE32+ EFI application");
+        return Err(refuse!("loaded image is not a PE32+ EFI application"));
     }
     let directories = image.word(optional + 108)? as usize;
     if directories
         .checked_mul(8)
         .is_none_or(|size| size > optional_bytes - OPTIONAL_HEADER)
     {
-        return Err("loaded image data directories escape optional header");
+        return Err(refuse!(
+            "loaded image data directories escape optional header"
+        ));
     }
     let alignment = image.word(optional + 32)? as usize;
     let file_alignment = image.word(optional + 36)? as usize;
@@ -123,7 +126,9 @@ pub fn sections(
         || !(512..=65536).contains(&file_alignment)
         || file_alignment > alignment
     {
-        return Err("loaded image requires supported page-aligned section geometry");
+        return Err(refuse!(
+            "loaded image requires supported page-aligned section geometry"
+        ));
     }
     let image_bytes = image.word(optional + 56)? as usize;
     let headers = image.word(optional + 60)? as usize;
@@ -131,7 +136,7 @@ pub fn sections(
         table,
         count
             .checked_mul(SECTION_HEADER)
-            .ok_or("loaded image section table size overflows")?,
+            .ok_or(refuse!("loaded image section table size overflows"))?,
     )?;
     if image_bytes == 0
         || !image_bytes.is_multiple_of(alignment)
@@ -140,11 +145,11 @@ pub fn sections(
         || headers > image_bytes
         || !headers.is_multiple_of(file_alignment)
     {
-        return Err("loaded image header or image geometry is invalid");
+        return Err(refuse!("loaded image header or image geometry is invalid"));
     }
     let mut previous = headers
         .checked_next_multiple_of(alignment)
-        .ok_or("loaded image header alignment overflows")?;
+        .ok_or(refuse!("loaded image header alignment overflows"))?;
     let mut sections = Vec::with_capacity(count);
     for index in 0..count {
         // The complete table extent was checked above.
@@ -162,7 +167,9 @@ pub fn sections(
                 .checked_add(raw_size)
                 .is_none_or(|end| end > u32::MAX as usize)
         {
-            return Err("loaded image section alignment or file geometry is invalid");
+            return Err(refuse!(
+                "loaded image section alignment or file geometry is invalid"
+            ));
         }
         let size = virtual_size.max(raw_size);
         if size == 0 {
@@ -172,11 +179,13 @@ pub fn sections(
             .checked_add(size)
             .and_then(|end| end.checked_next_multiple_of(PAGE))
             .filter(|&end| end <= image_bytes)
-            .ok_or("loaded image section escapes loaded image")?;
+            .ok_or(refuse!("loaded image section escapes loaded image"))?;
         let executable = flags & EXECUTE != 0;
         let writable = flags & WRITE != 0;
         if first < previous || flags & READ == 0 || (executable && writable) {
-            return Err("loaded image section overlaps or has unsupported access rights");
+            return Err(refuse!(
+                "loaded image section overlaps or has unsupported access rights"
+            ));
         }
         sections.push(Section {
             first,
@@ -187,7 +196,7 @@ pub fn sections(
         previous = end;
     }
     if sections.is_empty() {
-        return Err("loaded image has no mapped sections");
+        return Err(refuse!("loaded image has no mapped sections"));
     }
     Ok(sections)
 }
@@ -240,7 +249,7 @@ mod tests {
         }
         bytes
     }
-    fn parse(bytes: &[u8]) -> Result<Vec<Section>, &'static str> {
+    fn parse(bytes: &[u8]) -> Result<Vec<Section>> {
         sections(bytes.len(), |first, out| {
             out.copy_from_slice(&bytes[first..first + out.len()])
         })

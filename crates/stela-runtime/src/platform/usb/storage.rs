@@ -30,7 +30,9 @@ use super::{
         RECIPIENT_INTERFACE, Requests, SET_FEATURE, SET_INTERFACE, STANDARD, Setup, Stall,
     },
 };
+use crate::Result;
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
+use stela_contracts::refuse;
 use stela_drivers::block::BlockDevice;
 
 const BULK_IN: u8 = 0x81;
@@ -225,24 +227,24 @@ impl MassStorage {
     /// The device presenting `device`; `serial` is its iSerialNumber and
     /// unit serial number (12 or more characters per BOT 4.1.1, from
     /// `0-9A-F`), and `model` names it in INQUIRY.
-    pub fn new(
-        device: Box<dyn BlockDevice>,
-        serial: &str,
-        model: &str,
-    ) -> Result<Self, &'static str> {
+    pub fn new(device: Box<dyn BlockDevice>, serial: &str, model: &str) -> Result<Self> {
         let identity = device.identity();
         if identity.block_size < 512 || !identity.block_size.is_power_of_two() {
-            return Err("mass storage block size must be a power of two from 512");
+            return Err(refuse!(
+                "mass storage block size must be a power of two from 512"
+            ));
         }
         if identity.blocks == 0 {
-            return Err("mass storage backing device is empty");
+            return Err(refuse!("mass storage backing device is empty"));
         }
         if serial.len() < 12
             || !serial
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
         {
-            return Err("mass storage serial must be at least 12 characters of 0-9A-F");
+            return Err(refuse!(
+                "mass storage serial must be at least 12 characters of 0-9A-F"
+            ));
         }
         Ok(Self {
             control: Control::new(descriptors(serial)),
@@ -270,7 +272,7 @@ impl MassStorage {
     /// The device presenting `device` under a serial number derived from
     /// the host device's own serial and location, so a disk keeps its
     /// identity across boots, and its model in INQUIRY.
-    pub fn of(device: Box<dyn BlockDevice>) -> Result<Self, &'static str> {
+    pub fn of(device: Box<dyn BlockDevice>) -> Result<Self> {
         let identity = device.identity();
         let digest = stela_formats::sha256(
             alloc::format!("{}\0{}", identity.serial, identity.location).as_bytes(),
@@ -790,23 +792,18 @@ impl Requests for State {
 }
 
 impl BusPeer for MassStorage {
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         self.control.reset(&mut self.state)?;
         self.state
             .configure(0)
-            .map_err(|Stall| "mass storage reset")
+            .map_err(|Stall| refuse!("mass storage reset stalled"))
     }
 
-    fn packet(
-        &mut self,
-        endpoint: u8,
-        token: Token,
-        data: &mut [u8],
-    ) -> Result<Reply, &'static str> {
+    fn packet(&mut self, endpoint: u8, token: Token, data: &mut [u8]) -> Result<Reply> {
         let configured = self.control.configuration() != 0;
         Ok(match (endpoint, token) {
             (0, _) => return self.control.packet(token, data, &mut self.state),
-            (_, Token::Setup) => return Err("SETUP to a non-control endpoint"),
+            (_, Token::Setup) => return Err(refuse!("SETUP to a non-control endpoint")),
             (BULK_IN, Token::In) if configured => self.state.bulk_in(data),
             (BULK_OUT, Token::Out) if configured => self.state.bulk_out(data),
             _ => Reply::Stall,

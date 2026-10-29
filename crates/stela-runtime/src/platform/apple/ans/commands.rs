@@ -14,7 +14,9 @@ use super::{
     prp::{MAX_TRANSFER, Prps, dma_error},
     tunables,
 };
+use crate::Result;
 use alloc::{vec, vec::Vec};
+use stela_contracts::refuse;
 use stela_drivers::block::{BlockError, Finished, Request};
 use stela_soc_data::ans::BLOCK_BYTES;
 use {crate::platform::apple::sart::Sart, stela_contracts::dma::Port};
@@ -195,13 +197,15 @@ impl Command {
     fn nsid(&self) -> u32 {
         self.word(4)
     }
-    pub fn validate(&self) -> Result<(), &'static str> {
+    pub fn validate(&self) -> Result<()> {
         if self.0[1] != 0 || self.0[8..24].iter().any(|&b| b != 0) {
-            return Err("ANS fused, SGL, metadata or reserved command fields are not modeled");
+            return Err(refuse!(
+                "ANS fused, SGL, metadata or reserved command fields are not modeled"
+            ));
         }
         Ok(())
     }
-    pub fn direction(&self, queue: usize) -> Result<u8, &'static str> {
+    pub fn direction(&self, queue: usize) -> Result<u8> {
         if queue == 0 {
             match self.opcode() {
                 // The builders (0x3deb4f8, 0x3deb598) put the queue base
@@ -218,11 +222,11 @@ impl Command {
                 // Tunnel addresses are in CDW11-14, not the PRPs. It is
                 // authorized by SART, with an NVMMU entry but no PRP DMA.
                 APPLE_TUNNEL => Ok(0),
-                APPLE_IDENTIFY_STORAGE => Err(
+                APPLE_IDENTIFY_STORAGE => Err(refuse!(
                     "ANS Identify Storage Device (0xc8) is not modeled: the die runs no NAND \
-                     firmware whose UUID it could report",
-                ),
-                _ => Err("ANS admin opcode or DMA contract is not modeled"),
+                     firmware whose UUID it could report"
+                )),
+                _ => Err(refuse!("ANS admin opcode or DMA contract is not modeled")),
             }
         } else {
             match self.opcode() {
@@ -230,11 +234,11 @@ impl Command {
                 // The range list is read by the device, like write data.
                 WRITE | COMPARE | DATASET_MANAGEMENT => Ok(2),
                 FLUSH => Ok(0),
-                _ => Err("ANS I/O opcode is not modeled"),
+                _ => Err(refuse!("ANS I/O opcode is not modeled")),
             }
         }
     }
-    fn prps(&self, port: &mut Port<'_, '_>, bytes: usize, page: u64) -> Result<Prps, &'static str> {
+    fn prps(&self, port: &mut Port<'_, '_>, bytes: usize, page: u64) -> Result<Prps> {
         Prps::new(port, self.long(24), self.long(32), bytes, page)
     }
     fn zero_words(&self, from: usize) -> bool {
@@ -337,7 +341,7 @@ impl Ans {
         cmd: &Command,
         port: &mut Port<'_, '_>,
         sart: &mut Sart,
-    ) -> Result<Executed, &'static str> {
+    ) -> Result<Executed> {
         if queue != 0 {
             let key = (queue as u32) << 16 | u32::from(cmd.cid());
             return self.io(key, cmd, port);
@@ -350,7 +354,7 @@ impl Ans {
         cmd: &Command,
         port: &mut Port<'_, '_>,
         sart: &mut Sart,
-    ) -> Result<Outcome, &'static str> {
+    ) -> Result<Outcome> {
         match cmd.opcode() {
             IDENTIFY => self.identify(cmd, port),
             APPLE_DEBUG_SERVICE => {
@@ -361,7 +365,9 @@ impl Ans {
                     || cmd.word(44) != 0
                     || cmd.word(60) != 0
                 {
-                    return Err("ANS debug-service DMA or reserved fields are not modeled");
+                    return Err(refuse!(
+                        "ANS debug-service DMA or reserved fields are not modeled"
+                    ));
                 }
                 self.debug
                     .execute(cmd.word(48), cmd.word(52), cmd.word(56))
@@ -381,7 +387,7 @@ impl Ans {
                     || cmd.word(44) != 0
                     || !cmd.zero_words(56)
                 {
-                    return Err("ANS Apple time command fields are not modeled");
+                    return Err(refuse!("ANS Apple time command fields are not modeled"));
                 }
                 self.timestamp = cmd.long(48);
                 Ok(Outcome::status(SUCCESS))
@@ -391,7 +397,7 @@ impl Ans {
             FIRMWARE_DOWNLOAD | FIRMWARE_COMMIT | APPLE_BFH_PARAMS => {
                 self.boot_from_host(cmd, port)
             }
-            _ => Err("ANS admin command is not modeled"),
+            _ => Err(refuse!("ANS admin command is not modeled")),
         }
     }
 
@@ -400,16 +406,12 @@ impl Ans {
     /// flag is set (`IsBFHRequired` 0x3dbe014), the flag that also selects
     /// that mode (`PreCCEnableHook` 0x3dbdfb8). Standard firmware slots
     /// stay read-only and OACS still reports no firmware commands.
-    fn boot_from_host(
-        &mut self,
-        cmd: &Command,
-        port: &mut Port<'_, '_>,
-    ) -> Result<Outcome, &'static str> {
+    fn boot_from_host(&mut self, cmd: &Command, port: &mut Port<'_, '_>) -> Result<Outcome> {
         if self.modesel != MODE_RESTORE {
-            return Err("ANS boot-from-host command outside MODESEL 4");
+            return Err(refuse!("ANS boot-from-host command outside MODESEL 4"));
         }
         if cmd.nsid() != 0 {
-            return Err("ANS boot-from-host command names a namespace");
+            return Err(refuse!("ANS boot-from-host command names a namespace"));
         }
         if cmd.opcode() == FIRMWARE_COMMIT {
             if cmd.long(24) != 0
@@ -417,19 +419,21 @@ impl Ans {
                 || cmd.word(40) != bfh::ACTIVATE_SLOT0_REPLACE
                 || !cmd.zero_words(44)
             {
-                return Err("ANS firmware commit other than slot 0, action 1 is not modeled");
+                return Err(refuse!(
+                    "ANS firmware commit other than slot 0, action 1 is not modeled"
+                ));
             }
             self.boot_image = Some(self.download.activate()?);
             return Ok(Outcome::status(SUCCESS));
         }
         let bytes = (u64::from(cmd.word(40)) + 1) * 4;
         if bytes > MAX_TRANSFER as u64 {
-            return Err("ANS boot-from-host transfer exceeds MDTS");
+            return Err(refuse!("ANS boot-from-host transfer exceeds MDTS"));
         }
         let mut data = vec![0; bytes as usize];
         if cmd.opcode() == APPLE_BFH_PARAMS {
             if !cmd.zero_words(44) {
-                return Err("ANS BFH parameter command fields are not modeled");
+                return Err(refuse!("ANS BFH parameter command fields are not modeled"));
             }
             cmd.prps(port, data.len(), NVMMU_PAGE_BYTES)?
                 .read(port, &mut data)?;
@@ -437,7 +441,7 @@ impl Ans {
             return Ok(Outcome::status(SUCCESS));
         }
         if cmd.word(48) != 0 || cmd.word(52) != 0 {
-            return Err("ANS BFH download CDW12/CDW13 are not modeled");
+            return Err(refuse!("ANS BFH download CDW12/CDW13 are not modeled"));
         }
         cmd.prps(port, data.len(), NVMMU_PAGE_BYTES)?
             .read(port, &mut data)?;
@@ -450,13 +454,9 @@ impl Ans {
         Ok(Outcome::status(SUCCESS))
     }
 
-    fn identify(
-        &mut self,
-        cmd: &Command,
-        port: &mut Port<'_, '_>,
-    ) -> Result<Outcome, &'static str> {
+    fn identify(&mut self, cmd: &Command, port: &mut Port<'_, '_>) -> Result<Outcome> {
         if cmd.word(40) & !0xff != 0 || !cmd.zero_words(44) {
-            return Err("ANS Identify fields are not modeled");
+            return Err(refuse!("ANS Identify fields are not modeled"));
         }
         let mut data = [0; IDENTIFY_BYTES];
         match cmd.word(40) {
@@ -505,7 +505,7 @@ impl Ans {
                     put32(&mut data, slot * 4, ns.description.id);
                 }
             }
-            _ => return Err("ANS Identify selector is not modeled"),
+            _ => return Err(refuse!("ANS Identify selector is not modeled")),
         }
         cmd.prps(port, data.len(), NVMMU_PAGE_BYTES)?
             .write(port, &data)?;
@@ -524,7 +524,7 @@ impl Ans {
         ascii(&mut data[64..72], b"1.0");
     }
 
-    fn create_queue(&mut self, cmd: &Command) -> Result<Outcome, &'static str> {
+    fn create_queue(&mut self, cmd: &Command) -> Result<Outcome> {
         let id = cmd.word(40) & 0xffff;
         let depth = (cmd.word(40) >> 16) + 1;
         if cmd.nsid() != 0
@@ -533,7 +533,9 @@ impl Ans {
             || cmd.long(24) == 0
             || !cmd.long(24).is_multiple_of(self.page())
         {
-            return Err("ANS queue creation fields or address are not modeled");
+            return Err(refuse!(
+                "ANS queue creation fields or address are not modeled"
+            ));
         }
         if id != 1 || depth > u32::from(self.geometry.ring_entries()) {
             return Ok(Outcome::status(INVALID_FIELD));
@@ -544,12 +546,14 @@ impl Ans {
             COMMAND_BYTES
         } * u64::from(depth);
         if cmd.long(24).checked_add(bytes).is_none() {
-            return Err("ANS queue creation extent wraps");
+            return Err(refuse!("ANS queue creation extent wraps"));
         }
         let flags = cmd.word(44);
         if cmd.opcode() == CREATE_CQ {
             if flags & !3 != 0 || flags & 1 == 0 {
-                return Err("ANS CQ requires contiguous memory and interrupt vector zero");
+                return Err(refuse!(
+                    "ANS CQ requires contiguous memory and interrupt vector zero"
+                ));
             }
             if self.queues[1].cq_enabled {
                 return Ok(Outcome::status(INVALID_FIELD));
@@ -566,7 +570,7 @@ impl Ans {
             // QPRIO (bits 2:1) is ignored under the round-robin arbitration
             // CC.AMS 0 selects (NVMe 1.4 5.4); the driver sends medium.
             if flags & 1 == 0 || flags & 0xfff8 != 0 || flags >> 16 != 1 {
-                return Err("ANS SQ must be contiguous and use CQ 1");
+                return Err(refuse!("ANS SQ must be contiguous and use CQ 1"));
             }
             let q = &mut self.queues[1];
             if q.sq_enabled || !q.cq_enabled {
@@ -582,9 +586,9 @@ impl Ans {
     /// `IONVMeController::ShutdownNVMe` deletes the I/O SQ, then its CQ
     /// (`DisableSubmissionQueues` 0x3ddbc78, `DisableCompletionQueue`
     /// 0x3ddbcb4), before the shutdown notification.
-    fn delete_queue(&mut self, cmd: &Command) -> Result<Outcome, &'static str> {
+    fn delete_queue(&mut self, cmd: &Command) -> Result<Outcome> {
         if cmd.nsid() != 0 || cmd.long(24) != 0 || cmd.long(32) != 0 || !cmd.zero_words(44) {
-            return Err("ANS queue deletion fields are not modeled");
+            return Err(refuse!("ANS queue deletion fields are not modeled"));
         }
         let q = &mut self.queues[1];
         if cmd.word(40) != 1 {
@@ -595,7 +599,9 @@ impl Ans {
                 return Ok(Outcome::status(INVALID_QUEUE));
             }
             if self.pending.iter().any(|&(queue, _)| queue == 1) {
-                return Err("ANS SQ deletion with commands outstanding is not modeled");
+                return Err(refuse!(
+                    "ANS SQ deletion with commands outstanding is not modeled"
+                ));
             }
             q.sq = 0;
             q.sq_entries = 0;
@@ -612,10 +618,12 @@ impl Ans {
         Ok(Outcome::status(SUCCESS))
     }
 
-    fn feature(&mut self, cmd: &Command) -> Result<Outcome, &'static str> {
+    fn feature(&mut self, cmd: &Command) -> Result<Outcome> {
         let id = cmd.word(40);
         if cmd.nsid() != 0 || cmd.long(32) != 0 || id & !0xff != 0 || !cmd.zero_words(48) {
-            return Err("ANS saved/selected or namespace-specific features are not modeled");
+            return Err(refuse!(
+                "ANS saved/selected or namespace-specific features are not modeled"
+            ));
         }
         let value = cmd.word(44);
         let setting = cmd.opcode() == SET_FEATURES;
@@ -636,7 +644,7 @@ impl Ans {
                 // completes once the host has flushed it as well.
                 if setting {
                     if value & !1 != 0 {
-                        return Err("ANS Volatile Write Cache value is not modeled");
+                        return Err(refuse!("ANS Volatile Write Cache value is not modeled"));
                     }
                     self.features[VOLATILE_WRITE_CACHE] = value;
                 }
@@ -654,27 +662,24 @@ impl Ans {
                         _ => false,
                     }
                 {
-                    return Err("ANS feature value requires an unmodeled controller effect");
+                    return Err(refuse!(
+                        "ANS feature value requires an unmodeled controller effect"
+                    ));
                 }
                 if !setting && value != 0 {
-                    return Err("ANS Get Features has nonzero CDW11");
+                    return Err(refuse!("ANS Get Features has nonzero CDW11"));
                 }
                 if setting {
                     self.features[id as usize] = value;
                 }
                 Ok(Outcome::result(self.features[id as usize]))
             }
-            _ => Err("ANS feature ID is not modeled"),
+            _ => Err(refuse!("ANS feature ID is not modeled")),
         }
     }
 
     /// I/O command `cmd`, whose host transfer runs under `key`.
-    fn io(
-        &mut self,
-        key: u32,
-        cmd: &Command,
-        port: &mut Port<'_, '_>,
-    ) -> Result<Executed, &'static str> {
+    fn io(&mut self, key: u32, cmd: &Command, port: &mut Port<'_, '_>) -> Result<Executed> {
         if self.medium.namespace(cmd.nsid()).is_none() {
             return Ok(Executed::Done(Outcome::status(INVALID_NAMESPACE)));
         }
@@ -688,7 +693,7 @@ impl Ans {
                 || cmd.word(40) & !1 != 0
                 || !cmd.zero_words(44)
             {
-                return Err("ANS Flush fields are not modeled");
+                return Err(refuse!("ANS Flush fields are not modeled"));
             }
             return self.host(key, vec![Request::Flush], Wait::Flush, port);
         }
@@ -705,7 +710,9 @@ impl Ans {
             || cmd.word(52) & !HINTS != 0
             || !cmd.zero_words(56)
         {
-            return Err("ANS protection, encryption, metadata or read/write hints are not modeled");
+            return Err(refuse!(
+                "ANS protection, encryption, metadata or read/write hints are not modeled"
+            ));
         }
         let blocks = u64::from((controls & 0xffff) + 1);
         let lba = cmd.long(40);
@@ -745,7 +752,7 @@ impl Ans {
                 };
                 self.host(key, vec![request], Wait::Write { nsid, lba, blocks }, port)
             }
-            _ => Err("ANS I/O command is not modeled"),
+            _ => Err(refuse!("ANS I/O command is not modeled")),
         }
     }
 
@@ -758,7 +765,7 @@ impl Ans {
         requests: Vec<Request>,
         wait: Wait,
         port: &mut Port<'_, '_>,
-    ) -> Result<Executed, &'static str> {
+    ) -> Result<Executed> {
         if requests.is_empty() {
             return self.finish(wait, None, port).map(Executed::Done);
         }
@@ -780,7 +787,7 @@ impl Ans {
         wait: Wait,
         done: Option<Finished>,
         port: &mut Port<'_, '_>,
-    ) -> Result<Outcome, &'static str> {
+    ) -> Result<Outcome> {
         Ok(match (wait, done) {
             (Wait::Read { plan, bytes, prps }, done) => match host_bytes(done) {
                 Ok(host) => {
@@ -805,7 +812,7 @@ impl Ans {
             }
             (Wait::Flush | Wait::Deallocate, Some(result)) => block_result(result.map(drop)),
             (Wait::Deallocate, None) => Outcome::status(SUCCESS),
-            _ => return Err("ANS host transfer result differs from its command"),
+            _ => return Err(refuse!("ANS host transfer result differs from its command")),
         })
     }
 
@@ -822,12 +829,12 @@ impl Ans {
         key: u32,
         cmd: &Command,
         port: &mut Port<'_, '_>,
-    ) -> Result<Executed, &'static str> {
+    ) -> Result<Executed> {
         let count = cmd.word(40);
         if count & !0xff != 0 || cmd.word(44) != DEALLOCATE || !cmd.zero_words(48) {
-            return Err(
-                "ANS Dataset Management is modeled only as Deallocate without hints or reserved fields",
-            );
+            return Err(refuse!(
+                "ANS Dataset Management is modeled only as Deallocate without hints or reserved fields"
+            ));
         }
         let ranges = count as usize + 1;
         let mut list = vec![0; ranges * RANGE_BYTES];
@@ -837,7 +844,9 @@ impl Ans {
         for range in list.as_chunks::<RANGE_BYTES>().0 {
             let word = |at: usize| u32::from_le_bytes(range[at..at + 4].try_into().unwrap());
             if word(0) != 0 {
-                return Err("ANS Dataset Management context attributes are not modeled");
+                return Err(refuse!(
+                    "ANS Dataset Management context attributes are not modeled"
+                ));
             }
             let blocks = u64::from(word(4));
             let lba = u64::from_le_bytes(range[8..].try_into().unwrap());
@@ -876,20 +885,16 @@ impl Ans {
         self.host(key, requests, Wait::Deallocate, port)
     }
 
-    fn verify_namespaces(
-        &mut self,
-        cmd: &Command,
-        port: &mut Port<'_, '_>,
-    ) -> Result<Outcome, &'static str> {
+    fn verify_namespaces(&mut self, cmd: &Command, port: &mut Port<'_, '_>) -> Result<Outcome> {
         if cmd.nsid() != 0 || cmd.word(40) != 0 || !cmd.zero_words(44) {
-            return Err("ANS namespace creation options are not modeled");
+            return Err(refuse!("ANS namespace creation options are not modeled"));
         }
         let mut data = [0; IDENTIFY_BYTES];
         cmd.prps(port, data.len(), NVMMU_PAGE_BYTES)?
             .read(port, &mut data)?;
         let count = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
         if count != self.medium.namespaces.len() {
-            return Err("ANS namespace repartitioning is not modeled");
+            return Err(refuse!("ANS namespace repartitioning is not modeled"));
         }
         for (record, ns) in data[4..4 + count * 12]
             .as_chunks::<12>()
@@ -903,11 +908,13 @@ impl Ans {
                 || word(4) != expected.kind
                 || (word(8) != 0 && u64::from(word(8)) != ns.blocks)
             {
-                return Err("ANS namespace repartitioning is not modeled");
+                return Err(refuse!("ANS namespace repartitioning is not modeled"));
             }
         }
         if data[4 + count * 12..].iter().any(|&byte| byte != 0) {
-            return Err("ANS namespace request extension fields are not modeled");
+            return Err(refuse!(
+                "ANS namespace request extension fields are not modeled"
+            ));
         }
         // Same-layout formatting drops the growable data extent's mappings.
         // Fixed auxiliary namespaces keep their contents: their services
@@ -938,9 +945,11 @@ impl Ans {
         cmd: &Command,
         port: &mut Port<'_, '_>,
         sart: &mut Sart,
-    ) -> Result<Outcome, &'static str> {
+    ) -> Result<Outcome> {
         if cmd.nsid() != 0 || cmd.word(40) != 1 {
-            return Err("ANS tunnel selector/output contract is not modeled");
+            return Err(refuse!(
+                "ANS tunnel selector/output contract is not modeled"
+            ));
         }
         let port = &mut Port {
             iommu: sart,
@@ -950,7 +959,7 @@ impl Ans {
         };
         let address = cmd.long(44);
         if address == 0 {
-            return Err("ANS tunnel request address is null");
+            return Err(refuse!("ANS tunnel request address is null"));
         }
         let mut request = [0; 80];
         port.read(address, &mut request).map_err(dma_error)?;
@@ -966,14 +975,14 @@ impl Ans {
                     .chain(&request[16..76])
                     .any(|&b| b != 0)
             {
-                return Err("ANS NAND geometry tunnel fields are not modeled");
+                return Err(refuse!("ANS NAND geometry tunnel fields are not modeled"));
             }
             let output = cmd.long(52);
             let fields = die::geometry(&self.medium)?;
             // Validate every field address before any DMA effect.
             output
                 .checked_add(0x70)
-                .ok_or("ANS NAND geometry output wraps")?;
+                .ok_or(refuse!("ANS NAND geometry output wraps"))?;
             for (offset, value) in fields {
                 port.write(output + offset as u64, &value.to_le_bytes())
                     .map_err(dma_error)?;
@@ -985,7 +994,7 @@ impl Ans {
             port.write(
                 address
                     .checked_add(0x4c)
-                    .ok_or("ANS tunnel status address wraps")?,
+                    .ok_or(refuse!("ANS tunnel status address wraps"))?,
                 &0u32.to_le_bytes(),
             )
             .map_err(dma_error)?;
@@ -1005,14 +1014,14 @@ impl Ans {
                     .chain(&request[16..76])
                     .any(|&b| b != 0)
             {
-                return Err("ANS NAND-ID tunnel fields are not modeled");
+                return Err(refuse!("ANS NAND-ID tunnel fields are not modeled"));
             }
             port.write(cmd.long(52), &die::NAND_ID.to_le_bytes())
                 .map_err(dma_error)?;
             port.write(
                 address
                     .checked_add(0x4c)
-                    .ok_or("ANS tunnel status address wraps")?,
+                    .ok_or(refuse!("ANS tunnel status address wraps"))?,
                 &0u32.to_le_bytes(),
             )
             .map_err(dma_error)?;
@@ -1027,12 +1036,14 @@ impl Ans {
                     .chain(&request[16..76])
                     .any(|&b| b != 0)
             {
-                return Err("ANS sanitize-counter tunnel fields are not modeled");
+                return Err(refuse!(
+                    "ANS sanitize-counter tunnel fields are not modeled"
+                ));
             }
             let bytes = u64::from(die::SANITIZE_COUNTER_BYTES);
             output
                 .checked_add(bytes)
-                .ok_or("ANS sanitize-counter output wraps")?;
+                .ok_or(refuse!("ANS sanitize-counter output wraps"))?;
             // The whole output is records, so write all of it: the
             // counters, then empty headers.
             let mut chunk = [0u8; 4096];
@@ -1048,7 +1059,7 @@ impl Ans {
             port.write(
                 address
                     .checked_add(0x4c)
-                    .ok_or("ANS tunnel status address wraps")?,
+                    .ok_or(refuse!("ANS tunnel status address wraps"))?,
                 &0u32.to_le_bytes(),
             )
             .map_err(dma_error)?;
@@ -1067,14 +1078,14 @@ impl Ans {
                     .chain(&request[16..76])
                     .any(|&b| b != 0)
             {
-                return Err("ANS tunable-table tunnel fields are not modeled");
+                return Err(refuse!("ANS tunable-table tunnel fields are not modeled"));
             }
             let mut data = vec![0; cmd.word(60) as usize];
             port.read(output, &mut data).map_err(dma_error)?;
             port.write(
                 address
                     .checked_add(0x4c)
-                    .ok_or("ANS tunnel status address wraps")?,
+                    .ok_or(refuse!("ANS tunnel status address wraps"))?,
                 &0u32.to_le_bytes(),
             )
             .map_err(dma_error)?;
@@ -1090,7 +1101,7 @@ impl Ans {
                     .chain(&request[0x34..0x4c])
                     .any(|&b| b != 0)
             {
-                return Err("ANS device-time tunnel fields are not modeled");
+                return Err(refuse!("ANS device-time tunnel fields are not modeled"));
             }
             let word = |at: usize| u32::from_le_bytes(request[at..at + 4].try_into().unwrap());
             let long = |at: usize| u64::from_le_bytes(request[at..at + 8].try_into().unwrap());
@@ -1103,7 +1114,7 @@ impl Ans {
             port.write(
                 address
                     .checked_add(0x4c)
-                    .ok_or("ANS tunnel status address wraps")?,
+                    .ok_or(refuse!("ANS tunnel status address wraps"))?,
                 &0u32.to_le_bytes(),
             )
             .map_err(dma_error)?;
@@ -1111,10 +1122,10 @@ impl Ans {
             return Ok(Outcome::status(SUCCESS));
         }
         if kind != 0x120 {
-            return Err(unserved_tunnel(kind));
+            return Err(unserved_tunnel(kind).into());
         }
         if cmd.long(52) != 0 || cmd.word(60) != 0 {
-            return Err("ANS tunnel request type or output is not modeled");
+            return Err(refuse!("ANS tunnel request type or output is not modeled"));
         }
         if request[..12]
             .iter()
@@ -1122,12 +1133,14 @@ impl Ans {
             .chain(&request[40..76])
             .any(|&byte| byte != 0)
         {
-            return Err("ANS OS-build tunnel extension fields are not modeled");
+            return Err(refuse!(
+                "ANS OS-build tunnel extension fields are not modeled"
+            ));
         }
         let build: [u8; 16] = request[24..40].try_into().unwrap();
         let status = address
             .checked_add(0x4c)
-            .ok_or("ANS tunnel status address wraps")?;
+            .ok_or(refuse!("ANS tunnel status address wraps"))?;
         port.write(status, &0u32.to_le_bytes()).map_err(dma_error)?;
         self.os_build = build;
         Ok(Outcome::status(SUCCESS))

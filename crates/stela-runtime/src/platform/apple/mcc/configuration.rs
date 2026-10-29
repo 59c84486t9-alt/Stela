@@ -6,7 +6,9 @@
 //! bits. Creating zeroed control backing is a Stela policy, not recovered Apple
 //! DRAM timing, an alternate-mode selection or permission to settle later writes.
 use super::{CHANNELS, GROUPS};
+use crate::Result;
 use alloc::{vec, vec::Vec};
+use stela_contracts::refuse;
 
 /// Software configuration for a newly owned controller. Quotas start
 /// at zero; weights are a declared policy, not measured Apple reset values.
@@ -25,10 +27,7 @@ impl Configuration {
     /// lifecycle permission. Pass the resource's lifecycle separately to
     /// Controller::initialized_cacheless. Subsequent DRAM writes keep their
     /// ordinary pending-effect/readback contract, including a restore of zero.
-    pub fn zeroed_control_image(
-        apertures: usize,
-        weights: [u8; GROUPS as usize],
-    ) -> Result<Self, &'static str> {
+    pub fn zeroed_control_image(apertures: usize, weights: [u8; GROUPS as usize]) -> Result<Self> {
         validate(apertures, &weights)?;
         Ok(Self {
             dram: vec![[0; CHANNELS as usize]; apertures],
@@ -36,17 +35,21 @@ impl Configuration {
         })
     }
 
-    pub(super) fn validate(&self) -> Result<u8, &'static str> {
+    pub(super) fn validate(&self) -> Result<u8> {
         validate(self.dram.len(), &self.weights)
     }
 }
 
-fn validate(apertures: usize, weights: &[u8; GROUPS as usize]) -> Result<u8, &'static str> {
+fn validate(apertures: usize, weights: &[u8; GROUPS as usize]) -> Result<u8> {
     if !(1..=16).contains(&apertures) {
-        return Err("MCC aperture count exceeds original source capacity");
+        return Err(refuse!(
+            "MCC aperture count exceeds original source capacity"
+        ));
     }
     if weights.iter().any(|&weight| weight == 0 || weight > 0x7f) {
-        return Err("MCC quota policy weight is outside its source field");
+        return Err(refuse!(
+            "MCC quota policy weight is outside its source field"
+        ));
     }
     Ok(apertures as u8)
 }

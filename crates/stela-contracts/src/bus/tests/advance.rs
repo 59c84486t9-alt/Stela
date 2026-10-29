@@ -1,5 +1,6 @@
 //! Registration, failure-order and mutation controls for passive advancement.
 use super::*;
+use crate::Refusal;
 use crate::interrupt::InterruptLatch;
 use alloc::{boxed::Box, rc::Rc, vec, vec::Vec};
 use core::cell::RefCell;
@@ -56,7 +57,7 @@ impl MmioDevice for Passive {
     }
 }
 impl Lifecycle for Passive {
-    fn check_lifecycle(&self, _: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, _: LifecycleState) -> Result<(), Refusal> {
         Ok(())
     }
     fn set_lifecycle(&mut self, state: LifecycleState, _: &mut Access<'_>) {

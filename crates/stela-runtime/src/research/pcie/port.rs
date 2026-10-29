@@ -2,7 +2,10 @@
 //! Register facts: Linux v6.17 `drivers/pci/controller/pcie-apple.c`.
 //! Link readiness is derived from modeled supplies and a backed peer.
 //! Analog training, ASPM, tunnel-reset handshakes and AER recovery refuse.
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::MmioError,
     stela_contracts::bus::Width, stela_contracts::bus::refuse,
@@ -105,7 +108,7 @@ impl Port {
         mappings: usize,
         irq: AicInput,
         msi_irqs: Vec<AicInput>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let max = match layout {
             Layout::T8103 => 64,
             Layout::T6020 => 512,
@@ -116,14 +119,14 @@ impl Port {
             || msi_irqs.len() > 256
             || !msi_irqs.len().is_power_of_two()
         {
-            return Err("PCIe table/vector capacity is invalid");
+            return Err(refuse!("PCIe table/vector capacity is invalid"));
         }
         if msi_irqs
             .iter()
             .enumerate()
             .any(|(i, line)| msi_irqs[..i].contains(line) || *line == irq)
         {
-            return Err("PCIe MSI wires overlap");
+            return Err(refuse!("PCIe MSI wires overlap"));
         }
         Ok(Self {
             layout,
@@ -193,29 +196,22 @@ impl Port {
     }
     /// Source has not established port cold-reset/retention values. Refuse a
     /// live rail-loss edge instead of clearing routing as a guessed reset.
-    pub fn set_inputs(
-        &mut self,
-        inputs: Inputs,
-        access: &mut Access<'_>,
-    ) -> Result<(), &'static str> {
+    pub fn set_inputs(&mut self, inputs: Inputs, access: &mut Access<'_>) -> Result<()> {
         if self.inputs.powered && !inputs.powered {
-            return Err("PCIe port supply loss and volatile routing restoration are unqualified");
+            return Err(refuse!(
+                "PCIe port supply loss and volatile routing restoration are unqualified"
+            ));
         }
         self.inputs = inputs;
         self.update(access);
         Ok(())
     }
-    pub fn set_intx(
-        &mut self,
-        pin: u8,
-        asserted: bool,
-        access: &mut Access<'_>,
-    ) -> Result<(), &'static str> {
+    pub fn set_intx(&mut self, pin: u8, asserted: bool, access: &mut Access<'_>) -> Result<()> {
         if pin >= 4 {
-            return Err("PCIe INTx pin exceeds D");
+            return Err(refuse!("PCIe INTx pin exceeds D"));
         }
         if asserted && !self.link {
-            return Err("PCIe INTx on a down link");
+            return Err(refuse!("PCIe INTx on a down link"));
         }
         if asserted {
             self.intx |= 1 << pin;
@@ -296,7 +292,7 @@ impl Port {
         let index = offset.checked_sub(base)? / 4;
         (offset.is_multiple_of(4) && index < entries as u64).then_some(index as usize)
     }
-    fn error(offset: u64, direction: Direction, reason: &'static str) -> MmioError {
+    fn error(offset: u64, direction: Direction, reason: impl Into<Refusal>) -> MmioError {
         refuse(NAME, offset, Width::Word, direction, reason)
     }
     pub fn read(&self, offset: u64) -> Result<u32, MmioError> {
@@ -339,20 +335,20 @@ impl Port {
         value: u32,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let error = |reason| Self::error(offset, Direction::Write, reason);
+        let error = |reason: Refusal| Self::error(offset, Direction::Write, reason);
         if !self.inputs.powered {
-            return Err(error("port is unpowered"));
+            return Err(error(refuse!("port is unpowered")));
         }
         if let Some(i) = Self::table(offset, self.layout.sid(), self.sid.len()) {
             if value & 0x7f00_0000 != 0 {
-                return Err(error("unsupported stream-ID encoding"));
+                return Err(error(refuse!("unsupported stream-ID encoding")));
             }
             self.sid[i] = value;
         } else if self.layout == Layout::T6020
             && let Some(index) = Self::table(offset, 0x3800, self.msi_map.len())
         {
             if value & !(VALID | 0xff) != 0 {
-                return Err(error("unsupported MSI map encoding"));
+                return Err(error(refuse!("unsupported MSI map encoding")));
             }
             self.msi_map[index] = value;
         } else {
@@ -373,13 +369,13 @@ impl Port {
                         || (value >> 4) > maximum
                         || (self.layout == Layout::T6020 && value & !1 != 0)
                     {
-                        return Err(error("unsupported MSI vector-count encoding"));
+                        return Err(error(refuse!("unsupported MSI vector-count encoding")));
                     }
                     self.msi_config = value;
                 }
                 MSI_BASE if self.layout == Layout::T8103 => {
                     if value != 0 {
-                        return Err(error("nonzero MSI base encoding is unqualified"));
+                        return Err(error(refuse!("nonzero MSI base encoding is unqualified")));
                     }
                     self.msi_base = value;
                 }
@@ -390,7 +386,11 @@ impl Port {
                     self.msi_address =
                         (self.msi_address & u64::from(u32::MAX)) | u64::from(value) << 32;
                 }
-                _ => return Err(error("register, value or direction is not implemented")),
+                _ => {
+                    return Err(error(refuse!(
+                        "register, value or direction is not implemented"
+                    )));
+                }
             }
         }
         self.update(access);
@@ -405,7 +405,7 @@ impl Port {
         candidate.write(offset, value, &mut Access::new(0, 0, &mut Silent))?;
         Ok(candidate)
     }
-    pub(super) fn preview_inputs(&self, inputs: Inputs) -> Result<Self, &'static str> {
+    pub(super) fn preview_inputs(&self, inputs: Inputs) -> Result<Self> {
         let mut candidate = self.clone();
         candidate.set_inputs(inputs, &mut Access::new(0, 0, &mut Silent))?;
         Ok(candidate)

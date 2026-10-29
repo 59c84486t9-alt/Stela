@@ -32,6 +32,8 @@
 //!   `AppleSPMIController::start` (fffffe0009e3b2a8) skips `queue-depth`;
 //!   the Gen1-3 handlers inherit the base `getQueueDepths`, which returns
 //!   false (fffffe0009e384e0), and take the DT's depths.
+use crate::Result;
+use stela_contracts::refuse;
 
 /// Logical bank stride used by the controller's independently placed views.
 /// Bank B's device offset; the placement maps `reg[1]` here.
@@ -189,28 +191,28 @@ impl Configuration {
         response_vector: 0x100,
         queue_bytes: [256, 256],
     };
-    pub fn new(
-        profile: Profile,
-        response_vector: u32,
-        queue_bytes: [u32; 2],
-    ) -> Result<Self, &'static str> {
+    pub fn new(profile: Profile, response_vector: u32, queue_bytes: [u32; 2]) -> Result<Self> {
         if response_vector >= VECTOR_COUNT {
-            return Err("SPMI response vector exceeds the nine interrupt groups");
+            return Err(refuse!(
+                "SPMI response vector exceeds the nine interrupt groups"
+            ));
         }
         if queue_bytes
             .iter()
             .any(|&bytes| bytes < COMPLETE_CHUNK_BYTES || !bytes.is_multiple_of(WORD_BYTES))
         {
-            return Err(
-                "SPMI FIFO byte depths must hold a complete extended chunk and whole words",
-            );
+            return Err(refuse!(
+                "SPMI FIFO byte depths must hold a complete extended chunk and whole words"
+            ));
         }
         if profile.layout().depth.is_some()
             && queue_bytes
                 .iter()
                 .any(|&bytes| bytes / WORD_BYTES > GEN4_DEPTH_WORDS)
         {
-            return Err("SPMI FIFO depths exceed the depth register's ten-bit word fields");
+            return Err(refuse!(
+                "SPMI FIFO depths exceed the depth register's ten-bit word fields"
+            ));
         }
         Ok(Self {
             profile,

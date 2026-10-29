@@ -1,5 +1,7 @@
 //! Immutable DART family, stream-remap and register-window contracts.
 //! Resolving a mapper's declared route establishes no physical DMA permission.
+use crate::Result;
+use stela_contracts::refuse;
 pub const DAPF_BYTES: u64 = 0x4000;
 /// The largest DT translation window: M4/M5-generation `dart,t8110` nodes
 /// declare 0xc000 or 0x20000 bytes (J604AP, J700AP, J714cAP).
@@ -96,9 +98,11 @@ impl Profile {
     /// generation's 26A434 SPTM does (T8103 VA 0xfffffff0270e4858, T8112 VA
     /// 0xfffffff0270d976c..0xfffffff0270d9a68): no source remapped twice or
     /// to itself, no target that is itself remapped, every SID in range.
-    pub fn validate_remaps(self, streams: usize, remaps: &[(u8, u8)]) -> Result<(), &'static str> {
+    pub fn validate_remaps(self, streams: usize, remaps: &[(u8, u8)]) -> Result<()> {
         if streams == 0 || streams > self.stream_limit() {
-            return Err("DART stream count is outside the selected native profile");
+            return Err(refuse!(
+                "DART stream count is outside the selected native profile"
+            ));
         }
         for (index, &(source, target)) in remaps.iter().enumerate() {
             if usize::from(source) >= streams
@@ -107,7 +111,9 @@ impl Profile {
                 || remaps[..index].iter().any(|&(s, _)| s == source)
                 || remaps.iter().any(|&(s, _)| s == target)
             {
-                return Err("DART remaps chain, repeat or exceed the native profile");
+                return Err(refuse!(
+                    "DART remaps chain, repeat or exceed the native profile"
+                ));
             }
         }
         Ok(())
@@ -125,16 +131,18 @@ impl Profile {
         streams: usize,
         context: usize,
         remaps: &[(u8, u8)],
-    ) -> Result<usize, &'static str> {
+    ) -> Result<usize> {
         if context >= streams {
-            return Err("DART mapper context is outside the native profile");
+            return Err(refuse!("DART mapper context is outside the native profile"));
         }
         self.validate_remaps(streams, remaps)?;
         if remaps
             .iter()
             .any(|&(source, _)| usize::from(source) == context)
         {
-            return Err("DART mapper names an incoming remapped source instead of its context");
+            return Err(refuse!(
+                "DART mapper names an incoming remapped source instead of its context"
+            ));
         }
         Ok(remaps
             .iter()

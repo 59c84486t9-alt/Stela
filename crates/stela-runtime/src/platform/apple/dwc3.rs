@@ -35,8 +35,11 @@ mod apple;
 mod regs;
 pub mod xhci;
 
+use crate::Result;
 use alloc::{collections::VecDeque, string::String};
 use regs::*;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     super::typec::Usb2Speed, stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -163,7 +166,7 @@ struct Lifecycle {
 
 /// A controller DMA that failed: its I/O address, length and direction,
 /// and for a payload the endpoint and the TRB, at its address, it served.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DmaFault {
     pub iova: u64,
     pub bytes: usize,
@@ -265,7 +268,7 @@ impl Dwc3 {
         }
     }
 
-    fn mmio_ready(&self) -> Result<(), &'static str> {
+    fn mmio_ready(&self) -> Result<()> {
         self.mmio_ready_at(None)
     }
 
@@ -279,32 +282,34 @@ impl Dwc3 {
     /// and establish no other register's access while it is held, which
     /// stays unchecked, not a claim that physical reset makes the rest
     /// of MMIO inaccessible.
-    fn mmio_ready_at(&self, offset: Option<u64>) -> Result<(), &'static str> {
+    fn mmio_ready_at(&self, offset: Option<u64>) -> Result<()> {
         if !self.lifecycle.powered {
-            return Err("DWC3 power domain is off");
+            return Err(refuse!("DWC3 power domain is off"));
         }
         if !self.lifecycle.clocked {
-            return Err("DWC3 clock is gated");
+            return Err(refuse!("DWC3 clock is gated"));
         }
         if self.lifecycle.reset {
-            return Err("DWC3 reset is asserted");
+            return Err(refuse!("DWC3 reset is asserted"));
         }
         if self.phy_reset && !matches!(offset, Some(GUSB2PHYCFG | GUSB3PIPECTL)) {
-            return Err("DWC3 MMIO while physical ATC PHY reset is held is unqualified");
+            return Err(refuse!(
+                "DWC3 MMIO while physical ATC PHY reset is held is unqualified"
+            ));
         }
         Ok(())
     }
 
-    fn activity_ready(&self) -> Result<(), &'static str> {
+    fn activity_ready(&self) -> Result<()> {
         self.mmio_ready()?;
         if self.lifecycle.quiesced {
-            return Err("DWC3 DMA is quiesced");
+            return Err(refuse!("DWC3 DMA is quiesced"));
         }
         if !self.phy_clocked {
-            return Err("ATC PHY clock is gated");
+            return Err(refuse!("ATC PHY clock is gated"));
         }
         if self.phy_quiesced {
-            return Err("ATC PHY DMA is quiesced");
+            return Err(refuse!("ATC PHY DMA is quiesced"));
         }
         Ok(())
     }
@@ -411,19 +416,19 @@ impl Dwc3 {
         core::mem::take(&mut self.session_reset)
     }
 
-    fn error(offset: u64, direction: Direction, reason: &'static str) -> MmioError {
+    fn error(offset: u64, direction: Direction, reason: impl Into<Refusal>) -> MmioError {
         refuse(NAME, offset, Width::Word, direction, reason)
     }
 
-    fn queue(&mut self, ring: usize, value: u32) -> Result<(), &'static str> {
+    fn queue(&mut self, ring: usize, value: u32) -> Result<()> {
         if self.pending.len() == MAX_PENDING_EVENTS {
-            return Err("DWC3 pending event capacity exhausted");
+            return Err(refuse!("DWC3 pending event capacity exhausted"));
         }
         self.pending.push_back(Event { ring, value });
         Ok(())
     }
 
-    fn device_event(&mut self, kind: u32) -> Result<(), &'static str> {
+    fn device_event(&mut self, kind: u32) -> Result<()> {
         if self.devten & (1 << kind) != 0 {
             self.queue(0, device_event(kind))?;
         }
@@ -457,7 +462,7 @@ impl Dwc3 {
         }
     }
 
-    pub fn sync_port(&mut self, state: &impl PortState) -> Result<(), &'static str> {
+    pub fn sync_port(&mut self, state: &impl PortState) -> Result<()> {
         self.activity_ready()?;
         if self.pending_phy_disconnect {
             if self.connected {
@@ -483,17 +488,17 @@ impl Dwc3 {
 
     /// The DMA failure that poisoned the controller, if one did.
     pub fn dma_fault(&self) -> Option<DmaFault> {
-        self.poisoned
+        self.poisoned.clone()
     }
 
     /// Publish bounded queued events via this device's DART stream, before
     /// asserting a wire. Full rings backpressure without overwriting entries.
     /// An uncertain DMA failure poisons the controller until software reset;
     /// no payload or completion is retried behind the owner's back.
-    pub fn flush(&mut self, port: &mut Port<'_, '_>) -> Result<(), &'static str> {
+    pub fn flush(&mut self, port: &mut Port<'_, '_>) -> Result<()> {
         self.activity_ready()?;
         if self.poisoned.is_some() {
-            return Err("DWC3 requires reset after a DMA failure");
+            return Err(refuse!("DWC3 requires reset after a DMA failure"));
         }
         for _ in 0..self.pending.len() {
             let Some(event) = self.pending.front().copied() else {
@@ -508,7 +513,7 @@ impl Dwc3 {
             let address = ring
                 .address
                 .checked_add(u64::from(ring.producer))
-                .ok_or("DWC3 event address overflow")?;
+                .ok_or(refuse!("DWC3 event address overflow"))?;
             if let Err(error) = port.write(address, &event.value.to_le_bytes()) {
                 self.poisoned = Some(DmaFault::new(
                     address,
@@ -516,7 +521,7 @@ impl Dwc3 {
                     true,
                     error,
                 ));
-                return Err("DWC3 event DMA fault; reset required");
+                return Err(refuse!("DWC3 event DMA fault; reset required"));
             }
             ring.producer = (ring.producer + EVENT_BYTES) % ring.size;
             ring.count += EVENT_BYTES;
@@ -543,7 +548,7 @@ impl Dwc3 {
 
     /// Cables a USB2 function of `speed` to the host personality's root
     /// port, or nothing.
-    pub fn attach_host_function(&mut self, speed: Option<Usb2Speed>) -> Result<(), &'static str> {
+    pub fn attach_host_function(&mut self, speed: Option<Usb2Speed>) -> Result<()> {
         self.activity_ready()?;
         self.host.attach(speed);
         Ok(())
@@ -569,10 +574,10 @@ impl Dwc3 {
         &mut self,
         port: &mut Port<'_, '_>,
         function: Option<&mut (dyn Function + '_)>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         self.activity_ready()?;
         if self.poisoned.is_some() {
-            return Err("DWC3 requires reset after a DMA failure");
+            return Err(refuse!("DWC3 requires reset after a DMA failure"));
         }
         self.host.service(port, function)?;
         self.interrupts(port.access);
@@ -618,22 +623,26 @@ impl Dwc3 {
         self.session_reset = true;
     }
 
-    fn endpoint_command(&mut self, n: usize, value: u32) -> Result<(), &'static str> {
+    fn endpoint_command(&mut self, n: usize, value: u32) -> Result<()> {
         let command = value & 0xf;
         if !matches!(command, 1 | 2 | 4..=9) {
-            return Err("unmodeled DWC3 endpoint command");
+            return Err(refuse!("unmodeled DWC3 endpoint command"));
         }
         if value & CMDACT == 0 || value & !(0x7f_0000 | 0x800 | CMDACT | CMDIOC | 0xf) != 0 {
-            return Err("DWC3 endpoint command reserved bits or CMDACT clear");
+            return Err(refuse!(
+                "DWC3 endpoint command reserved bits or CMDACT clear"
+            ));
         }
         if command != 8 && value & (1 << 11) != 0 {
-            return Err("DWC3 endpoint priority or clear-pending request is not modeled");
+            return Err(refuse!(
+                "DWC3 endpoint priority or clear-pending request is not modeled"
+            ));
         }
         if command == 8 && value & (1 << 11) == 0 {
-            return Err("DWC3 End Transfer requires ForceRM");
+            return Err(refuse!("DWC3 End Transfer requires ForceRM"));
         }
         if value & CMDIOC != 0 && self.pending.len() == MAX_PENDING_EVENTS {
-            return Err("DWC3 pending command event capacity exhausted");
+            return Err(refuse!("DWC3 pending command event capacity exhausted"));
         }
         let ep = &mut self.endpoints[n];
         let [p2, p1, p0] = ep.parameters;
@@ -662,10 +671,14 @@ impl Dwc3 {
                             | interval)
                         != 0
                 {
-                    return Err("DWC3 endpoint streams, bursts or reserved configuration");
+                    return Err(refuse!(
+                        "DWC3 endpoint streams, bursts or reserved configuration"
+                    ));
                 }
                 if !matches!(kind, 0 | 2 | INTERRUPT) || (kind == 0) != (n < 2) {
-                    return Err("DWC3 models control EP0, bulk and interrupt endpoints only");
+                    return Err(refuse!(
+                        "DWC3 models control EP0, bulk and interrupt endpoints only"
+                    ));
                 }
                 if packet == 0
                     || packet
@@ -691,7 +704,7 @@ impl Dwc3 {
             }
             2 => {
                 if p0 != 1 || p1 != 0 || p2 != 0 {
-                    return Err("DWC3 requires one transfer resource per endpoint");
+                    return Err(refuse!("DWC3 requires one transfer resource per endpoint"));
                 }
                 if ep.configured && ep.active.is_none() {
                     ep.resource = true;
@@ -701,7 +714,9 @@ impl Dwc3 {
             }
             4 | 5 => {
                 if n < 2 && (n != 0 || command == 5) {
-                    return Err("DWC3 control stall is OUT-only and clears on SETUP");
+                    return Err(refuse!(
+                        "DWC3 control stall is OUT-only and clears on SETUP"
+                    ));
                 }
                 if !ep.configured {
                     failed = true;
@@ -711,10 +726,12 @@ impl Dwc3 {
             }
             6 => {
                 if value & (0x7f << 16 | 1 << 11) != 0 {
-                    return Err("DWC3 non-stream start requires zero command parameter/priority");
+                    return Err(refuse!(
+                        "DWC3 non-stream start requires zero command parameter/priority"
+                    ));
                 }
                 if p2 != 0 {
-                    return Err("DWC3 transfer streams are not modeled");
+                    return Err(refuse!("DWC3 transfer streams are not modeled"));
                 }
                 let address = u64::from(p1) | u64::from(p0) << 32;
                 if !ep.resource || ep.active.is_some() || !address.is_multiple_of(TRB_BYTES) {
@@ -744,7 +761,7 @@ impl Dwc3 {
                 if n != 0 || !matches!(first, 0 | 2) {
                     failed = true;
                 } else if first == 0 && value & CMDIOC != 0 {
-                    return Err("DWC3 initial Start Configuration requires polling");
+                    return Err(refuse!("DWC3 initial Start Configuration requires polling"));
                 } else if self.endpoints[first..].iter().any(|ep| ep.active.is_some()) {
                     failed = true;
                 } else {
@@ -780,11 +797,11 @@ impl Dwc3 {
 
     /// Why a host cannot reach the device personality now, if it cannot:
     /// the first unmet condition of [`Self::available`].
-    pub fn unavailable(&self) -> Option<&'static str> {
+    pub fn unavailable(&self) -> Option<Refusal> {
         if let Err(why) = self.activity_ready() {
             return Some(why);
         }
-        Some(if !self.phy_ready {
+        Some(Refusal::new(if !self.phy_ready {
             "ATC PHY USB2 is not ready"
         } else if self.pending_phy_disconnect {
             "a PHY disconnect is pending service"
@@ -798,7 +815,7 @@ impl Dwc3 {
             "GUSB2PHYCFG.PHYSOFTRST is set"
         } else {
             return None;
-        })
+        }))
     }
 
     /// A transaction adapter whose borrow keeps the DMA stream.
@@ -809,13 +826,7 @@ impl Dwc3 {
         }
     }
 
-    fn not_ready(
-        &mut self,
-        n: usize,
-        token: Token,
-        bytes: usize,
-        active: bool,
-    ) -> Result<Reply, &'static str> {
+    fn not_ready(&mut self, n: usize, token: Token, bytes: usize, active: bool) -> Result<Reply> {
         let ep = self.endpoints[n];
         if !ep.not_ready
             && ep.events & CFG_NOT_READY != 0
@@ -842,26 +853,26 @@ impl Dwc3 {
         &mut self,
         port: &mut Port<'_, '_>,
         mut address: u64,
-    ) -> Result<(u64, [u8; TRB_BYTES as usize]), &'static str> {
+    ) -> Result<(u64, [u8; TRB_BYTES as usize])> {
         let mut trb = [0u8; TRB_BYTES as usize];
         for _ in 0..=MAX_LINKS_PER_PACKET {
             if let Err(error) = port.read(address, &mut trb) {
                 self.poisoned = Some(DmaFault::new(address, trb.len(), false, error));
-                return Err("DWC3 TRB DMA fault; reset required");
+                return Err(refuse!("DWC3 TRB DMA fault; reset required"));
             }
             let ctrl = u32::from_le_bytes(trb[12..16].try_into().unwrap());
             if ctrl & HWO == 0 || (ctrl >> 4) & 0x3f != 8 {
                 return Ok((address, trb));
             }
             if ctrl & !(HWO | (0x3f << 4)) != 0 || trb[8..12] != [0; 4] {
-                return Err("DWC3 link TRB has unmodeled flags or size");
+                return Err(refuse!("DWC3 link TRB has unmodeled flags or size"));
             }
             address = u64::from_le_bytes(trb[..8].try_into().unwrap());
             if !address.is_multiple_of(TRB_BYTES) {
-                return Err("DWC3 unaligned link TRB");
+                return Err(refuse!("DWC3 unaligned link TRB"));
             }
         }
-        Err("DWC3 cyclic or excessive TRB links")
+        Err(refuse!("DWC3 cyclic or excessive TRB links"))
     }
 
     fn packet(
@@ -870,10 +881,10 @@ impl Dwc3 {
         token: Token,
         data: &mut [u8],
         port: &mut Port<'_, '_>,
-    ) -> Result<Reply, &'static str> {
+    ) -> Result<Reply> {
         self.activity_ready()?;
         if self.poisoned.is_some() {
-            return Err("DWC3 requires reset after a DMA failure");
+            return Err(refuse!("DWC3 requires reset after a DMA failure"));
         }
         if !self.connected || !self.available() {
             return Ok(Reply::Nak);
@@ -892,7 +903,7 @@ impl Dwc3 {
             return self.not_ready(n, token, data.len(), false);
         };
         if token == Token::Setup && self.endpoints[1].active.is_some() {
-            return Err("DWC3 superseding control SETUP is not modeled");
+            return Err(refuse!("DWC3 superseding control SETUP is not modeled"));
         }
         if self.pending.len() == MAX_PENDING_EVENTS {
             return Ok(Reply::Nak);
@@ -908,7 +919,7 @@ impl Dwc3 {
         let ctrl = u32::from_le_bytes(trb[12..16].try_into().unwrap());
         let kind = (ctrl >> 4) & 0x3f;
         if ctrl & !(HWO | LST | CHN | CSP | ISP | IOC | (0x3f << 4)) != 0 || size & !LENGTH != 0 {
-            return Err("DWC3 unmodeled TRB flags, streams or status");
+            return Err(refuse!("DWC3 unmodeled TRB flags, streams or status"));
         }
         if n < 2 {
             if !matches!(kind, 2..=5)
@@ -916,17 +927,17 @@ impl Dwc3 {
                 || (kind == 2 && (n != 0 || data.len() != 8 || size != 8))
                 || (matches!(kind, 3 | 4) && !data.is_empty())
             {
-                return Err("DWC3 control token/TRB stage mismatch");
+                return Err(refuse!("DWC3 control token/TRB stage mismatch"));
             }
         } else if kind != 1 {
-            return Err("DWC3 bulk requires a normal TRB");
+            return Err(refuse!("DWC3 bulk requires a normal TRB"));
         }
         let remaining = (size & LENGTH)
             .checked_sub(transfer.done)
-            .ok_or("DWC3 changed active TRB size")? as usize;
+            .ok_or(refuse!("DWC3 changed active TRB size"))? as usize;
         let packet = if token == Token::Setup { 8 } else { ep.packet };
         if data.len() > packet {
-            return Err("DWC3 transaction exceeds endpoint max packet");
+            return Err(refuse!("DWC3 transaction exceeds endpoint max packet"));
         }
         let bytes = if token == Token::In {
             remaining.min(data.len())
@@ -934,19 +945,21 @@ impl Dwc3 {
             data.len()
         };
         if bytes > remaining {
-            return Err("DWC3 OUT packet exceeds TRB capacity");
+            return Err(refuse!("DWC3 OUT packet exceeds TRB capacity"));
         }
         let address = buffer
             .checked_add(u64::from(transfer.done))
-            .ok_or("DWC3 payload address overflow")?;
+            .ok_or(refuse!("DWC3 payload address overflow"))?;
         let short_packet = token == Token::Out && !matches!(kind, 3 | 4) && bytes < packet;
         if short_packet && ctrl & (CSP | CHN) == CSP | CHN {
-            return Err("DWC3 short-packet chain fast-forward is not modeled");
+            return Err(refuse!(
+                "DWC3 short-packet chain fast-forward is not modeled"
+            ));
         }
         let next_trb = transfer
             .trb
             .checked_add(TRB_BYTES)
-            .ok_or("DWC3 TRB list address overflow")?;
+            .ok_or(refuse!("DWC3 TRB list address overflow"))?;
         let result = if token == Token::In {
             port.read(address, &mut data[..bytes])
         } else {
@@ -958,7 +971,7 @@ impl Dwc3 {
                 payload: Some((n, transfer.trb, trb)),
                 ..DmaFault::new(address, bytes, write, error)
             });
-            return Err("DWC3 payload DMA fault; reset required");
+            return Err(refuse!("DWC3 payload DMA fault; reset required"));
         }
         transfer.done += bytes as u32;
         let short = short_packet;
@@ -975,7 +988,7 @@ impl Dwc3 {
                     true,
                     error,
                 ));
-                return Err("DWC3 TRB completion DMA fault; reset required");
+                return Err(refuse!("DWC3 TRB completion DMA fault; reset required"));
             }
             let last = ctrl & LST != 0 || (short && ctrl & CSP == 0);
             let event_kind = if last { XFER_COMPLETE } else { XFER_PROGRESS };
@@ -1018,10 +1031,12 @@ pub struct Peer<'a, 'b, 'c> {
     dma: &'a mut Port<'b, 'c>,
 }
 impl BusPeer for Peer<'_, '_, '_> {
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         let controller = &mut self.controller;
         if !controller.available() {
-            return Err("DWC3 port or controller is not ready for USB2 reset");
+            return Err(refuse!(
+                "DWC3 port or controller is not ready for USB2 reset"
+            ));
         }
         controller.bus_event();
         controller.connected = true;
@@ -1029,14 +1044,11 @@ impl BusPeer for Peer<'_, '_, '_> {
         controller.device_event(2)?;
         Ok(())
     }
-    fn packet(
-        &mut self,
-        endpoint: u8,
-        token: Token,
-        data: &mut [u8],
-    ) -> Result<Reply, &'static str> {
+    fn packet(&mut self, endpoint: u8, token: Token, data: &mut [u8]) -> Result<Reply> {
         if endpoint & 0x70 != 0 || (token == Token::In) != (endpoint & 0x80 != 0) {
-            return Err("invalid USB endpoint direction or reserved address bits");
+            return Err(refuse!(
+                "invalid USB endpoint direction or reserved address bits"
+            ));
         }
         let n = usize::from(endpoint & 0xf) * 2 + usize::from(token == Token::In);
         self.controller.packet(n, token, data, self.dma)
@@ -1159,7 +1171,7 @@ impl MmioDevice for Dwc3 {
             ));
         }
         let value = value as u32;
-        let err = |why| Self::error(offset, Direction::Write, why);
+        let err = |why: Refusal| Self::error(offset, Direction::Write, why);
         match offset {
             GCTL => {
                 // GBLHIBERNATIONEN (bit 1), which AppleT8112USBXHCI::reset
@@ -1172,9 +1184,9 @@ impl MmioDevice for Dwc3 {
                     || value & (3 << 6) != 0
                     || value & (3 << 4) != 0
                 {
-                    return Err(err(
-                        "DWC3 requires host or device mode, bus clock and documented configuration",
-                    ));
+                    return Err(err(refuse!(
+                        "DWC3 requires host or device mode, bus clock and documented configuration"
+                    )));
                 }
                 if value & CORE_RESET != 0 || value & PRTCAP != PRTCAP_DEVICE {
                     self.release();
@@ -1189,7 +1201,9 @@ impl MmioDevice for Dwc3 {
                 const USB2_CONFIG: u32 =
                     (3 << 30) | (1 << 17) | (0xf << 10) | (3 << 8) | (1 << 6) | (1 << 3);
                 if value & !USB2_CONFIG != 0 {
-                    return Err(err("DWC3 requires documented UTMI PHY configuration"));
+                    return Err(err(refuse!(
+                        "DWC3 requires documented UTMI PHY configuration"
+                    )));
                 }
                 if value & (1 << 31) != 0 {
                     self.bus_event();
@@ -1199,21 +1213,23 @@ impl MmioDevice for Dwc3 {
             }
             GUSB3PIPECTL => {
                 if value & !(1 << 31 | 1 << 17) != 0 {
-                    return Err(err("DWC3 has no SuperSpeed PHY"));
+                    return Err(err(refuse!("DWC3 has no SuperSpeed PHY")));
                 }
                 self.usb3 = value;
             }
             DCFG => {
                 if value & !DCFG_FIELDS != 0 || !matches!(value & 7, 0 | 4 | 5) {
-                    return Err(err("DWC3 connects at high speed only, without streams"));
+                    return Err(err(refuse!(
+                        "DWC3 connects at high speed only, without streams"
+                    )));
                 }
                 self.dcfg = value;
             }
             DCTL => {
                 if value & !DCTL_FIELDS != 0 {
-                    return Err(err(
-                        "DWC3 link state change, test or save/restore request is not modeled",
-                    ));
+                    return Err(err(refuse!(
+                        "DWC3 link state change, test or save/restore request is not modeled"
+                    )));
                 }
                 if value & RESET != 0 {
                     self.reset(access);
@@ -1227,7 +1243,7 @@ impl MmioDevice for Dwc3 {
             }
             DEVTEN => {
                 if value & !DEVTEN_FIELDS != 0 {
-                    return Err(err("DWC3 unmodeled device event enable"));
+                    return Err(err(refuse!("DWC3 unmodeled device event enable")));
                 }
                 self.devten = value;
             }
@@ -1235,13 +1251,15 @@ impl MmioDevice for Dwc3 {
             DGCMDPAR => self.generic_parameter = value,
             DGCMD => {
                 if value & CMDACT == 0 || value & !(CMDACT | CMDIOC | 0xff) != 0 {
-                    return Err(err("invalid DWC3 generic command encoding"));
+                    return Err(err(refuse!("invalid DWC3 generic command encoding")));
                 }
                 if value & 0xff != 0x0a {
-                    return Err(err("only DWC3 all-FIFO flush is modeled"));
+                    return Err(err(refuse!("only DWC3 all-FIFO flush is modeled")));
                 }
                 if self.endpoints.iter().any(|ep| ep.active.is_some()) {
-                    return Err(err("DWC3 active FIFO flush requires transfer cancellation"));
+                    return Err(err(refuse!(
+                        "DWC3 active FIFO flush requires transfer cancellation"
+                    )));
                 }
                 if value & CMDIOC != 0 && self.devten & (1 << 10) != 0 {
                     self.queue(0, device_event(10)).map_err(err)?;
@@ -1251,13 +1269,13 @@ impl MmioDevice for Dwc3 {
             }
             GRXFIFOSIZ => {
                 if value > FIFO_WORDS {
-                    return Err(err("DWC3 RX FIFO exceeds declared RAM"));
+                    return Err(err(refuse!("DWC3 RX FIFO exceeds declared RAM")));
                 }
                 self.rx_fifo = value;
             }
             at if (GTXFIFOSIZ..GTXFIFOSIZ + 4 * (ENDPOINTS as u64 / 2)).contains(&at) => {
                 if (value >> 16) + (value & 0xffff) > FIFO_WORDS {
-                    return Err(err("DWC3 TX FIFO exceeds declared RAM"));
+                    return Err(err(refuse!("DWC3 TX FIFO exceeds declared RAM")));
                 }
                 self.tx_fifo[((at - GTXFIFOSIZ) / 4) as usize] = value;
             }
@@ -1267,11 +1285,13 @@ impl MmioDevice for Dwc3 {
                 match (at - GEVNT) % STRIDE {
                     field @ (0 | 4) => {
                         if ring.count != 0 || self.pending.iter().any(|event| event.ring == index) {
-                            return Err(err("cannot relocate a DWC3 ring with pending events"));
+                            return Err(err(refuse!(
+                                "cannot relocate a DWC3 ring with pending events"
+                            )));
                         }
                         if field == 0 {
                             if value & 3 != 0 {
-                                return Err(err("DWC3 event ring must be word aligned"));
+                                return Err(err(refuse!("DWC3 event ring must be word aligned")));
                             }
                             ring.address = ring.address & !0xffff_ffff | u64::from(value);
                         } else {
@@ -1281,16 +1301,18 @@ impl MmioDevice for Dwc3 {
                     }
                     8 => {
                         if value & !(INTMASK | 0xfffc) != 0 {
-                            return Err(err(
-                                "DWC3 event size must be a multiple of four; reserved bits",
-                            ));
+                            return Err(err(refuse!(
+                                "DWC3 event size must be a multiple of four; reserved bits"
+                            )));
                         }
                         let size = value & 0xfffc;
                         if size != ring.size
                             && (ring.count != 0
                                 || self.pending.iter().any(|event| event.ring == index))
                         {
-                            return Err(err("cannot resize a DWC3 ring with pending events"));
+                            return Err(err(refuse!(
+                                "cannot resize a DWC3 ring with pending events"
+                            )));
                         }
                         if size != ring.size {
                             ring.producer = 0;
@@ -1300,9 +1322,9 @@ impl MmioDevice for Dwc3 {
                     }
                     12 => {
                         if value & !0xfffc != 0 || value > ring.count {
-                            return Err(err(
-                                "DWC3 event acknowledgement exceeds pending byte count or is unaligned",
-                            ));
+                            return Err(err(refuse!(
+                                "DWC3 event acknowledgement exceeds pending byte count or is unaligned"
+                            )));
                         }
                         ring.count -= value;
                     }
@@ -1319,7 +1341,7 @@ impl MmioDevice for Dwc3 {
             }
             GUCTL1 => {
                 if value & !GUCTL1_FIELDS != 0 {
-                    return Err(err("unmodeled DWC3 GUCTL1 fields"));
+                    return Err(err(refuse!("unmodeled DWC3 GUCTL1 fields")));
                 }
                 self.guctl1 = value;
             }
@@ -1327,12 +1349,14 @@ impl MmioDevice for Dwc3 {
             GUID => self.guid = value,
             GTXFIFOPRIDEV => {
                 if value >> (ENDPOINTS / 2) != 0 {
-                    return Err(err("DWC3 TX FIFO priority names a FIFO the core lacks"));
+                    return Err(err(refuse!(
+                        "DWC3 TX FIFO priority names a FIFO the core lacks"
+                    )));
                 }
                 self.tx_priority = value;
             }
             at if apple::Registers::claims(at) => self.apple.write(at, value).map_err(err)?,
-            _ => return Err(err("read-only or unmodeled DWC3/Apple register")),
+            _ => return Err(err(refuse!("read-only or unmodeled DWC3/Apple register"))),
         }
         Ok(())
     }

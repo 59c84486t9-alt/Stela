@@ -7,7 +7,10 @@
 //! Source PMGR provider gate-index metadata remains inventoried separately from
 //! the consumer dependencies its IOService start activates.
 use super::{IOMMU_MAPPER, Node, PMGR2_ARCH, PMGR2_IMPLEMENTATION, SOCS, name_of};
+use crate::Result;
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
+use stela_contracts::refusal::Within;
+use stela_contracts::refuse;
 use {
     crate::dart::Profile, crate::pmgr::coverage, crate::pmgr::coverage::Admission,
     crate::pmgr::coverage::Consumer, crate::pmgr::coverage::Domain,
@@ -92,9 +95,11 @@ impl PowerStates {
         root: &Node<'_>,
         processors: &[stela_contracts::identity::Identity],
         acc_harvesting: u32,
-    ) -> Result<Vec<ProcessorAssociation>, String> {
-        let io = root.child("arm-io").ok_or("CPU PMGR requires arm-io")?;
-        let parent = io.child("pmgr").ok_or("CPU PMGR requires pmgr")?;
+    ) -> Result<Vec<ProcessorAssociation>> {
+        let io = root
+            .child("arm-io")
+            .ok_or(refuse!("CPU PMGR requires arm-io"))?;
+        let parent = io.child("pmgr").ok_or(refuse!("CPU PMGR requires pmgr"))?;
         let node = register_node(&io, &parent)?;
         // Reconstruct every original domain through the existing reader. The
         // association resolver may trust normalized non-CPU locations only
@@ -107,25 +112,26 @@ impl PowerStates {
             || self.blocks != table.blocks
             || self.registers != table.registers
         {
-            return Err("CPU PMGR canonical inventory differs from the source tree".into());
+            return Err(refuse!(
+                "CPU PMGR canonical inventory differs from the source tree"
+            ));
         }
         // Another die's cores power up through that die's PMGR records,
         // whose CPU owners the association resolver does not model.
         if dies.count != 1 {
-            return Err(format!(
-                "CPU PMGR associations: {:?}",
-                cpu::CpuAssociationError::UnsupportedDie(dies.count - 1)
-            ));
+            let error = cpu::CpuAssociationError::UnsupportedDie(dies.count - 1);
+            return Err(refuse!("CPU PMGR associations: {error}", ?error));
         }
-        let (layout, _) = Layout::select(node.property("ps-regs"), node.property("ps-groups"))
-            .map_err(String::from)?;
+        let (layout, _) = Layout::select(node.property("ps-regs"), node.property("ps-groups"))?;
         let devices = node
             .property("devices")
-            .ok_or("CPU PMGR requires devices")?;
+            .ok_or(refuse!("CPU PMGR requires devices"))?;
         if !devices.len().is_multiple_of(PMGR_DEVICE)
             || devices.len() / PMGR_DEVICE != self.domains.len()
         {
-            return Err("CPU PMGR views differ from the complete domain inventory".into());
+            return Err(refuse!(
+                "CPU PMGR views differ from the complete domain inventory"
+            ));
         }
         let views = devices
             .as_chunks::<PMGR_DEVICE>()
@@ -133,9 +139,9 @@ impl PowerStates {
             .iter()
             .zip(&self.domains)
             .map(|(raw, domain)| {
-                let record = Record::parse(layout, raw).map_err(String::from)?;
+                let record = Record::parse(layout, raw)?;
                 if domain.id != domain_id(record.id) || domain.name != record.name {
-                    return Err("CPU PMGR record and canonical domain differ".into());
+                    return Err(refuse!("CPU PMGR record and canonical domain differ"));
                 }
                 let location = match (record.location, domain.address) {
                     (Some(location), Some(address)) => Some(cpu::PmgrCpuLocation {
@@ -144,7 +150,7 @@ impl PowerStates {
                         address,
                     }),
                     (None, None) => None,
-                    _ => return Err("CPU PMGR physical/virtual domain mismatch".into()),
+                    _ => return Err(refuse!("CPU PMGR physical/virtual domain mismatch")),
                 };
                 Ok(cpu::PmgrCpuRecord {
                     id: domain.id,
@@ -154,14 +160,14 @@ impl PowerStates {
                     location,
                 })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>>>()?;
         cpu::resolve_cpu_power(chip, root, &views, processors, acc_harvesting)
-            .map_err(|error| format!("CPU PMGR associations: {error:?}"))
+            .map_err(|error| refuse!("CPU PMGR associations: {error}", ?error))
     }
 
     /// Original power gates plus checked physical ownership.
     /// Stable resource indices also identify the lifecycle owner.
-    pub fn power_requirements(&self) -> Result<Vec<Vec<DomainId>>, String> {
+    pub fn power_requirements(&self) -> Result<Vec<Vec<DomainId>>> {
         implicit::power_requirements(self)
     }
 
@@ -170,8 +176,8 @@ impl PowerStates {
     /// Missing evidence remains required. A hidden controller's registerless
     /// logical descendants follow it, until an independently admitted child
     /// or a placed hardware owner establishes its own obligations.
-    pub fn apply_admission(&mut self, prepared: &[u8], hidden: &[String]) -> Result<usize, String> {
-        let root = Node::root(prepared).ok_or("PMGR admission tree is invalid")?;
+    pub fn apply_admission(&mut self, prepared: &[u8], hidden: &[String]) -> Result<usize> {
+        let root = Node::root(prepared).ok_or(refuse!("PMGR admission tree is invalid"))?;
         let expected = inventory_with_nodes(&root)?;
         let io = root.child("arm-io");
         let pmgr = io.as_ref().unwrap_or(&root).child("pmgr");
@@ -196,15 +202,15 @@ impl PowerStates {
                         || expected.owner != actual.owner
                 })
         {
-            return Err(
-                "PMGR admission evidence differs from the complete resource inventory".into(),
-            );
+            return Err(refuse!(
+                "PMGR admission evidence differs from the complete resource inventory"
+            ));
         }
         let mut unavailable = BTreeSet::new();
         let mut evidence = BTreeSet::new();
         for entry in hidden {
             if !evidence.insert(entry.as_str()) {
-                return Err(format!("PMGR admission repeats evidence {entry}"));
+                return Err(refuse!("PMGR admission repeats evidence {entry}", entry));
             }
             // The historical ledger also carries these preparation notes.
             // They establish no unavailable resource and cannot waive sinks.
@@ -218,15 +224,19 @@ impl PowerStates {
                     _ => false,
                 };
                 if !valid {
-                    return Err(format!(
-                        "PMGR admission has invalid preparation note {entry}"
+                    return Err(refuse!(
+                        "PMGR admission has invalid preparation note {entry}",
+                        entry
                     ));
                 }
                 continue;
             }
             if entry == "/" || entry == "/arm-io" || entry == "/cpus" || entry.starts_with("/cpus/")
             {
-                return Err(format!("PMGR admission cannot retire structural {entry}"));
+                return Err(refuse!(
+                    "PMGR admission cannot retire structural {entry}",
+                    entry
+                ));
             }
             let index = expected.locate(entry)?;
             let node = &expected.nodes[index];
@@ -236,12 +246,13 @@ impl PowerStates {
                 .is_some_and(|owner| !matches!(owner, PowerOwner::Mmio(_)))
                 || node.property("compatible").is_some() && node.property("AAPL,ignore").is_none()
             {
-                return Err(format!(
-                    "PMGR unavailable admission conflicts with visible hardware {entry}"
+                return Err(refuse!(
+                    "PMGR unavailable admission conflicts with visible hardware {entry}",
+                    entry
                 ));
             }
             if !unavailable.insert(index) {
-                return Err(format!("PMGR admission repeats resource {entry}"));
+                return Err(refuse!("PMGR admission repeats resource {entry}", entry));
             }
         }
         let mut admissions = Vec::with_capacity(self.resources.len());
@@ -293,7 +304,7 @@ struct ResourceInventory<'a> {
 impl ResourceInventory<'_> {
     /// Historical admission ledgers contain paths, not node identities. Such
     /// evidence is usable only when it names exactly one original resource.
-    fn locate(&self, path: &str) -> Result<usize, String> {
+    fn locate(&self, path: &str) -> Result<usize> {
         let mut matches = self
             .resources
             .iter()
@@ -301,9 +312,9 @@ impl ResourceInventory<'_> {
             .filter_map(|(index, resource)| (resource.name == path).then_some(index));
         let index = matches
             .next()
-            .ok_or_else(|| format!("PMGR admission names missing resource {path}"))?;
+            .ok_or_else(|| refuse!("PMGR admission names missing resource {path}", path))?;
         if matches.next().is_some() {
-            return Err(format!("PMGR admission path is ambiguous: {path}"));
+            return Err(refuse!("PMGR admission path is ambiguous: {path}", path));
         }
         Ok(index)
     }
@@ -323,14 +334,14 @@ const GATE_RESERVED: u32 = 0x0fff_0000;
 /// Decode each gate word into its die-checked device. The record tables
 /// hold die 0's devices; [`decode_domain_table`] places every other die's
 /// copy, so a die without a placed PMGR remains an unknown requirement.
-pub(super) fn gate_ids(
-    node: &Node<'_>,
-    path: &str,
-    property: &str,
-) -> Result<Vec<DomainId>, String> {
+pub(super) fn gate_ids(node: &Node<'_>, path: &str, property: &str) -> Result<Vec<DomainId>> {
     let bytes = node.property(property).unwrap_or_default();
     if !bytes.len().is_multiple_of(4) {
-        return Err(format!("{path} {property} contains a partial device ID"));
+        return Err(refuse!(
+            "{path} {property} contains a partial device ID",
+            path,
+            property
+        ));
     }
     bytes
         .as_chunks::<4>()
@@ -339,8 +350,11 @@ pub(super) fn gate_ids(
         .map(|word| {
             let word = u32::from_le_bytes(*word);
             if word & GATE_RESERVED != 0 {
-                return Err(format!(
-                    "{path} {property} {word:#x} sets reserved PMGR device ID bits"
+                return Err(refuse!(
+                    "{path} {property} {word:#x} sets reserved PMGR device ID bits",
+                    path,
+                    property,
+                    word
                 ));
             }
             Ok(DomainId {
@@ -378,7 +392,7 @@ impl Dies {
     /// which XNU `ml_parse_cpu_topology` reads), as the `die-count` iBoot sets
     /// at boot (J180D iBoot file 0x39d88) is not in the firmware tree; a tree
     /// without CPU nodes is one die.
-    fn of(root: &Node<'_>, pmgr: &Node<'_>) -> Result<Self, String> {
+    fn of(root: &Node<'_>, pmgr: &Node<'_>) -> Result<Self> {
         let cpus = if name_of(root) == "arm-io" {
             None
         } else {
@@ -394,7 +408,7 @@ impl Dies {
             .checked_add(1)
             .filter(|&count| count <= 1 << (32 - GATE_DIE_SHIFT))
             .and_then(|count| u8::try_from(count).ok())
-            .ok_or_else(|| format!("CPU die-id {highest} exceeds the PMGR die field"))?;
+            .ok_or_else(|| refuse!("CPU die-id {highest} exceeds the PMGR die field", highest))?;
         if count == 1 {
             return Ok(Self { count, stride: 0 });
         }
@@ -402,7 +416,7 @@ impl Dies {
             Some(bytes) if bytes.len() == 8 => {
                 u64::from_le_bytes(bytes.try_into().expect("eight bytes"))
             }
-            Some(_) => return Err("/arm-io/pmgr die-stride is not one 64-bit stride".into()),
+            Some(_) => return Err(refuse!("/arm-io/pmgr die-stride is not one 64-bit stride")),
             None => 0,
         };
         let stride = if stride != 0 {
@@ -413,27 +427,30 @@ impl Dies {
                 .find(|(family, _)| pmgr.compatible(family))
                 .map(|&(_, stride)| stride)
                 .ok_or_else(|| {
-                    format!("/arm-io/pmgr spans {count} dies without a qualified die-stride")
+                    refuse!(
+                        "/arm-io/pmgr spans {count} dies without a qualified die-stride",
+                        count
+                    )
                 })?
         };
         Ok(Self { count, stride })
     }
 
     /// Die `die`'s copy of a die-0 physical address.
-    fn place(self, die: u8, address: u64) -> Result<u64, String> {
+    fn place(self, die: u8, address: u64) -> Result<u64> {
         self.stride
             .checked_mul(u64::from(die))
             .and_then(|offset| address.checked_add(offset))
-            .ok_or_else(|| format!("/arm-io/pmgr die {die} power state overflows"))
+            .ok_or_else(|| refuse!("/arm-io/pmgr die {die} power state overflows", die))
     }
 }
 
 #[cfg(test)]
-fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
+fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>> {
     Ok(inventory_with_nodes(root)?.resources)
 }
 
-fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, String> {
+fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>> {
     let provider = clock_role::provider(root)?;
     let ranges = root
         .child("arm-io")
@@ -455,7 +472,7 @@ fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, St
             }
         },
     )
-    .ok_or("invalid physical resource tree")?;
+    .ok_or(refuse!("invalid physical resource tree"))?;
     let physical = |node: &Node<'_>| {
         let key = node.property("reg")?.as_ptr();
         physical_views
@@ -486,7 +503,7 @@ fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, St
     let mut parents = alloc::vec![None];
     let mut pending = root
         .children()
-        .ok_or("invalid resource tree")?
+        .ok_or(refuse!("invalid resource tree"))?
         .into_iter()
         .rev()
         .map(|node| {
@@ -622,7 +639,7 @@ fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, St
         parents.push(Some(parent));
         for child in node
             .children()
-            .ok_or_else(|| format!("{path} has an invalid child"))?
+            .ok_or_else(|| refuse!("{path} has an invalid child", path))?
             .into_iter()
             .rev()
         {
@@ -648,7 +665,7 @@ pub(super) fn power_states(
     root: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     chip_id: u32,
-) -> Result<Option<PowerStates>, String> {
+) -> Result<Option<PowerStates>> {
     let io = root.child("arm-io");
     let io = io.as_ref().unwrap_or(root);
     let Some(parent) = io.child("pmgr").filter(|node| {
@@ -665,13 +682,13 @@ pub(super) fn power_states(
 /// `pmgr2,arch` publishes the controller and `pmgr2,t8152` owns the physical
 /// groups and device table (`docs/research/apple-socs.md`, CPU start registers).
 /// Selection grants neither PSD service-gate semantics nor lifecycle coverage.
-pub(super) fn register_node<'a>(io: &Node<'a>, parent: &Node<'a>) -> Result<Node<'a>, String> {
+pub(super) fn register_node<'a>(io: &Node<'a>, parent: &Node<'a>) -> Result<Node<'a>> {
     if !parent.compatible(PMGR2_ARCH) {
         return Ok(parent.clone());
     }
     io.child("pmgr-child")
         .filter(|node| node.compatible(PMGR2_IMPLEMENTATION))
-        .ok_or_else(|| "pmgr2,arch has no qualified register-bearing pmgr-child".into())
+        .ok_or_else(|| refuse!("pmgr2,arch has no qualified register-bearing pmgr-child"))
 }
 
 /// Normalize firmware records while preserving complete graph validation.
@@ -680,7 +697,7 @@ fn decode_power_states(
     root: &Node<'_>,
     node: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
-) -> Result<PowerStates, String> {
+) -> Result<PowerStates> {
     let states = source_power_states(root, node, translate)?;
     validate_power_graph(&states)?;
     Ok(states)
@@ -692,7 +709,7 @@ pub(super) fn source_power_states(
     root: &Node<'_>,
     node: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
-) -> Result<PowerStates, String> {
+) -> Result<PowerStates> {
     let table = decode_domain_table(node, Dies::of(root, node)?, translate)?;
     let inventory = inventory_with_nodes(root)?;
     let implicit = implicit::resolve(node, &table.domains, &inventory, translate)?;
@@ -706,7 +723,7 @@ pub(super) fn source_power_states(
     Ok(states)
 }
 
-pub(super) fn validate_power_graph(states: &PowerStates) -> Result<(), String> {
+pub(super) fn validate_power_graph(states: &PowerStates) -> Result<()> {
     let power = states.power_requirements()?;
     let consumers = states
         .resources
@@ -723,7 +740,7 @@ pub(super) fn validate_power_graph(states: &PowerStates) -> Result<(), String> {
         .collect::<Vec<_>>();
     // Validate the entire graph even when a broken record is unreferenced.
     coverage::analyze(&states.domains, &consumers)
-        .map_err(|error| format!("PMGR coverage: {error:?}"))?;
+        .map_err(|error| refuse!("PMGR coverage: {error}", ?error))?;
     Ok(())
 }
 
@@ -739,11 +756,11 @@ fn decode_domain_table(
     node: &Node<'_>,
     dies: Dies,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
-) -> Result<DomainTable, String> {
+) -> Result<DomainTable> {
     const PATH: &str = "/arm-io/pmgr";
-    let reg = super::apertures::registers(node).ok_or("PMGR reg has incomplete pairs")?;
-    let (layout, raw_blocks) = Layout::select(node.property("ps-regs"), node.property("ps-groups"))
-        .map_err(String::from)?;
+    let reg = super::apertures::registers(node).ok_or(refuse!("PMGR reg has incomplete pairs"))?;
+    let (layout, raw_blocks) =
+        Layout::select(node.property("ps-regs"), node.property("ps-groups"))?;
     let blocks = raw_blocks
         .as_chunks::<4>()
         .0
@@ -752,8 +769,9 @@ fn decode_domain_table(
         .collect::<Vec<_>>();
     let devices = node.property("devices").unwrap_or_default();
     if !raw_blocks.len().is_multiple_of(12) || !devices.len().is_multiple_of(PMGR_DEVICE) {
-        return Err(format!(
-            "{PATH} power-state groups or devices is not whole entries"
+        return Err(refuse!(
+            "{PATH} power-state groups or devices is not whole entries",
+            PATH
         ));
     }
     let mut spans: Vec<Option<(u64, u64)>> = alloc::vec![None; blocks.len() / 3];
@@ -761,34 +779,42 @@ fn decode_domain_table(
     let mut domains = Vec::new();
     for (number, entry) in devices.as_chunks::<PMGR_DEVICE>().0.iter().enumerate() {
         let record = Record::parse(layout, entry)
-            .map_err(|error| format!("{PATH} record {number}: {error}"))?;
+            .within(|| refuse!("{PATH} record {number}", PATH, number))?;
         let parents = record
             .parents
             .map(|parent| (parent != 0).then(|| domain_id(parent)));
         let address = if let Some(location) = record.location {
             let (index, block) = (u64::from(location.index), location.group);
-            let cells = blocks
-                .get(block * 3..block * 3 + 3)
-                .ok_or_else(|| format!("{PATH} device names absent power-state block {block}"))?;
-            let &(range, bytes) = reg
-                .get(cells[0] as usize)
-                .ok_or_else(|| format!("{PATH} ps-regs block {block} names absent reg"))?;
+            let cells = blocks.get(block * 3..block * 3 + 3).ok_or_else(|| {
+                refuse!(
+                    "{PATH} device names absent power-state block {block}",
+                    PATH,
+                    block
+                )
+            })?;
+            let &(range, bytes) = reg.get(cells[0] as usize).ok_or_else(|| {
+                refuse!("{PATH} ps-regs block {block} names absent reg", PATH, block)
+            })?;
             let offset = u64::from(cells[1])
                 .checked_add(index * 8)
                 .filter(|offset| offset.checked_add(4).is_some_and(|end| end <= bytes))
-                .ok_or_else(|| format!("{PATH} power state exceeds reg bank"))?;
-            let view = translate(range, bytes)
-                .ok_or_else(|| format!("{PATH} power-state view crosses its actual bus domain"))?;
+                .ok_or_else(|| refuse!("{PATH} power state exceeds reg bank", PATH))?;
+            let view = translate(range, bytes).ok_or_else(|| {
+                refuse!(
+                    "{PATH} power-state view crosses its actual bus domain",
+                    PATH
+                )
+            })?;
             let physical = view
                 .checked_add(offset)
-                .ok_or_else(|| format!("{PATH} power-state physical word overflows"))?;
+                .ok_or_else(|| refuse!("{PATH} power-state physical word overflows", PATH))?;
             let base = view
                 .checked_add(u64::from(cells[1]))
-                .ok_or_else(|| format!("{PATH} power-state base overflows"))?;
+                .ok_or_else(|| refuse!("{PATH} power-state base overflows", PATH))?;
             let end = physical
                 .checked_add(4)
                 .filter(|_| base.checked_add(index * 8) == Some(physical))
-                .ok_or_else(|| format!("{PATH} ps-regs block is not one contiguous range"))?;
+                .ok_or_else(|| refuse!("{PATH} ps-regs block is not one contiguous range", PATH))?;
             let span = spans[block].get_or_insert((base, 0));
             span.1 = span.1.max(end - base);
             if !registers.contains(&physical) {
@@ -838,8 +864,9 @@ fn decode_domain_table(
     }
     registers.sort_unstable();
     if registers.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(format!(
-            "{PATH} die-stride overlaps another die's power states"
+        return Err(refuse!(
+            "{PATH} die-stride overlaps another die's power states",
+            PATH
         ));
     }
     Ok(DomainTable {

@@ -1,5 +1,6 @@
 use super::*;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 use {
     crate::platform::apple::ptd::transport::Observation, stela_contracts::bus::Access,
     stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState,
@@ -174,7 +175,7 @@ fn complete_width_alignment_and_knownness_are_required_without_padding_registers
         for delta in 1..width.bytes() {
             assert_eq!(
                 bank.interrupt_snapshot(IRQ_STATUS + delta, width),
-                Err("PTD IRQ access is not aligned")
+                Err(refuse!("PTD IRQ access is not aligned"))
             );
         }
     }
@@ -195,11 +196,11 @@ fn complete_width_alignment_and_knownness_are_required_without_padding_registers
     let tiny = observed(65, &observations()[..3]);
     assert_eq!(
         tiny.interrupt_snapshot(IRQ_STATUS + 8, Width::Double),
-        Err("PTD IRQ read crosses its bank")
+        Err(refuse!("PTD IRQ read crosses its bank"))
     );
     assert_eq!(
         tiny.interrupt_snapshot(IRQ_STATUS, Width::Quad),
-        Err("PTD IRQ read crosses its bank")
+        Err(refuse!("PTD IRQ read crosses its bank"))
     );
     assert_eq!(
         tiny.interrupt_snapshot(IRQ_STATUS + 8, Width::Word)
@@ -213,7 +214,7 @@ fn complete_width_alignment_and_knownness_are_required_without_padding_registers
         let bank = observed(384, &observations);
         assert_eq!(
             bank.interrupt_snapshot(IRQ_STATUS, Width::Quad),
-            Err("PTD register contains unqualified bits")
+            Err(refuse!("PTD register contains unqualified bits"))
         );
         assert!(
             bank.interrupt_snapshot(IRQ_STATUS + 16, Width::Quad)
@@ -283,7 +284,7 @@ fn snapshots_never_consume_metadata_notifications_or_kept_lifecycle() {
     for width in [Width::Word, Width::Double, Width::Quad] {
         assert_eq!(
             bank.interrupt_snapshot(IRQ_STATUS, width),
-            Err("PTD transport is paused by its actual owner")
+            Err(refuse!("PTD transport is paused by its actual owner"))
         );
     }
     assert_eq!(local.asserted(), 1);

@@ -1,6 +1,7 @@
 use super::super::super::interrupt::InterruptLatch;
 use super::*;
 use stela_contracts::dma::test_support::Ram;
+use stela_contracts::refuse;
 
 const ROOT: u64 = 0x1_0000_0000;
 const LEAVES: u64 = ROOT + PAGE;
@@ -131,7 +132,7 @@ fn power_gates_lose_ordinary_state_but_retention_and_secure_zone_locks_survive()
         assert!(d.read(PARAMS1, Width::Word, &mut a).is_err());
         assert_eq!(
             d.translate(&mut ram, 2, ROOT, ROOT, false, &mut a),
-            Err(DmaError::Unsupported("DART power domain is off"))
+            Err(DmaError::Unsupported(refuse!("DART power domain is off")))
         );
         d.set_power(true, retention, &mut a);
         assert_eq!(
@@ -388,9 +389,9 @@ fn a_remapped_stream_takes_its_target_context() {
     // A fault's recorded SID is unrecovered for a remapped source.
     assert_eq!(
         dart.translate(&mut ram, 0, 0x200_4010, 0x200_4013, true, &mut a),
-        Err(DmaError::Unsupported(
+        Err(DmaError::Unsupported(refuse!(
             "DART remapped write fault: source-versus-context SID provenance"
-        ))
+        )))
     );
     assert_eq!(dart.read(ERROR, Width::Word, &mut a), Ok(0));
     // The context's own enable gates the routed stream.
@@ -440,7 +441,7 @@ fn unimplemented_and_invalid_translation_modes_never_bypass_permissions() {
             .unwrap();
         assert_eq!(
             dart.translate(&mut ram, 1, 0, 0, true, &mut a),
-            Err(DmaError::Unsupported(reason))
+            Err(DmaError::Unsupported(reason.into()))
         );
         assert_eq!(dart.read(ERROR, Width::Word, &mut a), Ok(0));
     }
@@ -485,7 +486,7 @@ fn quiesce_and_reset_are_distinct_from_kept_power() {
     assert_eq!(dart.read(TCR + 4, Width::Word, &mut a), Ok(1));
     assert_eq!(
         dart.translate(&mut ram, 2, ROOT, ROOT, false, &mut a),
-        Err(DmaError::Unsupported("DART DMA is quiesced"))
+        Err(DmaError::Unsupported(refuse!("DART DMA is quiesced")))
     );
     dart.set_power(false, true, &mut a);
     dart.set_power(true, true, &mut a);
@@ -496,14 +497,14 @@ fn quiesce_and_reset_are_distinct_from_kept_power() {
     assert!(dart.write(TCR, Width::Word, 1, &mut a).is_err());
     assert_eq!(
         dart.translate(&mut ram, 2, ROOT, ROOT, false, &mut a),
-        Err(DmaError::Unsupported("DART reset is asserted"))
+        Err(DmaError::Unsupported(refuse!("DART reset is asserted")))
     );
     dart.set_reset(false, &mut a);
     assert_eq!(dart.read(TCR + 4, Width::Word, &mut a), Ok(0));
     assert_eq!(dart.read(PROTECT_LOCK, Width::Word, &mut a), Ok(0));
     assert_eq!(
         dart.translate(&mut ram, 2, ROOT, ROOT, false, &mut a),
-        Err(DmaError::Unsupported("DART DMA is quiesced"))
+        Err(DmaError::Unsupported(refuse!("DART DMA is quiesced")))
     );
     dart.set_quiesced(false);
     // Releasing reset does not restore a software-owned table or enable.
@@ -626,7 +627,9 @@ fn the_apf_holds_its_slices_until_sptm_locks_them() {
         .unwrap();
     assert_eq!(
         dart.translate(&mut ram, 0, ROOT, ROOT, false, &mut access),
-        Err(DmaError::Unsupported("DART address permission filtering"))
+        Err(DmaError::Unsupported(refuse!(
+            "DART address permission filtering"
+        )))
     );
     // A DART without a filter has no APF domain.
     let mut plain = Dart::new(16, None);
@@ -725,7 +728,9 @@ fn original_pmp_apf_programming_keeps_all_slices_without_granting_dma() {
     for write in [false, true] {
         assert_eq!(
             dart.translate(&mut ram, 0, 0x4000, 0x4003, write, &mut access),
-            Err(DmaError::Unsupported("DART address permission filtering"))
+            Err(DmaError::Unsupported(refuse!(
+                "DART address permission filtering"
+            )))
         );
     }
 }
@@ -841,9 +846,9 @@ fn revision_2_2_walks_both_two_level_windows_and_three_four_level_tables() {
     let other = (1 << 36) + 0x200_4010;
     assert_eq!(
         d.translate(&mut ram, 1, other, other, false, &mut a),
-        Err(DmaError::Unsupported(
+        Err(DmaError::Unsupported(refuse!(
             "DART two-level DVA bits [46:36] outside the recovered 0 and 0x10 windows"
-        ))
+        )))
     );
     // FOUR_LEVEL: the TTBR's table maps DVA [46:36] to the same tables.
     ram.put_u64(UPPER + 0x10 * 8, table_entry(ROOT));
@@ -905,9 +910,9 @@ fn revision_2_2_captures_per_stream_faults_until_their_pending_bits_clear() {
         // A second fault of a pending stream is unchecked.
         assert_eq!(
             d.translate(&mut ram, 1, dva, dva + 3, true, &mut a),
-            Err(DmaError::Unsupported(
+            Err(DmaError::Unsupported(refuse!(
                 "per-SID DART secondary fault capture is unsupported"
-            ))
+            )))
         );
         assert_eq!(d.read(PENDING, Width::Word, &mut a), Ok(1 << 4 | 1 << 1));
         assert_eq!(d.read(record + 8, Width::Word, &mut a), Ok(0x200_4010));
@@ -991,9 +996,9 @@ fn revision_2_2_keeps_cacheless_invalidation_remap_and_its_protection_domains() 
     );
     assert_eq!(
         d.translate(&mut ram, 0, dva, dva, true, &mut a),
-        Err(DmaError::Unsupported(
+        Err(DmaError::Unsupported(refuse!(
             "DART remapped write fault: source-versus-context SID provenance"
-        ))
+        )))
     );
     assert_eq!(d.read(PENDING, Width::Word, &mut a), Ok(0));
     // SPTM protects and locks domains 5 to 8 with TTBR_TCR.

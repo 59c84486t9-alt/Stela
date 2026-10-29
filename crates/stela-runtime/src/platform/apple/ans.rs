@@ -35,6 +35,7 @@ mod namespace;
 mod prp;
 mod tunables;
 
+use crate::Result;
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, VecDeque},
@@ -46,6 +47,8 @@ pub use bfh::BootImage;
 use bfh::Identity;
 use namespace::Medium;
 use prp::dma_error;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use stela_drivers::block::BlockDevice;
 use stela_soc_data::ans::Description;
 use stela_soc_data::ans::{NVMMU_CONTROL, QueueGeometry};
@@ -147,21 +150,19 @@ pub const RTKIT_ENDPOINT: u8 = 0x20;
 pub struct Endpoint;
 
 impl super::rtkit::Endpoint for Endpoint {
-    fn check_reset(&self) -> Result<(), &'static str> {
+    fn check_reset(&self) -> Result<()> {
         Ok(())
     }
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         Ok(())
     }
-    fn start(&mut self, _outbox: &mut alloc::vec::Vec<u64>) -> Result<(), &'static str> {
+    fn start(&mut self, _outbox: &mut alloc::vec::Vec<u64>) -> Result<()> {
         Ok(())
     }
-    fn receive(
-        &mut self,
-        _payload: u64,
-        _outbox: &mut alloc::vec::Vec<u64>,
-    ) -> Result<(), &'static str> {
-        Err("ANS2 RTKit endpoint 0x20 has no AP message protocol")
+    fn receive(&mut self, _payload: u64, _outbox: &mut alloc::vec::Vec<u64>) -> Result<()> {
+        Err(refuse!(
+            "ANS2 RTKit endpoint 0x20 has no AP message protocol"
+        ))
     }
 }
 
@@ -181,9 +182,9 @@ struct Queue {
 }
 
 impl Queue {
-    fn acknowledge(&mut self, head: u16) -> Result<(), &'static str> {
+    fn acknowledge(&mut self, head: u16) -> Result<()> {
         if !self.cq_enabled || head >= self.cq_entries {
-            return Err("ANS CQ head outside an enabled queue");
+            return Err(refuse!("ANS CQ head outside an enabled queue"));
         }
         let consumed = (head + self.cq_entries - self.head) % self.cq_entries;
         let consumed = if consumed == 0 && self.pending == self.cq_entries {
@@ -192,7 +193,7 @@ impl Queue {
             consumed
         };
         if consumed > self.pending {
-            return Err("ANS CQ head consumes completions not produced");
+            return Err(refuse!("ANS CQ head consumes completions not produced"));
         }
         self.pending -= consumed;
         self.head = head;
@@ -291,7 +292,7 @@ impl Ans {
         backing: Box<dyn BlockDevice>,
         namespaces: &[Description],
         irq: Option<AicInput>,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         Self::with_geometry(backing, namespaces, irq, QueueGeometry::DEFAULT)
     }
 
@@ -300,7 +301,7 @@ impl Ans {
         namespaces: &[Description],
         irq: Option<AicInput>,
         geometry: QueueGeometry,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         let medium = Medium::new(backing, namespaces)?;
         let features = Self::default_features(&medium);
         Ok(Self {
@@ -392,15 +393,15 @@ impl Ans {
             && !self.lifecycle.reset
     }
 
-    fn accessible(&self) -> Result<(), &'static str> {
+    fn accessible(&self) -> Result<()> {
         if !self.lifecycle.powered {
-            return Err("ANS power is gated");
+            return Err(refuse!("ANS power is gated"));
         }
         if !self.lifecycle.clocked {
-            return Err("ANS clock is gated");
+            return Err(refuse!("ANS clock is gated"));
         }
         if self.lifecycle.reset {
-            return Err("ANS reset is asserted");
+            return Err(refuse!("ANS reset is asserted"));
         }
         Ok(())
     }
@@ -473,16 +474,18 @@ impl Ans {
         self
     }
 
-    fn configure(&mut self, value: u32) -> Result<(), &'static str> {
+    fn configure(&mut self, value: u32) -> Result<()> {
         if value & !CONFIG_MASK != 0 {
-            return Err("ANS CC fields without a model");
+            return Err(refuse!("ANS CC fields without a model"));
         }
         if value & ENABLE != 0 {
             if value & (0xff << 16) != ENTRY_SIZES || !matches!((value >> 7) & 0xf, 0 | 2) {
-                return Err("ANS CC requires 64-byte SQEs, 16-byte CQEs and 4/16 KiB pages");
+                return Err(refuse!(
+                    "ANS CC requires 64-byte SQEs, 16-byte CQEs and 4/16 KiB pages"
+                ));
             }
             if self.config & ENABLE != 0 && (value ^ self.config) & !SHUTDOWN != 0 {
-                return Err("ANS CC changed while enabled");
+                return Err(refuse!("ANS CC changed while enabled"));
             }
             if self.config & ENABLE == 0 {
                 let sq_entries = ((self.aqa & 0xfff) + 1) as u16;
@@ -496,7 +499,9 @@ impl Ans {
                     || !queue.sq.is_multiple_of(page)
                     || !queue.cq.is_multiple_of(page)
                 {
-                    return Err("ANS admin queues are missing, unaligned or too deep");
+                    return Err(refuse!(
+                        "ANS admin queues are missing, unaligned or too deep"
+                    ));
                 }
                 self.queues[0] = Queue {
                     sq_entries,
@@ -518,7 +523,7 @@ impl Ans {
             }
         } else {
             if !self.pending.is_empty() || !self.inflight.is_empty() || !self.completed.is_empty() {
-                return Err("ANS disable with unprocessed submissions");
+                return Err(refuse!("ANS disable with unprocessed submissions"));
             }
             self.status = 0;
             self.queues = [Queue::default(); 2];
@@ -553,18 +558,22 @@ impl Ans {
             )
     }
 
-    fn submit(&mut self, queue: usize, tag: u16) -> Result<(), &'static str> {
+    fn submit(&mut self, queue: usize, tag: u16) -> Result<()> {
         if self.status != READY || self.shutdown || !self.linear || !self.queues[queue].sq_enabled {
-            return Err("ANS submission requires a ready controller and an enabled linear SQ");
+            return Err(refuse!(
+                "ANS submission requires a ready controller and an enabled linear SQ"
+            ));
         }
         if tag >= self.geometry.tag_slots()
             || tag >= self.queues[queue].sq_entries
             || self.valid[tag as usize]
         {
-            return Err("ANS tag outside handoff/SQ capacity or still in use");
+            return Err(refuse!(
+                "ANS tag outside handoff/SQ capacity or still in use"
+            ));
         }
         if self.tcb_bases[queue] == 0 {
-            return Err("ANS submission without an NVMMU TCB array");
+            return Err(refuse!("ANS submission without an NVMMU TCB array"));
         }
         let limit = (queue == 1)
             .then_some(self.queue_attributes)
@@ -573,7 +582,9 @@ impl Ans {
         if limit
             .is_some_and(|limit| self.outstanding().filter(|&(q, _)| q == queue).count() >= limit)
         {
-            return Err("ANS pending commands exceed the programmed queue limit");
+            return Err(refuse!(
+                "ANS pending commands exceed the programmed queue limit"
+            ));
         }
         self.valid[tag as usize] = true;
         self.pending.push_back((queue, tag));
@@ -600,8 +611,11 @@ impl Ans {
                 "ANS DMA while PMGR inhibits execution",
             ));
         }
-        let address = |base: u64, bytes| base.checked_add(bytes).ok_or("ANS DMA address wraps");
-        let refusal = |queue: usize, reason| {
+        let address = |base: u64, bytes| {
+            base.checked_add(bytes)
+                .ok_or(refuse!("ANS DMA address wraps"))
+        };
+        let refusal = |queue: usize, reason: Refusal| {
             refuse(
                 NAME,
                 if queue == 0 { ADMIN_SUBMIT } else { IO_SUBMIT },
@@ -614,7 +628,7 @@ impl Ans {
         let now = port.access.now;
         for (key, done) in self.medium.device.poll(now) {
             let Some(inflight) = self.inflight.remove(&key) else {
-                return Err(refusal(1, "ANS host transfer for no command"));
+                return Err(refusal(1, refuse!("ANS host transfer for no command")));
             };
             let queue = inflight.queue;
             let outcome = self
@@ -629,10 +643,10 @@ impl Ans {
         // Submitted commands execute in order; a host transfer runs while
         // the next ones execute.
         while let Some(&(queue, tag)) = self.pending.front() {
-            let error = |reason| refusal(queue, reason);
+            let error = |reason: Refusal| refusal(queue, reason);
             let q = self.queues[queue];
             if !q.cq_enabled {
-                return Err(error("ANS completion queue is disabled"));
+                return Err(error(refuse!("ANS completion queue is disabled")));
             }
             let mut raw = [0; 64];
             port.read(
@@ -643,7 +657,9 @@ impl Ans {
             .map_err(error)?;
             let mut command = commands::Command(raw);
             if command.cid() != tag {
-                return Err(error("ANS SQ command ID differs from its linear tag"));
+                return Err(error(refuse!(
+                    "ANS SQ command ID differs from its linear tag"
+                )));
             }
             let mut tcb = [0; 128];
             port.read(
@@ -670,9 +686,9 @@ impl Ans {
                 || mirror != [0; 8] && mirror != &command.0[56..64]
                 || tcb[6..24].iter().chain(&tcb[40..56]).any(|&b| b != 0)
             {
-                return Err(error(
-                    "ANS NVMMU TCB opcode, tag, encryption or hash fields are not modeled",
-                ));
+                return Err(error(refuse!(
+                    "ANS NVMMU TCB opcode, tag, encryption or hash fields are not modeled"
+                )));
             }
             // The key area (bytes 0x40..) names the inline AES-XTS key for the
             // sector (`sep::inline_key`). The SEP installs those keys over the
@@ -681,10 +697,10 @@ impl Ans {
             // both are recovered no key is installed and an inline-keyed
             // command refuses here rather than passing data in the clear.
             if tcb[64..].iter().any(|&b| b != 0) {
-                return Err(error(
+                return Err(error(refuse!(
                     "ANS NVMMU inline AES-XTS key area is set, but no SEP key is installed for it \
-                     (sep::inline_key); its slot/wrapped-key encoding is not recovered",
-                ));
+                     (sep::inline_key); its slot/wrapped-key encoding is not recovered"
+                )));
             }
             // SPTM's MAP_PAGES writes the request's IODirection to TCB byte
             // 1 (`270c8130`): a grant of device writes (bit 0) and reads
@@ -694,13 +710,13 @@ impl Ans {
             command.validate().map_err(error)?;
             let direction = command.direction(queue).map_err(error)?;
             if flags & !3 != 0 || direction & !flags != 0 {
-                return Err(error(
-                    "ANS NVMMU TCB DMA permissions do not grant the command's direction",
-                ));
+                return Err(error(refuse!(
+                    "ANS NVMMU TCB DMA permissions do not grant the command's direction"
+                )));
             }
             if queue != 0 && matches!(command.opcode(), 1 | 2 | 5) && tcb[4..6] != command.0[48..50]
             {
-                return Err(error("ANS NVMMU length differs from the command"));
+                return Err(error(refuse!("ANS NVMMU length differs from the command")));
             }
             command.0[24..40].copy_from_slice(&tcb[24..40]);
             let executed = self.execute(queue, &command, port, sart).map_err(error)?;
@@ -738,10 +754,10 @@ impl Ans {
                 ref command,
                 ref outcome,
             } = self.completed[index];
-            let error = |reason| refusal(queue, reason);
+            let error = |reason: Refusal| refusal(queue, reason);
             let q = self.queues[queue];
             if !q.cq_enabled {
-                return Err(error("ANS completion queue is disabled"));
+                return Err(error(refuse!("ANS completion queue is disabled")));
             }
             if q.pending == q.cq_entries {
                 index += 1;
@@ -794,15 +810,15 @@ impl Ans {
 }
 
 impl Lifecycle for Ans {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<()> {
         if proposed.reset && !self.lifecycle.reset || !proposed.powered && !proposed.retention {
             // CC.EN reset is modeled separately in configure(). The PMGR
             // bank includes the protected linear/NVMMU handoff, loader and
             // NAND firmware state: CC reset does not prove their rail/reset
             // persistence. Keep all commands/completions owned on refusal.
-            return Err(
-                "ANS physical reset or nonretained power loss requires protected register and NAND firmware restore semantics",
-            );
+            return Err(refuse!(
+                "ANS physical reset or nonretained power loss requires protected register and NAND firmware restore semantics"
+            ));
         }
         Ok(())
     }
@@ -923,14 +939,14 @@ impl MmioDevice for Ans {
                 "ANS submission while PMGR quiesced",
             ));
         }
-        let error = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let error = |reason: Refusal| refuse(NAME, offset, width, Direction::Write, reason);
         if let Some(old) = self.base(offset & !7) {
             let base = offset & !7;
             if self.config & ENABLE != 0 && !matches!(base, IO_SQ | IO_CQ) {
-                return Err(error("ANS queue/TCB base changed while enabled"));
+                return Err(error(refuse!("ANS queue/TCB base changed while enabled")));
             }
             if self.outstanding().next().is_some() || self.queues[1].pending != 0 {
-                return Err(error("ANS base changed with outstanding commands"));
+                return Err(error(refuse!("ANS base changed with outstanding commands")));
             }
             // SPTM 0x270c88c4..0x270c88e8 and 0x270c76cc..0x270c7750
             // issue low/high 32-bit stores to TCB and queue addresses.
@@ -940,10 +956,10 @@ impl MmioDevice for Ans {
                     let shift = (offset % 8) * 8;
                     (old & !(0xffff_ffff << shift)) | (value << shift)
                 }
-                _ => return Err(error("ANS base register width or alignment")),
+                _ => return Err(error(refuse!("ANS base register width or alignment"))),
             };
             if !value.is_multiple_of(4096) {
-                return Err(error("ANS queue/TCB base is not page-aligned"));
+                return Err(error(refuse!("ANS queue/TCB base is not page-aligned")));
             }
             let bytes = match base {
                 ADMIN_TCB | IO_TCB => u64::from(self.geometry.tag_slots()) * TCB_BYTES,
@@ -952,7 +968,7 @@ impl MmioDevice for Ans {
                 _ => unreachable!(),
             };
             if value.checked_add(bytes).is_none() {
-                return Err(error("ANS declared queue/TCB extent wraps"));
+                return Err(error(refuse!("ANS declared queue/TCB extent wraps")));
             }
             match base {
                 ASQ => self.queues[0].sq = value,
@@ -967,7 +983,7 @@ impl MmioDevice for Ans {
             return Ok(());
         }
         if width != Width::Word || value > u64::from(u32::MAX) {
-            return Err(error("ANS register requires a 32-bit word"));
+            return Err(error(refuse!("ANS register requires a 32-bit word")));
         }
         let value = value as u32;
         match offset {
@@ -983,8 +999,8 @@ impl MmioDevice for Ans {
             }
             AQA if self.config & ENABLE == 0 && value & 0xf000_f000 == 0 => self.aqa = value,
             ADMIN_HEAD | IO_HEAD => {
-                let head =
-                    u16::try_from(value).map_err(|_| error("ANS CQ head exceeds 16 bits"))?;
+                let head = u16::try_from(value)
+                    .map_err(|_| error(refuse!("ANS CQ head exceeds 16 bits")))?;
                 self.queues[usize::from(offset == IO_HEAD)]
                     .acknowledge(head)
                     .map_err(error)?;
@@ -999,9 +1015,9 @@ impl MmioDevice for Ans {
                     || q.cq_enabled && q.cq_entries != ((value >> 16) as u16 + 1)
                     || self.outstanding().any(|(queue, _)| queue == 1)
                 {
-                    return Err(error(
-                        "ANS IOQA changes an active queue or outstanding submission",
-                    ));
+                    return Err(error(refuse!(
+                        "ANS IOQA changes an active queue or outstanding submission"
+                    )));
                 }
                 self.queue_attributes = Some(value)
             }
@@ -1021,16 +1037,20 @@ impl MmioDevice for Ans {
             ADMIN_SUBMIT | IO_SUBMIT => self
                 .submit(
                     usize::from(offset == IO_SUBMIT),
-                    u16::try_from(value).map_err(|_| error("ANS tag exceeds 16 bits"))?,
+                    u16::try_from(value).map_err(|_| error(refuse!("ANS tag exceeds 16 bits")))?,
                 )
                 .map_err(error)?,
             TCB_INVALIDATE if value < u32::from(self.geometry.tag_slots()) => {
                 if self.outstanding().any(|(_, tag)| u32::from(tag) == value) {
-                    return Err(error("ANS invalidation of a pending command"));
+                    return Err(error(refuse!("ANS invalidation of a pending command")));
                 }
                 self.valid[value as usize] = false;
             }
-            _ => return Err(error("ANS register, field or state without a model")),
+            _ => {
+                return Err(error(refuse!(
+                    "ANS register, field or state without a model"
+                )));
+            }
         }
         self.refresh_auto_queue();
         self.update_irq(access);

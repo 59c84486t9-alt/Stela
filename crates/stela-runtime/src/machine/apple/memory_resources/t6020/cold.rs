@@ -10,12 +10,14 @@ use super::MemoryController;
 use super::Prepared;
 use super::T6020Memory;
 use super::validate_ram;
+use crate::Result;
 use crate::machine::apple::AppleDevices;
 use crate::platform::apple::pmgr;
 use crate::platform::apple::pmgr::Pmgr;
-use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use stela_contracts::bus::LifecycleState;
 use stela_contracts::bus::Width;
+use stela_contracts::refuse;
 use stela_engine::memory::RegisteredSystemRam;
 use stela_soc_data::board::PowerOwner;
 use stela_soc_data::board::PowerStates;
@@ -48,19 +50,21 @@ impl Plan {
         ram: &Arc<RegisteredSystemRam>,
         programmed: stela_soc_data::amcc::Programmed,
         configuration: &Configuration,
-    ) -> Result<Self, String> {
-        descriptor.validate(controller).map_err(String::from)?;
-        validate_ram(descriptor, controller, programmed, ram).map_err(String::from)?;
-        let layout = descriptor.layout().map_err(String::from)?;
+    ) -> Result<Self> {
+        descriptor.validate(controller)?;
+        validate_ram(descriptor, controller, programmed, ram)?;
+        let layout = descriptor.layout()?;
         if configuration.channels.len() != layout.channels()
             || configuration.mcc_gating.len() != layout.apertures()
         {
-            return Err("cold T602x configuration omits actual controller channels".into());
+            return Err(refuse!(
+                "cold T602x configuration omits actual controller channels"
+            ));
         }
         let (resources, domains) = source_inputs(power, descriptor)?;
         let generation = ram
             .generation()
-            .map_err(|_| "cold T602x canonical RAM is not live")?;
+            .map_err(|_| refuse!("cold T602x canonical RAM is not live"))?;
         Ok(Self {
             controller: controller.clone(),
             descriptor: descriptor.clone(),
@@ -81,12 +85,14 @@ impl Plan {
         controller: Option<&MemoryController>,
         descriptor: Option<&T6020Memory>,
         power: Option<&PowerStates>,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         if controller != Some(&self.controller)
             || descriptor != Some(&self.descriptor)
             || power != Some(&self.power)
         {
-            return Err("cold T602x differs from its complete retained source resources".into());
+            return Err(refuse!(
+                "cold T602x differs from its complete retained source resources"
+            ));
         }
         self.validate_ram()
     }
@@ -107,35 +113,36 @@ impl Plan {
     pub fn input_domains(&self) -> &[u64] {
         &self.domains
     }
-    fn validate_ram(&self) -> Result<(), String> {
+    fn validate_ram(&self) -> Result<()> {
         if self
             .ram
             .generation()
-            .map_err(|_| "cold T602x canonical RAM is not live")?
+            .map_err(|_| refuse!("cold T602x canonical RAM is not live"))?
             != self.generation
         {
-            return Err("cold T602x canonical RAM generation changed".into());
+            return Err(refuse!("cold T602x canonical RAM generation changed"));
         }
         Ok(())
     }
 
-    fn lifecycle(&self, devices: &AppleDevices) -> Result<LifecycleState, String> {
+    fn lifecycle(&self, devices: &AppleDevices) -> Result<LifecycleState> {
         self.validate_ram()?;
         let id = devices
             .pmgr
-            .ok_or("cold T602x requires the actual placed PMGR")?;
+            .ok_or(refuse!("cold T602x requires the actual placed PMGR"))?;
         let pmgr = devices
             .bus
             .device::<Pmgr>(id)
-            .ok_or("cold T602x has a foreign PMGR owner")?;
+            .ok_or(refuse!("cold T602x has a foreign PMGR owner"))?;
         // Even an input-free MCC cannot borrow a numerically matching
         // PMGR state table with absent/foreign physical routes.
         for &address in &self.power.registers {
             if devices.bus.route(address, Width::Word).ok() != Some((id, address))
                 || pmgr.domain_state(address).is_none()
             {
-                return Err(format!(
-                    "cold T602x source register {address:#x} has no actual PMGR route/state"
+                return Err(refuse!(
+                    "cold T602x source register {address:#x} has no actual PMGR route/state",
+                    address
                 ));
             }
         }
@@ -158,7 +165,10 @@ impl Plan {
             .iter()
             .map(|&address| {
                 pmgr.domain_state(address).ok_or_else(|| {
-                    format!("cold T602x input {address:#x} has no actual PMGR state")
+                    refuse!(
+                        "cold T602x input {address:#x} has no actual PMGR state",
+                        address
+                    )
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -175,12 +185,14 @@ impl Plan {
     /// one joint owner and register its source reg0 lifecycle identity. The caller
     /// keeps stopped native/all-writer ownership through this cold placement.
     /// No controller request is retired and no PTD publication service is made.
-    pub fn install(self, devices: &mut AppleDevices) -> Result<(), String> {
+    pub fn install(self, devices: &mut AppleDevices) -> Result<()> {
         if devices.power_configured
             || devices.memory_controller.is_some()
             || devices.memory_publication.is_some()
         {
-            return Err("cold T602x requires an unoccupied unconnected memory mount".into());
+            return Err(refuse!(
+                "cold T602x requires an unoccupied unconnected memory mount"
+            ));
         }
         let lifecycle = self.lifecycle(devices)?;
         let physical = self.lifecycle_physical();
@@ -195,17 +207,14 @@ impl Plan {
         devices.add_t6020_memory_resources(owner)?;
         let id = devices
             .memory_controller
-            .ok_or("cold T602x lost its actual installed owner")?;
+            .ok_or(refuse!("cold T602x lost its actual installed owner"))?;
         // The ID is newly installed, the owner has a Lifecycle hook,
         // and the exclusive borrow kept power_configured=false above.
         devices.register_power_device(physical, id, true)
     }
 }
 
-fn source_inputs(
-    power: &PowerStates,
-    descriptor: &T6020Memory,
-) -> Result<(Vec<usize>, Vec<u64>), String> {
+fn source_inputs(power: &PowerStates, descriptor: &T6020Memory) -> Result<(Vec<usize>, Vec<u64>)> {
     let physical = descriptor.ptd.physical;
     let resources = power
         .resources
@@ -220,7 +229,9 @@ fn source_inputs(
             .iter()
             .any(|&id| power.resources[id].admission == coverage::Admission::Unavailable)
     {
-        return Err("cold T602x source reg0 has no positively owned lifecycle resource".into());
+        return Err(refuse!(
+            "cold T602x source reg0 has no positively owned lifecycle resource"
+        ));
     }
     let requirements = power.power_requirements()?;
     let consumers = power
@@ -237,13 +248,15 @@ fn source_inputs(
         })
         .collect::<Vec<_>>();
     let graph = coverage::analyze(&power.domains, &consumers)
-        .map_err(|error| format!("cold T602x complete source power graph: {error:?}"))?;
+        .map_err(|error| refuse!("cold T602x complete source power graph: {error}", ?error))?;
     if graph.len() != power.registers.len()
         || graph
             .iter()
             .any(|domain| !power.registers.contains(&domain.address))
     {
-        return Err("cold T602x source graph differs from its complete register set".into());
+        return Err(refuse!(
+            "cold T602x source graph differs from its complete register set"
+        ));
     }
     for &id in &resources {
         for &input in power.resources[id]
@@ -252,7 +265,9 @@ fn source_inputs(
             .chain(&requirements[id])
         {
             if !resolved_input(power, input) {
-                return Err("cold T602x input has an unresolved virtual ancestor".into());
+                return Err(refuse!(
+                    "cold T602x input has an unresolved virtual ancestor"
+                ));
             }
         }
     }
@@ -262,7 +277,9 @@ fn source_inputs(
             && contains(descriptor, address)
             && (!resource.activated_clocks().is_empty() || !requirements[id].is_empty())
         {
-            return Err("cold T602x independently gated overlapping alias needs its own actual lifecycle join".into());
+            return Err(refuse!(
+                "cold T602x independently gated overlapping alias needs its own actual lifecycle join"
+            ));
         }
     }
     let domains = graph
@@ -280,7 +297,9 @@ fn source_inputs(
             !power.resources[id].activated_clocks().is_empty() || !requirements[id].is_empty()
         })
     {
-        return Err("cold T602x activated inputs have no physical lifecycle producer".into());
+        return Err(refuse!(
+            "cold T602x activated inputs have no physical lifecycle producer"
+        ));
     }
     Ok((resources, domains))
 }
@@ -424,7 +443,7 @@ mod tests {
             PowerStates,
             Configuration,
         ),
-    ) -> Result<Plan, String> {
+    ) -> Result<Plan> {
         Plan::prepare_ap_frontend(&parts.0, &parts.1, &parts.3, &parts.2, [None; 4], &parts.4)
     }
     #[test]

@@ -6,7 +6,9 @@
 //! ordered chunk/retry forms, not arbitrary W1C masks, physical reset state or
 //! concurrent fault arrivals.
 use super::Window;
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 /// The extended-long opcode carries a three-bit length-minus-one.
 const CHUNK_BYTES: usize = 8;
@@ -41,11 +43,13 @@ impl From<FaultHistory> for FaultLog {
 }
 
 impl FaultLog {
-    pub fn check_read(&self) -> Result<(), &'static str> {
+    pub fn check_read(&self) -> Result<()> {
         if self.captured.as_ref().is_some_and(|snapshot| {
             snapshot.acknowledged != 0 && snapshot.acknowledged < self.pending.len()
         }) {
-            return Err("PMU fault visibility during a partial acknowledgement is unqualified");
+            return Err(refuse!(
+                "PMU fault visibility during a partial acknowledgement is unqualified"
+            ));
         }
         Ok(())
     }
@@ -88,9 +92,11 @@ impl FaultLog {
         }
     }
 
-    pub fn check_acknowledge(&self, address: u16, bytes: &[u8]) -> Result<(), &'static str> {
+    pub fn check_acknowledge(&self, address: u16, bytes: &[u8]) -> Result<()> {
         let Some(snapshot) = &self.captured else {
-            return Err("PMU fault acknowledge requires a complete captured snapshot");
+            return Err(refuse!(
+                "PMU fault acknowledge requires a complete captured snapshot"
+            ));
         };
         let offset = usize::from(address.wrapping_sub(self.window.base));
         let whole = offset == 0 && bytes.len() == self.pending.len();
@@ -104,7 +110,9 @@ impl FaultLog {
             || self.pending[snapshot.acknowledged..] != snapshot.bytes[snapshot.acknowledged..]
             || bytes != &snapshot.bytes[offset..offset + bytes.len()]
         {
-            return Err("PMU fault acknowledge differs from the ordered captured snapshot");
+            return Err(refuse!(
+                "PMU fault acknowledge differs from the ordered captured snapshot"
+            ));
         }
         Ok(())
     }

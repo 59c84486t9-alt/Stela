@@ -1,6 +1,8 @@
 //! Explicit private T6000 native resource assembly; no public PMGR admission.
 use super::AppleDevices;
-use alloc::{boxed::Box, format, string::String, vec::Vec};
+use crate::Result;
+use alloc::{boxed::Box, string::String, vec::Vec};
+use stela_contracts::refuse;
 use {
     crate::platform::apple::bridge::Bridge, crate::platform::apple::cluster::t6000::Complex,
     crate::platform::apple::cluster::t6000::Snapshot,
@@ -81,22 +83,24 @@ pub struct Prepared {
     program: ProgramSource,
 }
 impl Prepared {
-    pub fn new(adt: &[u8], input: Inputs) -> Result<Self, String> {
+    pub fn new(adt: &[u8], input: Inputs) -> Result<Self> {
         let declared = match &input.authority {
             Authority::Captured { source } => {
                 if source.is_empty() {
-                    return Err("T6000 capture provenance is missing".into());
+                    return Err(refuse!("T6000 capture provenance is missing"));
                 }
                 if input.identity.authority() == identity::Authority::DeclaredStela
                     || matches!(input.native, native::Handoff::StelaEmpty { .. })
                 {
-                    return Err("T6000 Stela initialization is not a captured Apple handoff".into());
+                    return Err(refuse!(
+                        "T6000 Stela initialization is not a captured Apple handoff"
+                    ));
                 }
                 false
             }
             Authority::DeclaredStela { entry } => {
                 if entry.is_empty() {
-                    return Err("T6000 declared entry authority is missing".into());
+                    return Err(refuse!("T6000 declared entry authority is missing"));
                 }
                 true
             }
@@ -104,16 +108,21 @@ impl Prepared {
         let chip = input
             .identity
             .chip()
-            .map_err(|e| format!("T6000 identity: {e:?}"))?;
+            .map_err(|e| refuse!("T6000 identity: {e}", ?e))?;
         let raw_revision = input
             .identity
             .revision()
-            .map_err(|e| format!("T6000 revision: {e:?}"))?;
+            .map_err(|e| refuse!("T6000 revision: {e}", ?e))?;
         match input.revision {
-            RevisionAuthority::DeclaredBeforeCache if declared => {},
+            RevisionAuthority::DeclaredBeforeCache if declared => {}
             RevisionAuthority::ObservedCache { value, known }
-                if known == u32::MAX && (value == u32::MAX || value == u32::from(raw_revision)) => {},
-            _ => return Err("T6000 RCfg selection requires pre-cache authority or an actual agreeing firmware cache word".into()),
+                if known == u32::MAX && (value == u32::MAX || value == u32::from(raw_revision)) => {
+            }
+            _ => {
+                return Err(refuse!(
+                    "T6000 RCfg selection requires pre-cache authority or an actual agreeing firmware cache word"
+                ));
+            }
         }
         let descriptor = Descriptor::parse(adt, chip, input.board, input.platform_revision)?;
         if input.ibootdata.source.is_empty()
@@ -126,14 +135,16 @@ impl Prepared {
             || !stela_formats::sha256(&input.ibootdata.bytes)
                 .eq_ignore_ascii_case(&input.ibootdata.expected_sha256)
         {
-            return Err("T6000 iBootData provenance/digest does not bind the actual input".into());
+            return Err(refuse!(
+                "T6000 iBootData provenance/digest does not bind the actual input"
+            ));
         }
         let program = {
             let image = reconfiguration::Image::parse(&input.ibootdata.bytes)
-                .map_err(|e| format!("T6000 iBootData container: {e:?}"))?;
+                .map_err(|e| refuse!("T6000 iBootData container: {e}", ?e))?;
             let source = image
                 .t6000(u32::from(raw_revision))
-                .map_err(|e| format!("T6000 original RCfg selection: {e:?}"))?;
+                .map_err(|e| refuse!("T6000 original RCfg selection: {e}", ?e))?;
             ProgramSource {
                 revision: u32::from(raw_revision),
                 offset: source.offset(),
@@ -143,9 +154,11 @@ impl Prepared {
             }
         };
         if input.bridges.len() != descriptor.bridges.len() {
-            return Err("T6000 handoff must explicitly retain all 193 bridge images".into());
+            return Err(refuse!(
+                "T6000 handoff must explicitly retain all 193 bridge images"
+            ));
         }
-        let layout = descriptor.layout().map_err(String::from)?;
+        let layout = descriptor.layout()?;
         let mut models: Vec<Box<dyn MmioDevice>> = Vec::new();
         let mut mappings = Vec::new();
         let identity = models.len();
@@ -169,15 +182,17 @@ impl Prepared {
         .enumerate()
         {
             if image.complex != complex {
-                return Err("T6000 cluster images do not name E/P0/P1 independently".into());
+                return Err(refuse!(
+                    "T6000 cluster images do not name E/P0/P1 independently"
+                ));
             }
-            let model = T6000::restore(&image).map_err(String::from)?;
+            let model = T6000::restore(&image)?;
             let id = models.len();
             clusters[index] = id;
             for offset in model.offsets() {
-                let logical =
-                    u32::try_from(offset).map_err(|_| "T6000 ACC logical offset overflows")?;
-                let physical = layout.acc(index, logical, 8).map_err(String::from)?;
+                let logical = u32::try_from(offset)
+                    .map_err(|_| refuse!("T6000 ACC logical offset overflows"))?;
+                let physical = layout.acc(index, logical, 8)?;
                 mappings.push(Mapping {
                     model: id,
                     physical,
@@ -196,8 +211,7 @@ impl Prepared {
                 &bank.configs,
                 bank.axi,
                 &image,
-            )
-            .map_err(String::from)?;
+            )?;
             let id = models.len();
             bridges.push(id);
             for (offset, bytes) in model.spans() {
@@ -205,7 +219,9 @@ impl Prepared {
                     .checked_add(bytes)
                     .is_none_or(|end| end > bank.view.bytes)
                 {
-                    return Err("T6000 bridge handoff exceeds its actual descriptor".into());
+                    return Err(refuse!(
+                        "T6000 bridge handoff exceeds its actual descriptor"
+                    ));
                 }
                 mappings.push(Mapping {
                     model: id,
@@ -213,7 +229,7 @@ impl Prepared {
                         .view
                         .physical
                         .checked_add(offset)
-                        .ok_or("T6000 bridge physical word overflows")?,
+                        .ok_or(refuse!("T6000 bridge physical word overflows"))?,
                     bytes,
                     offset,
                 });
@@ -227,30 +243,30 @@ impl Prepared {
             input.requests.observations,
             input.native,
         )
-        .map_err(|e| format!("T6000 supplied native resource: {e:?}"))?;
+        .map_err(|e| refuse!("T6000 supplied native resource: {e}", ?e))?;
         for (instance, geometry) in geometry.into_iter().enumerate() {
             for (bank, selector) in [(power::Bank::Pmgr, 0), (power::Bank::ClkGenSoc, 0x5b)] {
                 let offsets = geometry.offsets(bank);
                 if offsets.is_empty() {
                     continue;
                 }
-                let view = layout.register(selector).map_err(String::from)?;
+                let view = layout.register(selector)?;
                 let model = match bank {
                     power::Bank::Pmgr => controller.view(instance as u8),
                     power::Bank::ClkGenSoc => controller.clock_view(instance as u8),
                 }
-                .map_err(|e| format!("T6000 request view: {e:?}"))?;
+                .map_err(|e| refuse!("T6000 request view: {e}", ?e))?;
                 let id = models.len();
                 for offset in offsets {
                     if offset.checked_add(4).is_none_or(|end| end > view.bytes) {
-                        return Err("T6000 request exceeds its actual RegMap".into());
+                        return Err(refuse!("T6000 request exceeds its actual RegMap"));
                     }
                     mappings.push(Mapping {
                         model: id,
                         physical: view
                             .physical
                             .checked_add(offset)
-                            .ok_or("T6000 request physical address overflows")?,
+                            .ok_or(refuse!("T6000 request physical address overflows"))?,
                         bytes: 4,
                         offset,
                     });
@@ -267,7 +283,9 @@ impl Prepared {
                     .is_some_and(|end| end <= bytes)
             }) && !matches!(word.address, 0x292000200 | 0x292000204)
             {
-                return Err("T6000 native control lacks its source register view".into());
+                return Err(refuse!(
+                    "T6000 native control lacks its source register view"
+                ));
             }
             // LLB4b030 and indirect row3d7d4 separately own the exact two
             // native controller words292000200/+204; neither is in DT reg.
@@ -282,7 +300,7 @@ impl Prepared {
         models.push(Box::new(
             controller
                 .native_controls()
-                .map_err(|e| format!("T6000 native controls: {e:?}"))?,
+                .map_err(|e| refuse!("T6000 native controls: {e}", ?e))?,
         ));
         let native_sram = models.len();
         mappings.push(Mapping {
@@ -294,7 +312,7 @@ impl Prepared {
         models.push(Box::new(
             controller
                 .native_sram()
-                .map_err(|e| format!("T6000 SRAM owner: {e:?}"))?,
+                .map_err(|e| refuse!("T6000 SRAM owner: {e}", ?e))?,
         ));
         mappings.sort_by_key(|map| map.physical);
         for map in &mappings {
@@ -302,14 +320,16 @@ impl Prepared {
                 || map.physical.checked_add(map.bytes).is_none()
                 || map.offset.checked_add(map.bytes).is_none()
             {
-                return Err("T6000 actual resource mapping is empty or overflows".into());
+                return Err(refuse!(
+                    "T6000 actual resource mapping is empty or overflows"
+                ));
             }
         }
         for pair in mappings.windows(2) {
             if pair[0].physical + pair[0].bytes > pair[1].physical {
-                return Err(format!(
-                    "T6000 actual sparse owners overlap at {:#x}",
-                    pair[1].physical
+                return Err(refuse!(
+                    "T6000 actual sparse owners overlap at {physical:#x}",
+                    physical = pair[1].physical
                 ));
             }
         }
@@ -341,17 +361,17 @@ impl Prepared {
     /// Root must join canonical physical SRAM to the returned native_memory()
     /// before firmware runs. This publishes no PMGR admission/lifecycle credit
     /// for clusters/bridges and creates no separate memory backing plane.
-    pub fn publish(self, devices: &mut AppleDevices) -> Result<Mounted, String> {
+    pub fn publish(self, devices: &mut AppleDevices) -> Result<Mounted> {
         for map in &self.mappings {
             devices
                 .bus
                 .check_free(map.physical, map.bytes)
-                .map_err(|e| format!("T6000 full-resource MMIO preflight: {e:?}"))?;
+                .map_err(|e| refuse!("T6000 full-resource MMIO preflight: {e}", ?e))?;
         }
         let memory = self
             .controller
             .native_memory()
-            .map_err(|e| format!("T6000 canonical SRAM: {e:?}"))?;
+            .map_err(|e| refuse!("T6000 canonical SRAM: {e}", ?e))?;
         let ids = self
             .models
             .into_iter()
@@ -533,7 +553,7 @@ mod original {
         );
         for (address, width) in [(cluster_word, 8), (bridge_word, 4)] {
             assert!(
-                matches!(devices.read(0, address, width, 0), Err(stela_engine::machine::engine::DeviceError::Refused(reason)) if reason.contains("unknown"))
+                matches!(devices.read(0, address, width, 0), Err(stela_engine::machine::engine::DeviceError::Refused(reason)) if reason.to_string().contains("unknown"))
             );
         }
         assert_eq!(
@@ -631,6 +651,7 @@ mod original {
             Prepared::new(&bytes, input)
                 .err()
                 .unwrap()
+                .to_string()
                 .contains("cache word")
         );
         let mut input = inputs();
@@ -639,11 +660,18 @@ mod original {
             Prepared::new(&bytes, input)
                 .err()
                 .unwrap()
+                .to_string()
                 .contains("digest")
         );
         let mut input = inputs();
         input.bridges.pop();
-        assert!(Prepared::new(&bytes, input).err().unwrap().contains("193"));
+        assert!(
+            Prepared::new(&bytes, input)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("193")
+        );
         let mut input = inputs();
         input.authority = Authority::Captured {
             source: "not a declared resource".into(),
@@ -652,6 +680,7 @@ mod original {
             Prepared::new(&bytes, input)
                 .err()
                 .unwrap()
+                .to_string()
                 .contains("captured Apple handoff")
         );
         let mut input = inputs();
@@ -660,6 +689,7 @@ mod original {
             Prepared::new(&bytes, input)
                 .err()
                 .unwrap()
+                .to_string()
                 .contains("MissingObservation")
         );
         let mut input = inputs();

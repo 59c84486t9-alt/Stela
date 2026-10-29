@@ -30,6 +30,7 @@ use super::{
     Entropy,
     store::{Backend, Nonces, POLICY_NONCE_BYTES, PolicyNonce},
 };
+use crate::Result;
 #[cfg(test)]
 use crate::platform::apple::sep::keys::Roots;
 #[cfg(test)]
@@ -62,7 +63,7 @@ impl Update {
 
 /// `bootpolicy_update_..._nonce_begin`: propose a fresh nonce for `which`. The
 /// durable nonce is unchanged until [`commit`].
-pub fn begin(which: PolicyNonce, entropy: &mut dyn Entropy) -> Result<Update, &'static str> {
+pub fn begin(which: PolicyNonce, entropy: &mut dyn Entropy) -> Result<Update> {
     let mut proposed = Zeroizing::new([0; POLICY_NONCE_BYTES]);
     entropy.fill(&mut *proposed)?;
     Ok(Update { which, proposed })
@@ -71,10 +72,7 @@ pub fn begin(which: PolicyNonce, entropy: &mut dyn Entropy) -> Result<Update, &'
 /// `bootpolicy_update_..._nonce_end`: commit the proposed nonce as the durable
 /// policy nonce. The old nonce is replaced only here, so a failed or reset
 /// update never advances it.
-pub fn commit<B: Backend>(
-    store: &mut Nonces<B>,
-    update: Update,
-) -> Result<[u8; DIGEST_BYTES], &'static str> {
+pub fn commit<B: Backend>(store: &mut Nonces<B>, update: Update) -> Result<[u8; DIGEST_BYTES]> {
     let digest = update.proposed_digest();
     store.commit_policy_nonce(update.which, Some(*update.proposed))?;
     Ok(digest)
@@ -82,7 +80,7 @@ pub fn commit<B: Backend>(
 
 /// `bootpolicy_update_..._nonce_reset`: discard an in-progress update and clear
 /// the durable nonce (the policy it bound to is being withdrawn).
-pub fn reset<B: Backend>(store: &mut Nonces<B>, which: PolicyNonce) -> Result<(), &'static str> {
+pub fn reset<B: Backend>(store: &mut Nonces<B>, which: PolicyNonce) -> Result<()> {
     store.commit_policy_nonce(which, None)
 }
 
@@ -90,7 +88,7 @@ pub fn reset<B: Backend>(store: &mut Nonces<B>, which: PolicyNonce) -> Result<()
 pub fn committed_digest<B: Backend>(
     store: &Nonces<B>,
     which: PolicyNonce,
-) -> Result<Option<[u8; DIGEST_BYTES]>, &'static str> {
+) -> Result<Option<[u8; DIGEST_BYTES]>> {
     Ok(store
         .policy_nonce(which)?
         .map(|nonce| Sha384::digest(nonce).into()))
@@ -107,7 +105,7 @@ pub struct PolicyKeys {
 }
 #[cfg(test)]
 impl PolicyKeys {
-    pub fn derive(roots: &Roots) -> Result<Self, &'static str> {
+    pub fn derive(roots: &Roots) -> Result<Self> {
         Ok(Self {
             key: roots.uid(SIGNING_PURPOSE)?,
         })
@@ -140,7 +138,7 @@ mod tests {
     use super::*;
     use alloc::boxed::Box;
 
-    fn entropy(seed: u8) -> impl FnMut(&mut [u8]) -> Result<(), &'static str> {
+    fn entropy(seed: u8) -> impl FnMut(&mut [u8]) -> Result<()> {
         let mut next = seed;
         move |bytes: &mut [u8]| {
             for b in bytes {

@@ -34,6 +34,7 @@ pub mod store;
 pub mod transaction;
 pub mod xart;
 
+use crate::Result;
 use alloc::boxed::Box;
 use stela_contracts::dma::Port;
 use {
@@ -53,11 +54,11 @@ pub const AUXILIARY_OFFSET: u64 = 1 << 32;
 /// Implementations must supply independent unpredictable bytes in production;
 /// only unit tests use deterministic sources.
 pub trait Entropy {
-    fn fill(&mut self, bytes: &mut [u8]) -> Result<(), &'static str>;
+    fn fill(&mut self, bytes: &mut [u8]) -> Result<()>;
 }
 
-impl<F: FnMut(&mut [u8]) -> Result<(), &'static str>> Entropy for F {
-    fn fill(&mut self, bytes: &mut [u8]) -> Result<(), &'static str> {
+impl<F: FnMut(&mut [u8]) -> Result<()>> Entropy for F {
+    fn fill(&mut self, bytes: &mut [u8]) -> Result<()> {
         self(bytes)
     }
 }
@@ -79,7 +80,7 @@ impl Sep {
         ecid: u64,
         observe: bool,
         state: state::Location,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         Ok(Self {
             mailbox: Asc::new(
                 Box::new(firmware::SepFirmware::new(
@@ -105,7 +106,7 @@ impl Sep {
         ecid: u64,
         observe: bool,
         state: state::Location,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         Ok(Self {
             mailbox: Asc::booted(
                 Box::new(firmware::SepFirmware::new(
@@ -232,6 +233,7 @@ impl MmioDevice for Sep {
 mod tests {
     use super::message::{Frame, ROM};
     use super::*;
+    use stela_contracts::refuse;
     use {
         stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch,
         stela_contracts::interrupt::Wire,
@@ -323,7 +325,7 @@ mod tests {
             observed.set(call + 1);
             bytes.copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
             if call == 0 {
-                Err("injected real entropy-source failure")
+                Err(refuse!("injected real entropy-source failure"))
             } else {
                 Ok(())
             }
@@ -414,7 +416,9 @@ mod tests {
                 .lifecycle(mounted.device)
                 .unwrap()
                 .check_lifecycle(reset),
-            Err("ASC reset or power loss with owned mailbox messages")
+            Err(refuse!(
+                "ASC reset or power loss with owned mailbox messages"
+            ))
         );
         mounted.set(super::super::bus::LifecycleState {
             powered: false,
@@ -431,7 +435,9 @@ mod tests {
         let lifecycle = mounted.bus.lifecycle(mounted.device).unwrap();
         assert_eq!(
             lifecycle.check_lifecycle(reset),
-            Err("SEP physical reset and nonretained security-state restoration are not qualified")
+            Err(refuse!(
+                "SEP physical reset and nonretained security-state restoration are not qualified"
+            ))
         );
         assert_eq!(
             lifecycle.check_lifecycle(super::super::bus::LifecycleState {
@@ -439,7 +445,9 @@ mod tests {
                 retention: false,
                 ..ACTIVE
             }),
-            Err("SEP physical reset and nonretained security-state restoration are not qualified")
+            Err(refuse!(
+                "SEP physical reset and nonretained security-state restoration are not qualified"
+            ))
         );
         assert_eq!(mounted.read(0x44, Width::Word), Ok(1 << 4));
         assert!(
@@ -477,7 +485,7 @@ mod tests {
             AicInput::new(0, 0x116),
         ];
         let mut sep = Sep::new(
-            Box::new(|_: &mut [u8]| Err("unused entropy")),
+            Box::new(|_: &mut [u8]| Err(refuse!("unused entropy"))),
             Lines::from_interrupts(irqs),
             None,
             0xa5a5_0005,

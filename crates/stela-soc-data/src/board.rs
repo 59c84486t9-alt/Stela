@@ -15,6 +15,7 @@
 //! without that evidence refuses: the T6050's M cores, whose caches no
 //! source gives, the M6's M cores, and a T6050 template whose fused variant
 //! is not merged yet (the boot bundle merges it, `stela_loader::soc_variant`).
+use crate::Result;
 use crate::agx;
 use crate::aic::AIC2_DIE_STRIDE;
 use crate::aic::AIC2_MAX_DIES;
@@ -36,6 +37,7 @@ use crate::smc;
 use crate::spi;
 use crate::wake;
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
+use stela_contracts::refuse;
 use {stela_contracts::adt::Node, stela_contracts::identity::Identity};
 
 pub mod t6000_pmgr;
@@ -220,29 +222,31 @@ const UNAWAITED_NUB: [&str; 2] = ["remote-only", "automatic-rail-gating-enabled"
 /// Select the protocol endpoint by its declared compatible under an already
 /// checked ASC role. Node names are labels (J314s uses iop-gfx-nub0),
 /// not a second protocol discriminator. Ambiguous endpoints refuse.
-fn rtbuddy_nub<'a>(asc: &Node<'a>, role: &str) -> Result<Node<'a>, String> {
+fn rtbuddy_nub<'a>(asc: &Node<'a>, role: &str) -> Result<Node<'a>> {
     let children = asc
         .children()
-        .ok_or_else(|| format!("{role} children are malformed"))?;
+        .ok_or_else(|| refuse!("{role} children are malformed", role))?;
     let mut nubs = children.into_iter().filter(|node| node.compatible(RTBUDDY));
     let nub = nubs
         .next()
-        .ok_or_else(|| format!("{role} has no RTBuddy v2 nub"))?;
+        .ok_or_else(|| refuse!("{role} has no RTBuddy v2 nub", role))?;
     if nubs.next().is_some() {
-        return Err(format!("{role} has ambiguous RTBuddy v2 nubs"));
+        return Err(refuse!("{role} has ambiguous RTBuddy v2 nubs", role));
     }
     awaited_nub(&nub, role)?;
     Ok(nub)
 }
 
 /// Refuse an RTBuddy nub whose start-up the RTKit model does not carry.
-fn awaited_nub(nub: &Node<'_>, role: &str) -> Result<(), String> {
+fn awaited_nub(nub: &Node<'_>, role: &str) -> Result<()> {
     match UNAWAITED_NUB
         .into_iter()
         .find(|flag| nub.property(flag).is_some())
     {
-        Some(flag) => Err(format!(
-            "{role} nub is {flag}, a start-up the RTKit model does not carry"
+        Some(flag) => Err(refuse!(
+            "{role} nub is {flag}, a start-up the RTKit model does not carry",
+            role,
+            flag
         )),
         None => Ok(()),
     }
@@ -514,12 +518,13 @@ impl Board {
 fn single_range(
     node: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
-) -> Result<(u64, u64), &'static str> {
-    let pairs = apertures::registers(node).ok_or("device reg missing")?;
+) -> Result<(u64, u64)> {
+    let pairs = apertures::registers(node).ok_or(refuse!("device reg missing"))?;
     let [(offset, bytes)] = pairs[..] else {
-        return Err("device requires one reg range");
+        return Err(refuse!("device requires one reg range"));
     };
-    let physical = translate(offset, bytes).ok_or("device range is not wholly translated")?;
+    let physical =
+        translate(offset, bytes).ok_or(refuse!("device range is not wholly translated"))?;
     Ok((physical, bytes))
 }
 
@@ -603,8 +608,8 @@ pub struct WatchdogSide {
 fn watchdog_side(
     node: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
-) -> Result<Option<WatchdogSide>, String> {
-    let reg = apertures::registers(node).ok_or("watchdog has no reg")?;
+) -> Result<Option<WatchdogSide>> {
+    let reg = apertures::registers(node).ok_or(refuse!("watchdog has no reg"))?;
     if reg.len() == 1 {
         return Ok(None);
     }
@@ -613,33 +618,35 @@ fn watchdog_side(
         || !bit("panic-save-flag-bit")
         || (reg.len() == 5 && !bit("panic-forcepoweroff-flag-bit"))
     {
-        return Err(
-            "watchdog side controls need reg[1]/reg[2], valid flag bits and at most reg[4]".into(),
-        );
+        return Err(refuse!(
+            "watchdog side controls need reg[1]/reg[2], valid flag bits and at most reg[4]"
+        ));
     }
     let mut words = Vec::new();
     for &(address, bytes) in &reg[1..] {
         if bytes != 4 || !address.is_multiple_of(4) {
-            return Err("watchdog side register is not one aligned full32 word".into());
+            return Err(refuse!(
+                "watchdog side register is not one aligned full32 word"
+            ));
         }
-        let physical =
-            translate(address, bytes).ok_or("watchdog side register is outside arm-io ranges")?;
+        let physical = translate(address, bytes)
+            .ok_or(refuse!("watchdog side register is outside arm-io ranges"))?;
         words.push(physical);
     }
     let mut triggers = Vec::new();
     if let Some(records) = node.property("trigger-config") {
         let (records, rest) = records.as_chunks::<16>();
         if !rest.is_empty() {
-            return Err("watchdog trigger-config holds a partial record".into());
+            return Err(refuse!("watchdog trigger-config holds a partial record"));
         }
         for record in records {
             let word = |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().expect("word"));
             let physical = u64::from_le_bytes(record[..8].try_into().expect("address"));
             let (mask, value) = (word(8), word(12));
             if !physical.is_multiple_of(4) || mask == 0 || value & !mask != 0 {
-                return Err(
-                    "watchdog trigger-config record is unaligned or exceeds its mask".into(),
-                );
+                return Err(refuse!(
+                    "watchdog trigger-config record is unaligned or exceeds its mask"
+                ));
             }
             triggers.push((physical, mask, value));
         }
@@ -666,15 +673,17 @@ impl CoreSight {
 
 /// Validate the DT aperture before placing its lock pair and, when it fits,
 /// the UTTDBG PC sampler. Preserve the owner even when other PEs lack a map.
-fn place_coresight(cpu: usize, pairs: &[(u64, u64)]) -> Result<CoreSight, String> {
+fn place_coresight(cpu: usize, pairs: &[(u64, u64)]) -> Result<CoreSight> {
     let [(physical, bytes)] = pairs else {
-        return Err("CPU CoreSight map must describe one component".into());
+        return Err(refuse!("CPU CoreSight map must describe one component"));
     };
     if *bytes < coresight::STATUS + 4
         || !physical.is_multiple_of(coresight::BYTES)
         || physical.checked_add(*bytes).is_none()
     {
-        return Err("CPU CoreSight component is empty, unaligned or overflows its page".into());
+        return Err(refuse!(
+            "CPU CoreSight component is empty, unaligned or overflows its page"
+        ));
     }
     Ok(CoreSight {
         cpu,
@@ -690,23 +699,23 @@ fn place_coresight(cpu: usize, pairs: &[(u64, u64)]) -> Result<CoreSight, String
 /// model. An `/arm-io` child's `reg` is translated through `/arm-io`
 /// `ranges`; the AIC's inputs and dies are those its vectors name
 /// (`aic_vectors`, `aic_inputs`).
-pub fn board(tree: &[u8]) -> Result<Board, String> {
-    let root = Node::root_exact(tree).ok_or("DeviceTree has no root or is malformed")?;
+pub fn board(tree: &[u8]) -> Result<Board> {
+    let root = Node::root_exact(tree).ok_or(refuse!("DeviceTree has no root or is malformed"))?;
     let chip_id = root
         .child("chosen")
         .and_then(|chosen| chosen.first_u32("chip-id"))
-        .ok_or("DeviceTree has no /chosen chip-id")?;
+        .ok_or(refuse!("DeviceTree has no /chosen chip-id"))?;
     let soc_name = root
         .child("product")
         .and_then(|product| product.property("product-soc-name"))
         .and_then(|name| core::str::from_utf8(name).ok())
         .map(|name| name.trim_end_matches('\0'))
-        .ok_or("DeviceTree has no /product product-soc-name")?;
+        .ok_or(refuse!("DeviceTree has no /product product-soc-name"))?;
     let mut found = Vec::new();
     let mut blocks = Vec::new();
     let mut debug_components = Vec::new();
     root.child("cpus")
-        .ok_or("DeviceTree has no /cpus")?
+        .ok_or(refuse!("DeviceTree has no /cpus"))?
         .visit(&mut |node| {
             if let Some(cluster_type) = node.property("cluster-type") {
                 if node.property("coresight-reg").is_some() {
@@ -723,16 +732,16 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
                 }
             }
         })
-        .ok_or("DeviceTree walk failed")?;
+        .ok_or(refuse!("DeviceTree walk failed"))?;
     let coresight = debug_components
         .into_iter()
         .map(|(cpu, pairs)| {
             place_coresight(
                 cpu,
-                &pairs.ok_or("CPU CoreSight reg contains partial records")?,
+                &pairs.ok_or(refuse!("CPU CoreSight reg contains partial records"))?,
             )
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>>>()?;
     let processors = found
         .into_iter()
         .map(|found| match found {
@@ -741,14 +750,16 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
                 reg,
                 l2_bytes,
             }),
-            _ => Err("a /cpus node has no reg or an empty cluster-type"),
+            _ => Err(refuse!("a /cpus node has no reg or an empty cluster-type")),
         })
         .collect::<Result<Vec<_>, _>>()?;
     let boot_processor = boot_processor::boot_processor(&root, &processors)?;
     let cpus = cpus(chip_id, soc_name, &processors)?;
     let processor_registers = processor_registers::processor_registers(&root)?;
     if processor_registers.len() != cpus.processors.len() {
-        return Err("CPU register roster differs from processor topology".into());
+        return Err(refuse!(
+            "CPU register roster differs from processor topology"
+        ));
     }
     let mut counters = Vec::new();
     if let Some(layout) = crate::core_counters::layout(chip_id) {
@@ -761,9 +772,13 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
             let (physical, bytes) = pairs
                 .as_ref()
                 .and_then(|pairs| pairs.first().copied())
-                .ok_or_else(|| format!("a /cpus node has no {name}"))?;
+                .ok_or_else(|| refuse!("a /cpus node has no {name}", name))?;
             if end > bytes {
-                return Err(format!("{name} at {physical:#x} has no sampler counters"));
+                return Err(refuse!(
+                    "{name} at {physical:#x} has no sampler counters",
+                    name,
+                    physical
+                ));
             }
             counters.push(CounterBlock {
                 cpu: cpu.expect("every cpu-impl-reg names its PE"),
@@ -776,10 +791,14 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     for (index, name, pairs, cpu) in blocks.into_iter().filter(|_| cpus.lockdown.is_some()) {
         let (physical, bytes) = pairs
             .and_then(|pairs| pairs.first().copied())
-            .ok_or_else(|| format!("a /cpus node has no {name}"))?;
+            .ok_or_else(|| refuse!("a /cpus node has no {name}", name))?;
         let control = cpus.lockdown.expect("filtered")[index];
         if control + 16 > bytes {
-            return Err(format!("{name} at {physical:#x} has no lockdown registers"));
+            return Err(refuse!(
+                "{name} at {physical:#x} has no lockdown registers",
+                name,
+                physical
+            ));
         }
         if !lockdown.iter().any(|block| block.physical == physical) {
             lockdown.push(LockdownBlock {
@@ -791,30 +810,36 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
             });
         }
     }
-    let io = root.child("arm-io").ok_or("DeviceTree has no /arm-io")?;
+    let io = root
+        .child("arm-io")
+        .ok_or(refuse!("DeviceTree has no /arm-io"))?;
     let translate = |offset: u64| io.translate_range(offset, 1);
     let extent = |offset: u64, bytes: u64| io.translate_range(offset, bytes);
-    let place = |name: &str, model: Option<&str>| -> Result<(Node<'_>, u64, u64), String> {
+    let place = |name: &str, model: Option<&str>| -> Result<(Node<'_>, u64, u64)> {
         let node = io
             .child(name)
-            .ok_or_else(|| format!("DeviceTree has no /arm-io/{name}"))?;
+            .ok_or_else(|| refuse!("DeviceTree has no /arm-io/{name}", name))?;
         if let Some(model) = model
             && !node.compatible(model)
         {
-            return Err(format!("/arm-io/{name} is not {model}, the modeled device"));
+            return Err(refuse!(
+                "/arm-io/{name} is not {model}, the modeled device",
+                name,
+                model
+            ));
         }
         let (offset, bytes) = apertures::registers(&node)
             .and_then(|reg| reg.first().copied())
-            .ok_or_else(|| format!("/arm-io/{name} has no reg"))?;
+            .ok_or_else(|| refuse!("/arm-io/{name} has no reg", name))?;
         let physical = extent(offset, bytes)
-            .ok_or_else(|| format!("/arm-io/{name} extent is outside /arm-io ranges"))?;
+            .ok_or_else(|| refuse!("/arm-io/{name} extent is outside /arm-io ranges", name))?;
         Ok((node, physical, bytes))
     };
-    let device = |name: &str, model: &str| -> Result<Device, String> {
+    let device = |name: &str, model: &str| -> Result<Device> {
         let (node, physical, bytes) = place(name, Some(model))?;
         let irq = node
             .first_u32("interrupts")
-            .ok_or_else(|| format!("/arm-io/{name} has no interrupts"))?;
+            .ok_or_else(|| refuse!("/arm-io/{name} has no interrupts", name))?;
         Ok(Device {
             physical,
             bytes,
@@ -826,17 +851,19 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let watchdog_side = watchdog_side(&io.child("wdt").expect("device was placed"), &extent)?;
     let (version, event) = cpus
         .aic
-        .ok_or("the SoC's AIC event register offset is unknown")?;
+        .ok_or(refuse!("the SoC's AIC event register offset is unknown"))?;
     let (aic, physical, _) = place("aic", Some(version))?;
     let phandle = aic
         .first_u32("AAPL,phandle")
-        .ok_or("/arm-io/aic has no phandle")?;
+        .ok_or(refuse!("/arm-io/aic has no phandle"))?;
     let (inputs, layout) = aic_inputs(
         &aic,
         aic_layout(&aic, version, event)?,
         &aic_vectors(&root, phandle)?,
     )?;
-    let chosen = root.child("chosen").ok_or("DeviceTree has no /chosen")?;
+    let chosen = root
+        .child("chosen")
+        .ok_or(refuse!("DeviceTree has no /chosen"))?;
     let memory_controller = memory_controller(&chosen)?;
     let io_access_controller = memory_controller_named(&chosen, "ioa")?;
     let gpio = gpio_bank(&io, &extent, phandle)?;

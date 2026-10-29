@@ -326,6 +326,7 @@ fn typec_placement_distinguishes_i2c_addresses_from_mmio_and_preserves_phy_alias
         assert!(
             place(&bytes, 0x63, Some(&gpio))
                 .unwrap_err()
+                .to_string()
                 .contains("qualified compatible list")
         );
     }
@@ -338,6 +339,7 @@ fn typec_placement_distinguishes_i2c_addresses_from_mmio_and_preserves_phy_alias
         assert!(
             place(&bytes, 0x63, Some(&gpio))
                 .unwrap_err()
+                .to_string()
                 .contains("qualified compatible list")
         );
     }
@@ -486,6 +488,7 @@ fn usb_placement_uses_identity_ranges_mapper_and_all_interrupts() {
         assert!(
             usb_controller(&node, &flat_fixture_extent(&Some), &found.darts)
                 .unwrap_err()
+                .to_string()
                 .contains("qualified USB DRD layout")
         );
     }
@@ -504,6 +507,7 @@ fn usb_placement_uses_identity_ranges_mapper_and_all_interrupts() {
     assert!(
         usb_controller(&node, &flat_fixture_extent(&Some), &routes)
             .unwrap_err()
+            .to_string()
             .contains("SID set")
     );
     routes[0].sids = vec![1, 3];
@@ -511,6 +515,7 @@ fn usb_placement_uses_identity_ranges_mapper_and_all_interrupts() {
     assert!(
         usb_controller(&node, &flat_fixture_extent(&Some), &routes)
             .unwrap_err()
+            .to_string()
             .contains("ambiguous")
     );
     // Every controller is placed, in DeviceTree order; a malformed
@@ -554,7 +559,7 @@ fn usb_placement_uses_identity_ranges_mapper_and_all_interrupts() {
         &[],
     );
     assert_eq!(
-        board(&pair(unnumbered)).unwrap_err(),
+        board(&pair(unnumbered)).unwrap_err().to_string(),
         "usb-drd1 has no Type-C port number"
     );
     assert!(models(USB_DRD, |_| None));

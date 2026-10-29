@@ -2,6 +2,8 @@
 //! groups.
 
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 
 impl AppleDevices {
     /// The AMCC's lock registers at each aperture of `layout`, with the
@@ -13,7 +15,7 @@ impl AppleDevices {
         layout: stela_soc_data::amcc::Layout,
         programmed: stela_soc_data::amcc::Programmed,
         cache: Option<stela_soc_data::amcc::Cache>,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let device = self.map_lock_controller(apertures, layout, programmed, cache)?;
         self.memory_controller = Some(device);
         Ok(())
@@ -26,7 +28,7 @@ impl AppleDevices {
         apertures: &[u64],
         layout: stela_soc_data::amcc::Layout,
         programmed: stela_soc_data::amcc::Programmed,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         self.map_lock_controller(apertures, layout, programmed, None)?;
         Ok(())
     }
@@ -37,12 +39,11 @@ impl AppleDevices {
         layout: stela_soc_data::amcc::Layout,
         programmed: stela_soc_data::amcc::Programmed,
         cache: Option<stela_soc_data::amcc::Cache>,
-    ) -> Result<DeviceId, String> {
+    ) -> Result<DeviceId> {
         if cache.is_some() {
-            return Err(
+            return Err(refuse!(
                 "MCC/DCS/PTD mount requires an actual qualified memory, drain and service owner"
-                    .into(),
-            );
+            ));
         }
         if layout.cache_status.is_some_and(|status| {
             layout
@@ -50,11 +51,11 @@ impl AppleDevices {
                 .checked_mul(u64::from(layout.planes))
                 .is_none_or(|end| status.offset >= end)
         }) {
-            return Err(
-                "AMCC shared MCC status requires the prepared joint memory resource owner".into(),
-            );
+            return Err(refuse!(
+                "AMCC shared MCC status requires the prepared joint memory resource owner"
+            ));
         }
-        let model = Amcc::new(layout, apertures.len(), programmed, cache).map_err(String::from)?;
+        let model = Amcc::new(layout, apertures.len(), programmed, cache)?;
         let ranges: alloc::vec::Vec<(u64, u64, u64)> = apertures
             .iter()
             .enumerate()
@@ -62,13 +63,13 @@ impl AppleDevices {
                 let offset = u64::try_from(index)
                     .ok()
                     .and_then(|index| index.checked_mul(layout.aperture_bytes))
-                    .ok_or("CTRR device aperture offsets overflow")?;
+                    .ok_or(refuse!("CTRR device aperture offsets overflow"))?;
                 Ok((physical, layout.aperture_bytes, offset))
             })
-            .collect::<Result<_, String>>()?;
+            .collect::<Result<_>>()?;
         self.bus
             .install(Box::new(model), &ranges)
-            .map_err(|error| format!("CTRR controller placement: {error:?}"))
+            .map_err(|error| refuse!("CTRR controller placement: {error}", ?error))
     }
 
     /// The memory cache controller's `channels` DRAM channels, sharing
@@ -79,9 +80,11 @@ impl AppleDevices {
         channels: usize,
         ptd: u64,
         ranges: &[stela_soc_data::ptd::Range],
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let _ = (range, channels, ptd, ranges);
-        Err("MCC/DCS/PTD mount requires an actual qualified memory, drain and service owner".into())
+        Err(refuse!(
+            "MCC/DCS/PTD mount requires an actual qualified memory, drain and service owner"
+        ))
     }
 
     /// Independently programmed DT TRAD windows with a shared fault wire.
@@ -109,21 +112,25 @@ impl AppleDevices {
         streams: usize,
         irq: Option<AicInput>,
         apf: Option<(u64, usize)>,
-    ) -> Result<Vec<DartId>, String> {
+    ) -> Result<Vec<DartId>> {
         if !profile.is_t8110() && apf.is_some() {
-            return Err("legacy DART APF topology and filtering are unsupported".into());
+            return Err(refuse!(
+                "legacy DART APF topology and filtering are unsupported"
+            ));
         }
         if !profile.is_t8110() && ranges.len() > 5 {
-            return Err(
-                "legacy DART topology exceeds the recovered five-instance placement".into(),
-            );
+            return Err(refuse!(
+                "legacy DART topology exceeds the recovered five-instance placement"
+            ));
         }
         if apf.is_some_and(|(physical, slices)| {
             !physical.is_multiple_of(stela_soc_data::dart::DAPF_BYTES)
                 || slices == 0
                 || slices as u64 > stela_soc_data::dart::DAPF_BYTES / 0x40
         }) {
-            return Err("DART APF requires one aligned window with a native slice count".into());
+            return Err(refuse!(
+                "DART APF requires one aligned window with a native slice count"
+            ));
         }
         if ranges.iter().any(|range| {
             !profile.admits_window(range.bytes)
@@ -132,14 +139,13 @@ impl AppleDevices {
                     .is_multiple_of(stela_soc_data::dart::DAPF_BYTES)
                 || range.physical.checked_add(range.bytes).is_none()
         }) {
-            return Err(
+            return Err(refuse!(
                 "DART translation ranges must be aligned windows of the profile's register file"
-                    .into(),
-            );
+            ));
         }
         let models = Dart::group_for_profile(profile, streams, irq, ranges.len())?;
         self.place_dart_group(models, ranges, apf, irq)
-            .map_err(|error| format!("DART native placement: {error:?}"))
+            .map_err(|error| refuse!("DART native placement: {error}", ?error))
     }
 
     pub(super) fn place_dart_group(
@@ -198,23 +204,27 @@ impl AppleDevices {
     /// Map the capture view of an existing DART, sharing its lifecycle.
     /// Validate and map before attaching so a failed placement changes neither
     /// the device's capabilities nor the physical address map.
-    pub fn add_dart_smmu(&mut self, dart: DartId, range: Range) -> Result<(), String> {
+    pub fn add_dart_smmu(&mut self, dart: DartId, range: Range) -> Result<()> {
         if range.bytes != dart::SMMU_BYTES || !range.physical.is_multiple_of(dart::SMMU_BYTES) {
-            return Err("DART SMMU range must be one aligned 16 KiB aperture".into());
+            return Err(refuse!(
+                "DART SMMU range must be one aligned 16 KiB aperture"
+            ));
         }
         let model = self
             .bus
             .device::<Dart>(dart.0)
-            .ok_or("DART SMMU owner is not a DART")?;
+            .ok_or(refuse!("DART SMMU owner is not a DART"))?;
         if !model.supports_smmu() {
-            return Err("DART generation has no supported paired SMMU capture format".into());
+            return Err(refuse!(
+                "DART generation has no supported paired SMMU capture format"
+            ));
         }
         if model.has_smmu() {
-            return Err("DART already has a paired SMMU view".into());
+            return Err(refuse!("DART already has a paired SMMU view"));
         }
         self.bus
             .map(dart.0, range.physical, range.bytes, dart::SMMU_OFFSET)
-            .map_err(|error| format!("DART SMMU mapping: {error:?}"))?;
+            .map_err(|error| refuse!("DART SMMU mapping: {error}", ?error))?;
         self.bus
             .device_mut::<Dart>(dart.0)
             .expect("validated DART owner remains present")
@@ -252,19 +262,15 @@ impl AppleDevices {
     /// Pure preflight of boxed ownership and incoming-SID capacity.
     /// Boot adapters validate every declared bank/mapper before publication;
     /// this does not enable DMA or check a physical traffic classifier.
-    pub fn validate_native_dart(
-        &self,
-        name: &str,
-        dart: DartId,
-        stream: usize,
-    ) -> Result<(), String> {
+    pub fn validate_native_dart(&self, name: &str, dart: DartId, stream: usize) -> Result<()> {
         let owner = self
             .bus
             .device::<Dart>(dart.0)
-            .ok_or_else(|| format!("{name} DMA owner is not a mounted DART"))?;
+            .ok_or_else(|| refuse!("{name} DMA owner is not a mounted DART", name))?;
         if stream >= owner.stream_capacity() {
-            return Err(format!(
-                "{name} incoming stream exceeds its mounted DART capacity"
+            return Err(refuse!(
+                "{name} incoming stream exceeds its mounted DART capacity",
+                name
             ));
         }
         Ok(())

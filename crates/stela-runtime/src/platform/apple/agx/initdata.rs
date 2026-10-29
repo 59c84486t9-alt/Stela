@@ -36,6 +36,8 @@
 
 use super::firmware::Pipe;
 use super::ring::{self, Descriptor, Shared};
+use crate::Result;
+use stela_contracts::refuse;
 
 /// Bytes of the root the kext writes (through +0xc0's pointer).
 pub const ROOT_BYTES: usize = 0xc8;
@@ -80,14 +82,16 @@ pub struct Root {
 impl Root {
     /// Parse the root's bytes, refusing a root that is not the kext's: its
     /// first word must be the family's `magic`.
-    pub fn parse(bytes: &[u8; ROOT_BYTES], magic: u64) -> Result<Self, &'static str> {
+    pub fn parse(bytes: &[u8; ROOT_BYTES], magic: u64) -> Result<Self> {
         let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
         let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
         if u64_at(0) != magic {
-            return Err("GFX initdata root lacks its magic");
+            return Err(refuse!("GFX initdata root lacks its magic"));
         }
         if (u32_at(0x28), u32_at(0x2c)) != ROOT_CONSTANTS {
-            return Err("GFX initdata root's words at +0x28 are not 0 and 1");
+            return Err(refuse!(
+                "GFX initdata root's words at +0x28 are not 0 and 1"
+            ));
         }
         let root = Self {
             page_1660: u64_at(0x08),
@@ -109,32 +113,27 @@ impl Root {
             root.object_368,
         ];
         if pointers.contains(&0) {
-            return Err("GFX initdata root leaves an object pointer empty");
+            return Err(refuse!("GFX initdata root leaves an object pointer empty"));
         }
         Ok(root)
     }
 
     /// Read the root at `va`, whose first word must be `magic`.
-    pub fn read(memory: &mut dyn Shared, va: u64, magic: u64) -> Result<Self, &'static str> {
+    pub fn read(memory: &mut dyn Shared, va: u64, magic: u64) -> Result<Self> {
         let mut bytes = [0; ROOT_BYTES];
         memory.read(va, &mut bytes)?;
         Self::parse(&bytes, magic)
     }
 
     /// The device-control ring.
-    pub fn device_control(&self, memory: &mut dyn Shared) -> Result<Descriptor, &'static str> {
+    pub fn device_control(&self, memory: &mut dyn Shared) -> Result<Descriptor> {
         Descriptor::read(memory, self.rings + DEVICE_CONTROL)
     }
 
     /// The data-master ring of `pipe` at submission `index` (0..4).
-    pub fn work(
-        &self,
-        memory: &mut dyn Shared,
-        pipe: Pipe,
-        index: u8,
-    ) -> Result<Descriptor, &'static str> {
+    pub fn work(&self, memory: &mut dyn Shared, pipe: Pipe, index: u8) -> Result<Descriptor> {
         if index >= WORK_INDICES {
-            return Err("GFX work submission index names no ring");
+            return Err(refuse!("GFX work submission index names no ring"));
         }
         let va = self.rings
             + DESCRIPTOR_TABLE
@@ -144,11 +143,11 @@ impl Root {
     }
 
     /// The firmware event ring: (state, entries) firmware VAs.
-    pub fn event_ring(&self, memory: &mut dyn Shared) -> Result<(u64, u64), &'static str> {
+    pub fn event_ring(&self, memory: &mut dyn Shared) -> Result<(u64, u64)> {
         let state = memory.read_u64(self.rings + EVENT_STATE)?;
         let entries = memory.read_u64(self.rings + EVENT_ENTRIES)?;
         if state == 0 || entries == 0 {
-            return Err("GFX firmware event ring is not populated");
+            return Err(refuse!("GFX firmware event ring is not populated"));
         }
         Ok((state, entries))
     }
@@ -203,7 +202,7 @@ pub(crate) mod tests {
         memory.put_u64(ROOT, 0);
         assert_eq!(
             Root::read(&mut memory, ROOT, MAGIC),
-            Err("GFX initdata root lacks its magic")
+            Err(refuse!("GFX initdata root lacks its magic"))
         );
     }
 

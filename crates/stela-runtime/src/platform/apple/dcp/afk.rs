@@ -72,10 +72,12 @@ pub(crate) mod interface;
 mod lifecycle;
 
 use super::rpc::Bus;
+use crate::Result;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 const TYPE_SHIFT: u32 = 48;
 pub const INIT: u64 = 0x80;
@@ -242,9 +244,11 @@ impl Afk {
         &mut self,
         descriptor: interface::Descriptor,
         service: Box<dyn interface::Service>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if self.state != State::Ready {
-            return Err("DCP AFKEPV2 register after transport initialization");
+            return Err(refuse!(
+                "DCP AFKEPV2 register after transport initialization"
+            ));
         }
         self.interfaces.register(descriptor, service)
     }
@@ -292,14 +296,16 @@ impl Afk {
             && !self.pause_completion
     }
 
-    pub(super) fn check_reset(&self) -> Result<(), &'static str> {
+    pub(super) fn check_reset(&self) -> Result<()> {
         if !self.retained_idle() || !self.interfaces.idle() || self.interfaces.pending() {
-            return Err("DCP physical reset with owned AFKEPV2 work or fragments");
+            return Err(refuse!(
+                "DCP physical reset with owned AFKEPV2 work or fragments"
+            ));
         }
         Ok(())
     }
 
-    pub(super) fn reset(&mut self) -> Result<(), &'static str> {
+    pub(super) fn reset(&mut self) -> Result<()> {
         self.check_reset()?;
         self.interfaces.reset()?;
         self.state = State::Ready;
@@ -312,14 +318,16 @@ impl Afk {
     }
 
     /// The AP sent `word`; what needs no memory is answered at once.
-    pub fn receive(&mut self, word: u64, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    pub fn receive(&mut self, word: u64, outbox: &mut Vec<u64>) -> Result<()> {
         self.seen.push_back(Event::Received(word));
         match (kind(word), self.state) {
-            (_, State::Stopped) => Err("DCP AFK message after shutdown before endpoint restart"),
+            (_, State::Stopped) => Err(refuse!(
+                "DCP AFK message after shutdown before endpoint restart"
+            )),
             // The firmware would lay its rings out in 0x40-byte blocks while
             // its `INIT_ACK` tells the AP 0x80; no 26A434 AP asks for that.
             (INIT, State::Ready) if word & 0xffff == SMALL_LAYOUT => {
-                Err("DCP AFK INIT asks for the 0x40-byte ring layout")
+                Err(refuse!("DCP AFK INIT asks for the 0x40-byte ring layout"))
             }
             (INIT, State::Ready) => {
                 self.state = State::Asked;
@@ -334,13 +342,13 @@ impl Afk {
                 outbox.push(message(VERSION_ACK, INIT_ACK_VALUE));
                 Ok(())
             }
-            (VERSION, _) => Err("DCP AFK version query after initialization"),
-            (INIT, _) => Err("DCP AFK INIT on an endpoint already started"),
+            (VERSION, _) => Err(refuse!("DCP AFK version query after initialization")),
+            (INIT, _) => Err(refuse!("DCP AFK INIT on an endpoint already started")),
             (GETBUF_ACK, State::Asked) | (RECV | SEND | FULL | SPACE, State::Started { .. }) => {
                 self.incoming.push_back(word);
                 Ok(())
             }
-            (GETBUF_ACK, _) => Err("DCP AFK GETBUF_ACK without a GETBUF"),
+            (GETBUF_ACK, _) => Err(refuse!("DCP AFK GETBUF_ACK without a GETBUF")),
             (START, State::Described { buffer }) => {
                 self.state = State::Started { buffer };
                 outbox.push(message(START_ACK, 0));
@@ -352,10 +360,10 @@ impl Afk {
                 );
                 Ok(())
             }
-            (START, _) => Err("DCP AFK START before both rings were described"),
-            (RECV | SEND | FULL | SPACE, _) => {
-                Err("DCP AFK queue notification on an endpoint that has not started")
-            }
+            (START, _) => Err(refuse!("DCP AFK START before both rings were described")),
+            (RECV | SEND | FULL | SPACE, _) => Err(refuse!(
+                "DCP AFK queue notification on an endpoint that has not started"
+            )),
             (SHUTDOWN, State::Started { .. }) => {
                 // Cancellation may refuse after earlier completions committed.
                 // Keep the transport retryable until every owner has settled.
@@ -373,19 +381,23 @@ impl Afk {
                 outbox.push(message(SHUTDOWN_ACK, 0));
                 Ok(())
             }
-            (SHUTDOWN, _) => Err("DCP AFK SHUTDOWN on an endpoint that has not started"),
+            (SHUTDOWN, _) => Err(refuse!(
+                "DCP AFK SHUTDOWN on an endpoint that has not started"
+            )),
             (INIT_ACK | START_ACK | GETBUF | INIT_TX | INIT_RX | VERSION_ACK | SHUTDOWN_ACK, _) => {
-                Err(
-                    "DCP AFK response or queue registration is not pending in the coprocessor-owned-buffer flow",
-                )
+                Err(refuse!(
+                    "DCP AFK response or queue registration is not pending in the coprocessor-owned-buffer flow"
+                ))
             }
-            (0x8d | 0x8e, _) => Err("DCP AFK unsolicited AP-owned buffer is unsupported"),
-            _ => Err("DCP AFK unknown message type"),
+            (0x8d | 0x8e, _) => Err(refuse!(
+                "DCP AFK unsolicited AP-owned buffer is unsupported"
+            )),
+            _ => Err(refuse!("DCP AFK unknown message type")),
         }
     }
 
     /// Handle the queued words that need the AP's buffer.
-    pub fn dma(&mut self, bus: &mut dyn Bus, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    pub fn dma(&mut self, bus: &mut dyn Bus, outbox: &mut Vec<u64>) -> Result<()> {
         if self.incoming.is_empty()
             && let State::Started { buffer } = self.state
         {
@@ -434,14 +446,18 @@ impl Afk {
                         self.receive_full = false;
                     }
                 }
-                _ => return Err("DCP AFK queued message no longer matches the endpoint"),
+                _ => {
+                    return Err(refuse!(
+                        "DCP AFK queued message no longer matches the endpoint"
+                    ));
+                }
             }
             self.incoming.pop_front();
         }
         Ok(())
     }
 
-    fn header(&self, bus: &mut dyn Bus, ring: u64) -> Result<[u32; 4], &'static str> {
+    fn header(&self, bus: &mut dyn Bus, ring: u64) -> Result<[u32; 4]> {
         let mut fields = [0; 4];
         for (field, offset) in fields.iter_mut().zip([0, 4, RPTR, WPTR]) {
             let mut word = [0; 4];
@@ -451,18 +467,18 @@ impl Afk {
         Ok(fields)
     }
 
-    fn validate_header(&self, fields: [u32; 4]) -> Result<(), &'static str> {
+    fn validate_header(&self, fields: [u32; 4]) -> Result<()> {
         if u64::from(fields[0]) != RING_BYTES - RING_HEADER || fields[1] != RING_FORMAT {
-            return Err("DCP AFK ring header size or format changed");
+            return Err(refuse!("DCP AFK ring header size or format changed"));
         }
         if fields[2..]
             .iter()
             .any(|&p| u64::from(p) >= RING_BYTES - RING_HEADER)
         {
-            return Err("DCP AFK ring pointer lies outside the ring");
+            return Err(refuse!("DCP AFK ring pointer lies outside the ring"));
         }
         if fields[2..].iter().any(|p| p % ENTRY_BLOCK != 0) {
-            return Err("DCP AFK ring pointer is not entry-block aligned");
+            return Err(refuse!("DCP AFK ring pointer is not entry-block aligned"));
         }
         Ok(())
     }
@@ -475,7 +491,7 @@ impl Afk {
         buffer: u64,
         mut tx: [u32; 4],
         outbox: &mut Vec<u64>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         loop {
             if let Some(accepted) = &self.accepted {
                 if let Some((_, response)) = &accepted.response {
@@ -513,14 +529,18 @@ impl Afk {
             let entry = self.entry(bus, buffer)?;
             self.seen.push_back(Event::Entry(entry));
             if entry.channel != 0 || entry.kind != 0 {
-                return Err("DCP AFK queue entry does not carry AFKEPV2 framing");
+                return Err(refuse!(
+                    "DCP AFK queue entry does not carry AFKEPV2 framing"
+                ));
             }
             let block = entry_block(entry.size)?;
             let pointer = if tx[2] + block > DATA_BYTES { 0 } else { tx[2] };
             let next = advance(pointer, block);
             // A producer must publish all of a frame before advancing WPTR.
             if pointer < tx[3] && next != 0 && next > tx[3] {
-                return Err("DCP AFK entry extends beyond the published write pointer");
+                return Err(refuse!(
+                    "DCP AFK entry extends beyond the published write pointer"
+                ));
             }
             let mut packet = alloc::vec![0; entry.size as usize];
             bus.read(
@@ -529,14 +549,14 @@ impl Afk {
             )?;
             let header = packet
                 .get(..8)
-                .ok_or("DCP AFKEPV2 packet header is truncated")?;
+                .ok_or(refuse!("DCP AFKEPV2 packet header is truncated"))?;
             let interface = u16::from_le_bytes(header[2..4].try_into().expect("interface"));
             let total = u32::from_le_bytes(header[4..8].try_into().expect("length"));
             let response = if interface == 0 {
                 let packet: [u8; lifecycle::PACKET_BYTES] = packet
                     .as_slice()
                     .try_into()
-                    .map_err(|_| "DCP AFKEPV2 internal packet length is not four bytes")?;
+                    .map_err(|_| refuse!("DCP AFKEPV2 internal packet length is not four bytes"))?;
                 self.seen.push_back(Event::Lifecycle(packet));
                 let command = lifecycle::Command::decode(&packet)?;
                 let response = self.peer.receive(command);
@@ -568,7 +588,7 @@ impl Afk {
         bus: &mut dyn Bus,
         buffer: u64,
         outbox: &mut Vec<u64>,
-    ) -> Result<bool, &'static str> {
+    ) -> Result<bool> {
         if self.reply.is_none() {
             self.reply = self.outgoing.pop_front();
         }
@@ -659,19 +679,19 @@ impl Afk {
     }
 
     /// The entry at the AP ring's read pointer.
-    fn entry(&self, bus: &mut dyn Bus, buffer: u64) -> Result<Entry, &'static str> {
+    fn entry(&self, bus: &mut dyn Bus, buffer: u64) -> Result<Entry> {
         let ring = buffer + TX_RING;
         let mut word = [0u8; 4];
         bus.read(ring + RPTR, &mut word)?;
         let rptr = u64::from(u32::from_le_bytes(word));
         if rptr + 16 > RING_BYTES - RING_HEADER {
-            return Err("DCP AFK ring read pointer lies outside the ring");
+            return Err(refuse!("DCP AFK ring read pointer lies outside the ring"));
         }
         let mut qe = [0u8; 16];
         bus.read(ring + RING_HEADER + rptr, &mut qe)?;
         let field = |at: usize| u32::from_le_bytes(qe[at..at + 4].try_into().expect("4 bytes"));
         if field(0) != QE_MAGIC {
-            return Err("DCP AFK ring entry lacks the queue-entry magic");
+            return Err(refuse!("DCP AFK ring entry lacks the queue-entry magic"));
         }
         let size = field(4);
         // The declared endpoint uses AFKEPV2: eight transport bytes,
@@ -716,13 +736,13 @@ impl Pending {
     }
 }
 
-fn entry_block(size: u32) -> Result<u32, &'static str> {
+fn entry_block(size: u32) -> Result<u32> {
     let block = size
         .checked_add(16)
         .and_then(|size| size.checked_next_multiple_of(ENTRY_BLOCK))
-        .ok_or("DCP AFK queue entry length overflow")?;
+        .ok_or(refuse!("DCP AFK queue entry length overflow"))?;
     if block >= DATA_BYTES {
-        return Err("DCP AFK queue entry cannot fit in its ring");
+        return Err(refuse!("DCP AFK queue entry cannot fit in its ring"));
     }
     Ok(block)
 }

@@ -4,6 +4,8 @@
 //! neither this coordinator nor the ping endpoint supplies their settlement.
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use {
     super::super::ptd::transport::notifications::LocalNotifications, stela_contracts::bus::Access,
     stela_contracts::bus::MmioError, stela_soc_data::ptd::Range,
@@ -121,11 +123,11 @@ impl Request {
 /// A backend keeps any reached internal prefix/busy wait under the same request
 /// until it retires. Retired-with-refusal records effects before returning the
 /// refusal; the coordinator resumes the following operation, never replays it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
     Busy { deadline: Option<u64> },
-    Retired { refusal: Option<&'static str> },
-    Refused(&'static str),
+    Retired { refusal: Option<Refusal> },
+    Refused(Refusal),
 }
 pub enum Refresh {
     Busy {
@@ -133,9 +135,9 @@ pub enum Refresh {
     },
     Retired {
         packets: Packets,
-        refusal: Option<&'static str>,
+        refusal: Option<Refusal>,
     },
-    Refused(&'static str),
+    Refused(Refusal),
 }
 
 /// Native resource owner, moved into the coordinator and never replaced
@@ -174,8 +176,8 @@ pub enum Phase {
 }
 #[derive(Debug)]
 pub enum Error {
-    Contract(&'static str),
-    Backend(&'static str),
+    Contract(Refusal),
+    Backend(Refusal),
     Mmio(MmioError),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,7 +222,7 @@ pub struct Owner<B> {
     serial: u64,
     transition: Option<Transition>,
     packets: Option<Packets>,
-    refusal: Option<&'static str>,
+    refusal: Option<Refusal>,
     publisher_epoch: Option<Rc<Cell<bool>>>,
     service_alive: Rc<Cell<bool>>,
     memory_claimed: bool,
@@ -245,34 +247,36 @@ impl<B: Resources> Owner<B> {
                 continue;
             }
             if selected_ids[..index].contains(&id) {
-                return Err(Error::Contract("PMP selected range identity is duplicated"));
+                return Err(Error::Contract(refuse!(
+                    "PMP selected range identity is duplicated"
+                )));
             }
             ranges[index] = Some(
                 all.iter()
                     .find(|r| r.id == id)
-                    .ok_or(Error::Contract(
-                        "PMP selected range has no actual PTD owner",
-                    ))?
+                    .ok_or(Error::Contract(refuse!(
+                        "PMP selected range has no actual PTD owner"
+                    )))?
                     .clone(),
             );
         }
         for index in [0, 1, 2, 3, 10, 11, 12, 13] {
             if ranges[index].is_none() {
-                return Err(Error::Contract(
-                    "PMP startup requires a missing selected range",
-                ));
+                return Err(Error::Contract(refuse!(
+                    "PMP startup requires a missing selected range"
+                )));
             }
         }
         if ranges[1].as_ref().unwrap().count != 1 || ranges[2].as_ref().unwrap().count != 4 {
-            return Err(Error::Contract(
-                "PMP STATUS/packet geometry is not qualified",
-            ));
+            return Err(Error::Contract(refuse!(
+                "PMP STATUS/packet geometry is not qualified"
+            )));
         }
         let inventory = resources.inventory();
         if inventory.power_groups > ranges[11].as_ref().unwrap().count {
-            return Err(Error::Contract(
-                "PMP actual power groups exceed ACK ownership",
-            ));
+            return Err(Error::Contract(refuse!(
+                "PMP actual power groups exceed ACK ownership"
+            )));
         }
         local.claim_pmp_recipient().map_err(Error::Contract)?;
         Ok(Self {
@@ -301,7 +305,9 @@ impl<B: Resources> Owner<B> {
     /// Dropping a claim never reopens it or releases remote allocations.
     pub fn claim_memory_services(&mut self) -> Result<memory::Claim, Error> {
         if self.memory_claimed {
-            return Err(Error::Contract("PMP memory class slot is already admitted"));
+            return Err(Error::Contract(refuse!(
+                "PMP memory class slot is already admitted"
+            )));
         }
         self.memory_claimed = true;
         Ok(memory::Claim::new(
@@ -313,9 +319,9 @@ impl<B: Resources> Owner<B> {
     /// registry owner, but are distinct original endpoint callback slots.
     pub fn claim_registry_services(&mut self) -> Result<registry::Claim, Error> {
         if self.registry_claimed {
-            return Err(Error::Contract(
-                "PMP registry class slots are already admitted",
-            ));
+            return Err(Error::Contract(refuse!(
+                "PMP registry class slots are already admitted"
+            )));
         }
         self.registry_claimed = true;
         Ok(registry::Claim::new(
@@ -330,15 +336,15 @@ impl<B: Resources> Owner<B> {
     /// No startup, counter producer, event completion or ACK is supplied.
     pub fn claim_counter_frames(&mut self) -> Result<counters::Claim, Error> {
         if self.counter_frames_claimed {
-            return Err(Error::Contract(
-                "PMP counter frame owner is already admitted",
-            ));
+            return Err(Error::Contract(refuse!(
+                "PMP counter frame owner is already admitted"
+            )));
         }
         let range = self.ranges[9]
             .as_ref()
-            .ok_or(Error::Contract(
-                "PMP counter frames require the actual selected SOC-DEV-PKT range",
-            ))?
+            .ok_or(Error::Contract(refuse!(
+                "PMP counter frames require the actual selected SOC-DEV-PKT range"
+            )))?
             .clone();
         self.counter_frames_claimed = true;
         Ok(counters::Claim::new(
@@ -352,9 +358,9 @@ impl<B: Resources> Owner<B> {
     /// this unique claim supplies only the same live native/PTD ownership.
     pub fn claim_provider_frames(&mut self) -> Result<platform::counter_cache::Claim, Error> {
         if self.provider_frames_claimed {
-            return Err(Error::Contract(
-                "PMP provider-frame owner is already admitted",
-            ));
+            return Err(Error::Contract(refuse!(
+                "PMP provider-frame owner is already admitted"
+            )));
         }
         let ranges = core::array::from_fn(|i| self.ranges[i + 4].clone());
         self.provider_frames_claimed = true;
@@ -371,9 +377,9 @@ impl<B: Resources> Owner<B> {
         &mut self,
     ) -> Result<platform::counter_cache::ManagerClaim, Error> {
         if self.manager_masks_claimed {
-            return Err(Error::Contract(
-                "PMP manager read-mask owner is already admitted",
-            ));
+            return Err(Error::Contract(refuse!(
+                "PMP manager read-mask owner is already admitted"
+            )));
         }
         self.manager_masks_claimed = true;
         Ok(platform::counter_cache::ManagerClaim::new(
@@ -394,7 +400,9 @@ impl<B: Resources> Owner<B> {
         response_id: u32,
     ) -> Result<cache::service::Claim, Error> {
         if self.cache_claimed || request_id == response_id {
-            return Err(Error::Contract("PMP cache service ownership is duplicated"));
+            return Err(Error::Contract(refuse!(
+                "PMP cache service ownership is duplicated"
+            )));
         }
         let ranges = self.local.bank().ranges();
         let range = |id| {
@@ -402,9 +410,9 @@ impl<B: Resources> Owner<B> {
                 .iter()
                 .find(|r| r.id == id)
                 .cloned()
-                .ok_or(Error::Contract(
-                    "PMP cache service requires actual resolved PTD ranges",
-                ))
+                .ok_or(Error::Contract(refuse!(
+                    "PMP cache service requires actual resolved PTD ranges"
+                )))
         };
         let request = range(request_id)?;
         let response = range(response_id)?;
@@ -419,8 +427,8 @@ impl<B: Resources> Owner<B> {
     pub fn phase(&self) -> Phase {
         self.phase
     }
-    pub fn refusal(&self) -> Option<&'static str> {
-        self.refusal
+    pub fn refusal(&self) -> Option<&Refusal> {
+        self.refusal.as_ref()
     }
     pub fn committed_prefix(&self) -> usize {
         self.transition.as_ref().map_or(0, |t| t.cursor)
@@ -433,9 +441,9 @@ impl<B: Resources> Owner<B> {
 
     pub fn begin_startup(&mut self) -> Result<(), Error> {
         if self.phase != Phase::Dormant || self.transition.is_some() {
-            return Err(Error::Contract(
-                "PMP startup conflicts with an actual retained transition",
-            ));
+            return Err(Error::Contract(refuse!(
+                "PMP startup conflicts with an actual retained transition"
+            )));
         }
         let mut ops = Vec::new();
         ops.push(Operation::Refresh);
@@ -475,13 +483,13 @@ impl<B: Resources> Owner<B> {
     }
     pub fn begin_exit(&mut self) -> Result<(), Error> {
         if self.phase != Phase::Active || self.transition.is_some() {
-            return Err(Error::Contract(
-                "PMP exit conflicts with an actual retained transition",
-            ));
+            return Err(Error::Contract(refuse!(
+                "PMP exit conflicts with an actual retained transition"
+            )));
         }
-        let packets = self.packets.ok_or(Error::Contract(
-            "PMP exit has no actual retained packet state",
-        ))?;
+        let packets = self.packets.ok_or(Error::Contract(refuse!(
+            "PMP exit has no actual retained packet state"
+        )))?;
         let mut ops = Vec::new();
         for family in [Family::Pmgr, Family::Dpe, Family::Device, Family::SocDevice] {
             ops.push(Operation::Resource(Effect::StopPacketMonitors(family)));
@@ -532,7 +540,7 @@ impl<B: Resources> Owner<B> {
         let serial = self
             .serial
             .checked_add(1)
-            .ok_or(Error::Contract("PMP transition serial exhausted"))?;
+            .ok_or(Error::Contract(refuse!("PMP transition serial exhausted")))?;
         self.serial = serial;
         self.phase = phase;
         self.refusal = None;
@@ -550,9 +558,9 @@ impl<B: Resources> Owner<B> {
     pub fn advance(&mut self, access: &mut Access<'_>) -> Result<Progress, Error> {
         let life = self.local.bank().lifecycle_state();
         if life.reset || !life.powered || !life.clocked || life.quiesced {
-            return Err(Error::Contract(
-                "PMP actual PTD/resource owner is paused or reset",
-            ));
+            return Err(Error::Contract(refuse!(
+                "PMP actual PTD/resource owner is paused or reset"
+            )));
         }
         self.refusal = None;
         loop {
@@ -591,9 +599,9 @@ impl<B: Resources> Owner<B> {
                     }
                 }
                 Operation::Resource(effect) => {
-                    let packets = packets.ok_or(Error::Contract(
-                        "PMP resource operation has no actual refreshed state",
-                    ))?;
+                    let packets = packets.ok_or(Error::Contract(refuse!(
+                        "PMP resource operation has no actual refreshed state"
+                    )))?;
                     let target = if let Effect::BindPacketSource(family) = effect {
                         let index = match family {
                             Family::Pmgr => 4,
@@ -622,7 +630,7 @@ impl<B: Resources> Owner<B> {
             match step {
                 Step::Busy { deadline } => return Ok(Progress::Busy { deadline }),
                 Step::Refused(reason) => {
-                    self.refusal = Some(reason);
+                    self.refusal = Some(reason.clone());
                     return Err(Error::Backend(reason));
                 }
                 Step::Retired { refusal } => {
@@ -631,7 +639,7 @@ impl<B: Resources> Owner<B> {
                         self.publisher_epoch.as_ref().unwrap().set(false);
                     }
                     if let Some(reason) = refusal {
-                        self.refusal = Some(reason);
+                        self.refusal = Some(reason.clone());
                         return Err(Error::Backend(reason));
                     }
                 }

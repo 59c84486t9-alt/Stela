@@ -43,7 +43,9 @@ use super::{
         RECIPIENT_INTERFACE, Requests, SET_FEATURE, SET_INTERFACE, STANDARD, Setup, Stall,
     },
 };
+use crate::Result;
 use alloc::{collections::VecDeque, format, string::String, vec, vec::Vec};
+use stela_contracts::refuse;
 use stela_drivers::net::Mac;
 
 const NOTIFY: u8 = 0x83;
@@ -284,9 +286,11 @@ fn notification(code: u8, value: u16, data: &[u8]) -> Vec<u8> {
 
 impl Ecm {
     /// The adapter whose station address is `mac`, a unicast address.
-    pub fn new(mac: Mac) -> Result<Self, &'static str> {
+    pub fn new(mac: Mac) -> Result<Self> {
         if mac.is_multicast() || mac.0 == [0; 6] {
-            return Err("the USB Ethernet address must be a unicast address");
+            return Err(refuse!(
+                "the USB Ethernet address must be a unicast address"
+            ));
         }
         Ok(Self {
             control: Control::new(descriptors(mac)),
@@ -567,24 +571,19 @@ impl Requests for State {
 }
 
 impl BusPeer for Ecm {
-    fn reset(&mut self) -> Result<(), &'static str> {
+    fn reset(&mut self) -> Result<()> {
         self.control.reset(&mut self.state)?;
         self.state
             .configure(0)
-            .map_err(|Stall| "USB Ethernet reset")
+            .map_err(|Stall| refuse!("USB Ethernet reset stalled"))
     }
 
-    fn packet(
-        &mut self,
-        endpoint: u8,
-        token: Token,
-        data: &mut [u8],
-    ) -> Result<Reply, &'static str> {
+    fn packet(&mut self, endpoint: u8, token: Token, data: &mut [u8]) -> Result<Reply> {
         if endpoint == 0 {
             return self.control.packet(token, data, &mut self.state);
         }
         if token == Token::Setup {
-            return Err("SETUP to a non-control endpoint");
+            return Err(refuse!("SETUP to a non-control endpoint"));
         }
         let configured = self.control.configuration() != 0;
         let active = configured && self.state.alternate == 1;

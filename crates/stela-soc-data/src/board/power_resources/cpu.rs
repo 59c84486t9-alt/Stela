@@ -315,7 +315,8 @@ pub fn resolve_cpu_power(
         .zip(records)
         .enumerate()
     {
-        let parsed = Record::parse(Layout::V1, raw).map_err(Error::Malformed)?;
+        let parsed =
+            Record::parse(Layout::V1, raw).map_err(|record| Error::Malformed(record.what()))?;
         if view.id.die != 0 {
             return Err(Error::UnsupportedDie(view.id.die));
         }

@@ -13,6 +13,7 @@ use super::owner::{CounterContext, EffectValue};
 use super::{CounterReference, Descriptor};
 use alloc::rc::Rc;
 use stela_contracts::bus::Access;
+use stela_contracts::refuse;
 
 pub use ingestion::{Error, Progress};
 const TIME_MASK: u64 = (1 << 54) - 1;
@@ -141,9 +142,9 @@ impl<B: Backend> Owner<B> {
         destination: &mut [[u8; GROUP_BYTES]],
     ) -> Result<Option<u32>, Error> {
         if self.batch.is_some() || self.awaiting_post.is_some() || destination.len() != GROUPS {
-            return Err(Error::Contract(
-                "AMCC MC-event copy has unfinished work or foreign geometry",
-            ));
+            return Err(Error::Contract(refuse!(
+                "AMCC MC-event copy has unfinished work or foreign geometry"
+            )));
         }
         if expected != self.arrived {
             return Ok(None);
@@ -202,22 +203,24 @@ impl<B: Backend> Owner<B> {
                 .as_ref()
                 .is_some_and(|s| s.context.evaluated != 0 || s.context.pending != 1)
         {
-            return Err(Error::Contract("AMCC Capture has unfinished prior work"));
+            return Err(Error::Contract(refuse!(
+                "AMCC Capture has unfinished prior work"
+            )));
         }
         descriptor(d)?;
         let capture = frames.capture_identity(captured).map_err(Error::Contract)?;
         let observed = captured.bits(16, 112).map_err(Error::Contract)?;
         if context.selected != observed & d.selection().bits() {
-            return Err(Error::Contract(
-                "AMCC selection differs from its actual PTD capture",
-            ));
+            return Err(Error::Contract(refuse!(
+                "AMCC selection differs from its actual PTD capture"
+            )));
         }
         match input {
             Input::Copied(copied) => {
                 if context.activity == 0 || copied.selected() != context.selected {
-                    return Err(Error::Contract(
-                        "AMCC bulk receipt differs from reached source bulk",
-                    ));
+                    return Err(Error::Contract(refuse!(
+                        "AMCC bulk receipt differs from reached source bulk"
+                    )));
                 }
                 frames
                     .validate_copied_capture(&copied, captured)
@@ -227,9 +230,9 @@ impl<B: Backend> Owner<B> {
             }
             Input::Retained(retained) => {
                 if context.activity != 0 {
-                    return Err(Error::Contract(
-                        "AMCC active bulk requires its actual copy receipt",
-                    ));
+                    return Err(Error::Contract(refuse!(
+                        "AMCC active bulk requires its actual copy receipt"
+                    )));
                 }
                 self.generic
                     .begin_retained_capture(frames, retained, d, context, activation)?;
@@ -253,16 +256,18 @@ impl<B: Backend> Owner<B> {
         activation: u32,
     ) -> Result<(), Error> {
         if self.batch.is_some() {
-            return Err(Error::Contract("AMCC Postprocess has unfinished work"));
+            return Err(Error::Contract(refuse!(
+                "AMCC Postprocess has unfinished work"
+            )));
         }
         descriptor(d)?;
-        let retained = self.awaiting_post.as_ref().ok_or(Error::Contract(
-            "AMCC Postprocess requires its unreplayed Capture",
-        ))?;
+        let retained = self.awaiting_post.as_ref().ok_or(Error::Contract(refuse!(
+            "AMCC Postprocess requires its unreplayed Capture"
+        )))?;
         if context != retained.context {
-            return Err(Error::Contract(
-                "AMCC Postprocess context differs from retained Capture",
-            ));
+            return Err(Error::Contract(refuse!(
+                "AMCC Postprocess context differs from retained Capture"
+            )));
         }
         frames
             .validate_capture_identity(&retained.capture)
@@ -283,7 +288,7 @@ impl<B: Backend> Owner<B> {
             let batch = self
                 .batch
                 .as_ref()
-                .ok_or(Error::Contract("AMCC hook has no pending work"))?;
+                .ok_or(Error::Contract(refuse!("AMCC hook has no pending work")))?;
             frames
                 .validate_capture_identity(&batch.capture)
                 .map_err(Error::Contract)?;
@@ -309,7 +314,9 @@ impl<B: Backend> Owner<B> {
                 Phase::Capture(_) => {
                     let cells = self.generic.cells(frames)?;
                     if cells.len() != 112 {
-                        return Err(Error::Contract("AMCC retained buffer has foreign geometry"));
+                        return Err(Error::Contract(refuse!(
+                            "AMCC retained buffer has foreign geometry"
+                        )));
                     }
                     let batch = self.batch.take().unwrap();
                     self.packet_low = batch.context.current_packet.0[0] as u32 & 15;
@@ -374,9 +381,9 @@ impl<B: Backend> Owner<B> {
         }
         self.statistics[g][k]
             .as_mut()
-            .ok_or(Error::Contract(
-                "AMCC metric has no initialized source histogram",
-            ))?
+            .ok_or(Error::Contract(refuse!(
+                "AMCC metric has no initialized source histogram"
+            )))?
             .record(self.rates[g][k] >> 10);
         Ok(())
     }
@@ -393,7 +400,9 @@ impl<B: Backend> Owner<B> {
             return Ok(0);
         }
         if selector >= 6 || kind >= 3 {
-            return Err(Error::Contract("AMCC query exceeds source metric geometry"));
+            return Err(Error::Contract(refuse!(
+                "AMCC query exceeds source metric geometry"
+            )));
         }
         let kind = kind as usize;
         let special = if slot == Query::Slot50 {
@@ -427,9 +436,9 @@ impl<B: Backend> Owner<B> {
     pub fn group<'a>(&self, frames: &'a Frames, group: usize) -> Result<GroupView<'a>, Error> {
         let cells = self.generic.cells(frames)?;
         if group >= GROUPS || cells.len() != 112 {
-            return Err(Error::Contract(
-                "AMCC group view exceeds retained T8112 cells",
-            ));
+            return Err(Error::Contract(refuse!(
+                "AMCC group view exceeds retained T8112 cells"
+            )));
         }
         let start = PREFIX + GROUP_ENTRIES * group;
         Ok(GroupView {
@@ -440,9 +449,9 @@ impl<B: Backend> Owner<B> {
     /// metrics and arrival words survive. This is not activation completion.
     pub fn apply_source_activation_reset(&mut self) -> Result<(), Error> {
         if self.batch.is_some() {
-            return Err(Error::Contract(
-                "AMCC activation reset overlaps a pending hook",
-            ));
+            return Err(Error::Contract(refuse!(
+                "AMCC activation reset overlaps a pending hook"
+            )));
         }
         self.generic.apply_source_activation_reset()?;
         self.awaiting_post = None;
@@ -456,9 +465,9 @@ pub struct GroupView<'a> {
 impl GroupView<'_> {
     pub fn copy_into_existing(&self, destination: &mut [u8]) -> Result<(), Error> {
         if destination.len() != GROUP_BYTES {
-            return Err(Error::Contract(
-                "AMCC group destination must already own64 bytes",
-            ));
+            return Err(Error::Contract(refuse!(
+                "AMCC group destination must already own64 bytes"
+            )));
         }
         for (cell, out) in self.cells.iter().zip(destination.as_chunks_mut::<16>().0) {
             out[..8].copy_from_slice(&cell.value.to_le_bytes());
@@ -476,9 +485,9 @@ fn descriptor(d: &Descriptor) -> Result<(), Error> {
                 count: 112,
             })
     {
-        return Err(Error::Contract(
-            "AMCC wrapper requires original checked T8112 ordinal/range",
-        ));
+        return Err(Error::Contract(refuse!(
+            "AMCC wrapper requires original checked T8112 ordinal/range"
+        )));
     }
     Ok(())
 }
@@ -491,9 +500,9 @@ fn local_pair(
     context: CounterContext,
 ) -> Result<Pair, Error> {
     if r.kind != 2 {
-        return Err(Error::Refused(
-            "AMCC specialized provider descriptor has no qualified owner",
-        ));
+        return Err(Error::Refused(refuse!(
+            "AMCC specialized provider descriptor has no qualified owner"
+        )));
     }
     let value = if context.activity == 0 {
         0
@@ -505,7 +514,9 @@ fn local_pair(
     } else {
         cells
             .first()
-            .ok_or(Error::Contract("AMCC retained timestamp cell absent"))?
+            .ok_or(Error::Contract(refuse!(
+                "AMCC retained timestamp cell absent"
+            )))?
             .metadata
             & TIME_MASK
     };
@@ -539,9 +550,9 @@ fn products(context: &mut CounterContext, value: EffectValue) -> Result<(), Erro
             context.previous_state_index = previous_state_index;
             Ok(())
         }
-        EffectValue::Complete => Err(Error::Contract(
-            "AMCC generic hook returned no retained products",
-        )),
+        EffectValue::Complete => Err(Error::Contract(refuse!(
+            "AMCC generic hook returned no retained products"
+        ))),
     }
 }
 fn hook(context: CounterContext) -> EffectValue {

@@ -4,6 +4,8 @@
 //! constructs the two words; VA 0xfffffff0270cc7f0 submits them with STP.
 //! DSB ISH, TLBI VALE1OS and DSB OSH follow at cc810..cc818. Decoding a
 //! payload does not publish it or complete that architectural ordering.
+use crate::Result;
+use stela_contracts::refuse;
 
 const PAGE_SHIFT: u32 = 14;
 const PAGE_FIELD: u64 = (1 << 28) - 1;
@@ -27,11 +29,13 @@ pub struct ContextCommand {
 }
 
 impl ContextCommand {
-    pub(super) fn new(sid: usize, slot: u16) -> Result<Self, &'static str> {
+    pub(super) fn new(sid: usize, slot: u16) -> Result<Self> {
         let sid = u8::try_from(sid)
-            .map_err(|_| "gen3 DART publication SID exceeds its native command field")?;
+            .map_err(|_| refuse!("gen3 DART publication SID exceeds its native command field"))?;
         if slot >= 64 {
-            return Err("gen3 DART publication context slot exceeds its native command field");
+            return Err(refuse!(
+                "gen3 DART publication context slot exceeds its native command field"
+            ));
         }
         Ok(Self {
             sid,
@@ -85,15 +89,15 @@ impl Command {
 
     /// Validate a complete request before it has any device effect. Unknown
     /// classes and fields are unsupported, not weakened invalidations.
-    pub fn decode(words: [u64; 2]) -> Result<Self, &'static str> {
+    pub fn decode(words: [u64; 2]) -> Result<Self> {
         let [first, second] = words;
         if first & !(RANGE | SID | INSTANCE | CLASS) != 0 || second & !RANGE != 0 {
-            return Err("gen3 DART TLBI payload contains unmodeled fields");
+            return Err(refuse!("gen3 DART TLBI payload contains unmodeled fields"));
         }
         let operation = match (first & CLASS) >> CLASS_SHIFT {
             class @ (0 | 1) => {
                 if first & RANGE != 0 || second != 0 {
-                    return Err("gen3 DART non-range TLBI carries range fields");
+                    return Err(refuse!("gen3 DART non-range TLBI carries range fields"));
                 }
                 if class == 0 {
                     Operation::All
@@ -105,14 +109,14 @@ impl Command {
                 let start_page = ((first & RANGE) >> PAGE_SHIFT) as u32;
                 let end_page = (second >> PAGE_SHIFT) as u32;
                 if start_page > end_page {
-                    return Err("gen3 DART TLBI range endpoints are reversed");
+                    return Err(refuse!("gen3 DART TLBI range endpoints are reversed"));
                 }
                 Operation::Range {
                     start_page,
                     end_page,
                 }
             }
-            _ => return Err("gen3 DART TLBI command class is unsupported"),
+            _ => return Err(refuse!("gen3 DART TLBI command class is unsupported")),
         };
         Ok(Self {
             instance: ((first & INSTANCE) >> INSTANCE_SHIFT) as u8,
@@ -123,15 +127,21 @@ impl Command {
 
     /// Check routing before delivering a command to an instance. This is
     /// validation only; completion belongs to the owning ordering boundary.
-    pub fn validate_target(self, instance: u8, streams: usize) -> Result<(), &'static str> {
+    pub fn validate_target(self, instance: u8, streams: usize) -> Result<()> {
         if self.instance != instance {
-            return Err("gen3 DART TLBI instance tag does not match its target");
+            return Err(refuse!(
+                "gen3 DART TLBI instance tag does not match its target"
+            ));
         }
         if !(1..=256).contains(&streams) {
-            return Err("gen3 DART TLBI target has an invalid native stream count");
+            return Err(refuse!(
+                "gen3 DART TLBI target has an invalid native stream count"
+            ));
         }
         if usize::from(self.sid) >= streams {
-            return Err("gen3 DART TLBI stream is outside its target profile");
+            return Err(refuse!(
+                "gen3 DART TLBI stream is outside its target profile"
+            ));
         }
         Ok(())
     }

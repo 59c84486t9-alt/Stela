@@ -1,5 +1,7 @@
 //! A display's broad physical windows keep their nested devices.
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 
 impl AppleDevices {
     /// Mount all original physical display views in one transaction, leaving
@@ -12,30 +14,30 @@ impl AppleDevices {
         regions: &[(&'static str, Range)],
         role: &'static str,
         darts: &[DartId],
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let mut controllers = self.coprocessors.iter().filter(|(name, _)| *name == role);
         let &(_, asc) = controllers
             .next()
-            .ok_or("display has no mounted coprocessor")?;
+            .ok_or(refuse!("display has no mounted coprocessor"))?;
         if controllers.next().is_some() {
-            return Err("display coprocessor role is ambiguous".into());
+            return Err(refuse!("display coprocessor role is ambiguous"));
         }
         let master = self
             .dcp_masters
             .iter()
             .find(|master| master.asc == asc)
-            .ok_or("display coprocessor has no actual DMA owner")?;
+            .ok_or(refuse!("display coprocessor has no actual DMA owner"))?;
         if !darts.iter().any(|id| id.0 == master.dart)
             || master
                 .surface
                 .is_some_and(|(owner, _)| !darts.iter().any(|id| id.0 == owner))
         {
-            return Err("display container omits a selected DART owner".into());
+            return Err(refuse!("display container omits a selected DART owner"));
         }
         let mut children = vec![asc];
         for dart in darts {
             if self.bus.device::<Dart>(dart.0).is_none() {
-                return Err("display container child is not an actual DART".into());
+                return Err(refuse!("display container child is not an actual DART"));
             }
             if !children.contains(&dart.0) {
                 children.push(dart.0);
@@ -45,7 +47,7 @@ impl AppleDevices {
             .iter()
             .map(|&(name, range)| (name, range.physical, range.bytes))
             .collect();
-        let model = display_hw::Region::physical(views).map_err(String::from)?;
+        let model = display_hw::Region::physical(views)?;
         let spans = regions
             .iter()
             .map(|(_, range)| (range.physical, range.bytes))
@@ -68,7 +70,7 @@ impl AppleDevices {
                 // LDP entries and IRQs outside display's narrower update view.
                 self.bus
                     .shared_view(device, bank_start, bank_bytes, bank_offset)
-                    .map_err(|error| format!("display full PTD owner: {error:?}"))?;
+                    .map_err(|error| refuse!("display full PTD owner: {error}", ?error))?;
             }
             for &(physical, bytes) in &spans {
                 // Region::physical has already checked these ends.
@@ -77,7 +79,7 @@ impl AppleDevices {
                     shared.push(
                         self.bus
                             .shared_view(device, start, bytes, offset)
-                            .map_err(|error| format!("display PTD shared view: {error:?}"))?,
+                            .map_err(|error| refuse!("display PTD shared view: {error}", ?error))?,
                     );
                 }
             }
@@ -101,7 +103,7 @@ impl AppleDevices {
             shared.push(
                 self.bus
                     .shared_view(owner, physical, bytes, offset + (physical - start))
-                    .map_err(|error| format!("display sub-block view: {error:?}"))?,
+                    .map_err(|error| refuse!("display sub-block view: {error}", ?error))?,
             );
         }
         let plan = if shared.is_empty() {
@@ -112,15 +114,17 @@ impl AppleDevices {
         };
         let bindings = plan.map_err(|error| {
             let owner = match error {
-                MapError::Overlap { existing } => self.bus.device_name(existing).unwrap_or("unknown"),
+                MapError::Overlap { existing } => {
+                    self.bus.device_name(existing).unwrap_or("unknown")
+                }
                 _ => "none",
             };
-            format!("display container placement: {error:?}; existing owner={owner}; requested={spans:#x?}")
+            refuse!("display container placement: {error}", ?error, owner, requested = ?spans)
         })?;
         if !bindings.is_empty() {
             self.bus
                 .install(Box::new(model), &bindings)
-                .map_err(|error| format!("display container publication: {error:?}"))?;
+                .map_err(|error| refuse!("display container publication: {error}", ?error))?;
         }
         Ok(())
     }

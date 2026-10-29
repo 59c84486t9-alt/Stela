@@ -1,15 +1,17 @@
 //! Original native PMP registry producer and class4 callback. Allocations are
 //! class1 client objects; no numeric slot/DMA address grants ownership.
 use super::{Progress, Step, memory};
+use crate::Result;
 use alloc::{boxed::Box, rc::Rc, vec::Vec};
 use core::cell::Cell;
 use memory::Mapping;
+use stela_contracts::Refusal;
 use stela_contracts::bus::Access;
+use stela_contracts::refuse;
 mod operations;
 mod wire;
 use wire::Kind;
 
-type Error = &'static str;
 const BUFFER_BYTES: u32 = 0x4000;
 /// Original initialized native object52424..524c4, not a hardware reset value.
 const CAPACITY: usize = 0x400;
@@ -22,11 +24,11 @@ impl Claim {
     pub(super) fn new(owner: Rc<()>, alive: Rc<Cell<bool>>) -> Self {
         Self { owner, alive }
     }
-    pub(super) fn check(&self) -> Result<(), Error> {
+    pub(super) fn check(&self) -> Result<()> {
         if self.alive.get() {
             Ok(())
         } else {
-            Err("PMP native registry owner was abandoned")
+            Err(refuse!("PMP native registry owner was abandoned"))
         }
     }
 }
@@ -85,9 +87,9 @@ pub enum CallbackStep {
     },
     Retired {
         accepted: bool,
-        refusal: Option<Error>,
+        refusal: Option<Refusal>,
     },
-    Refused(Error),
+    Refused(Refusal),
 }
 /// Moved-in native invocation/context owner. Shared input is the live
 /// mapped AP buffer, not a staged copy: callback RAM effects must occur through
@@ -118,15 +120,15 @@ pub struct Configuration {
     pub flags: u32,
 }
 impl Configuration {
-    fn check(&self) -> Result<(), Error> {
+    fn check(&self) -> Result<()> {
         if self.flags & !31 != 0
             || !self.name.contains(&0)
             || !self.unit.contains(&0)
             || !self.value_type.contains(&0)
         {
-            return Err(
-                "PMP registry configuration has unqualified flags or unterminated source strings",
-            );
+            return Err(refuse!(
+                "PMP registry configuration has unqualified flags or unterminated source strings"
+            ));
         }
         Ok(())
     }
@@ -183,7 +185,7 @@ struct Plan<B: memory::Backend> {
     data: Vec<u8>,
     value: Option<Vec<u8>>,
     callback: Option<Box<dyn Callback<B>>>,
-    failed: Option<Error>,
+    failed: Option<Refusal>,
 }
 pub enum Completion {
     Initialized,
@@ -233,7 +235,7 @@ pub struct Owner<B: memory::Backend> {
 /// Failed admission returns the claims/client, including any reached
 /// mapping/remote-allocation prefix. It does not silently drop those resources.
 pub struct Admission<B: memory::Backend> {
-    pub reason: Error,
+    pub reason: Refusal,
     pub claim: Claim,
     pub memory: memory::Client<B>,
 }
@@ -253,13 +255,14 @@ where
             .check()
             .err()
             .or_else(|| {
-                (!memory.owns(&claim.owner))
-                    .then_some("PMP registry memory belongs to another actual native owner")
+                (!memory.owns(&claim.owner)).then_some(refuse!(
+                    "PMP registry memory belongs to another actual native owner"
+                ))
             })
             .or_else(|| {
-                (!memory.fresh()).then_some(
-                    "PMP cold registry admission requires the untouched actual memory client",
-                )
+                (!memory.fresh()).then_some(refuse!(
+                    "PMP cold registry admission requires the untouched actual memory client"
+                ))
             });
         if let Some(reason) = reason {
             return Err(Box::new(Admission {
@@ -288,11 +291,11 @@ where
     pub fn regions(&self) -> Option<&Option<Vec<memory::Region>>> {
         self.regions.as_ref()
     }
-    fn request(&mut self) -> Result<Request, Error> {
+    fn request(&mut self) -> Result<Request> {
         self.serial = self
             .serial
             .checked_add(1)
-            .ok_or("PMP registry transaction identity exhausted")?;
+            .ok_or(refuse!("PMP registry transaction identity exhausted"))?;
         Ok(Request {
             owner: self.claim.owner.clone(),
             serial: self.serial,
@@ -306,10 +309,12 @@ where
         configuration: Option<Configuration>,
         data: Vec<u8>,
         callback: Option<Box<dyn Callback<B>>>,
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         self.claim.check()?;
         if self.plan.is_some() || self.completion.is_some() || self.received.is_some() {
-            return Err("PMP registry still retains an operation, incoming callback or result");
+            return Err(refuse!(
+                "PMP registry still retains an operation, incoming callback or result"
+            ));
         }
         let request = self.request()?;
         self.plan = Some(Plan {
@@ -329,9 +334,9 @@ where
         });
         Ok(())
     }
-    pub fn begin_init(&mut self) -> Result<(), Error> {
+    pub fn begin_init(&mut self) -> Result<()> {
         if self.initialized {
-            return Err("PMP registry initialization already completed");
+            return Err(refuse!("PMP registry initialization already completed"));
         }
         self.begin(
             alloc::vec![
@@ -353,7 +358,7 @@ where
             None,
         )
     }
-    fn index(&self, entry: &Entry) -> Result<usize, Error> {
+    fn index(&self, entry: &Entry) -> Result<usize> {
         self.claim.check()?;
         if !Rc::ptr_eq(&entry.owner, &self.claim.owner)
             || !self
@@ -362,7 +367,9 @@ where
                 .and_then(Option::as_ref)
                 .is_some_and(|r| Rc::ptr_eq(&r.object, &entry.object))
         {
-            return Err("PMP registry entry is foreign, removed or replaced");
+            return Err(refuse!(
+                "PMP registry entry is foreign, removed or replaced"
+            ));
         }
         Ok(entry.index)
     }
@@ -380,19 +387,23 @@ where
         configuration: Configuration,
         data: &[u8],
         callback: Option<Box<dyn Callback<B>>>,
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         configuration.check()?;
         if !self.initialized {
-            return Err("PMP registry has not completed actual buffer initialization");
+            return Err(refuse!(
+                "PMP registry has not completed actual buffer initialization"
+            ));
         }
         if data.len() > BUFFER_BYTES as usize {
-            return Err("PMP registry value exceeds its actual shared buffer");
+            return Err(refuse!(
+                "PMP registry value exceeds its actual shared buffer"
+            ));
         }
         let index = self
             .entries
             .iter()
             .position(Option::is_none)
-            .ok_or("PMP registry actual initialized slots exhausted")?;
+            .ok_or(refuse!("PMP registry actual initialized slots exhausted"))?;
         let mut ops = Vec::new();
         if configuration.remote() {
             ops.extend([
@@ -422,7 +433,7 @@ where
         }
         Ok(())
     }
-    pub fn begin_remove(&mut self, entry: &Entry) -> Result<(), Error> {
+    pub fn begin_remove(&mut self, entry: &Entry) -> Result<()> {
         let index = self.index(entry)?;
         let mut ops = Vec::new();
         if self.entries[index].as_ref().unwrap().configuration.remote() {
@@ -431,11 +442,13 @@ where
         ops.push(Operation::CommitRemove);
         self.begin(ops, index, None, Vec::new(), None)
     }
-    pub fn begin_set(&mut self, entry: &Entry, data: &[u8]) -> Result<(), Error> {
+    pub fn begin_set(&mut self, entry: &Entry, data: &[u8]) -> Result<()> {
         let index = self.index(entry)?;
         let record = self.entries[index].as_ref().unwrap();
         if data.len() > record.bytes || data.len() > BUFFER_BYTES as usize {
-            return Err("PMP registry set exceeds its retained entry or shared buffer");
+            return Err(refuse!(
+                "PMP registry set exceeds its retained entry or shared buffer"
+            ));
         }
         let mut ops = Vec::new();
         if record.configuration.remote() {
@@ -455,25 +468,25 @@ where
         }
         Ok(())
     }
-    fn allocation(&self, target: Target) -> Result<memory::Allocation, Error> {
+    fn allocation(&self, target: Target) -> Result<memory::Allocation> {
         match target {
             Target::Outgoing => &self.outgoing,
             Target::Incoming => &self.incoming,
             Target::Temporary => &self.temporary,
         }
         .clone()
-        .ok_or("PMP registry lacks its actual AP allocation")
+        .ok_or(refuse!("PMP registry lacks its actual AP allocation"))
     }
-    fn bus(&mut self, target: Target) -> Result<u64, Error> {
+    fn bus(&mut self, target: Target) -> Result<u64> {
         let a = self.allocation(target)?;
         Ok(self.memory.mapping(&a)?.geometry().bus)
     }
-    pub fn take_completion(&mut self) -> Result<Option<Completion>, Error> {
+    pub fn take_completion(&mut self) -> Result<Option<Completion>> {
         self.claim.check()?;
         Ok(self.completion.take())
     }
     /// Commit at most one word. No fallible operation follows an outgoing push.
-    pub fn emit(&mut self, outbox: &mut Vec<u64>) -> Result<bool, Error> {
+    pub fn emit(&mut self, outbox: &mut Vec<u64>) -> Result<bool> {
         self.claim.check()?;
         if self
             .received
@@ -490,7 +503,7 @@ where
         let Some(plan) = self.plan.as_ref() else {
             return Ok(false);
         };
-        if let Some(reason) = plan.failed {
+        if let Some(reason) = plan.failed.clone() {
             return Err(reason);
         }
         let Some(Operation::Send(kind)) = plan.ops.get(plan.cursor).copied() else {
@@ -507,7 +520,7 @@ where
         plan.cursor += 1;
         Ok(true)
     }
-    pub fn receive(&mut self, payload: u64) -> Result<(), Error> {
+    pub fn receive(&mut self, payload: u64) -> Result<()> {
         self.claim.check()?;
         match payload >> 52 & 15 {
             1 => self.memory.receive(payload),
@@ -515,12 +528,12 @@ where
                 let p = self
                     .plan
                     .as_mut()
-                    .ok_or("PMP registry reply has no class3 waiter")?;
+                    .ok_or(refuse!("PMP registry reply has no class3 waiter"))?;
                 let expected = p
                     .expected
-                    .ok_or("PMP registry reply precedes actual publication")?;
+                    .ok_or(refuse!("PMP registry reply precedes actual publication"))?;
                 if p.reply.is_some() {
-                    return Err("PMP registry reply repeats a retained reply");
+                    return Err(refuse!("PMP registry reply repeats a retained reply"));
                 }
                 p.reply = Some(expected.reply(payload)?);
                 Ok(())
@@ -528,10 +541,14 @@ where
             4 => {
                 let index = wire::incoming(payload)?;
                 if index >= CAPACITY {
-                    return Err("PMP class4 slot exceeds actual initialized native storage");
+                    return Err(refuse!(
+                        "PMP class4 slot exceeds actual initialized native storage"
+                    ));
                 }
                 if !self.initialized || self.received.is_some() {
-                    return Err("PMP class4 callback is unavailable or already retained");
+                    return Err(refuse!(
+                        "PMP class4 callback is unavailable or already retained"
+                    ));
                 }
                 let object = self
                     .entries
@@ -548,7 +565,7 @@ where
                 });
                 Ok(())
             }
-            _ => Err("PMP registry input has an unqualified class"),
+            _ => Err(refuse!("PMP registry input has an unqualified class")),
         }
     }
     fn sync(
@@ -566,7 +583,7 @@ where
             Err(reason) => Step::Refused(reason),
         }
     }
-    fn incoming_step(&mut self, access: &mut Access<'_>) -> Result<Progress, Error> {
+    fn incoming_step(&mut self, access: &mut Access<'_>) -> Result<Progress> {
         loop {
             let incoming = self.received.as_ref().unwrap();
             let index = incoming.index;
@@ -691,7 +708,7 @@ where
             r.request.operation += 1;
         }
     }
-    fn retire(&mut self, step: Step) -> Result<Option<Progress>, Error> {
+    fn retire(&mut self, step: Step) -> Result<Option<Progress>> {
         match step {
             Step::Busy { deadline } => Ok(Some(Progress::Busy { deadline })),
             Step::Refused(reason) => Err(reason),

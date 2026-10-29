@@ -9,9 +9,11 @@
 //! modeled DCP presents. XNU's 32-bit pixels are x8r8g8b8 with blue in the
 //! low byte (public XNU `osfmk/console/video_console.c`), GOP's BGR order;
 //! an RGB or channel-mask mode re-encodes each pixel.
+use crate::Result;
 use crate::console::{self, Framebuffer};
 use crate::output;
 use core::sync::atomic::{AtomicBool, Ordering};
+use stela_contracts::refuse;
 use stela_formats::boot_bundle;
 use stela_runtime::machine::apple::{DisplayLog, Scanout, ScanoutFormat, ScanoutMode};
 
@@ -52,11 +54,11 @@ impl Scanout for GopScanout {
         }
     }
 
-    fn present(&mut self, rows: &[u8]) -> Result<(), &'static str> {
+    fn present(&mut self, rows: &[u8]) -> Result<()> {
         let (width, height) = self.screen.resolution();
         let row_bytes = width * 4;
         if rows.len() < row_bytes * height {
-            return Err("presented frame is smaller than the scanout mode");
+            return Err(refuse!("presented frame is smaller than the scanout mode"));
         }
         if !DCP_PRESENTED.swap(true, Ordering::Relaxed) {
             console::release();

@@ -2,7 +2,9 @@
 //! (`layout::top_level`), built from any frame source. The loader uses
 //! firmware pages reached by identity; the engine uses its own pool reached
 //! through the physmap.
+use crate::Result;
 use crate::layout;
+use stela_contracts::refuse;
 
 pub const PAGE: u64 = 4096;
 pub const LARGE: u64 = 2 * 1024 * 1024;
@@ -38,7 +40,7 @@ pub fn entry(
     address: u64,
     level: u32,
     create: bool,
-) -> Result<Option<*mut u64>, &'static str> {
+) -> Result<Option<*mut u64>> {
     let mut table = root;
     for current in (level + 1..=layout::top_level()).rev() {
         let slot = frames.table(table).wrapping_add(index(address, current));
@@ -48,12 +50,12 @@ pub fn entry(
             if !create {
                 return Ok(None);
             }
-            let next = frames.frame().ok_or("no page-table frame left")?;
+            let next = frames.frame().ok_or(refuse!("no page-table frame left"))?;
             // SAFETY: as above; intermediate entries never carry NX.
             unsafe { slot.write_volatile(next | PRESENT | WRITABLE) };
             table = next;
         } else if value & HUGE != 0 {
-            return Err("address already mapped by a large page");
+            return Err(refuse!("address already mapped by a large page"));
         } else {
             table = value & ADDRESS;
         }
@@ -70,7 +72,7 @@ pub fn map_page(
     address: u64,
     physical: u64,
     rights: u64,
-) -> Result<(), &'static str> {
+) -> Result<()> {
     let slot = entry(frames, root, address, 0, true)?.expect("created");
     // SAFETY: a live leaf slot of this builder's tables.
     unsafe { slot.write_volatile((physical & ADDRESS) | rights) };
@@ -84,12 +86,12 @@ pub fn map_large(
     address: u64,
     physical: u64,
     rights: u64,
-) -> Result<(), &'static str> {
+) -> Result<()> {
     let slot = entry(frames, root, address, 1, true)?.expect("created");
     // SAFETY: a live directory slot of this builder's tables.
     unsafe {
         if slot.read_volatile() & PRESENT != 0 && slot.read_volatile() & HUGE == 0 {
-            return Err("2 MiB page over an existing table");
+            return Err(refuse!("2 MiB page over an existing table"));
         }
         slot.write_volatile((physical & ADDRESS) | rights | HUGE);
     }
@@ -105,7 +107,7 @@ pub fn map_range(
     physical: u64,
     bytes: u64,
     rights: u64,
-) -> Result<(), &'static str> {
+) -> Result<()> {
     let mut offset = 0;
     while offset < bytes {
         let (va, pa) = (address + offset, physical + offset);

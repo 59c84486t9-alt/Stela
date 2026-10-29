@@ -16,6 +16,8 @@
 //! by digest, as one APTicket covers a restore; its signature is checked
 //! only when a SEP [`PolicyAuthority`] is given. A step that fails is named
 //! as LLB and iBoot name it in `ota-result`/`ota-failure-reason`.
+use crate::Result;
+use crate::Within;
 use crate::{
     apple_device_tree::DeviceTree,
     boot_bundle::{self, Bundle, Input, Inputs, Options, OwnedRamdisk, Source, Target},
@@ -31,6 +33,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
+use stela_contracts::refuse;
 use {
     stela_formats::apfs, stela_formats::apfs::ApfsError, stela_formats::apfs::Container,
     stela_formats::apfs::FileKind, stela_formats::apfs::Volume,
@@ -350,22 +353,22 @@ impl Decoded {
 }
 
 impl<R: ReadAt> Reader<'_, R> {
-    fn file(&mut self, staged: &Staged) -> Result<Vec<u8>, String> {
+    fn file(&mut self, staged: &Staged) -> Result<Vec<u8>> {
         let inode = self
             .volume
             .inode(&mut self.container.device, staged.oid)
-            .map_err(|e| format!("{}: {e}", staged.path))?;
+            .within(|| refuse!("{path}", path = staged.path.as_str()))?;
         self.volume
             .read(&mut self.container.device, &inode)
-            .map_err(|e| format!("{}: {e}", staged.path))
+            .within(|| refuse!("{path}", path = staged.path.as_str()))
     }
 
     /// Decode a staged object, with the SHA-384 of its `IM4P`.
-    fn decode(&mut self, staged: &Staged, component: &str, limit: u64) -> Result<Decoded, String> {
+    fn decode(&mut self, staged: &Staged, component: &str, limit: u64) -> Result<Decoded> {
         let file = self.file(staged)?;
-        let parts = img4::parse(&file).map_err(|e| format!("{}: {e}", staged.path))?;
+        let parts = img4::parse(&file).within(|| refuse!("{path}", path = staged.path.as_str()))?;
         let im4p_sha384 = im4m::sha384(parts.payload);
-        let (bytes, receipt) = im4p::decode(parts.payload, limit).map_err(|e| format!("{e:#}"))?;
+        let (bytes, receipt) = im4p::decode(parts.payload, limit)?;
         Ok(Decoded {
             source: Source {
                 component: component.into(),
@@ -382,9 +385,9 @@ impl<R: ReadAt> Reader<'_, R> {
     }
 
     /// Keep an object as its encoded `IM4P` (the SEP firmware), with its hash.
-    fn encoded(&mut self, staged: &Staged, component: &str) -> Result<Decoded, String> {
+    fn encoded(&mut self, staged: &Staged, component: &str) -> Result<Decoded> {
         let file = self.file(staged)?;
-        let parts = img4::parse(&file).map_err(|e| format!("{}: {e}", staged.path))?;
+        let parts = img4::parse(&file).within(|| refuse!("{path}", path = staged.path.as_str()))?;
         Ok(Decoded {
             im4p_sha384: im4m::sha384(parts.payload),
             source: Source {
@@ -402,18 +405,14 @@ impl<R: ReadAt> Reader<'_, R> {
 
     /// The manifest the objects carry (the kernel's `IMG4` tail), and its
     /// `DGST` for a payload type when present.
-    fn manifest(&mut self, staged: &Staged) -> Result<Option<Vec<u8>>, String> {
+    fn manifest(&mut self, staged: &Staged) -> Result<Option<Vec<u8>>> {
         let file = self.file(staged)?;
-        let parts = img4::parse(&file).map_err(|e| format!("{}: {e}", staged.path))?;
+        let parts = img4::parse(&file).within(|| refuse!("{path}", path = staged.path.as_str()))?;
         Ok(parts.manifest.map(<[u8]>::to_vec))
     }
 }
 
-fn check_digest(
-    manifest: Option<&im4m::Manifest>,
-    tag: &str,
-    decoded: &Decoded,
-) -> Result<(), String> {
+fn check_digest(manifest: Option<&im4m::Manifest>, tag: &str, decoded: &Decoded) -> Result<()> {
     let Some(manifest) = manifest else {
         return Ok(());
     };
@@ -423,11 +422,13 @@ fn check_digest(
         .map(|p| &p.value);
     match digest {
         Some(im4m::Value::Data(d)) if d.as_slice() == decoded.im4p_sha384.as_slice() => Ok(()),
-        Some(im4m::Value::Data(_)) => Err(format!(
-            "the update manifest's {tag} digest is not the staged object's"
-        )),
-        Some(_) => Err(format!("the update manifest's {tag} digest is not data")),
-        None => Err(format!("the update manifest records no {tag} object")),
+        Some(im4m::Value::Data(_)) => Err(refuse!(
+            "the update manifest's {tag} digest is not the staged object's",
+            tag
+        )
+        .into()),
+        Some(_) => Err(refuse!("the update manifest's {tag} digest is not data", tag).into()),
+        None => Err(refuse!("the update manifest records no {tag} object", tag).into()),
     }
 }
 
@@ -439,7 +440,7 @@ pub fn prepare<R: ReadAt>(
     found: Update,
     authority: Option<&dyn PolicyAuthority>,
     options: &Options,
-) -> Result<Staged2, String> {
+) -> Result<Staged2> {
     let volume = found.volume.clone();
     let mut reader = Reader {
         container,
@@ -447,11 +448,7 @@ pub fn prepare<R: ReadAt>(
     };
     let kernel = reader.decode(found.object(b"krnl"), "Update KernelCache", KERNEL_LIMIT)?;
     let manifest_bytes = reader.manifest(found.object(b"krnl"))?;
-    let manifest = manifest_bytes
-        .as_deref()
-        .map(im4m::parse)
-        .transpose()
-        .map_err(|e| format!("{e:#}"))?;
+    let manifest = manifest_bytes.as_deref().map(im4m::parse).transpose()?;
     if let (Some(bytes), Some(authority)) = (&manifest_bytes, authority) {
         authority.verify(bytes)?;
     }
@@ -473,25 +470,26 @@ pub fn prepare<R: ReadAt>(
         ("trxm", &txm),
         ("dtre", &device_tree),
     ] {
-        check_digest(manifest.as_ref(), tag, decoded).map_err(|e| {
-            Failure {
+        check_digest(manifest.as_ref(), tag, decoded).map_err(|error| {
+            let failure = Failure {
                 result: IBEC_FAILURE,
                 step: "load upgrade local policy",
-                detail: e,
-            }
-            .to_string()
+                detail: error.to_string(),
+            };
+            refuse!("{failure}", %failure)
         })?;
     }
-    let tree = DeviceTree::parse(&device_tree.bytes).map_err(|e| format!("{e:#}"))?;
+    let tree = DeviceTree::parse(&device_tree.bytes)
+        .map_err(|error| refuse!("update DeviceTree: {error}", %error))?;
     let product_type = tree
         .property("/", "model")
         .and_then(|p| p.as_str())
-        .ok_or("the update DeviceTree has no model")?
+        .ok_or(refuse!("the update DeviceTree has no model"))?
         .to_string();
     let target_type = tree
         .property("/", "target-type")
         .and_then(|p| p.as_str())
-        .ok_or("the update DeviceTree has no target-type")?
+        .ok_or(refuse!("the update DeviceTree has no target-type"))?
         .to_string();
     let id = |key: &str| match manifest.as_ref().and_then(|m| m.property(key)) {
         Some(im4m::Value::Integer(v)) => u32::try_from(*v).ok(),
@@ -532,7 +530,7 @@ pub fn prepare<R: ReadAt>(
         root_hash: None,
         board_firmware: Vec::new(),
     };
-    let mut options = options.placed_at(inputs.dram_base().map_err(|e| format!("{e:#}"))?);
+    let mut options = options.placed_at(inputs.dram_base()?);
     options.root = Some(Root::Ramdisk);
     // LLB's Update-volume dispatch records 3 before loading /boot/iBEC;
     // it does not use the host-received iBEC origin (7).
@@ -541,8 +539,7 @@ pub fn prepare<R: ReadAt>(
         bytes: ramdisk.bytes,
         source: ramdisk.source,
     };
-    let mut bundle =
-        boot_bundle::prepare_owned(&inputs, owned, &options).map_err(|e| format!("{e:#}"))?;
+    let mut bundle = boot_bundle::prepare_owned(&inputs, owned, &options)?;
     if manifest_bytes.is_none() {
         bundle
             .manifest
@@ -574,21 +571,19 @@ pub fn prepare_disk<R: ReadAt>(
     volume: Option<BootVolume>,
     authority: Option<&dyn PolicyAuthority>,
     options: &Options,
-) -> Result<(u64, Staged2), String> {
-    let mut partitions = apfs::container_partitions(source).map_err(|e| format!("{e}"))?;
+) -> Result<(u64, Staged2)> {
+    let mut partitions = apfs::container_partitions(source)?;
     if let Some(volume) = &volume {
         if volume.kind != VolumeType::Apfs {
-            return Err(format!(
-                "NVRAM boots a {:?} partition, not an APFS container",
-                volume.kind
-            ));
+            return Err(refuse!("NVRAM boots a {kind} partition, not an APFS container", kind = ?volume.kind).into());
         }
         partitions.retain(|(_, guid)| guid.is_none_or(|g| g.0 == volume.partition));
         if partitions.is_empty() {
-            return Err(format!(
-                "NVRAM boots partition {}, which this disk does not have",
-                uuid_text(&volume.partition)
-            ));
+            return Err(refuse!(
+                "NVRAM boots partition {partition}, which this disk does not have",
+                partition = uuid_text(&volume.partition)
+            )
+            .into());
         }
     }
     let mut found = Vec::new();
@@ -601,7 +596,7 @@ pub fn prepare_disk<R: ReadAt>(
                 continue;
             }
         };
-        match find(&mut container).map_err(|e| format!("container at {offset:#x}: {e}"))? {
+        match find(&mut container).within(|| refuse!("container at {offset:#x}", offset))? {
             Ok(update) => {
                 let staged = prepare(&mut container, update, authority, options)?;
                 found.push((offset, staged));
@@ -611,13 +606,16 @@ pub fn prepare_disk<R: ReadAt>(
     }
     match found.len() {
         1 => Ok(found.remove(0)),
-        0 => Err(format!(
-            "no Update volume holds a staged update: {}",
-            failures.join("; ")
-        )),
-        count => Err(format!(
-            "{count} containers hold a staged update; NVRAM's boot-volume must name one"
-        )),
+        0 => Err(refuse!(
+            "no Update volume holds a staged update: {failures}",
+            failures = failures.join("; ")
+        )
+        .into()),
+        count => Err(refuse!(
+            "{count} containers hold a staged update; NVRAM's boot-volume must name one",
+            count
+        )
+        .into()),
     }
 }
 

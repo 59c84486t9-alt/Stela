@@ -2,8 +2,10 @@
 pub mod cold;
 
 use super::{AppleDevices, memory_resources::t8112};
-use alloc::{boxed::Box, format, string::String, sync::Arc};
+use crate::Result;
+use alloc::{boxed::Box, sync::Arc};
 use stela_contracts::bus::Width;
+use stela_contracts::refuse;
 
 impl AppleDevices {
     /// Install the component owners together, keeping separate device
@@ -13,15 +15,17 @@ impl AppleDevices {
         &mut self,
         memory: t8112::Prepared,
         cache: t8112::cache::EmptyResource,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         if self.power_configured
             || self.memory_controller.is_some()
             || self.memory_publication.is_some()
         {
-            return Err("memory resource owners are already installed".into());
+            return Err(refuse!("memory resource owners are already installed"));
         }
         if !Arc::ptr_eq(memory.registered_ram(), cache.registered_ram()) {
-            return Err("T8112 cache and DCS/PTD require the same actual registered RAM".into());
+            return Err(refuse!(
+                "T8112 cache and DCS/PTD require the same actual registered RAM"
+            ));
         }
         let cache_binding = [cache.binding()];
         // reg[0] of the original MCC node names the shared aperture, while
@@ -30,7 +34,9 @@ impl AppleDevices {
         if cache_binding[0].0.checked_add(cache_binding[0].1)
             != Some(memory.descriptor().channels.0)
         {
-            return Err("T8112 cache union and DCS source placements disagree".into());
+            return Err(refuse!(
+                "T8112 cache union and DCS source placements disagree"
+            ));
         }
         let memory_bindings = memory.bindings();
         let [publication, controller] = self
@@ -39,7 +45,7 @@ impl AppleDevices {
                 [Box::new(memory), Box::new(cache)],
                 [&memory_bindings, &cache_binding],
             )
-            .map_err(|error| format!("T8112 memory placement: {error:?}"))?;
+            .map_err(|error| refuse!("T8112 memory placement: {error}", ?error))?;
         self.memory_publication = Some(publication);
         self.memory_controller = Some(controller);
         // These are distinct lifecycle sinks of the same source MCC
