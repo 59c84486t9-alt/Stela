@@ -243,6 +243,8 @@ impl BlockDevice for Service {
         self.inner.posted()
     }
     fn signals(&self) -> bool {
+        // SAFETY: as in read(); this query reaches shared controller state.
+        let _root = unsafe { RestoreRoot::enter(self.root) };
         self.inner.signals()
     }
 }
