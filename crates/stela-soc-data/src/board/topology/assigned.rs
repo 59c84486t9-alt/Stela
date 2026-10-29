@@ -8,16 +8,13 @@ pub use source::{BspSource, SourceIdentity};
 use crate::pmgr::coverage::DomainId;
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use {
-    stela_contracts::Chip, stela_contracts::caches::Cache, stela_contracts::caches::Caches,
-    stela_contracts::identity::Identity,
+    stela_contracts::Chip, stela_contracts::caches::Cache, stela_contracts::caches::CacheSelection,
+    stela_contracts::caches::Caches, stela_contracts::identity::Identity,
 };
 
 const AFFINITY_MASK: u32 = 0xffff;
 const AFFINITY_PART_MASK: u32 = 0xff;
 const CLUSTER_SHIFT: u32 = 8;
-const CORETYPE_SHIFT: u32 = 16;
-const CORETYPE_MASK: u8 = 7;
-const MPIDR_RES1: u64 = 1 << 31;
 
 macro_rules! ids {
     ($($id:ident),* $(,)?) => {$(
@@ -540,7 +537,7 @@ impl<'a> Plan<'a> {
             if kind.cluster_type == 0
                 || kind.midr == 0
                 || kind.midr > u64::from(u32::MAX)
-                || kind.aff2 > CORETYPE_MASK
+                || kind.aff2 > crate::board::mpidr::CORETYPE_MASK
                 || kind.clock == Some(0)
             {
                 return Err(conflict(id, ResourceKind::CoreKind));
@@ -603,9 +600,8 @@ impl<'a> Plan<'a> {
                 cluster_type: kind.cluster_type,
                 identity: Identity {
                     midr: kind.midr,
-                    mpidr: MPIDR_RES1
-                        | u64::from(kind.aff2) << CORETYPE_SHIFT
-                        | u64::from(slot.reg),
+                    mpidr: crate::board::mpidr::compose(kind.aff2, slot.reg)
+                        .ok_or_else(|| conflict(id, ResourceKind::CoreKind))?,
                     clock: kind.clock,
                     caches: Some(caches),
                 },

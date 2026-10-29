@@ -158,6 +158,21 @@ impl Caches {
     pub fn ccsidr(&self, csselr: u64) -> u64 {
         u64::from(self.ccsidr[(csselr & SELECTION) as usize])
     }
+
+    /// The geometry `selection`'s CCSIDR_EL1 reports, as `do_cacheid`
+    /// decodes it: line 16 << LineSize, NumSets + 1 sets and
+    /// Associativity + 1 ways.
+    pub fn cache(&self, selection: CacheSelection) -> Cache {
+        let value = self.ccsidr[selection as usize];
+        let line = 16 << (value & 7);
+        let ways = (value >> ASSOCIATIVITY & (MAX_WAYS - 1)) + 1;
+        let sets = (value >> NUM_SETS & (MAX_SETS - 1)) + 1;
+        Cache {
+            bytes: sets * ways * line,
+            ways,
+            line,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -194,6 +209,12 @@ mod tests {
         assert_eq!(decode(caches.ccsidr(0)), (128, 128, 8));
         assert_eq!(decode(caches.ccsidr(1)), (128, 256, 6));
         assert_eq!(decode(caches.ccsidr(2)), (128, 8192, 16));
+        assert_eq!(caches.cache(CacheSelection::L1Data), cache(128 << 10, 8));
+        assert_eq!(
+            caches.cache(CacheSelection::L1Instruction),
+            cache(192 << 10, 6)
+        );
+        assert_eq!(caches.cache(CacheSelection::L2Unified), cache(16 << 20, 16));
         // TnD is outside the selection; absent caches read 0.
         assert_eq!(caches.ccsidr(0x10), caches.ccsidr(0));
         assert_eq!(caches.ccsidr(3), 0);

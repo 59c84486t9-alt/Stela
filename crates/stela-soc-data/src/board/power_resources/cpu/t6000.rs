@@ -12,7 +12,6 @@ const T6000_KERNEL_MAX_CLUSTERS: usize = 6;
 const T6000_KERNEL_MAX_PHYSICAL_CLUSTER: u32 = 10;
 const AFFINITY_PART_MASK: u32 = 0xff;
 const CLUSTER_SHIFT: u32 = 8;
-const MPIDR_RES1: u64 = 1 << 31;
 const ENABLE_CORE_SELECTOR: u32 = 0x436f_7265;
 
 pub(super) const EVIDENCE: &str = "26A434 mac13j SHA256 5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90; mode1 complex2b16e08/core2b190e4/skip2b19918, enable2b2dcb0; cpu/t6000-core-membership-r1 source receipt";
@@ -59,7 +58,7 @@ pub(super) fn resolve(
     for (pe, (node, identity)) in nodes.iter().zip(processors).enumerate() {
         let reg = word(required(node, "reg")?)?;
         let aff1 = (reg >> CLUSTER_SHIFT) as usize;
-        if u64::from(reg) & !PHYSICAL_AFFINITY != 0
+        if reg & !crate::board::mpidr::CLUSTER_CORE != 0
             || reg >> CLUSTER_SHIFT > T6000_KERNEL_MAX_PHYSICAL_CLUSTER
         {
             return Err(Error::Topology("T6000 physical affinity"));
@@ -96,7 +95,7 @@ pub(super) fn resolve(
             || word(required(node, "die-id")?)? != 0
             || word(required(node, "die-cluster-id")?)? as usize != aff1
             || word(required(node, "cluster-core-id")?)? != reg & AFFINITY_PART_MASK
-            || identity.mpidr != (MPIDR_RES1 | (aff2 << CORETYPE_SHIFT) | u64::from(reg))
+            || crate::board::mpidr::compose(aff2, reg) != Some(identity.mpidr)
         {
             return Err(Error::Topology("T6000 source/profile coordinate mismatch"));
         }

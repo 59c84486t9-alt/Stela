@@ -136,15 +136,10 @@ impl<'a> BspSource<'a> {
             let acc = region(node, "acc-impl-reg")?;
             let cpm = region(node, "cpm-impl-reg")?;
             let cpu_impl = region(node, "cpu-impl-reg")?;
-            let encoded = identities.processors[pe]
+            let cache = identities.processors[pe]
                 .caches
                 .ok_or(refuse!("assigned T6000 cache identity is incomplete"))?
-                .ccsidr(2);
-            let cache = Cache {
-                line: 16 << (encoded & 7),
-                ways: ((encoded >> 3) & 0x3ff) as u32 + 1,
-                bytes: word(node, "l2-cache-size")?,
-            };
+                .cache(CacheSelection::L2Unified);
             let cluster = (cpu.reg >> CLUSTER_SHIFT) as usize;
             if geometry.len() == cluster {
                 geometry.push((pe, acc, cpm, cpu_impl.bytes, cache));
@@ -227,7 +222,7 @@ impl<'a> BspSource<'a> {
                 id: kind_id,
                 cluster_type: cpu.cluster_type,
                 midr: identity.midr,
-                aff2: (identity.mpidr >> CORETYPE_SHIFT & u64::from(CORETYPE_MASK)) as u8,
+                aff2: crate::board::mpidr::coretype(identity.mpidr),
                 clock: identity.clock,
                 instruction,
                 data,

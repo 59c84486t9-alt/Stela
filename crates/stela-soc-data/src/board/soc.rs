@@ -98,15 +98,7 @@ impl CoreType {
     /// creates another physical cluster. Returns `None` for an unknown
     /// mapping, out-of-field core type or undeclared `reg` bits.
     pub fn mpidr(&self, reg: u32) -> Option<u64> {
-        // XNU xnu-12377.121.6 apple_arm64_regs.h:102–107 defines
-        // MPIDR_CORETYPE at bits 18:16, E=0, P=1, M=4.
-        const CORETYPE_MASK: u8 = 7;
-        const CORETYPE_SHIFT: u32 = 16;
-        let aff2 = self.mpidr_aff2?;
-        if aff2 & !CORETYPE_MASK != 0 || reg & !MPIDR_CLUSTER_CORE != 0 {
-            return None;
-        }
-        Some(0x8000_0000 | u64::from(aff2) << CORETYPE_SHIFT | u64::from(reg))
+        super::mpidr::compose(self.mpidr_aff2?, reg)
     }
 }
 
@@ -417,9 +409,6 @@ pub struct Processor {
 /// (its template's `reg` 0x1000 to 0x1205; XNU's T6050
 /// `MAX_CPU_CLUSTER_PHY_ID` is 18). Each chip's kernel limits bound the
 /// cluster numbers further. A `reg` beyond Aff1 and Aff0 refuses.
-/// The `reg` bits a `/cpus` node may set: Aff1 and Aff0.
-const MPIDR_CLUSTER_CORE: u32 = 0xffff;
-
 pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cpus> {
     let rows: Vec<&Soc> = SOCS.iter().filter(|soc| soc.chip_id == chip_id).collect();
     if rows.is_empty() {
@@ -463,7 +452,7 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
                     )
                 })?;
             let core = core.expect("a part requires a core descriptor");
-            if processor.reg & !MPIDR_CLUSTER_CORE != 0 {
+            if processor.reg & !super::mpidr::CLUSTER_CORE != 0 {
                 return Err(refuse!(
                     "{name} cpu reg {reg:#x} has no public MPIDR mapping",
                     name = soc.name,

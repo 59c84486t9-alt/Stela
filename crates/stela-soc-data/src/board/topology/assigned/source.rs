@@ -406,15 +406,10 @@ impl<'a> BspSource<'a> {
         let identity = cpus.processors[0];
         let (instruction, data) = board::level1_caches(chip, b'E')
             .ok_or(refuse!("assigned source E cache geometry is unqualified"))?;
-        let encoded = identity
+        let geometry = identity
             .caches
             .ok_or(refuse!("assigned source lacks complete cache identity"))?
-            .ccsidr(2);
-        let geometry = Cache {
-            line: 16 << (encoded & 7),
-            ways: ((encoded >> 3) & 0x3ff) as u32 + 1,
-            bytes: word(node, "l2-cache-size")?,
-        };
+            .cache(CacheSelection::L2Unified);
         let slot = GuestSlotId(0);
         let cluster = ClusterId(0);
         let cache = CacheId(0);

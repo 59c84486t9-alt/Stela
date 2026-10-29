@@ -249,13 +249,13 @@ mod tests {
         // core type. The M affinity must not split this shared P/M L2.
         for (pe, mpidr) in processors.iter().zip(&mpidrs) {
             assert_eq!(
-                (*mpidr >> 16) & 7,
-                u64::from(match pe.cluster_type {
-                    b'E' => 0u8,
+                crate::board::mpidr::coretype(*mpidr),
+                match pe.cluster_type {
+                    b'E' => 0,
                     b'P' => 1,
                     b'M' => 4,
                     _ => unreachable!(),
-                })
+                }
             );
             assert_eq!((*mpidr >> 8) & 0xf, u64::from(pe.reg >> 8));
             assert_eq!(*mpidr & 0xff, u64::from(pe.reg & 0xff));

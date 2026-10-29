@@ -40,6 +40,7 @@ use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 use stela_contracts::refuse;
 use {stela_contracts::adt::Node, stela_contracts::identity::Identity};
 
+pub mod mpidr;
 pub mod t6000_pmgr;
 
 mod apertures;

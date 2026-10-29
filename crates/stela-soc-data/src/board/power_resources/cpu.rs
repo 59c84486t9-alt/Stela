@@ -80,8 +80,6 @@ const PERF_DOMAIN_BYTES: usize = 28;
 const DEVICE_BYTES: usize = 48;
 const DOMAIN_LIMIT: usize = 48;
 const VIRTUAL: u8 = 1 << 4;
-const PHYSICAL_AFFINITY: u64 = 0xffff;
-const CORETYPE_SHIFT: u32 = 16;
 
 type Error = CpuAssociationError;
 
@@ -223,10 +221,8 @@ fn topology(
         }
         let kind = required(node, "cluster-type")?;
         let expected_kind = if complex == 0 { b"E\0" } else { b"P\0" };
-        let expected_aff2 = complex as u64;
         if kind != expected_kind
-            || identity.mpidr & PHYSICAL_AFFINITY != u64::from(reg)
-            || identity.mpidr != (0x8000_0000 | expected_aff2 << CORETYPE_SHIFT | u64::from(reg))
+            || crate::board::mpidr::compose(complex as u8, reg) != Some(identity.mpidr)
         {
             return Err(Error::Topology(
                 "CPU profile differs from original affinity",

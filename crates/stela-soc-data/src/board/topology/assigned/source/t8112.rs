@@ -274,10 +274,10 @@ impl<'a> BspSource<'a> {
         let kind = processors[pe].cluster_type;
         let (instruction, data) = board::level1_caches(profile.soc, kind)
             .ok_or(refuse!("assigned T8112 L1 geometry is unqualified"))?;
-        let encoded = identity
+        let unified = identity
             .caches
             .ok_or(refuse!("assigned T8112 cache identity is incomplete"))?
-            .ccsidr(2);
+            .cache(CacheSelection::L2Unified);
         let slot = GuestSlotId(0);
         let cluster = ClusterId(0);
         let cache = CacheId(0);
@@ -305,7 +305,7 @@ impl<'a> BspSource<'a> {
                 id: KindId(0),
                 cluster_type: kind,
                 midr: identity.midr,
-                aff2: (identity.mpidr >> 16 & 7) as u8,
+                aff2: crate::board::mpidr::coretype(identity.mpidr),
                 clock: identity.clock,
                 instruction,
                 data,
@@ -335,11 +335,7 @@ impl<'a> BspSource<'a> {
             caches: vec![SharedCache {
                 id: cache,
                 cluster,
-                geometry: Cache {
-                    line: 16 << (encoded & 7),
-                    ways: ((encoded >> 3) & 0x3ff) as u32 + 1,
-                    bytes: word(node, "l2-cache-size")?,
-                },
+                geometry: unified,
             }],
             interrupts: vec![InterruptTarget {
                 id: InterruptId(0),
