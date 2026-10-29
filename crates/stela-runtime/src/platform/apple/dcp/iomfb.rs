@@ -723,7 +723,7 @@ impl Methods {
         input: &[u8],
         output: u32,
     ) -> Result<Step<Self>, &'static str> {
-        let Some(swap_id) = self.open_swap.take() else {
+        let Some(swap_id) = self.open_swap else {
             return self.refuse(tag, "swap_submit_dcp without swap_start_dcp");
         };
         if self.dumped < DUMPED_SWAPS {
@@ -742,14 +742,17 @@ impl Methods {
             Ok(layers) => layers,
             Err(reason) => return self.refuse(tag, reason),
         };
-        self.planes = planes;
-        self.frames.push_back(Frame { swap_id, layers });
         let packed = Packed::new()
             .bool(false)
             .u32(0)
             .u32(IO_RETURN_SUCCESS)
             .finish(output);
-        self.reply(tag, packed)
+        let reply = self.reply(tag, packed)?;
+        // Commit the accepted swap only after every fallible preflight succeeds.
+        self.open_swap = None;
+        self.planes = planes;
+        self.frames.push_back(Frame { swap_id, layers });
+        Ok(reply)
     }
 }
 
@@ -1375,6 +1378,78 @@ mod tests {
         u32::from_le_bytes(started[0..4].try_into().unwrap())
     }
 
+    fn submit_refusal_keeps_accepted_swap(mutate: impl FnOnce(&mut [u8]), reason: &str) {
+        let screen = TestScreen(Rc::default(), Some(MODE));
+        let displayed = screen.0.clone();
+        let mut methods = Methods::new(Box::new(screen));
+        started(&mut methods);
+        let completed = start_swap(&mut methods);
+        returned(methods.call(*b"A407", &submission(completed, &[]), 0xc));
+        methods
+            .present(|_, _| panic!("background clear reads no surface"))
+            .unwrap();
+        let queued = start_swap(&mut methods);
+        returned(methods.call(*b"A407", &submission(queued, &[(0, 4, 2, 0x1000)]), 0xc));
+        let id = start_swap(&mut methods);
+        let valid = submission(id, &[(0, 4, 2, 0x2000)]);
+        let mut refused = valid.clone();
+        mutate(&mut refused);
+        let planes = methods.planes.to_vec();
+        let frames = methods.frames.clone();
+        let completions = methods.completed.clone();
+        let error = methods
+            .call(*b"A407", &refused, 0xc)
+            .err()
+            .expect("unsupported submission refused");
+        assert!(error.contains(reason), "{error}");
+        assert_eq!(methods.open_swap, Some(id));
+        assert_eq!(methods.planes.as_slice(), planes);
+        assert_eq!(methods.frames, frames);
+        assert_eq!(methods.completed, completions);
+        assert_eq!(displayed.borrow().len(), 1);
+        assert_eq!(methods.call(*b"A407", &refused, 0xc).err(), Some(error));
+        returned(methods.call(*b"A407", &valid, 0xc));
+        assert_eq!(methods.open_swap, None);
+        assert_eq!(methods.frames.len(), frames.len() + 1);
+        assert_eq!(methods.frames.back().unwrap().swap_id, id);
+        assert_eq!(methods.completed, completions);
+    }
+
+    #[test]
+    fn refused_swap_parse_preserves_started_swap_and_prior_frames() {
+        submit_refusal_keeps_accepted_swap(
+            |input| input[swap::SECONDARY_NULL] = 0,
+            "secondary surface",
+        );
+    }
+
+    #[test]
+    fn refused_tiled_surface_preserves_started_swap_and_prior_frames() {
+        submit_refusal_keeps_accepted_swap(|input| input[swap::SURFACES] = 1, "tiled");
+    }
+
+    #[test]
+    fn refused_background_preserves_started_swap_and_prior_frames() {
+        submit_refusal_keeps_accepted_swap(
+            |input| input[swap::BACKGROUND] = 0xff,
+            "background color",
+        );
+    }
+
+    #[test]
+    fn refused_submit_reply_preflight_preserves_started_swap() {
+        let mut methods = methods();
+        let id = start_swap(&mut methods);
+        let input = submission(id, &[]);
+        // Public RPC validates ABI output size before dispatch. The actual
+        // submit method also prepares its fallible reply before committing.
+        assert!(methods.submit(*b"A407", &input, 0).is_err());
+        assert_eq!(methods.open_swap, Some(id));
+        assert!(methods.frames.is_empty());
+        returned(methods.call(*b"A407", &input, 0xc));
+        assert_eq!(methods.frames.back().unwrap().swap_id, id);
+    }
+
     #[test]
     fn surface_and_sink_faults_retain_swap_order_and_abort_cancels_without_completion() {
         struct Sink {
@@ -1554,6 +1629,8 @@ mod tests {
                 .unwrap()
                 .contains("outside its surface")
         );
+        // The refused submission retains its accepted start until explicit abort.
+        returned(methods.call(*b"A479", &[0; 8], 4));
         // A non-black background refuses.
         start_swap(&mut methods);
         let mut red = submission(3, &[]);
