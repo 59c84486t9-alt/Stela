@@ -9,7 +9,8 @@
 //! a tail level maps. A map that finds the heap full leaves the remaining
 //! tiles unmapped, as Metal does. Updates take effect in command-buffer
 //! order: the device turns them into sparse binds between segments when the
-//! command buffer commits.
+//! command buffer commits, or, for an indirect update, once the host has
+//! read the arguments the GPU copied.
 use super::{
     abi::{
         ResourceOptions, SparseTextureMappingMode, SparseTextureRegionAlignmentMode, StorageMode,
@@ -19,6 +20,7 @@ use super::{
     error::{Error, Result, ensure, require},
     pixel_format::PixelFormat,
     resource::{self, TextureDescriptor, TexturePlan},
+    upload::Upload,
     vulkan::{
         ImageAspects, ImageCreate,
         command::{SparseBind, Subresource},
@@ -266,6 +268,40 @@ pub struct MappingUpdate {
     pub slice: u64,
     /// The region in tiles; any region of a tail level is the whole tail.
     pub region: SparseRegion,
+}
+
+/// `sizeof(MTLMapIndirectArguments)`.
+pub const MAP_INDIRECT_ARGUMENTS_BYTES: usize = 32;
+
+impl MappingUpdate {
+    /// `MTLMapIndirectArguments`: the region's origin and size in tiles,
+    /// then its level and slice, as `uint32_t`s.
+    pub fn from_indirect(arguments: &[u8; MAP_INDIRECT_ARGUMENTS_BYTES]) -> Self {
+        let words = arguments.as_chunks::<4>().0;
+        let word = |index: usize| u64::from(u32::from_le_bytes(words[index]));
+        Self {
+            level: word(6),
+            slice: word(7),
+            region: SparseRegion {
+                origin: [word(0), word(1), word(2)],
+                size: [word(3), word(4), word(5)],
+            },
+        }
+    }
+}
+
+/// A resource state encoder's recorded operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Mapping {
+    Request(MappingRequest),
+    /// `updateTextureMapping:mode:indirectBuffer:indirectBufferOffset:`:
+    /// the GPU copies the `MTLMapIndirectArguments` to `arguments`, in
+    /// host-visible memory.
+    Indirect {
+        image: Image,
+        mode: SparseTextureMappingMode,
+        arguments: Upload,
+    },
 }
 
 /// A resource state encoder's operation on sparse textures.

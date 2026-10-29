@@ -21,7 +21,7 @@ use crate::gpu::metal::{
 };
 use alloc::vec::Vec;
 
-const TRANSFER: Use = Use::new(
+pub(super) const TRANSFER: Use = Use::new(
     PipelineStages::ALL_TRANSFER,
     Access::TRANSFER_READ.union(Access::TRANSFER_WRITE),
 );

@@ -5,6 +5,12 @@
 //! between queues hold by construction. Command buffer `n` signals `n` on
 //! the queue's timeline semaphore; [`Device::poll`] retires everything up to
 //! the completed value.
+//!
+//! An indirect sparse mapping update splits its command buffer: the segments
+//! from the update's on are held until the GPU has copied its arguments,
+//! when the device reads them, makes the binds and submits the segments.
+//! Command buffers committed meanwhile are held behind them, keeping the
+//! queue's order; polling and waiting submit held work as it becomes ready.
 use super::{
     BufferId, ComputePipelineId, CounterBufferId, Device, EventId, RenderPipelineId, Slab,
     TextureId,
@@ -17,7 +23,7 @@ use crate::gpu::metal::{
     binding::ResourceId,
     command_buffer::{
         BufferRef, CommandBuffer, ComputePipelineState, DynamicFeatures, RenderPipelineState,
-        Resolver,
+        Resolver, Segment,
         counters::{self, CounterRange, CounterSample, STATISTIC_SAMPLE_BYTES},
         render::PassBoundary,
     },
@@ -30,6 +36,7 @@ use crate::gpu::metal::{
     pipeline::MAX_COLOR_ATTACHMENTS,
     resource::TextureDescriptor,
     shader::{Compiler, Specialization},
+    sparse::{MAP_INDIRECT_ARGUMENTS_BYTES, Mapping, MappingRequest, MappingUpdate},
     upload::{Chunk, ChunkSource},
     vulkan::{
         BufferCreate, BufferUsage, MemoryProperties, PipelineStatistics,
@@ -40,7 +47,7 @@ use crate::gpu::metal::{
         },
     },
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 
 /// Queries per occlusion or statistics pool.
 const POOL_QUERIES: u32 = 256;
@@ -75,6 +82,19 @@ struct InFlight {
     pools: Vec<(QueryType, QueryPool)>,
 }
 
+/// Segments of a committed command buffer that the host submits: either all
+/// of them, or those from an indirect mapping update's on.
+#[derive(Debug)]
+struct Held {
+    serial: u64,
+    /// The step value the copy of the update's arguments signals; zero
+    /// when only the held work ahead delays the segments.
+    step: u64,
+    segments: Vec<Segment>,
+    /// Mapping operations by index into `segments`.
+    mappings: Vec<(usize, Mapping)>,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct Queue {
     /// Upload chunks with their memory; free ones are reused.
@@ -84,6 +104,12 @@ pub(super) struct Queue {
     in_flight: Vec<InFlight>,
     events: Slab<Semaphore>,
     counters: Slab<CounterBuffer>,
+    /// Committed work not yet submitted, in commit order.
+    held: VecDeque<Held>,
+    /// Signals each indirect mapping update's step once its arguments are
+    /// copied; created with the first.
+    steps: Option<Semaphore>,
+    step: u64,
 }
 
 /// One attachment of a [`RenderPassRequest`].
@@ -309,34 +335,150 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     pub fn commit(&mut self, commands: CommandBuffer) -> Result<u64> {
         let serial = self.submitted + 1;
         let completion = (self.timeline, serial);
-        let mut recording = commands.commit(&mut self.resolver(), completion)?;
-        let mappings = core::mem::take(&mut recording.mappings);
-        for (_, request) in &mappings {
-            self.check_mapping(request)?;
+        let recording = commands.commit(&mut self.resolver(), completion)?;
+        for (_, mapping) in &recording.mappings {
+            match mapping {
+                Mapping::Request(request) => self.check_mapping(request)?,
+                // The region is checked once the host reads it.
+                Mapping::Indirect { image, .. } => {
+                    self.sparse_texture(*image)?;
+                }
+            }
         }
-        for (segment, request) in &mappings {
-            let binds = self.sparse_binds(request)?;
-            recording.segments[*segment].binds.extend(binds);
-        }
+        let mut held = self.hold(serial, recording.segments, recording.mappings)?;
         // CPU-copy writes reach the images first, after the opening barrier.
         let uploads = self.take_cpu_copy_uploads();
-        recording.segments[0].commands.splice(1..1, uploads);
+        held[0].segments[0].commands.splice(1..1, uploads);
         let mut chunks = Vec::with_capacity(recording.uploads.len());
         for (chunk, bytes) in &recording.uploads {
             let memory = self.chunk_memory(chunk.buffer)?;
             self.backend.write_memory(memory, 0, bytes)?;
             chunks.push(*chunk);
         }
-        let submitted = self.backend.submit(&recording.segments);
         self.submitted = serial;
         self.queue.in_flight.push(InFlight {
             serial,
             chunks,
             pools: recording.query_pools,
         });
-        // A failed submission never signals; record the loss so waits end.
-        submitted.inspect_err(|_| self.lost = true)?;
+        self.queue.held.extend(held);
+        self.advance()?;
         Ok(serial)
+    }
+
+    /// Splits a command buffer before each segment whose mapping operations
+    /// include an indirect update; the segment before it, which copies the
+    /// arguments, signals the next step.
+    fn hold(
+        &mut self,
+        serial: u64,
+        mut segments: Vec<Segment>,
+        mut mappings: Vec<(usize, Mapping)>,
+    ) -> Result<Vec<Held>> {
+        let mut starts: Vec<_> = mappings
+            .iter()
+            .filter(|(_, mapping)| matches!(mapping, Mapping::Indirect { .. }))
+            .map(|(segment, _)| *segment)
+            .collect();
+        starts.dedup();
+        let rebase = |mappings: Vec<(usize, Mapping)>, base: usize| {
+            mappings
+                .into_iter()
+                .map(|(segment, mapping)| (segment - base, mapping))
+                .collect()
+        };
+        let mut held = Vec::with_capacity(starts.len() + 1);
+        let (mut base, mut step) = (0, 0);
+        for start in starts {
+            let rest = segments.split_off(start - base);
+            let steps = match self.queue.steps {
+                Some(steps) => steps,
+                None => *self.queue.steps.insert(self.backend.create_semaphore(0)?),
+            };
+            self.queue.step += 1;
+            let copy = segments.last_mut().expect("the arguments' copy");
+            copy.signals.push((steps, self.queue.step));
+            let later = mappings.split_off(mappings.partition_point(|(at, _)| *at < start));
+            held.push(Held {
+                serial,
+                step,
+                segments,
+                mappings: rebase(mappings, base),
+            });
+            (base, step, segments, mappings) = (start, self.queue.step, rest, later);
+        }
+        held.push(Held {
+            serial,
+            step,
+            segments,
+            mappings: rebase(mappings, base),
+        });
+        Ok(held)
+    }
+
+    /// Submits held work, in order, as far as its arguments are readable.
+    fn advance(&mut self) -> Result<()> {
+        while let Some(held) = self.queue.held.front() {
+            if self.lost {
+                return Err(Error::DeviceLost);
+            }
+            if held.step > 0 {
+                let steps = self.queue.steps.expect("steps have their semaphore");
+                if self.backend.semaphore_value(steps)? < held.step {
+                    break;
+                }
+            }
+            let held = self.queue.held.pop_front().expect("held work");
+            // A failed submission never signals; record the loss so waits end.
+            self.submit_held(held).inspect_err(|_| self.lost = true)?;
+        }
+        Ok(())
+    }
+
+    /// Makes held segments' binds, reading indirect regions from the copies
+    /// of their arguments, and submits the segments. Metal leaves regions
+    /// outside a texture undefined, as it does textures destroyed while in
+    /// use; neither maps anything.
+    fn submit_held(&mut self, mut held: Held) -> Result<()> {
+        for (segment, mapping) in held.mappings {
+            let request = match mapping {
+                Mapping::Request(request) => request,
+                Mapping::Indirect {
+                    image,
+                    mode,
+                    arguments,
+                } => {
+                    let memory = self.chunk_memory(arguments.buffer)?;
+                    let mut bytes = [0; MAP_INDIRECT_ARGUMENTS_BYTES];
+                    self.backend
+                        .read_memory(memory, arguments.offset, &mut bytes)?;
+                    MappingRequest::Update {
+                        image,
+                        mode,
+                        updates: alloc::vec![MappingUpdate::from_indirect(&bytes)],
+                    }
+                }
+            };
+            if self.check_mapping(&request).is_ok() {
+                let binds = self.sparse_binds(&request)?;
+                held.segments[segment].binds.extend(binds);
+            }
+        }
+        self.backend.submit(&held.segments)
+    }
+
+    /// Waits for the held work ahead of `serial`, or all of it, to be
+    /// submitted; `false` when a step's wait times out.
+    fn submit_held_through(&mut self, serial: u64, timeout: u64) -> Result<bool> {
+        self.advance()?;
+        while let Some(held) = self.queue.held.front().filter(|held| held.serial <= serial) {
+            let steps = self.queue.steps.expect("steps have their semaphore");
+            if !self.backend.wait_semaphore(steps, held.step, timeout)? {
+                return Ok(false);
+            }
+            self.advance()?;
+        }
+        Ok(true)
     }
 
     fn chunk_memory(&self, buffer: crate::gpu::metal::vulkan::object::Buffer) -> Result<Memory> {
@@ -350,8 +492,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .ok_or(Error::Invalid("unknown upload chunk"))
     }
 
-    /// Retires completed command buffers and returns the completed serial.
+    /// Submits ready held work, retires completed command buffers and
+    /// returns the completed serial.
     pub fn poll(&mut self) -> Result<u64> {
+        self.advance()?;
         if self.lost {
             return Err(Error::DeviceLost);
         }
@@ -360,7 +504,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(completed)
     }
 
-    /// `waitUntilCompleted` for the command buffer with `serial`.
+    /// `waitUntilCompleted` for the command buffer with `serial`; `timeout`
+    /// bounds each wait for held work, then the command buffer's.
     pub fn wait(&mut self, serial: u64, timeout: u64) -> Result<bool> {
         ensure(
             serial <= self.submitted,
@@ -368,6 +513,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         )?;
         if self.lost {
             return Err(Error::DeviceLost);
+        }
+        if !self.submit_held_through(serial, timeout)? {
+            return Ok(false);
         }
         let reached = self
             .backend
@@ -429,9 +577,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(())
     }
 
-    /// `waitUntilSignaledValue:timeoutMS:`.
+    /// `waitUntilSignaledValue:timeoutMS:`. Held work may signal the event,
+    /// so it is submitted first; `timeout` bounds each wait.
     pub fn wait_event(&mut self, id: EventId, value: u64, timeout: u64) -> Result<bool> {
         let semaphore = self.event_semaphore(id)?;
+        if self.backend.semaphore_value(semaphore)? >= value {
+            return Ok(true);
+        }
+        if !self.submit_held_through(self.submitted, timeout)? {
+            return Ok(false);
+        }
         self.backend.wait_semaphore(semaphore, value, timeout)
     }
 

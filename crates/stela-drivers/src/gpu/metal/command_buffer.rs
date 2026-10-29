@@ -16,7 +16,7 @@ use super::{
     indirect::{IndirectCommandBuffer, IndirectCommandBufferId},
     pipeline::{ComputePipelinePlan, RenderPipelinePlan},
     shader::{Interface, Specialization, Stage},
-    sparse::MappingRequest,
+    sparse::Mapping,
     upload::{Chunk, ChunkSource, Upload, UploadArena},
     vulkan::{
         command::{Command, SparseBind},
@@ -168,8 +168,8 @@ pub struct Recording {
     pub uploads: Vec<(Chunk, Vec<u8>)>,
     /// Query pools to reset and recycle on completion.
     pub query_pools: Vec<(QueryType, QueryPool)>,
-    /// Sparse mapping updates and the segment whose binds they become.
-    pub mappings: Vec<(usize, MappingRequest)>,
+    /// Sparse mapping operations and the segment whose binds they become.
+    pub mappings: Vec<(usize, Mapping)>,
 }
 
 /// One stage's argument table and whether the GPU copy is current.
@@ -314,7 +314,7 @@ struct Recorder {
     uploads: UploadArena,
     query_pools: Vec<(QueryType, QueryPool)>,
     statistics: Option<counters::Statistics>,
-    mappings: Vec<(usize, MappingRequest)>,
+    mappings: Vec<(usize, Mapping)>,
 }
 
 impl Recorder {

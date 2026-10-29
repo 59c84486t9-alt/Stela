@@ -1054,7 +1054,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .map(|(_, texture)| (texture.layout.first_mip_in_tail, texture.layout.tail_bytes)))
     }
 
-    fn sparse_texture(&self, image: Image) -> Result<&(HeapId, SparseTexture)> {
+    pub(super) fn sparse_texture(&self, image: Image) -> Result<&(HeapId, SparseTexture)> {
         self.resources
             .sparse
             .get(&image)

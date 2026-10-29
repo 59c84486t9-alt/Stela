@@ -1267,10 +1267,6 @@ fn sparse_textures_map_heap_pages_at_commit() {
             alloc::vec![tiles(0, [0; 3], [2, 1, 1]), tiles(3, [0; 3], [1; 3])],
         )
         .unwrap();
-    assert_eq!(
-        commands.update_texture_mapping_indirect(),
-        Err(Error::Unsupported("indirect sparse mapping updates"))
-    );
     commands.end_encoding(&mut device.resolver()).unwrap();
     device.commit(commands).unwrap();
     let segments = device.backend().submissions.last().unwrap().clone();
@@ -1354,6 +1350,115 @@ fn multisample_sparse_textures_map_msaa_blocks() {
     let segments = device.backend().submissions.last().unwrap().clone();
     assert_eq!(segments.last().unwrap().binds.len(), 4);
     assert_eq!(device.heap_usage(heap, 1), Ok((4 << 16, 0)));
+    device.destroy_texture(sparse).unwrap();
+    device.destroy_heap(heap).unwrap();
+}
+
+#[test]
+fn indirect_mapping_updates_bind_once_their_arguments_are_read() {
+    let mut device = device();
+    let heap = device
+        .new_heap(&HeapDescriptor {
+            size: 4 << 16,
+            options: options(StorageMode::Private),
+            heap_type: HeapType::Sparse,
+            sparse_page_size: SparsePageSize::Size64,
+        })
+        .unwrap();
+    // Two by two tiles and no mip tail.
+    let descriptor = TextureDescriptor {
+        width: 256,
+        height: 256,
+        ..texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ)
+    };
+    let sparse = device.new_heap_texture(heap, &descriptor, None).unwrap();
+    let image = device.sparse_image(sparse).unwrap();
+    let indirect = BufferRef {
+        buffer: Buffer(99),
+        offset: 0,
+        address: 99 << 32,
+        length: 64,
+    };
+    let encode = |device: &mut TestDevice, offset| {
+        let mut commands = device.new_command_buffer();
+        commands
+            .begin_resource_state(&mut device.resolver())
+            .unwrap();
+        let encoded = commands.update_texture_mapping_indirect(
+            &mut device.resolver(),
+            image,
+            SparseTextureMappingMode::Map,
+            indirect,
+            offset,
+        );
+        commands.end_encoding(&mut device.resolver()).unwrap();
+        encoded.map(|()| commands)
+    };
+    assert!(
+        encode(&mut device, 2).is_err(),
+        "offsets are 4-byte aligned"
+    );
+    assert!(
+        encode(&mut device, 40).is_err(),
+        "the arguments are in the buffer"
+    );
+
+    // Commits an update and plays the GPU: its copy of the arguments lands
+    // and signals its step.
+    let copied = |device: &mut TestDevice, words: [u32; 8]| {
+        let submitted = device.backend().submissions.len();
+        let copy = device.backend().submissions.last().unwrap().clone();
+        assert_eq!(copy.len(), 1, "the segments from the update's on are held");
+        let at = copy[0]
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                Command::CopyBuffer { src, regions, .. } if *src == Buffer(99) => {
+                    Some(regions[0].dst_offset)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (steps, step) = *copy[0].signals.last().unwrap();
+        let backend = device.backend();
+        let memory = backend.writes.last().unwrap().0;
+        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        backend.write_memory(memory, at, &bytes).unwrap();
+        (submitted, steps, step)
+    };
+
+    let commands = encode(&mut device, 32).unwrap();
+    device.commit(commands).unwrap();
+    let later = submit(&mut device);
+    // Origin (1, 0, 0), size (1, 2, 1), level 0, slice 0: the right column.
+    let (submitted, steps, step) = copied(&mut device, [1, 0, 0, 1, 2, 1, 0, 0]);
+    assert_eq!(
+        device.wait(later, 0),
+        Ok(false),
+        "later command buffers wait"
+    );
+    assert_eq!(device.backend().submissions.len(), submitted);
+    device.backend().signal_semaphore(steps, step).unwrap();
+    assert_eq!(device.poll(), Ok(0));
+    let submissions = &device.backend().submissions;
+    assert_eq!(submissions.len(), submitted + 2);
+    assert_eq!(submissions[submitted][0].binds.len(), 2);
+    assert!(submissions[submitted + 1][0].binds.is_empty());
+    assert_eq!(device.heap_usage(heap, 1), Ok((2 << 16, 2 << 16)));
+
+    // Arguments naming no region of the texture map nothing.
+    let commands = encode(&mut device, 0).unwrap();
+    let serial = device.commit(commands).unwrap();
+    let (_, steps, step) = copied(&mut device, [0, 0, 0, 1, 1, 1, 5, 0]);
+    device.backend().signal_semaphore(steps, step).unwrap();
+    assert_eq!(device.poll(), Ok(0));
+    assert!(
+        device.backend().submissions.last().unwrap()[0]
+            .binds
+            .is_empty()
+    );
+    assert_eq!(device.heap_usage(heap, 1), Ok((2 << 16, 2 << 16)));
+    complete(&mut device, serial);
     device.destroy_texture(sparse).unwrap();
     device.destroy_heap(heap).unwrap();
 }
