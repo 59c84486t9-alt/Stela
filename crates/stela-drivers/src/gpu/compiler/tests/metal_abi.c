@@ -350,6 +350,91 @@ static void tessellation_control_reads_factors_by_step(void)
    }
 }
 
+/* Decodes words holding one attribute and folds it to constants. */
+static void decoded(const uint32_t *words, unsigned count, unsigned format, uint32_t expected[4])
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL, "decode");
+   nir_def *packed = nir_build_imm(&b, count, 32,
+                                   (nir_const_value[4]){{.u32 = words[0]},
+                                                        {.u32 = count > 1 ? words[1] : 0},
+                                                        {.u32 = count > 2 ? words[2] : 0},
+                                                        {.u32 = count > 3 ? words[3] : 0}});
+   nir_def *value = stela_metal_decode_attribute(&b, packed, format);
+   nir_variable *out = nir_variable_create(b.shader, nir_var_shader_out, glsl_uvec4_type(), "v");
+   nir_store_var(&b, out, value, 0xf);
+   while (nir_opt_constant_folding(b.shader) |
+          nir_opt_copy_prop(b.shader) | nir_opt_dce(b.shader))
+      ;
+   nir_intrinsic_instr *store = NULL;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_store_deref)
+            store = nir_instr_as_intrinsic(instr);
+      }
+   }
+   assert(store && nir_src_is_const(store->src[1]));
+   for (unsigned i = 0; i < 4; i++)
+      expected[i] = nir_src_comp_as_uint(store->src[1], i);
+   ralloc_free(b.shader);
+}
+
+static uint32_t bits_of(float value)
+{
+   uint32_t bits;
+   memcpy(&bits, &value, 4);
+   return bits;
+}
+
+/* Vertex formats decode to Metal's lanes with (0, 0, 0, 1) filling the rest. */
+static void attributes_decode_metal_vertex_formats(void)
+{
+   uint32_t lanes[4];
+   /* UChar4Normalized_BGRA: bytes B, G, R, A. */
+   decoded((uint32_t[]){0xff000033}, 1, 42, lanes);
+   assert(lanes[0] == bits_of(0.0f) && lanes[1] == bits_of(0.0f) &&
+          lanes[2] == bits_of(0.2f) && lanes[3] == bits_of(1.0f));
+   /* Char3: sign-extended, integer fill. */
+   decoded((uint32_t[]){0x007f80ff}, 1, 5, lanes);
+   assert((int32_t)lanes[0] == -1 && (int32_t)lanes[1] == -128 && lanes[2] == 127 &&
+          lanes[3] == 1);
+   /* Short2Normalized: -32768 clamps to -1. */
+   decoded((uint32_t[]){0x80007fff}, 1, 22, lanes);
+   assert(lanes[0] == bits_of(1.0f) && lanes[1] == bits_of(-1.0f) && lanes[2] == bits_of(0.0f) &&
+          lanes[3] == bits_of(1.0f));
+   /* Half3 spans two words. */
+   decoded((uint32_t[]){0xc0003c00, 0x00003800}, 2, 26, lanes);
+   assert(lanes[0] == bits_of(1.0f) && lanes[1] == bits_of(-2.0f) && lanes[2] == bits_of(0.5f) &&
+          lanes[3] == bits_of(1.0f));
+   /* Float2 passes through. */
+   decoded((uint32_t[]){bits_of(3.0f), bits_of(-4.0f)}, 2, 29, lanes);
+   assert(lanes[0] == bits_of(3.0f) && lanes[1] == bits_of(-4.0f) && lanes[2] == bits_of(0.0f));
+   /* UInt1010102Normalized: x in the low bits. */
+   decoded((uint32_t[]){0xc00003ff}, 1, 41, lanes);
+   assert(lanes[0] == bits_of(1.0f) && lanes[1] == bits_of(0.0f) && lanes[3] == bits_of(1.0f));
+   assert(stela_metal_vertex_format_bytes(14) == 6 && stela_metal_vertex_format_bytes(54) == 4);
+   assert(!stela_metal_vertex_format_bytes(43) && !stela_metal_vertex_format_bytes(56));
+   assert(stela_metal_vertex_format_integer(39) && !stela_metal_vertex_format_integer(9));
+
+   /* Fetches read the attribute's whole words. */
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL, "fetch");
+   nir_def *value = stela_metal_fetch_attribute(&b, nir_imm_int64(&b, 0x1000), 14);
+   assert(value->num_components == 4);
+   assert(!stela_metal_fetch_attribute(&b, nir_imm_int64(&b, 0x1000), 0));
+   bool loaded = false;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_global) {
+            nir_intrinsic_instr *load = nir_instr_as_intrinsic(instr);
+            loaded = load->def.num_components == 2 && nir_intrinsic_align_mul(load) == 4;
+         }
+      }
+   }
+   assert(loaded);
+   ralloc_free(b.shader);
+}
+
 int main(void)
 {
    glsl_type_singleton_init_or_ref();
@@ -362,6 +447,7 @@ int main(void)
    tessellation_factors_follow_metal_rules();
    tessellation_vertex_passes_the_draw_indices();
    tessellation_control_reads_factors_by_step();
+   attributes_decode_metal_vertex_formats();
    glsl_type_singleton_decref();
    puts("metal abi: ok");
    return 0;

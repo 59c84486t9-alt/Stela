@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "metal_abi.h"
+#include "compiler/nir/nir_format_convert.h"
 #include "util/ralloc.h"
 
 static nir_def *load_push(nir_builder *b, unsigned bit_size, unsigned offset)
@@ -242,6 +243,140 @@ nir_shader *stela_metal_tessellation_vertex(const nir_shader_compiler_options *o
    nir_def *instance = nir_iadd(&b, nir_load_instance_id(&b), nir_load_base_instance(&b));
    nir_store_var(&b, patch, nir_vec2(&b, nir_load_vertex_id(&b), instance), 0x3);
    return validated(&b);
+}
+
+/* How an MTLVertexFormat's lanes read. */
+enum vertex_kind {
+   VERTEX_UINT = 1,
+   VERTEX_SINT,
+   VERTEX_UNORM,
+   VERTEX_SNORM,
+   VERTEX_HALF,
+   VERTEX_FLOAT,
+   /* Packed formats, one word each. */
+   VERTEX_UNORM_1010102,
+   VERTEX_SNORM_1010102,
+   VERTEX_RG11B10,
+   VERTEX_RGB9E5,
+};
+
+struct vertex_format {
+   uint8_t lanes, bits; /* Lanes of bits each; packed formats' lanes vary. */
+   enum vertex_kind kind;
+   bool bgra; /* The bytes hold blue, green, red, alpha. */
+};
+
+/* By MTLVertexFormat; the gaps name no format. */
+static const struct vertex_format vertex_formats[] = {
+   [1] = {2, 8, VERTEX_UINT},    [2] = {3, 8, VERTEX_UINT},    [3] = {4, 8, VERTEX_UINT},
+   [4] = {2, 8, VERTEX_SINT},    [5] = {3, 8, VERTEX_SINT},    [6] = {4, 8, VERTEX_SINT},
+   [7] = {2, 8, VERTEX_UNORM},   [8] = {3, 8, VERTEX_UNORM},   [9] = {4, 8, VERTEX_UNORM},
+   [10] = {2, 8, VERTEX_SNORM},  [11] = {3, 8, VERTEX_SNORM},  [12] = {4, 8, VERTEX_SNORM},
+   [13] = {2, 16, VERTEX_UINT},  [14] = {3, 16, VERTEX_UINT},  [15] = {4, 16, VERTEX_UINT},
+   [16] = {2, 16, VERTEX_SINT},  [17] = {3, 16, VERTEX_SINT},  [18] = {4, 16, VERTEX_SINT},
+   [19] = {2, 16, VERTEX_UNORM}, [20] = {3, 16, VERTEX_UNORM}, [21] = {4, 16, VERTEX_UNORM},
+   [22] = {2, 16, VERTEX_SNORM}, [23] = {3, 16, VERTEX_SNORM}, [24] = {4, 16, VERTEX_SNORM},
+   [25] = {2, 16, VERTEX_HALF},  [26] = {3, 16, VERTEX_HALF},  [27] = {4, 16, VERTEX_HALF},
+   [28] = {1, 32, VERTEX_FLOAT}, [29] = {2, 32, VERTEX_FLOAT}, [30] = {3, 32, VERTEX_FLOAT},
+   [31] = {4, 32, VERTEX_FLOAT},
+   [32] = {1, 32, VERTEX_SINT},  [33] = {2, 32, VERTEX_SINT},  [34] = {3, 32, VERTEX_SINT},
+   [35] = {4, 32, VERTEX_SINT},
+   [36] = {1, 32, VERTEX_UINT},  [37] = {2, 32, VERTEX_UINT},  [38] = {3, 32, VERTEX_UINT},
+   [39] = {4, 32, VERTEX_UINT},
+   [40] = {4, 0, VERTEX_SNORM_1010102},
+   [41] = {4, 0, VERTEX_UNORM_1010102},
+   [42] = {4, 8, VERTEX_UNORM, true},
+   [45] = {1, 8, VERTEX_UINT},   [46] = {1, 8, VERTEX_SINT},
+   [47] = {1, 8, VERTEX_UNORM},  [48] = {1, 8, VERTEX_SNORM},
+   [49] = {1, 16, VERTEX_UINT},  [50] = {1, 16, VERTEX_SINT},
+   [51] = {1, 16, VERTEX_UNORM}, [52] = {1, 16, VERTEX_SNORM},
+   [53] = {1, 16, VERTEX_HALF},
+   [54] = {3, 0, VERTEX_RG11B10},
+   [55] = {3, 0, VERTEX_RGB9E5},
+};
+
+static const struct vertex_format *vertex_format(unsigned format)
+{
+   if (format >= ARRAY_SIZE(vertex_formats) || !vertex_formats[format].kind)
+      return NULL;
+   return &vertex_formats[format];
+}
+
+unsigned stela_metal_vertex_format_bytes(unsigned format)
+{
+   const struct vertex_format *f = vertex_format(format);
+   if (!f)
+      return 0;
+   return f->bits ? f->lanes * f->bits / 8 : 4;
+}
+
+bool stela_metal_vertex_format_integer(unsigned format)
+{
+   const struct vertex_format *f = vertex_format(format);
+   return f && (f->kind == VERTEX_UINT || f->kind == VERTEX_SINT);
+}
+
+nir_def *stela_metal_decode_attribute(nir_builder *b, nir_def *words, unsigned format)
+{
+   const struct vertex_format *f = vertex_format(format);
+   assert(f && words->bit_size == 32 &&
+          words->num_components == DIV_ROUND_UP(stela_metal_vertex_format_bytes(format), 4));
+   const unsigned packed[] = {10, 10, 10, 2};
+   const unsigned lane_bits[] = {f->bits, f->bits, f->bits, f->bits};
+   const unsigned *bits = f->bits ? lane_bits : packed;
+   nir_def *value;
+   switch (f->kind) {
+   case VERTEX_UINT:
+   case VERTEX_HALF:
+   case VERTEX_UNORM:
+   case VERTEX_UNORM_1010102:
+      value = f->bits == 32 ? words : nir_format_unpack_uint(b, words, bits, f->lanes);
+      if (f->kind == VERTEX_HALF)
+         value = nir_f2f32(b, nir_u2u16(b, value));
+      else if (f->kind != VERTEX_UINT)
+         value = nir_format_unorm_to_float(b, value, bits);
+      break;
+   case VERTEX_SINT:
+   case VERTEX_SNORM:
+   case VERTEX_SNORM_1010102:
+      value = f->bits == 32 ? words : nir_format_unpack_sint(b, words, bits, f->lanes);
+      if (f->kind != VERTEX_SINT)
+         value = nir_format_snorm_to_float(b, value, bits);
+      break;
+   case VERTEX_FLOAT:
+      value = words;
+      break;
+   case VERTEX_RG11B10:
+      value = nir_format_unpack_11f11f10f(b, words);
+      break;
+   case VERTEX_RGB9E5:
+      value = nir_format_unpack_r9g9b9e5(b, words);
+      break;
+   default:
+      UNREACHABLE("a vertex format");
+   }
+   if (f->bgra)
+      value = nir_swizzle(b, value, (unsigned[]){2, 1, 0, 3}, 4);
+   bool integer = stela_metal_vertex_format_integer(format);
+   nir_def *lanes[4] = {
+      integer ? nir_imm_int(b, 0) : nir_imm_float(b, 0.0f),
+      integer ? nir_imm_int(b, 0) : nir_imm_float(b, 0.0f),
+      integer ? nir_imm_int(b, 0) : nir_imm_float(b, 0.0f),
+      integer ? nir_imm_int(b, 1) : nir_imm_float(b, 1.0f),
+   };
+   for (unsigned i = 0; i < value->num_components; i++)
+      lanes[i] = nir_channel(b, value, i);
+   return nir_vec(b, lanes, 4);
+}
+
+nir_def *stela_metal_fetch_attribute(nir_builder *b, nir_def *address, unsigned format)
+{
+   unsigned bytes = stela_metal_vertex_format_bytes(format);
+   if (!bytes)
+      return NULL;
+   nir_def *words = nir_load_global(b, DIV_ROUND_UP(bytes, 4), 32, address,
+                                    .access = ACCESS_NON_WRITEABLE, .align_mul = 4);
+   return stela_metal_decode_attribute(b, words, format);
 }
 
 nir_def *stela_metal_tessellation_factor(nir_builder *b, nir_def *factor, nir_def *scale,

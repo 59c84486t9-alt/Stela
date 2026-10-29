@@ -171,6 +171,23 @@ nir_shader *stela_metal_tessellation_vertex(const nir_shader_compiler_options *o
 nir_shader *stela_metal_tessellation_control(const nir_shader_compiler_options *options,
                                              const struct stela_metal_tessellation *tessellation);
 
+/* Stage-in attributes that shaders fetch from buffers themselves: a post-
+ * tessellation vertex function's control points and per-patch data, and a
+ * kernel's stage-in. format is an MTLVertexFormat's raw value. An attribute
+ * reads as Metal's shaders see it: four 32-bit lanes, floats for normalized,
+ * half and float formats and integers for the others, with the lanes the
+ * format lacks filled from (0, 0, 0, 1). */
+
+/* The attribute's bytes, or zero for a value that names no format. */
+unsigned stela_metal_vertex_format_bytes(unsigned format);
+/* Whether the attribute reads as integers. */
+bool stela_metal_vertex_format_integer(unsigned format);
+/* The attribute in words: the 32-bit words holding its bytes, the first in
+ * the low bits of the first word. */
+nir_def *stela_metal_decode_attribute(nir_builder *b, nir_def *words, unsigned format);
+/* The attribute at a 4-byte aligned address, read in whole words. */
+nir_def *stela_metal_fetch_attribute(nir_builder *b, nir_def *address, unsigned format);
+
 /* One 32-bit Metal factor as Vulkan's tessellator takes it: scaled, clamped
  * to the maximum factor (less one for fractional-odd partitions) and, for
  * pow2 partitions, rounded up to a power of two. Zero, negative and NaN
