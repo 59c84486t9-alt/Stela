@@ -33,6 +33,23 @@ use super::{
 use alloc::vec::Vec;
 use core::ops::Range;
 
+/// A render pipeline's place in the device's execution sets: its state
+/// class and its index in the class's set. Its `gpuResourceID` is
+/// [`handle`](Self::handle).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct IndirectPipeline {
+    pub class: u32,
+    pub index: u32,
+}
+
+impl IndirectPipeline {
+    /// The class plus one in the high half and the index in the low half,
+    /// so zero names no pipeline.
+    pub const fn handle(self) -> u64 {
+        (self.class as u64 + 1) << 32 | self.index as u64
+    }
+}
+
 /// Names an indirect command buffer on its device.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct IndirectCommandBufferId(pub u32);

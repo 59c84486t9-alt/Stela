@@ -248,6 +248,7 @@ fn render_state(amplification: u64) -> RenderPipelineState {
         pipeline: Some(Pipeline(42)),
         plan,
         interfaces: alloc::vec![vertex.interface, fragment.interface],
+        indirect: None,
     }
 }
 
@@ -300,6 +301,7 @@ fn patch_state(layout: Option<&VertexDescriptor>) -> RenderPipelineState {
         pipeline: Some(Pipeline(43)),
         plan: render_pipeline(&capabilities(), &descriptor).unwrap(),
         interfaces: alloc::vec![evaluation.interface],
+        indirect: None,
     }
 }
 
@@ -517,6 +519,7 @@ fn mesh_thread_draws_cover_the_grid_with_the_first_stage() {
                 .into_iter()
                 .chain([mesh_function.clone()])
                 .collect(),
+            indirect: None,
         };
         let mut resolver = MockResolver::default();
         let mut commands = CommandBuffer::new(FEATURES);

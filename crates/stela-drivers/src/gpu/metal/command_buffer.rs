@@ -13,7 +13,7 @@ use super::{
     binding::{ArgumentTable, BufferBinding, PushConstants, ResourceId},
     error::{Error, Result, ensure},
     hazard::{FULL, Hazards, Use},
-    indirect::{IndirectCommandBuffer, IndirectCommandBufferId},
+    indirect::{IndirectCommandBuffer, IndirectCommandBufferId, IndirectPipeline},
     pipeline::{ComputePipelinePlan, RenderPipelinePlan},
     shader::{Interface, Specialization, Stage},
     sparse::Mapping,
@@ -65,6 +65,9 @@ pub struct RenderPipelineState {
     pub plan: RenderPipelinePlan,
     /// Interfaces of the pipeline's functions, by table slot.
     pub interfaces: Vec<Interface>,
+    /// Its place in the execution sets when GPU-resident indirect commands
+    /// can switch to it.
+    pub indirect: Option<IndirectPipeline>,
 }
 
 /// A compute pipeline state object; its Vulkan pipelines are variants.

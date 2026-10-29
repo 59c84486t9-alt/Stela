@@ -717,6 +717,75 @@ fn color_targets() -> RenderTargets {
 }
 
 #[test]
+fn indirect_pipelines_share_execution_sets_by_state() {
+    let mut device = device();
+    let vertex = device.new_function(1, "vertex", Vec::new()).unwrap();
+    let fragment = device.new_function(1, "fragment", Vec::new()).unwrap();
+    let request = RenderPipelineRequest {
+        vertex_function: vertex,
+        fragment_function: Some(fragment),
+        vertex_descriptor: None,
+        targets: color_targets(),
+        input_primitive_topology: PrimitiveTopologyClass::Triangle,
+        max_vertex_amplification_count: 1,
+        tessellation: Default::default(),
+        vertex_linked_functions: LinkedFunctions::default(),
+        fragment_linked_functions: LinkedFunctions::default(),
+        support_indirect_command_buffers: true,
+    };
+    let first = device.new_render_pipeline(&request).unwrap();
+    let second = device.new_render_pipeline(&request).unwrap();
+    let mut blended = request.clone();
+    blended.targets.color_attachments[0].blending_enabled = true;
+    let other = device.new_render_pipeline(&blended).unwrap();
+    let plain = device
+        .new_render_pipeline(&RenderPipelineRequest {
+            support_indirect_command_buffers: false,
+            ..request.clone()
+        })
+        .unwrap();
+
+    let handle = |device: &TestDevice, id| device.render_pipeline_resource_id(id).unwrap();
+    assert_eq!(handle(&device, first), 1 << 32 | 1);
+    assert_eq!(
+        handle(&device, second),
+        1 << 32 | 2,
+        "the same state shares a set"
+    );
+    assert_eq!(
+        handle(&device, other),
+        2 << 32 | 1,
+        "other state has its own"
+    );
+    assert_eq!(handle(&device, plain), 0);
+    let graphics = &device.backend().graphics;
+    let bindable: Vec<bool> = graphics.iter().map(|info| info.indirect_bindable).collect();
+    assert_eq!(bindable, [true, true, true, false]);
+    let sets = &device.backend().execution_sets;
+    assert_eq!(sets.len(), 2);
+    let first_set = sets.values().next().unwrap();
+    assert_eq!(first_set.len(), 3, "index 0 repeats the initial pipeline");
+    assert_eq!(first_set[&0], first_set[&1]);
+
+    device.destroy_render_pipeline(other).unwrap();
+    assert!(
+        device
+            .backend()
+            .destroyed
+            .iter()
+            .any(|object| matches!(object, Object::ExecutionSet(_))),
+        "the set goes with its last pipeline"
+    );
+    device.destroy_render_pipeline(second).unwrap();
+    let third = device.new_render_pipeline(&request).unwrap();
+    assert_eq!(
+        handle(&device, third),
+        1 << 32 | 3,
+        "indices return only once idle"
+    );
+}
+
+#[test]
 fn amplified_pipelines_compile_amplified_vertex_functions() {
     let mut device = device();
     let vertex = device.new_function(1, "vertex", Vec::new()).unwrap();
@@ -731,6 +800,7 @@ fn amplified_pipelines_compile_amplified_vertex_functions() {
         tessellation: Default::default(),
         vertex_linked_functions: LinkedFunctions::default(),
         fragment_linked_functions: LinkedFunctions::default(),
+        support_indirect_command_buffers: false,
     };
     device.new_render_pipeline(&request).unwrap();
     let amplified: Vec<bool> = device
@@ -842,6 +912,7 @@ fn stages_link_visible_functions_and_name_them_by_handle() {
             functions: alloc::vec![visible],
             ..LinkedFunctions::default()
         },
+        support_indirect_command_buffers: false,
     };
     let pipeline = device.new_render_pipeline(&render).unwrap();
     let handle =
@@ -902,6 +973,7 @@ fn render_pipelines_compile_their_functions_once() {
         tessellation: Default::default(),
         vertex_linked_functions: LinkedFunctions::default(),
         fragment_linked_functions: LinkedFunctions::default(),
+        support_indirect_command_buffers: false,
     };
     let pipeline = device.new_render_pipeline(&request).unwrap();
     assert_eq!(
@@ -1050,6 +1122,7 @@ fn post_tessellation_functions_compile_with_their_feeding_stages() {
         },
         vertex_linked_functions: LinkedFunctions::default(),
         fragment_linked_functions: LinkedFunctions::default(),
+        support_indirect_command_buffers: false,
     };
     let pipeline = device.new_render_pipeline(&request).unwrap();
     let tessellation = &device.compiler.tessellations[0];

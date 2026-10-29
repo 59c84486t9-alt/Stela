@@ -152,6 +152,10 @@ pub struct RenderPipelineRequest {
     pub tessellation: TessellationDescriptor,
     pub vertex_linked_functions: LinkedFunctions,
     pub fragment_linked_functions: LinkedFunctions,
+    /// `supportIndirectCommandBuffers`: GPU-resident indirect commands can
+    /// switch to the pipeline, unless it is tessellated or amplifies
+    /// vertices, whose draws only the CPU encodes.
+    pub support_indirect_command_buffers: bool,
 }
 
 /// `MTLComputePipelineDescriptor` with the device's function id.
@@ -361,20 +365,39 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 },
             ),
         };
+        let generated = self.backend.physical_device().limits.generated_commands;
         // The driver compiles the NIR into the pipeline, which outlives it.
-        let created = pipeline::render_pipeline(&self.capabilities, &descriptor)
-            .and_then(|plan| Ok((self.backend.create_graphics_pipeline(&plan.info)?, plan)));
+        let created =
+            pipeline::render_pipeline(&self.capabilities, &descriptor).and_then(|mut plan| {
+                plan.info.indirect_bindable = request.support_indirect_command_buffers
+                    && plan.tessellation.is_none()
+                    && plan.amplification_count == 1
+                    && generated.is_some();
+                Ok((self.backend.create_graphics_pipeline(&plan.info)?, plan))
+            });
         codes.iter().for_each(|code| self.compiler.release(*code));
         let (vulkan, plan) = created?;
-        let interfaces = core::iter::once(vertex.interface)
+        let interfaces: Vec<Interface> = core::iter::once(vertex.interface)
             .chain(fragment.map(|shader| shader.interface))
             .collect();
+        let indirect = if plan.info.indirect_bindable {
+            match self.add_indirect_render(&plan.info, &interfaces, vulkan) {
+                Ok(indirect) => Some(indirect),
+                Err(error) => {
+                    self.defer(Object::Pipeline(vulkan));
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         let index = self.pipelines.render.insert(RenderObject {
             state: RenderPipelineState {
                 id: 0,
                 pipeline: Some(vulkan),
                 plan,
                 interfaces,
+                indirect,
             },
             linked: alloc::vec![
                 (Stage::Vertex, vertex_linked),
@@ -456,6 +479,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 pipeline: None,
                 plan,
                 interfaces,
+                indirect: None,
             },
             linked,
             fragment: fragment.map(|shader| shader.code),
@@ -567,8 +591,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(pipeline)
     }
 
+    /// `gpuResourceID`: the handle GPU-resident indirect commands name the
+    /// pipeline by, or zero when they cannot switch to it.
+    pub fn render_pipeline_resource_id(&self, id: RenderPipelineId) -> Result<u64> {
+        let state = &self.pipelines.render.get(id.0)?.state;
+        Ok(state.indirect.map_or(0, |indirect| indirect.handle()))
+    }
+
     pub fn destroy_render_pipeline(&mut self, id: RenderPipelineId) -> Result<()> {
         let render = self.pipelines.render.remove(id.0)?;
+        if let Some(indirect) = render.state.indirect {
+            self.remove_indirect_render(indirect)?;
+        }
         let variants = render.variants.into_iter().map(|(_, pipeline)| pipeline);
         for pipeline in render.state.pipeline.into_iter().chain(variants) {
             self.defer(Object::Pipeline(pipeline));

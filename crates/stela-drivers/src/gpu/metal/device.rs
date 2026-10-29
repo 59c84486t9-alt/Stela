@@ -19,6 +19,7 @@ use super::{
 };
 use alloc::{sync::Arc, vec::Vec};
 
+mod execution_sets;
 pub mod indirect;
 pub mod pipelines;
 pub mod queue;
@@ -112,6 +113,7 @@ pub struct Device<B: Backend, C: Compiler> {
     allocated: u64,
     resources: resources::Resources,
     pipelines: pipelines::Pipelines,
+    execution_sets: execution_sets::ExecutionSets,
     indirect: Slab<Arc<IndirectCommandBuffer>>,
     queue: queue::Queue,
 }
@@ -148,6 +150,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             allocated: 0,
             resources: resources::Resources::default(),
             pipelines: pipelines::Pipelines::default(),
+            execution_sets: execution_sets::ExecutionSets::default(),
             indirect: Slab::default(),
             queue: queue::Queue::default(),
         })

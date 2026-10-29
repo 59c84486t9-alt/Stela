@@ -548,6 +548,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .into_iter()
             .for_each(|(_, object)| self.backend.destroy(object));
         self.descriptors.retire(completed);
+        self.execution_sets.retire(completed);
     }
 
     /// `newEvent` and `newSharedEvent`: both are timeline semaphores.
