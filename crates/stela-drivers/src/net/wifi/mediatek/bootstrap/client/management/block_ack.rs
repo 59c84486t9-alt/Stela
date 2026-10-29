@@ -81,7 +81,6 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// Same retained requester/current policy and negotiated OS authorization
     /// as receive_management_block_ack, including deferred automatic responses
     /// and local DELBA. No PMF, SAE or 6GHz negotiation is inferred here.
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn begin_management_block_ack<H: HardwarePolicy, O: OsPolicy>(
         &mut self,
         authority: &mut Owner<H, O>,

@@ -49,7 +49,6 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// or enforces restrictions on already armed radio work and retains every
     /// original owner through cancellation, uncertainty and independent drain.
     /// The OS lease selects this precise request; it does not authenticate SAE.
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn begin_six_ghz_external_authentication<H: HardwarePolicy, O: OsPolicy>(
         &mut self,
         authority: &mut Owner<H, O>,

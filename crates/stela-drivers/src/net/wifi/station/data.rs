@@ -548,7 +548,6 @@ impl Station {
 
     /// Prepare against borrowed original slots from independently retained
     /// hardware owners, using exactly the same admission and nonce algorithm.
-    #[allow(clippy::too_many_arguments)]
     pub fn prepare_msdu_refs<K: BorrowMut<KeySlot>>(
         &mut self,
         epoch: u64,

@@ -63,7 +63,6 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn transmit_external_authentication(
         &mut self,
         session: &Session,

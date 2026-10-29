@@ -173,7 +173,6 @@ impl Station {
     /// The deadline covers OS computation as well as transport; repeated commits
     /// do not extend it. Only the OS's last frame is sent again, as
     /// `ieee80211_auth` retries it.
-    #[allow(clippy::too_many_arguments)]
     pub fn begin_external_authentication(
         &mut self,
         peer: Mac,
@@ -342,7 +341,6 @@ impl Station {
     /// Build only the ordinary authentication header and fixed SAE fields.
     /// The OS supplies complete transaction/status/data, including anti-clogging
     /// retries. This does not parse or fabricate secret SAE arithmetic.
-    #[allow(clippy::too_many_arguments)]
     pub fn external_authentication_transmit(
         &mut self,
         session: &Session,
