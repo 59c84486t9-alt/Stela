@@ -550,7 +550,7 @@ render_stages_compile_at_their_linked_locations(void)
    assert(reflect(vertex, "vertex", &reflection, &error));
    assert(reflection.stage == STELA_METAL_VERTEX && reflection.varying_count == 1);
    assert(reflection.attribute_count == 1 && reflection.attributes[0].index == 3 &&
-          reflection.attributes[0].components == 4);
+          reflection.attributes[0].components == 4 && !reflection.attributes[0].patch_control_point);
    const struct stela_metal_varying *uv = &reflection.varyings[0];
    assert(!strcmp(name(&reflection, uv->identifier, uv->identifier_bytes), "user(uv)"));
    assert(uv->primitive == STELA_AIR_FLOAT && uv->components == 2 && !uv->per_primitive);
@@ -600,7 +600,7 @@ patch_functions_compile_behind_their_tessellation_stages(void)
           reflection.patch_control_points == 3);
    /* The control points' members the function reads. */
    assert(reflection.attribute_count == 1 && reflection.attributes[0].index == 1 &&
-          reflection.attributes[0].components == 4);
+          reflection.attributes[0].components == 4 && reflection.attributes[0].patch_control_point);
 
    const struct stela_metal_specialization plain = {0};
    assert(!compile(patch, "patch", &plain, &error) && error.kind == STELA_AIR_ARGUMENT);

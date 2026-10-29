@@ -817,6 +817,7 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
                 index: attribute.index,
                 numeric: numeric(attribute.primitive)?,
                 components: components(attribute.components)?,
+                patch_control_point: attribute.patch_control_point != 0,
             })
         })
         .collect::<Result<Vec<_>>>()?;

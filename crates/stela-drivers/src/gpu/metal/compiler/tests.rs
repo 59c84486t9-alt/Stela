@@ -360,6 +360,7 @@ fn reflections_become_interfaces_with_their_provenance() {
             index: 1,
             primitive: FLOAT,
             components: 3,
+            patch_control_point: 0,
         };
         r.attribute_count = 1;
         add_varying(r, "user(uv)", FLOAT, 2);
@@ -409,7 +410,8 @@ fn reflections_become_interfaces_with_their_provenance() {
         [AttributeUse {
             index: 1,
             numeric: NumericClass::Float,
-            components: 3
+            components: 3,
+            patch_control_point: false
         }]
     );
     assert_eq!(
@@ -815,6 +817,7 @@ fn kernels_compile_with_their_stage_in() {
             index: 2,
             primitive: ffi::primitive::UINT,
             components: 2,
+            patch_control_point: 0,
         };
         r.attribute_count = 1;
     });
@@ -877,6 +880,7 @@ fn post_tessellation_vertex_functions_compile_with_their_stage_in() {
             index: 3,
             primitive: ffi::primitive::FLOAT,
             components: 4,
+            patch_control_point: 1,
         };
         r.attribute_count = 1;
     });
@@ -887,6 +891,7 @@ fn post_tessellation_vertex_functions_compile_with_their_stage_in() {
     };
     let interface = reflect_stage(&mut compiler, library);
     assert_eq!(interface.patch, Some(patch));
+    assert!(interface.attributes[0].patch_control_point);
     assert!(interface.features.contains(ShaderFeatures::TESSELLATION));
     let tessellation = Tessellation {
         patch,

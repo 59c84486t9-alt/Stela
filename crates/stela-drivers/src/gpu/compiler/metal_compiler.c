@@ -155,13 +155,13 @@ add_sampler(struct reflecting *r, const struct stela_air_sampler *sampler)
 
 static bool
 add_attribute(struct reflecting *r, unsigned location, enum stela_air_primitive primitive,
-              unsigned components)
+              unsigned components, bool patch_control_point)
 {
    struct stela_metal_reflection *out = r->out;
    if (out->attribute_count == STELA_METAL_ATTRIBUTES)
       return fail(r->error, STELA_AIR_LIMIT, "attributes exceed the table");
    out->attributes[out->attribute_count++] = (struct stela_metal_attribute_use){
-      location, primitive, components};
+      location, primitive, components, patch_control_point};
    return true;
 }
 
@@ -183,7 +183,7 @@ reflect_kernel(const struct stela_air_inspection *info, const struct stela_air_e
                    /* The stage-in attributes the kernel reads. */
                    argument->kind == 5 && argument->used ?
                                          add_attribute(r, argument->location, argument->primitive,
-                                                       argument->type_components) :
+                                                       argument->type_components, false) :
                                          true;
       if (!added)
          return false;
@@ -219,13 +219,13 @@ add_input(struct reflecting *r, const struct stela_air_stage_io *io)
       out->barycentrics = 1;
       return true;
    case STELA_AIR_VERTEX_INPUT:
-      return add_attribute(r, io->location, io->primitive, io->components);
+      return add_attribute(r, io->location, io->primitive, io->components, false);
    case STELA_AIR_CONTROL_POINTS:
       /* The members the function reads. */
       for (unsigned i = 0; i < io->member_count; i++) {
          const struct stela_air_struct_member *member = &io->members[i];
          if (!member->unused && !add_attribute(r, member->location, member->primitive,
-                                               member->components))
+                                               member->components, true))
             return false;
       }
       return true;

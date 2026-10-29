@@ -120,12 +120,15 @@ pub struct ThreadgroupUse {
     pub declared_bytes: u64,
 }
 
-/// A `[[stage_in]]` attribute of a vertex function.
+/// A `[[stage_in]]` attribute of a vertex function. A post-tessellation
+/// vertex function's is each control point's (`patchControlPointData`) or
+/// its patch's (`patchData`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AttributeUse {
     pub index: u32,
     pub numeric: NumericClass,
     pub components: u8,
+    pub patch_control_point: bool,
 }
 
 /// A `[[color(n)]]` output of a fragment function.

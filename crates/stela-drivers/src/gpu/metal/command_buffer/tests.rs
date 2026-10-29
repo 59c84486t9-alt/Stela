@@ -337,6 +337,7 @@ fn patch_state(layout: Option<&VertexDescriptor>) -> RenderPipelineState {
                     index: attribute.index,
                     numeric: NumericClass::Float,
                     components: 4,
+                    patch_control_point: false,
                 })
                 .collect();
         }
@@ -1057,6 +1058,7 @@ fn stage_in_dispatches_pass_their_region() {
             index: 0,
             numeric: NumericClass::Float,
             components: 4,
+            patch_control_point: false
         }];
     });
     let layout = StageInputDescriptor {

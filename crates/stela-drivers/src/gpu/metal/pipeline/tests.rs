@@ -77,7 +77,8 @@ fn render_pipeline_with_vertex_layout_and_blending() {
         interface.attributes = alloc::vec![AttributeUse {
             index: 0,
             numeric: NumericClass::Float,
-            components: 3
+            components: 3,
+            patch_control_point: false
         }];
     });
     let fragment = shader(Stage::Fragment, 2, |interface| {
@@ -202,7 +203,8 @@ fn render_pipelines_validate_their_interfaces() {
         interface.attributes = alloc::vec![AttributeUse {
             index: 3,
             numeric: NumericClass::Uint,
-            components: 1
+            components: 1,
+            patch_control_point: false
         }];
     });
     assert!(render_pipeline(&capabilities, &descriptor(&stage_in, None)).is_err());
@@ -281,7 +283,8 @@ fn tessellation_properties_follow_metal_rules() {
     patch.attributes = alloc::vec![AttributeUse {
         index: 0,
         numeric: NumericClass::Float,
-        components: 4
+        components: 4,
+        patch_control_point: true
     }];
     assert!(matches!(
         check(&patch, integer(6), None),
