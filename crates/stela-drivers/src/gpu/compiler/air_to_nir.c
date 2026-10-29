@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_to_nir.h"
+#include "air_constants.h"
 #include "air_math.h"
 #include "air_simd.h"
 #include "air_texture.h"
@@ -3744,7 +3745,8 @@ translate(const void *bitcode, size_t size, const char *entry,
    bool compute = compute_like(&t);
    if (!bitcode || size < 4 || size > AIR_MAX_BITCODE_BYTES ||
        memcmp(bitcode, "BC\xc0\xde", 4) || !entry || !*entry || !nir_options ||
-       !options || !options->max_instructions || (compute && (!options->workgroup_size[0] ||
+       !options || !options->max_instructions || (options->constant_count && !options->constants) ||
+       (compute && (!options->workgroup_size[0] ||
        !options->workgroup_size[1] || !options->workgroup_size[2]))) {
       fail(&t, STELA_AIR_INPUT, "invalid AIR bitcode/options");
       return NULL;
@@ -3812,7 +3814,8 @@ translate(const void *bitcode, size_t size, const char *entry,
       goto done;
    }
    t.metadata = (struct stela_air_metadata){.module = t.module, .error = error, .render = stage != NULL};
-   if (!stela_air_metadata_layout(&t.metadata) || !stela_air_metadata_validate(&t.metadata))
+   if (!stela_air_metadata_layout(&t.metadata) || !stela_air_metadata_validate(&t.metadata) ||
+       !stela_air_specialize_constants(&t.metadata, options->constants, options->constant_count))
       goto done;
    t.layout = t.metadata.layout;
    t.air_minor = t.metadata.air_minor;

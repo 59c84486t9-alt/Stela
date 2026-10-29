@@ -15,6 +15,10 @@ static_assert(sizeof(struct stela_metal_linked_varying) == STELA_METAL_LINKED_VA
               "metal/compiler.rs mirrors the linked varyings");
 static_assert(sizeof(struct stela_metal_specialization) == STELA_METAL_SPECIALIZATION_BYTES,
               "metal/compiler.rs mirrors the specialization");
+static_assert(sizeof(struct stela_air_constant_value) == STELA_METAL_CONSTANT_VALUE_BYTES,
+              "metal/compiler.rs mirrors the constant values");
+static_assert(STELA_METAL_FUNCTION_CONSTANTS == AIR_MAX_FUNCTION_CONSTANTS,
+              "the reflection holds every function constant the frontend admits");
 
 /* Reports the first error; always false. */
 static bool
@@ -76,7 +80,19 @@ add_name(struct reflecting *r, const char *bytes, size_t size, uint32_t *offset)
 static bool
 module_facts(struct reflecting *r, const struct stela_air_inspection *info)
 {
+   struct stela_metal_reflection *out = r->out;
    r->denorms_disable = info->denorms_disable;
+   for (unsigned i = 0; i < info->function_constant_count; i++) {
+      const struct stela_air_function_constant *constant = &info->function_constants[i];
+      struct stela_metal_function_constant *row = &out->function_constants[i];
+      *row = (struct stela_metal_function_constant){
+         .index = constant->index, .name_bytes = (uint32_t)constant->name_bytes,
+         .type_bytes = (uint32_t)constant->type_bytes, .required = constant->required};
+      if (!add_name(r, constant->name, constant->name_bytes, &row->name) ||
+          !add_name(r, constant->type, constant->type_bytes, &row->type))
+         return false;
+   }
+   out->function_constant_count = info->function_constant_count;
    if (!info->ident)
       return true;
    r->out->ident_bytes = (uint32_t)info->ident_bytes;
@@ -330,7 +346,8 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
    *error = (struct stela_air_error){0};
    if (!entry || !target || !target->nir || !specialization ||
        (specialization->threadgroup_length_count && !specialization->threadgroup_lengths) ||
-       (specialization->varying_count && !specialization->varyings)) {
+       (specialization->varying_count && !specialization->varyings) ||
+       (specialization->constant_count && !specialization->constants)) {
       fail(error, STELA_AIR_INPUT, "invalid compilation request");
       return NULL;
    }
@@ -361,6 +378,8 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       .bind_texture_id = stela_metal_bind_texture_id,
       .bind_sampler_id = stela_metal_bind_sampler_id,
       .load_device_value = stela_metal_load_device_value,
+      .constants = specialization->constants,
+      .constant_count = specialization->constant_count,
    };
    if (compute) {
       memcpy(resources.workgroup_size, specialization->workgroup_size,

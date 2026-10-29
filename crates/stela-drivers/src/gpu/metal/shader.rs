@@ -8,7 +8,7 @@
 //! [`Provenance`] keeps the input's identity attached to every result.
 use super::{
     abi::{
-        FunctionType, TessellationControlPointIndexType, TessellationFactorStepFunction,
+        DataType, FunctionType, TessellationControlPointIndexType, TessellationFactorStepFunction,
         TessellationPartitionMode, TextureType, Winding,
     },
     binding::TableSlot,
@@ -162,6 +162,26 @@ pub struct Varying {
     pub per_primitive: bool,
 }
 
+/// A function constant (`MTLFunctionConstant`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionConstant {
+    pub name: String,
+    pub data_type: DataType,
+    pub index: u32,
+    /// The function reads the constant without testing whether it is
+    /// defined, so it needs a value.
+    pub required: bool,
+}
+
+impl FunctionConstant {
+    /// Whether `value` is laid out as the constant's type: its lanes packed,
+    /// a three-lane vector optionally padded to four.
+    pub fn accepts(&self, value: &[u8]) -> bool {
+        let (bytes, lanes) = self.data_type.lanes();
+        value.len() == bytes * lanes || (lanes == 3 && value.len() == bytes * 4)
+    }
+}
+
 /// The domain a post-tessellation vertex function evaluates.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PatchDomain {
@@ -219,6 +239,7 @@ pub struct Interface {
     pub max_total_threads: Option<u32>,
     /// The function reads `[[amplification_id]]`.
     pub amplification: bool,
+    pub constants: Vec<FunctionConstant>,
     pub features: ShaderFeatures,
 }
 
@@ -280,6 +301,14 @@ impl Interface {
                         .all(|other| other.identifier != varying.identifier)
             }),
             "varyings",
+        )?;
+        ensure(
+            self.constants.iter().enumerate().all(|(n, constant)| {
+                self.constants[n + 1..]
+                    .iter()
+                    .all(|other| other.index != constant.index && other.name != constant.name)
+            }),
+            "function constants",
         )?;
         if let Some(patch) = self.patch {
             ensure(
@@ -463,8 +492,29 @@ pub(crate) mod tests {
             static_threadgroup_bytes: 0,
             max_total_threads: None,
             amplification: false,
+            constants: Vec::new(),
             features: ShaderFeatures::EMPTY,
         }
+    }
+
+    #[test]
+    fn function_constant_values_take_their_type_s_layout() {
+        let constant = |data_type| FunctionConstant {
+            name: String::from("c"),
+            data_type,
+            index: 0,
+            required: false,
+        };
+        assert!(constant(DataType::Bool).accepts(&[1]));
+        assert!(constant(DataType::Half2).accepts(&[0; 4]));
+        assert!(!constant(DataType::Half2).accepts(&[0; 2]));
+        for bytes in [12, 16] {
+            assert!(constant(DataType::Float3).accepts(&alloc::vec![0; bytes]));
+        }
+        assert!(!constant(DataType::Float4).accepts(&[0; 12]));
+        assert!(constant(DataType::ULong).accepts(&[0; 8]));
+        assert_eq!(DataType::vector(DataType::Char, 3), Some(DataType::Char3));
+        assert_eq!(DataType::vector(DataType::Char, 5), None);
     }
 
     #[test]

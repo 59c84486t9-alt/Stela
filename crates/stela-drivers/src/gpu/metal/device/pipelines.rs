@@ -114,6 +114,25 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         };
         let interface = self.compiler.reflect(library, entry, &specialization)?;
         interface.validate()?;
+        ensure(
+            constants
+                .iter()
+                .enumerate()
+                .all(|(n, (index, _))| constants[n + 1..].iter().all(|(other, _)| other != index)),
+            "a function constant has two values",
+        )?;
+        for constant in &interface.constants {
+            match constants.iter().find(|(index, _)| *index == constant.index) {
+                Some((_, value)) => ensure(
+                    constant.accepts(value),
+                    "a function constant value of another type",
+                )?,
+                None => ensure(
+                    !constant.required,
+                    "a required function constant has no value",
+                )?,
+            }
+        }
         let function = FunctionObject {
             library,
             entry: String::from(entry),

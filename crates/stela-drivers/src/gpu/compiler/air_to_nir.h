@@ -114,6 +114,14 @@ enum stela_air_device_value {
 typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_device_value,
                                                 void *binding_data);
 
+/* A MTLFunctionConstantValues value, laid out as Metal's: its lanes packed,
+ * each bool one byte, a three-lane vector optionally padded to four. */
+struct stela_air_constant_value {
+   unsigned index;
+   const void *bytes;
+   size_t size;
+};
+
 struct stela_air_options {
    unsigned workgroup_size[3]; /* Exact nonzero pipeline specialization. */
    unsigned max_instructions; /* Nonzero caller-supplied compilation budget. */
@@ -149,6 +157,11 @@ struct stela_air_options {
     * kernel threads outside a dispatchThreads grid return before the
     * function runs, as Metal's smaller edge threadgroups never run them. */
    stela_air_load_device_value load_device_value;
+   /* Function constant values by index (see air_constants.c). A required
+    * constant without one is refused; values for constants the module does
+    * not declare are ignored. */
+   const struct stela_air_constant_value *constants;
+   unsigned constant_count;
 };
 
 /* Additive VS/FS frontend. No runtime/Metal pipeline is constructed. resources

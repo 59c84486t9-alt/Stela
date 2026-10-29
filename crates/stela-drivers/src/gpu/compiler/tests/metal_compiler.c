@@ -56,6 +56,35 @@ static const char *kernel =
    "!42 = !{i32 2, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
    " !\"air.arg_name\", !\"tid\"}\n";
 
+/* Stores the scale constant where it is defined and the required enabled
+ * constant is set, in the form Metal.jl's library builder reads. */
+static const char *constants =
+   "@scale = external addrspace(2) constant i32\n"
+   "@enabled = external addrspace(2) constant i8\n"
+   "declare i1 @air.is_function_constant_defined(ptr addrspace(2))\n"
+   "define void @constants(ptr addrspace(1) %data, i32 %tid) {\n"
+   "%defined = call i1 @air.is_function_constant_defined(ptr addrspace(2) @scale)\n"
+   "%e = load i8, ptr addrspace(2) @enabled, align 1\n"
+   "%on = icmp ne i8 %e, 0\n"
+   "%both = and i1 %defined, %on\n"
+   "br i1 %both, label %scaled, label %done\n"
+   "scaled:\n%s = load i32, ptr addrspace(2) @scale, align 4\n"
+   "%i = zext i32 %tid to i64\n"
+   "%q = getelementptr i32, ptr addrspace(1) %data, i64 %i\n"
+   "store i32 %s, ptr addrspace(1) %q, align 4\n"
+   "br label %done\n"
+   "done:\nret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @constants, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
+   " !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n"
+   "!air.function_constants = !{!50, !51}\n"
+   "!50 = !{ptr addrspace(2) @scale, !\"uint\", !\"scale\", i32 0, i1 false}\n"
+   "!51 = !{ptr addrspace(2) @enabled, !\"bool\", !\"enabled\", i32 3, i1 true}\n";
+
 #define VERTEX_RESULT "<{ <4 x float>, <2 x float> }>"
 
 static const char *vertex =
@@ -291,6 +320,56 @@ mesh_stages_compile_with_their_launch(void)
    stela_metal_release(shader);
 }
 
+static void
+function_constants_reflect_and_specialize(void)
+{
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   assert(reflect(constants, "constants", &reflection, &error));
+   assert(reflection.function_constant_count == 2);
+   const struct stela_metal_function_constant *scale = &reflection.function_constants[0];
+   const struct stela_metal_function_constant *enabled = &reflection.function_constants[1];
+   assert(!strcmp(name(&reflection, scale->name, scale->name_bytes), "scale"));
+   assert(!strcmp(name(&reflection, scale->type, scale->type_bytes), "uint"));
+   assert(scale->index == 0 && !scale->required);
+   assert(!strcmp(name(&reflection, enabled->type, enabled->type_bytes), "bool"));
+   assert(enabled->index == 3 && enabled->required);
+
+   const uint32_t seven = 7;
+   const uint8_t on = 1;
+   const struct stela_air_constant_value values[] = {{0, &seven, 4}, {3, &on, 1}, {9, &on, 1}};
+   struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .constants = values, .constant_count = 3,
+   };
+   nir_shader *shader = compile(constants, "constants", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "constants: %u %s\n", error.kind, error.detail);
+   /* Every read folds to its value; none is left in constant data. */
+   assert(shader && shader->constant_data_size == 0);
+   stela_metal_release(shader);
+
+   /* scale is optional, and its definedness test folds to false. */
+   specialization.constants = &values[1];
+   specialization.constant_count = 1;
+   shader = compile(constants, "constants", &specialization, &error);
+   assert(shader);
+   stela_metal_release(shader);
+
+   /* enabled is required. */
+   specialization.constants = values;
+   specialization.constant_count = 1;
+   assert(!compile(constants, "constants", &specialization, &error) &&
+          error.kind == STELA_AIR_ARGUMENT);
+   /* Values take their constant's size, once each. */
+   const struct stela_air_constant_value wide[] = {{3, &seven, 4}};
+   specialization.constants = wide;
+   assert(!compile(constants, "constants", &specialization, &error) && error.kind == STELA_AIR_INPUT);
+   const struct stela_air_constant_value twice[] = {{3, &on, 1}, {3, &on, 1}};
+   specialization.constants = twice;
+   specialization.constant_count = 2;
+   assert(!compile(constants, "constants", &specialization, &error) && error.kind == STELA_AIR_INPUT);
+}
+
 int
 main(void)
 {
@@ -298,6 +377,7 @@ main(void)
    kernels_reflect_and_compile_their_threadgroup_memory();
    render_stages_compile_at_their_linked_locations();
    mesh_stages_compile_with_their_launch();
+   function_constants_reflect_and_specialize();
    glsl_type_singleton_decref();
    puts("metal compiler: ok");
    return 0;

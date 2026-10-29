@@ -7,7 +7,8 @@ use core::ffi::{c_char, c_void};
 pub(super) const ATTRIBUTES: usize = 31;
 pub(super) const VARYINGS: usize = 32;
 pub(super) const COLOR_OUTPUTS: usize = 9;
-pub(super) const NAME_BYTES: usize = 4096;
+pub(super) const FUNCTION_CONSTANTS: usize = 256;
+pub(super) const NAME_BYTES: usize = 8192;
 
 /// `enum stela_air_error_kind`.
 pub(super) mod kind {
@@ -111,6 +112,17 @@ pub(super) struct ColorOutput {
     pub dual_source: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct FunctionConstant {
+    pub index: u32,
+    pub name: u32,
+    pub name_bytes: u32,
+    pub type_name: u32,
+    pub type_bytes: u32,
+    pub required: u32,
+}
+
 /// `struct stela_metal_reflection`.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -133,6 +145,7 @@ pub struct Reflection {
     pub(super) ident: u32,
     pub(super) ident_bytes: u32,
     pub(super) names_bytes: u32,
+    pub(super) function_constant_count: u32,
     pub(super) buffers: [BufferUse; MAX_BUFFER_BINDINGS as usize],
     pub(super) textures: [TextureUse; MAX_TEXTURE_BINDINGS as usize],
     pub(super) samplers: [u32; MAX_SAMPLER_BINDINGS as usize],
@@ -140,6 +153,7 @@ pub struct Reflection {
     pub(super) attributes: [AttributeUse; ATTRIBUTES],
     pub(super) varyings: [Varying; VARYINGS],
     pub(super) color_outputs: [ColorOutput; COLOR_OUTPUTS],
+    pub(super) function_constants: [FunctionConstant; FUNCTION_CONSTANTS],
     pub(super) names: [u8; NAME_BYTES],
 }
 
@@ -178,6 +192,15 @@ pub(super) struct LinkedVarying {
     pub per_primitive: u32,
 }
 
+/// `struct stela_air_constant_value`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ConstantValue {
+    pub index: u32,
+    pub bytes: *const c_void,
+    pub size: usize,
+}
+
 /// `struct stela_metal_specialization`.
 #[repr(C)]
 #[derive(Debug)]
@@ -189,6 +212,8 @@ pub struct Specialization {
     pub(super) varying_count: u32,
     pub(super) amplified: u32,
     pub(super) launched_by_grid: u32,
+    pub(super) constant_count: u32,
+    pub(super) constants: *const ConstantValue,
 }
 
 #[cfg(test)]
@@ -212,6 +237,7 @@ mod tests {
             ("STELA_METAL_ATTRIBUTES", ATTRIBUTES),
             ("STELA_METAL_VARYINGS", VARYINGS),
             ("STELA_METAL_COLOR_OUTPUTS", COLOR_OUTPUTS),
+            ("STELA_METAL_FUNCTION_CONSTANTS", FUNCTION_CONSTANTS),
             ("STELA_METAL_NAME_BYTES", NAME_BYTES),
             ("STELA_METAL_REFLECTION_BYTES", size_of::<Reflection>()),
             ("STELA_METAL_TARGET_BYTES", size_of::<Target>()),
@@ -222,6 +248,10 @@ mod tests {
             (
                 "STELA_METAL_SPECIALIZATION_BYTES",
                 size_of::<Specialization>(),
+            ),
+            (
+                "STELA_METAL_CONSTANT_VALUE_BYTES",
+                size_of::<ConstantValue>(),
             ),
         ];
         for (name, value) in expected {

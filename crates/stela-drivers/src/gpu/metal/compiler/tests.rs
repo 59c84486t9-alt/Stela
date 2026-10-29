@@ -20,6 +20,7 @@ struct Compiled {
     workgroup_size: [u32; 3],
     lengths: Vec<(u32, u32)>,
     varyings: Vec<(String, bool)>,
+    constants: Vec<(u32, Vec<u8>)>,
     amplified: bool,
     launched_by_grid: bool,
 }
@@ -105,7 +106,8 @@ unsafe extern "C" fn compile(
     // arrays and identifiers it keeps alive for the call.
     let (target, specialization) = unsafe { (&*target, &*specialization) };
     assert!(!target.nir.is_null());
-    let (lengths, varyings) = unsafe {
+    // SAFETY: as above.
+    let (lengths, varyings, constants) = unsafe {
         (
             slice::from_raw_parts(
                 specialization.threadgroup_lengths,
@@ -115,8 +117,21 @@ unsafe extern "C" fn compile(
                 specialization.varyings,
                 specialization.varying_count as usize,
             ),
+            slice::from_raw_parts(
+                specialization.constants,
+                specialization.constant_count as usize,
+            ),
         )
     };
+    let constants = constants
+        .iter()
+        .map(|constant| {
+            // SAFETY: as above.
+            let value =
+                unsafe { slice::from_raw_parts(constant.bytes.cast::<u8>(), constant.size) };
+            (constant.index, value.to_vec())
+        })
+        .collect();
     let varyings = varyings
         .iter()
         .map(|varying| {
@@ -141,6 +156,7 @@ unsafe extern "C" fn compile(
                 .map(|length| (length.index, length.bytes))
                 .collect(),
             varyings,
+            constants,
             amplified: specialization.amplified != 0,
             launched_by_grid: specialization.launched_by_grid != 0,
         });
@@ -241,6 +257,17 @@ fn reflections_become_interfaces_with_their_provenance() {
         r.attribute_count = 1;
         add_varying(r, "user(uv)", FLOAT, 2);
         r.amplification = 1;
+        let name = add_name(r, b"tint");
+        let type_name = add_name(r, b"half3");
+        r.function_constants[0] = ffi::FunctionConstant {
+            index: 4,
+            name,
+            name_bytes: 4,
+            type_name,
+            type_bytes: 5,
+            required: 1,
+        };
+        r.function_constant_count = 1;
     });
     let (mut compiler, library) = with_library();
     let interface = compiler
@@ -290,6 +317,15 @@ fn reflections_become_interfaces_with_their_provenance() {
         }]
     );
     assert!(interface.amplification);
+    assert_eq!(
+        interface.constants,
+        [FunctionConstant {
+            name: String::from("tint"),
+            data_type: DataType::Half3,
+            index: 4,
+            required: true,
+        }]
+    );
     assert_eq!(interface.max_total_threads, None);
     assert_eq!(
         interface.features,
@@ -367,6 +403,7 @@ fn compilations_carry_their_specialization_and_release_through_the_service() {
         r.threadgroup_count = 1;
     });
     let specialization = Specialization {
+        constants: vec![(2, vec![1, 0])],
         workgroup_size: Some([64, 2, 1]),
         threadgroup_lengths: vec![(1, 512)],
         ..Specialization::default()
@@ -415,6 +452,7 @@ fn compilations_carry_their_specialization_and_release_through_the_service() {
                 Compiled {
                     workgroup_size: [64, 2, 1],
                     lengths: vec![(1, 512)],
+                    constants: vec![(2, vec![1, 0])],
                     ..Compiled::default()
                 },
             ]
@@ -472,33 +510,19 @@ fn refusals_name_their_kind_and_keep_their_detail() {
 fn what_the_service_cannot_take_is_refused_before_it_runs() {
     reflecting(|r| r.stage = 3);
     let (mut compiler, library) = with_library();
-    let refused = [
-        (
-            Specialization {
-                constants: vec![(0, vec![1, 0, 0, 0])],
-                ..Specialization::default()
-            },
-            Error::Unsupported("function constants"),
-        ),
-        (
-            Specialization {
-                stage_in: Some(StageInputDescriptor {
-                    attributes: Vec::new(),
-                    layouts: Vec::new(),
-                    index_type: IndexType::UInt16,
-                    index_buffer_index: 0,
-                }),
-                ..Specialization::default()
-            },
-            Error::Unsupported("kernel stage-in"),
-        ),
-    ];
-    for (specialization, error) in refused {
-        assert_eq!(
-            compiler.compile(library, "kernel", &specialization),
-            Err(error)
-        );
-    }
+    let stage_in = Specialization {
+        stage_in: Some(StageInputDescriptor {
+            attributes: Vec::new(),
+            layouts: Vec::new(),
+            index_type: IndexType::UInt16,
+            index_buffer_index: 0,
+        }),
+        ..Specialization::default()
+    };
+    assert_eq!(
+        compiler.compile(library, "kernel", &stage_in),
+        Err(Error::Unsupported("kernel stage-in"))
+    );
     let specialization = Specialization::default();
     assert_eq!(
         compiler.reflect(library, "missing", &specialization),
@@ -556,7 +580,7 @@ fn post_tessellation_vertex_functions_are_unsupported() {
 #[test]
 fn malformed_reflections_are_refused() {
     let (mut compiler, library) = with_library();
-    let edits: [fn(&mut ffi::Reflection); 5] = [
+    let edits: [fn(&mut ffi::Reflection); 6] = [
         |r| r.stage = 4,
         |r| r.buffer_count = 32,
         |r| {
@@ -573,6 +597,11 @@ fn malformed_reflections_are_refused() {
             r.stage = 3;
             r.buffers[0].access = 16;
             r.buffer_count = 1;
+        },
+        |r| {
+            r.stage = 3;
+            r.function_constants[0].type_bytes = 4;
+            r.function_constant_count = 1;
         },
     ];
     for edit in edits {
@@ -618,4 +647,23 @@ fn targets_follow_the_device() {
     let target = compiler(&device).target;
     assert_eq!(target.max_threadgroup_bytes, u16::MAX.into());
     assert_eq!(target.max_payload_bytes, 0);
+}
+
+#[test]
+fn function_constant_types_follow_their_spelling() {
+    for (spelling, expected) in [
+        (&b"float"[..], DataType::Float),
+        (b"uint3", DataType::UInt3),
+        (b"bool4", DataType::Bool4),
+        (b"half2", DataType::Half2),
+        (b"ulong", DataType::ULong),
+    ] {
+        assert_eq!(data_type(spelling), Ok(expected));
+    }
+    for spelling in [&b"uint5"[..], b"double", b""] {
+        assert_eq!(
+            data_type(spelling),
+            Err(Error::Unsupported("function constant type"))
+        );
+    }
 }

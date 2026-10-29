@@ -10,21 +10,21 @@
 //! The service refuses AIR it does not lower with a typed kind and a detail:
 //! the call fails with `Error::Unsupported` naming the kind, and
 //! [`AirCompiler::refusal`] keeps the detail for the frontend's `NSError`.
-//! Function constants, kernel stage-in and post-tessellation vertex functions
-//! have no AIR form the frontend lowers, so they are refused before it runs.
+//! Kernel stage-in and post-tessellation vertex functions have no AIR form
+//! the frontend lowers, so they are refused before it runs.
 pub mod ffi;
 #[cfg(test)]
 mod tests;
 
 use super::{
-    abi::TextureType,
+    abi::{DataType, TextureType},
     capabilities::ShaderFeatures,
     error::{Error, Result, require},
     library::{Air, Library},
     shader::{
-        Access, AttributeUse, BufferUse, ColorOutput, CompiledShader, Compiler, Interface,
-        NumericClass, Provenance, Scalar, Specialization, Stage, Tessellation, TessellationStages,
-        TextureUse, ThreadgroupUse, Varying,
+        Access, AttributeUse, BufferUse, ColorOutput, CompiledShader, Compiler, FunctionConstant,
+        Interface, NumericClass, Provenance, Scalar, Specialization, Stage, Tessellation,
+        TessellationStages, TextureUse, ThreadgroupUse, Varying,
     },
     vulkan::{object::ShaderCode, physical::PhysicalDevice},
 };
@@ -215,6 +215,15 @@ impl Compiler for AirCompiler {
                 per_primitive: varying.per_primitive.into(),
             })
             .collect();
+        let constants: Vec<_> = specialization
+            .constants
+            .iter()
+            .map(|(index, value)| ffi::ConstantValue {
+                index: *index,
+                bytes: value.as_ptr().cast(),
+                size: value.len(),
+            })
+            .collect();
         let count = |len: usize| u32::try_from(len).map_err(|_| MALFORMED);
         let raw = ffi::Specialization {
             workgroup_size: specialization.workgroup_size.unwrap_or_default(),
@@ -224,12 +233,14 @@ impl Compiler for AirCompiler {
             varying_count: count(varyings.len())?,
             amplified: specialization.amplified.into(),
             launched_by_grid: specialization.launched_by_grid.into(),
+            constant_count: count(constants.len())?,
+            constants: constants.as_ptr(),
         };
         let mut error = ffi::AirError::NONE;
         let air = selected.air.bitcode;
-        // SAFETY: the AIR, entry, target and specialization, with the arrays
-        // and identifiers it points to, outlive the call, which writes only
-        // the error.
+        // SAFETY: the AIR, entry, target and specialization, with the arrays,
+        // identifiers and values it points to, outlive the call, which writes
+        // only the error.
         let shader = unsafe {
             (self.service.compile)(
                 air.as_ptr().cast(),
@@ -282,7 +293,6 @@ fn select<'a>(
     entry: &str,
     specialization: &Specialization,
 ) -> Result<Selected<'a>> {
-    require(specialization.constants.is_empty(), "function constants")?;
     require(specialization.stage_in.is_none(), "kernel stage-in")?;
     let data = libraries
         .get(&library)
@@ -419,6 +429,30 @@ fn components(count: u32) -> Result<u8> {
         .ok_or(MALFORMED)
 }
 
+/// The `MTLDataType` of a function constant's MSL type spelling, as
+/// `float`, `uint3` or `bool2`.
+fn data_type(spelling: &[u8]) -> Result<DataType> {
+    let (scalar, lanes) = match spelling.split_last() {
+        Some((lanes @ b'2'..=b'4', scalar)) => (scalar, u64::from(lanes - b'0')),
+        _ => (spelling, 1),
+    };
+    let scalar = match scalar {
+        b"float" => DataType::Float,
+        b"half" => DataType::Half,
+        b"int" => DataType::Int,
+        b"uint" => DataType::UInt,
+        b"short" => DataType::Short,
+        b"ushort" => DataType::UShort,
+        b"char" => DataType::Char,
+        b"uchar" => DataType::UChar,
+        b"bool" => DataType::Bool,
+        b"long" => DataType::Long,
+        b"ulong" => DataType::ULong,
+        _ => return Err(Error::Unsupported("function constant type")),
+    };
+    DataType::vector(scalar, lanes).ok_or(MALFORMED)
+}
+
 /// `enum stela_air_texture_type`.
 fn texture_type(raw: u32) -> Result<TextureType> {
     const TYPES: [TextureType; 10] = [
@@ -500,6 +534,18 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let constants = rows(&r.function_constants, r.function_constant_count)?
+        .iter()
+        .map(|constant| {
+            let constant_name = name(r, constant.name, constant.name_bytes)?;
+            Ok(FunctionConstant {
+                name: String::from(str::from_utf8(constant_name).map_err(|_| MALFORMED)?),
+                data_type: data_type(name(r, constant.type_name, constant.type_bytes)?)?,
+                index: constant.index,
+                required: constant.required != 0,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let features = match stage {
         Stage::Kernel => ShaderFeatures::COMPUTE,
         Stage::Vertex | Stage::Fragment => ShaderFeatures::VERTEX_FRAGMENT,
@@ -543,6 +589,7 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
         static_threadgroup_bytes: r.threadgroup_bytes,
         max_total_threads: (r.max_total_threads != 0).then_some(r.max_total_threads),
         amplification: r.amplification != 0,
+        constants,
         features,
     };
     interface.validate()?;

@@ -21,7 +21,8 @@ enum stela_metal_function_stage {
 #define STELA_METAL_VARYINGS 32u
 /* Eight render targets and the second source of dual-source blending. */
 #define STELA_METAL_COLOR_OUTPUTS 9u
-#define STELA_METAL_NAME_BYTES 4096u
+#define STELA_METAL_FUNCTION_CONSTANTS 256u
+#define STELA_METAL_NAME_BYTES 8192u
 
 /* Access flags, as shader.rs Access. */
 #define STELA_METAL_ACCESS_READ 1u
@@ -54,15 +55,21 @@ struct stela_metal_color_output {
    uint32_t index, primitive, dual_source;
 };
 
-/* One function's reflection. names holds the varying identifiers and the
- * module's llvm.ident, whose bytes are zero when it records none. */
+/* A function constant: its name and MSL type spelling are in names. */
+struct stela_metal_function_constant {
+   uint32_t index, name, name_bytes, type, type_bytes, required;
+};
+
+/* One function's reflection. names holds the varying identifiers, the
+ * function constants' names and types and the module's llvm.ident, whose
+ * bytes are zero when it records none. */
 struct stela_metal_reflection {
    uint32_t stage, max_total_threads;
    uint64_t threadgroup_bytes;
    uint32_t buffer_count, texture_count, sampler_count, threadgroup_count;
    uint32_t attribute_count, varying_count, color_output_count;
    uint32_t writes_depth, writes_stencil, writes_sample_mask, discards, amplification;
-   uint32_t ident, ident_bytes, names_bytes;
+   uint32_t ident, ident_bytes, names_bytes, function_constant_count;
    struct stela_metal_buffer_use buffers[STELA_METAL_BUFFERS];
    struct stela_metal_texture_use textures[STELA_METAL_TEXTURES];
    uint32_t samplers[STELA_METAL_SAMPLERS];
@@ -70,9 +77,10 @@ struct stela_metal_reflection {
    struct stela_metal_attribute_use attributes[STELA_METAL_ATTRIBUTES];
    struct stela_metal_varying varyings[STELA_METAL_VARYINGS];
    struct stela_metal_color_output color_outputs[STELA_METAL_COLOR_OUTPUTS];
+   struct stela_metal_function_constant function_constants[STELA_METAL_FUNCTION_CONSTANTS];
    char names[STELA_METAL_NAME_BYTES];
 };
-#define STELA_METAL_REFLECTION_BYTES 8024u
+#define STELA_METAL_REFLECTION_BYTES 18272u
 
 /* The target's facts, fixed for a device. nir is the Vulkan driver's
  * compiler options, which must outlive every shader compiled with them. */
@@ -95,16 +103,19 @@ struct stela_metal_linked_varying {
 };
 #define STELA_METAL_LINKED_VARYING_BYTES 24u
 
-/* shader.rs Specialization, less what the service refuses: function
- * constants are values of AIR the frontend refuses, and kernels' stage-in. */
+#define STELA_METAL_CONSTANT_VALUE_BYTES 24u
+
+/* shader.rs Specialization, less kernels' stage-in, which the frontend
+ * refuses. */
 struct stela_metal_specialization {
    uint32_t workgroup_size[3];
    uint32_t threadgroup_length_count;
    const struct stela_metal_threadgroup_length *threadgroup_lengths;
    const struct stela_metal_linked_varying *varyings;
-   uint32_t varying_count, amplified, launched_by_grid;
+   uint32_t varying_count, amplified, launched_by_grid, constant_count;
+   const struct stela_air_constant_value *constants;
 };
-#define STELA_METAL_SPECIALIZATION_BYTES 48u
+#define STELA_METAL_SPECIALIZATION_BYTES 56u
 
 /* Reflects entry of the AIR module. False after reporting why in error. */
 bool stela_metal_reflect(const void *air, size_t size, const char *entry,

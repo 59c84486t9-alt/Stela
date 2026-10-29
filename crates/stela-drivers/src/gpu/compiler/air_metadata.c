@@ -191,6 +191,8 @@ stela_air_metadata_globals(struct stela_air_metadata *t, bool *threadgroup)
       struct stela_air_global info;
       if (++count > AIR_MAX_ARGUMENTS)
          return fail(t, STELA_AIR_LIMIT, "global count exceeded");
+      if (stela_air_metadata_is_function_constant(t, global))
+         continue;
       if (!stela_air_metadata_global(t, global, &info))
          return false;
       *threadgroup |= !info.constant;
@@ -284,7 +286,7 @@ stela_air_metadata_validate(struct stela_air_metadata *t)
       const char *name = LLVMGetNamedMetadataName(node, &size);
       const char *allowed[] = {"air.version", "air.language_version",
                               "air.compile_options", "air.kernel", "llvm.ident",
-                              "llvm.module.flags"};
+                              "llvm.module.flags", "air.function_constants"};
       const char *render[] = {"air.vertex", "air.fragment", "air.object", "air.mesh"};
       bool found = false;
       for (unsigned i = 0; i < ARRAY_SIZE(allowed); i++)
@@ -295,8 +297,11 @@ stela_air_metadata_validate(struct stela_air_metadata *t)
          return fail(t, STELA_AIR_METADATA, "unsupported module metadata: %.*s",
                      (int)MIN2(size, 160), name);
    }
+   struct stela_air_function_constant constants[AIR_MAX_FUNCTION_CONSTANTS];
+   unsigned constant_count;
    if (!version_metadata(t, "air.version", false) ||
-       !version_metadata(t, "air.language_version", true) || !module_flags(t))
+       !version_metadata(t, "air.language_version", true) || !module_flags(t) ||
+       !stela_air_metadata_function_constants(t, constants, NULL, &constant_count))
       return false;
    LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
    unsigned count;
@@ -611,6 +616,100 @@ metadata_text(struct stela_air_metadata *m, LLVMValueRef v, const char **s, size
    unsigned bytes;
    *s = LLVMGetMDString(v, &bytes); *n = bytes;
    return stage_text(*s, *n) || fail(m, STELA_AIR_METADATA, "invalid stage metadata text");
+}
+
+/* A function constant's storage: an integer, half or float scalar, or a
+ * vector of two to four. */
+static bool
+function_constant_type(LLVMTypeRef type)
+{
+   if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
+      unsigned lanes = LLVMGetVectorSize(type);
+      if (lanes < 2 || lanes > 4)
+         return false;
+      type = LLVMGetElementType(type);
+   }
+   switch (LLVMGetTypeKind(type)) {
+   case LLVMIntegerTypeKind: {
+      unsigned width = LLVMGetIntTypeWidth(type);
+      return width == 1 || width == 8 || width == 16 || width == 32 || width == 64;
+   }
+   case LLVMHalfTypeKind:
+   case LLVMFloatTypeKind:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+function_constant_text(LLVMValueRef value, const char **text, size_t *bytes)
+{
+   if (!value || !LLVMIsAMDString(value))
+      return false;
+   unsigned length;
+   *text = LLVMGetMDString(value, &length);
+   *bytes = length;
+   return length && stage_text(*text, *bytes);
+}
+
+bool
+stela_air_metadata_function_constants(struct stela_air_metadata *t,
+                                      struct stela_air_function_constant *constants,
+                                      LLVMValueRef *storage, unsigned *count)
+{
+   LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS], globals[AIR_MAX_FUNCTION_CONSTANTS];
+   if (!stela_air_named_md(t, "air.function_constants", nodes, count))
+      return false;
+   for (unsigned i = 0; i < *count; i++) {
+      LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+      unsigned field_count, index;
+      struct stela_air_function_constant *constant = &constants[i];
+      if (!stela_air_md_node(t, nodes[i], fields, &field_count))
+         return false;
+      LLVMValueRef global = field_count == 4 || field_count == 5 ? fields[0] : NULL;
+      if (!global || !LLVMIsAGlobalVariable(global) ||
+          LLVMGetPointerAddressSpace(LLVMTypeOf(global)) != 2 || LLVMIsThreadLocal(global) ||
+          !function_constant_type(LLVMGlobalGetValueType(global)) ||
+          !function_constant_text(fields[1], &constant->type, &constant->type_bytes) ||
+          !function_constant_text(fields[2], &constant->name, &constant->name_bytes) ||
+          !stela_air_md_uint(fields[3], &index) || index > UINT16_MAX ||
+          (field_count == 5 && (!LLVMIsAConstantInt(fields[4]) ||
+                                LLVMGetIntTypeWidth(LLVMTypeOf(fields[4])) != 1)))
+         return fail(t, STELA_AIR_METADATA, "invalid function constant metadata");
+      constant->index = index;
+      constant->required = field_count == 5 && LLVMConstIntGetZExtValue(fields[4]);
+      globals[i] = global;
+      for (unsigned j = 0; j < i; j++) {
+         if (constants[j].index == index || globals[j] == global ||
+             (constants[j].name_bytes == constant->name_bytes &&
+              !memcmp(constants[j].name, constant->name, constant->name_bytes)))
+            return fail(t, STELA_AIR_METADATA, "duplicate function constant");
+      }
+      if (storage)
+         storage[i] = global;
+   }
+   return true;
+}
+
+bool
+stela_air_metadata_is_function_constant(struct stela_air_metadata *t, LLVMValueRef global)
+{
+   LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
+   unsigned count = LLVMGetNamedMetadataNumOperands(t->module, "air.function_constants");
+   if (count > AIR_MAX_METADATA_OPERANDS)
+      return false;
+   LLVMGetNamedMetadataOperands(t->module, "air.function_constants", nodes);
+   for (unsigned i = 0; i < count; i++) {
+      LLVMValueRef fields[5];
+      unsigned field_count = LLVMIsAMDNode(nodes[i]) ? LLVMGetMDNodeNumOperands(nodes[i]) : 0;
+      if (field_count < 4 || field_count > 5)
+         continue;
+      LLVMGetMDNodeOperands(nodes[i], fields);
+      if (fields[0] == global)
+         return true;
+   }
+   return false;
 }
 
 static unsigned
@@ -1827,10 +1926,15 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
       fail(&m, STELA_AIR_TARGET, "AIR version and target triple disagree");
       goto done;
    }
+   struct stela_air_function_constant constants[AIR_MAX_FUNCTION_CONSTANTS];
+   unsigned constant_count;
+   if (!stela_air_metadata_function_constants(&m, constants, NULL, &constant_count))
+      goto done;
    struct stela_air_inspection info = {
       .target = target, .target_bytes = strlen(target), .air_minor = m.air_minor,
       .language_major = m.language_major, .language_minor = m.language_minor,
       .denorms_disable = m.denorms_disable, .fast_math = m.fast_math,
+      .function_constants = constants, .function_constant_count = constant_count,
    };
    /* The identity is observational: its absence or shape refuses nothing. */
    struct stela_air_error ident_error = {0};

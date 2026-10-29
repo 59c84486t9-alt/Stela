@@ -54,6 +54,20 @@ struct stela_air_buffer {
 };
 
 
+/* A function constant: an operand of !air.function_constants,
+ * {ptr addrspace(2) @storage, !"type", !"name", i32 index[, i1 required]}, as
+ * Metal.jl's library builder reads Apple's AIR. Functions load the constant
+ * from its storage and test it with air.is_function_constant_defined. type
+ * is its MSL spelling. Linked modules record whether functions require a
+ * value; the constant is optional where they do not. */
+struct stela_air_function_constant {
+   const char *name, *type;
+   size_t name_bytes, type_bytes;
+   unsigned index;
+   bool required;
+};
+#define AIR_MAX_FUNCTION_CONSTANTS 256u
+
 /* Borrowed callback views expire on callback return. Inspection validates LLVM,
  * module/entry ABI and metadata, not executable-body support, bindings, GPU
  * capability, or compiler provenance. Only actual air.kernel entries are
@@ -67,6 +81,8 @@ struct stela_air_inspection {
    size_t ident_bytes;
    unsigned air_minor, language_major, language_minor;
    bool denorms_disable, fast_math;
+   const struct stela_air_function_constant *function_constants;
+   unsigned function_constant_count;
 };
 enum stela_air_primitive {
    STELA_AIR_PRIMITIVE_UNKNOWN,
@@ -326,6 +342,14 @@ bool stela_air_named_md(struct stela_air_metadata *m, const char *name,
                         LLVMValueRef *operands, unsigned *count);
 bool stela_air_metadata_layout(struct stela_air_metadata *m);
 bool stela_air_metadata_validate(struct stela_air_metadata *m);
+/* The module's function constants and, when storage is not NULL, the global
+ * each is stored in: an AS2 scalar or 2-4 lane vector of integers, half or
+ * float, which specialization defines. Indices, names and storage are unique. */
+bool stela_air_metadata_function_constants(struct stela_air_metadata *m,
+                                           struct stela_air_function_constant *constants,
+                                           LLVMValueRef *storage, unsigned *count);
+/* Whether global stores a function constant. */
+bool stela_air_metadata_is_function_constant(struct stela_air_metadata *m, LLVMValueRef global);
 /* One LLVM-only storage validator shared by conservative reflection and NIR.
  * These describe the qualified ABI, not compiler provenance or GPU limits.
  * No shared storage is allocated here; only actually used globals are lowered
@@ -340,7 +364,8 @@ struct stela_air_global {
 };
 bool stela_air_metadata_global(struct stela_air_metadata *m, LLVMValueRef global,
                                struct stela_air_global *info);
-/* Validates every global; `threadgroup` reports any threadgroup memory. */
+/* Validates every global but function constants' storage; `threadgroup`
+ * reports any threadgroup memory. */
 bool stela_air_metadata_globals(struct stela_air_metadata *m, bool *threadgroup);
 
 /* An argument buffer's fields: kernel->fields[first, first + count), in

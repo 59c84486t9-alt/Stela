@@ -700,3 +700,88 @@ raw_enum! {
         V4_1 = (4 << 16) + 1,
     }
 }
+
+raw_enum! {
+    /// `MTLDataType`'s scalar and vector types, the types of function
+    /// constants.
+    pub enum DataType: u64 {
+        Float = 3,
+        Float2 = 4,
+        Float3 = 5,
+        Float4 = 6,
+        Half = 16,
+        Half2 = 17,
+        Half3 = 18,
+        Half4 = 19,
+        Int = 29,
+        Int2 = 30,
+        Int3 = 31,
+        Int4 = 32,
+        UInt = 33,
+        UInt2 = 34,
+        UInt3 = 35,
+        UInt4 = 36,
+        Short = 37,
+        Short2 = 38,
+        Short3 = 39,
+        Short4 = 40,
+        UShort = 41,
+        UShort2 = 42,
+        UShort3 = 43,
+        UShort4 = 44,
+        Char = 45,
+        Char2 = 46,
+        Char3 = 47,
+        Char4 = 48,
+        UChar = 49,
+        UChar2 = 50,
+        UChar3 = 51,
+        UChar4 = 52,
+        Bool = 53,
+        Bool2 = 54,
+        Bool3 = 55,
+        Bool4 = 56,
+        Long = 81,
+        Long2 = 82,
+        Long3 = 83,
+        Long4 = 84,
+        ULong = 85,
+        ULong2 = 86,
+        ULong3 = 87,
+        ULong4 = 88,
+    }
+}
+
+impl DataType {
+    /// The scalar type and the bytes of one lane.
+    const fn scalar(self) -> (Self, usize) {
+        match self.raw() {
+            3..=6 => (Self::Float, 4),
+            16..=19 => (Self::Half, 2),
+            29..=32 => (Self::Int, 4),
+            33..=36 => (Self::UInt, 4),
+            37..=40 => (Self::Short, 2),
+            41..=44 => (Self::UShort, 2),
+            45..=48 => (Self::Char, 1),
+            49..=52 => (Self::UChar, 1),
+            53..=56 => (Self::Bool, 1),
+            81..=84 => (Self::Long, 8),
+            _ => (Self::ULong, 8),
+        }
+    }
+
+    /// The type of `lanes` lanes of `scalar`, a scalar type.
+    pub fn vector(scalar: Self, lanes: u64) -> Option<Self> {
+        if (1..=4).contains(&lanes) {
+            Self::from_raw(scalar.scalar().0.raw() + lanes - 1)
+        } else {
+            None
+        }
+    }
+
+    /// The bytes of one lane and the lane count.
+    pub const fn lanes(self) -> (usize, usize) {
+        let (scalar, bytes) = self.scalar();
+        (bytes, (self.raw() - scalar.raw()) as usize + 1)
+    }
+}

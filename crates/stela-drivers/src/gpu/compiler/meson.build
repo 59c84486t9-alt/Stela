@@ -171,7 +171,8 @@ if stela_air_llvm != ''
   )
   stela_air = static_library(
     'stela_air_to_nir',
-    ['air_to_nir.c', 'air_metadata.c', 'air_texture.c', 'air_call.c', 'air_math.c', 'air_simd.c'],
+    ['air_to_nir.c', 'air_metadata.c', 'air_texture.c', 'air_call.c', 'air_math.c', 'air_simd.c',
+     'air_constants.c'],
     include_directories : [inc_include, inc_src, inc_gpu],
     dependencies : [idep_nir, idep_mesautil, stela_air_llvm_dep],
   )

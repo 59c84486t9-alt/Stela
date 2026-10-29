@@ -5,11 +5,11 @@ use super::{
 };
 use crate::gpu::metal::{
     abi::{
-        CpuCacheMode, DispatchType, HazardTrackingMode, HeapType, IndirectCommandType, LoadAction,
-        MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, PrimitiveTopologyClass,
-        PrimitiveType, ResourceOptions, SparsePageSize, SparseTextureMappingMode, StorageMode,
-        StoreAction, StoreActionOptions, SwizzleChannels, TessellationPartitionMode, TextureType,
-        TextureUsage,
+        CpuCacheMode, DataType, DispatchType, HazardTrackingMode, HeapType, IndirectCommandType,
+        LoadAction, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter,
+        PrimitiveTopologyClass, PrimitiveType, ResourceOptions, SparsePageSize,
+        SparseTextureMappingMode, StorageMode, StoreAction, StoreActionOptions, SwizzleChannels,
+        TessellationPartitionMode, TextureType, TextureUsage,
     },
     capabilities::{ShaderFeatures, Size},
     command_buffer::{
@@ -27,8 +27,9 @@ use crate::gpu::metal::{
     resource::TextureDescriptor,
     sampler::SamplerDescriptor,
     shader::{
-        Access, BufferUse, CompiledShader, Interface, Patch, PatchDomain, Provenance, Scalar,
-        Specialization, Stage, Tessellation, TessellationStages, Varying, tests::interface,
+        Access, BufferUse, CompiledShader, FunctionConstant, Interface, Patch, PatchDomain,
+        Provenance, Scalar, Specialization, Stage, Tessellation, TessellationStages, Varying,
+        tests::interface,
     },
     sparse::{MappingUpdate, SparseRegion},
     vulkan::{
@@ -232,8 +233,9 @@ impl Backend for MockBackend {
 }
 
 /// Reflects functions by name: `"kernel"`, `"vertex"`, `"fragment"`,
-/// `"object"`, `"mesh"`, the post-tessellation `"patch"` and `"unlinked"`, a
-/// fragment function reading a varying nothing outputs.
+/// `"object"`, `"mesh"`, the post-tessellation `"patch"`, `"unlinked"`, a
+/// fragment function reading a varying nothing outputs, and `"constants"`, a
+/// kernel with a required and an optional function constant.
 #[derive(Default)]
 struct MockCompiler {
     compiled: Vec<Specialization>,
@@ -248,6 +250,7 @@ fn reflected(entry: &str) -> Result<Interface> {
         "fragment" | "unlinked" => Stage::Fragment,
         "object" => Stage::Object,
         "mesh" => Stage::Mesh,
+        "constants" => Stage::Kernel,
         _ => return Err(Error::Invalid("no such function")),
     };
     let mut interface = interface(stage);
@@ -269,6 +272,18 @@ fn reflected(entry: &str) -> Result<Interface> {
         "unlinked" => alloc::vec![varying("user(missing)", false)],
         _ => Vec::new(),
     };
+    if entry == "constants" {
+        let constant = |name: &str, data_type, index, required| FunctionConstant {
+            name: String::from(name),
+            data_type,
+            index,
+            required,
+        };
+        interface.constants = alloc::vec![
+            constant("scale", DataType::UInt, 0, true),
+            constant("tint", DataType::Half3, 1, false),
+        ];
+    }
     if stage == Stage::Kernel {
         interface.buffers = alloc::vec![BufferUse {
             index: 0,
@@ -643,6 +658,36 @@ fn amplified_pipelines_compile_amplified_vertex_functions() {
         .map(|specialization| specialization.amplified)
         .collect();
     assert_eq!(amplified, [true, false]);
+}
+
+#[test]
+fn functions_take_values_for_their_function_constants() {
+    let mut device = device();
+    let scale = (0, alloc::vec![2, 0, 0, 0]);
+    let refused = [
+        (Vec::new(), "a required function constant has no value"),
+        (
+            alloc::vec![(0, alloc::vec![2, 0])],
+            "a function constant value of another type",
+        ),
+        (
+            alloc::vec![scale.clone(), scale.clone()],
+            "a function constant has two values",
+        ),
+    ];
+    for (constants, reason) in refused {
+        assert_eq!(
+            device.new_function(1, "constants", constants),
+            Err(Error::Invalid(reason))
+        );
+    }
+    // tint is optional; values of constants the function lacks are ignored.
+    for constants in [
+        alloc::vec![scale.clone()],
+        alloc::vec![scale.clone(), (1, alloc::vec![0; 8]), (9, alloc::vec![1])],
+    ] {
+        assert!(device.new_function(1, "constants", constants).is_ok());
+    }
 }
 
 #[test]
