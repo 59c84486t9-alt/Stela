@@ -30,6 +30,32 @@ pub struct EarlyFault {
     pub address: Option<u64>,
 }
 
+/// A published record whose contents cannot describe a CPU exception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordError {
+    Frame { mode: u32, vector: u32 },
+    Publication { seal: u32 },
+}
+
+impl core::fmt::Display for RecordError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Frame { mode, vector } => write!(
+                f,
+                "early AP exception has mode {mode} and vector {vector}; expected mode 32 or 64 and vector below {EXCEPTIONS}"
+            ),
+            Self::Publication { seal } => {
+                write!(
+                    f,
+                    "early AP exception has invalid publication value {seal:#x}"
+                )
+            }
+        }
+    }
+}
+
+impl core::error::Error for RecordError {}
+
 pub fn gate32(handler: u32) -> [u8; 8] {
     let low = handler as u16;
     let high = (handler >> 16) as u16;
@@ -59,9 +85,9 @@ fn decode(
     error: u64,
     pc: u64,
     address: u64,
-) -> Result<EarlyFault, &'static str> {
+) -> Result<EarlyFault, RecordError> {
     if !matches!(mode, 32 | 64) || vector >= EXCEPTIONS as u32 {
-        return Err("malformed sealed early AP exception");
+        return Err(RecordError::Frame { mode, vector });
     }
     Ok(EarlyFault {
         mode: mode as u8,
@@ -75,12 +101,14 @@ fn decode(
 /// The record is the actual aligned owned SIPI allocation, not arbitrary bytes.
 /// The AP is the sole claimant; its assembly latches the first exception and
 /// never changes payload after publishing SEALED, including later NMI entry.
-pub unsafe fn read(record: *const Record) -> Result<Option<EarlyFault>, &'static str> {
+pub unsafe fn read(record: *const Record) -> Result<Option<EarlyFault>, RecordError> {
+    // SAFETY: the caller retains an aligned live Record; its seal is atomic
+    // while the AP may still be publishing the payload.
     let seal = unsafe { &(*record).seal }.load(Ordering::Acquire);
     match seal {
         0 | WRITING => Ok(None),
         SEALED => {
-            // Acquire observes completed immutable publication. No Rust RAM
+            // SAFETY: Acquire observes completed immutable publication. No Rust RAM
             // references cross concurrent AP writes while the seal is pending.
             let fault = unsafe {
                 decode(
@@ -93,13 +121,20 @@ pub unsafe fn read(record: *const Record) -> Result<Option<EarlyFault>, &'static
             }?;
             Ok(Some(fault))
         }
-        _ => Err("invalid early AP exception publication"),
+        seal => Err(RecordError::Publication { seal }),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn observed(record: &Record) -> Result<Option<EarlyFault>, RecordError> {
+        // SAFETY: every test record is aligned, live, and owned by this thread;
+        // there is no AP or other writer, including after publishing SEALED.
+        unsafe { read(record) }
+    }
+
     #[test]
     fn exact_exception_error_slots_and_mode_gates_follow_cpu_frames() {
         assert_eq!(core::mem::size_of::<Record>(), 40);
@@ -114,8 +149,20 @@ mod tests {
             assert_eq!(fault.error, errors.contains(&vector).then_some(0x45));
             assert_eq!(fault.address, (vector == 14).then_some(0x23456));
         }
-        assert!(decode(16, 13, 0, 0, 0).is_err());
-        assert!(decode(64, 32, 0, 0, 0).is_err());
+        assert_eq!(
+            decode(16, 13, 0, 0, 0),
+            Err(RecordError::Frame {
+                mode: 16,
+                vector: 13
+            })
+        );
+        assert_eq!(
+            decode(64, 32, 0, 0, 0),
+            Err(RecordError::Frame {
+                mode: 64,
+                vector: 32
+            })
+        );
         let address = 0x98765432;
         let legacy = gate32(address);
         assert_eq!(&legacy[2..6], &[0x18, 0, 0, 0x8e]);
@@ -146,12 +193,12 @@ mod tests {
             pc: 0xabcdef,
             address: 0x123456,
         };
-        assert_eq!(unsafe { read(&record) }, Ok(None));
+        assert_eq!(observed(&record), Ok(None));
         record.seal.store(WRITING, Ordering::Release);
-        assert_eq!(unsafe { read(&record) }, Ok(None));
+        assert_eq!(observed(&record), Ok(None));
         record.seal.store(SEALED, Ordering::Release);
         assert_eq!(
-            unsafe { read(&record) },
+            observed(&record),
             Ok(Some(EarlyFault {
                 mode: 64,
                 vector: 13,
@@ -161,11 +208,8 @@ mod tests {
             }))
         );
         record.vector = 14;
-        assert_eq!(
-            unsafe { read(&record) }.unwrap().unwrap().address,
-            Some(0x123456)
-        );
+        assert_eq!(observed(&record).unwrap().unwrap().address, Some(0x123456));
         record.seal.store(2, Ordering::Release);
-        assert!(unsafe { read(&record) }.is_err());
+        assert_eq!(observed(&record), Err(RecordError::Publication { seal: 2 }));
     }
 }

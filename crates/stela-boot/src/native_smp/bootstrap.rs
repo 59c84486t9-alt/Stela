@@ -448,7 +448,9 @@ pub(crate) unsafe fn prepare(
 ///
 /// # Safety
 /// `mapped` is the retained actual owned SIPI page, prepared for this one AP.
-pub(crate) unsafe fn failure(mapped: *const u8) -> Result<Option<EarlyFault>, &'static str> {
+pub(crate) unsafe fn failure(mapped: *const u8) -> Result<Option<EarlyFault>, early::RecordError> {
+    // SAFETY: the caller retains this AP's owned SIPI page, whose assembly
+    // publishes the aligned record once and leaves its sealed payload immutable.
     unsafe { early::read(mapped.add(offset(&raw const stela_ap_fault_record)).cast()) }
 }
 

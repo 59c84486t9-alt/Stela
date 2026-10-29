@@ -32,6 +32,10 @@ const ENTERED: u8 = 4;
 pub(crate) enum StartupFailure {
     Resources,
     Bootstrap(&'static str),
+    FaultRecord {
+        slot: usize,
+        cause: stela_boot_core::early_fault::RecordError,
+    },
     EarlyException {
         slot: usize,
         cause: bootstrap::EarlyFault,
@@ -551,7 +555,7 @@ pub(crate) unsafe fn start(
             // AP/low-page resource whose execution remains uncertain.
             if let Some(cause) =
                 unsafe { bootstrap::failure(layout::physical(physical) as *const u8) }
-                    .map_err(StartupFailure::Bootstrap)?
+                    .map_err(|cause| StartupFailure::FaultRecord { slot, cause })?
             {
                 return Err(StartupFailure::EarlyException { slot, cause });
             }
