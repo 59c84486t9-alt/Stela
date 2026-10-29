@@ -11,7 +11,8 @@
 use super::{CS_HASHTYPE_SHA1, CS_HASHTYPE_SHA256, CS_HASHTYPE_SHA384, ber_children, ber_element};
 use crate::rsa::{self, Hash, Key};
 use alloc::vec::Vec;
-use sha2::{Digest as _, Sha256, Sha384};
+use sha2::{Digest as _, Sha384};
+use stela_crypto::Sha256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Error {
@@ -132,7 +133,7 @@ fn algorithm(contents: &[u8]) -> Result<&[u8], Error> {
 
 fn digest(oid: &[u8], message: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(match oid {
-        SHA1 => sha1::Sha1::digest(message).to_vec(),
+        SHA1 => stela_crypto::Sha1::digest(message).to_vec(),
         SHA256 => Sha256::digest(message).to_vec(),
         SHA384 => Sha384::digest(message).to_vec(),
         _ => return Err(Error::DigestAlgorithm),

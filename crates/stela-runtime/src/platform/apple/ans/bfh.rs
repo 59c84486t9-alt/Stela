@@ -23,7 +23,8 @@
 //! length, CRC32C and SHA-256 as the loaded image's identity and leaves
 //! the medium unchanged. NVMe 1.4 section 5.11 discards an uncommitted
 //! download on a controller-level reset, and so does the model.
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use stela_crypto::Sha256;
 
 pub(super) const SECTIONS: usize = 3;
 /// `BuildCommandFirmwareActivate` CDW10 for slot 0, commit action 1:

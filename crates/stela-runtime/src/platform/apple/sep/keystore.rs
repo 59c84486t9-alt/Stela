@@ -65,7 +65,8 @@ use super::{
     transaction::{Answer, Payload, Refusal},
 };
 use alloc::{string::String, vec, vec::Vec};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use stela_crypto::Sha256;
 use zeroize::Zeroizing;
 
 /// Stela's catalog ID for the service, after the xART pair.

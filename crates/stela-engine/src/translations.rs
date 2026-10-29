@@ -10,7 +10,7 @@
 pub mod pack;
 
 use alloc::{string::String, vec::Vec};
-use sha2::{Digest as _, Sha256};
+use sha2::Digest as _;
 use stela_compiler::block::Features;
 use stela_compiler::{
     GuestAddress, NativeBlock,
@@ -20,6 +20,7 @@ use stela_compiler::{
     },
     x86_64::chain::DirectExit,
 };
+use stela_crypto::Sha256;
 
 /// The bytes of the fetch page a record covers: no block leaves it.
 pub const PAGE_BYTES: usize = 4096;

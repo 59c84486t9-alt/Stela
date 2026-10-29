@@ -19,7 +19,8 @@ use super::{
     },
 };
 use alloc::{boxed::Box, vec, vec::Vec};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use stela_crypto::Sha256;
 use stela_drivers::block::{BlockDevice, Shared};
 use zeroize::Zeroizing;
 

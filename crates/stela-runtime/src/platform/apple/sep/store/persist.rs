@@ -12,7 +12,8 @@
 //! provides durability and torn-write/older-bank protection only.
 use super::{Backend, Head};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use stela_crypto::Sha256;
 use stela_drivers::block::BlockDevice;
 
 const MAGIC: &[u8; 8] = b"STXARTB1";

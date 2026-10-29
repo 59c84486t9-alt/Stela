@@ -23,7 +23,8 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use sha2::{Digest as _, Sha256};
+use sha2::Digest as _;
+use stela_crypto::Sha256;
 
 pub const MAGIC: [u8; 8] = *b"STLTPACK";
 pub const SCHEMA: u32 = 1;

@@ -13,7 +13,7 @@ pub mod persist;
 use super::{Entropy, keys::Roots};
 use alloc::{collections::BTreeMap, vec::Vec};
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use stela_crypto::Sha256;
 use zeroize::Zeroizing;
 
 const MAGIC: &[u8; 8] = b"STSEPN02";

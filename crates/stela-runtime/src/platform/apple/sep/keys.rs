@@ -6,7 +6,7 @@
 //! domains with HMAC-SHA256. docs/research/sep.md defines this Stela policy.
 //! This primitive grants no Image4 trust, AKS wrapping format or keybag state.
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use stela_crypto::Sha256;
 use zeroize::Zeroizing;
 
 const UID_DOMAIN: &[u8] = b"Stela SEP UID v1\0";

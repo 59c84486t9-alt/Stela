@@ -41,7 +41,8 @@ use core::{
     convert::Infallible,
     fmt::{self, Write as _},
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use stela_crypto::Sha256;
 use stela_drivers::block::{BlockDevice, BlockError, Finished, Request};
 use {crate::machine::apple::sep_state, stela_soc_data::nor::CAPACITY};
 

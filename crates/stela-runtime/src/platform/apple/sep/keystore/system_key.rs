@@ -20,7 +20,7 @@ use super::{
 use alloc::{format, string::String};
 use hmac::{Hmac, Mac};
 use p256::{SecretKey, elliptic_curve::sec1::ToEncodedPoint};
-use sha2::Sha256;
+use stela_crypto::Sha256;
 use zeroize::Zeroizing;
 
 pub(super) const PERFORM_OPERATION: u8 = 0x22;

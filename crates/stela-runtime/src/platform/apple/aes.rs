@@ -185,17 +185,17 @@ enum Mode {
 }
 
 enum Cipher {
-    Aes128(aes::Aes128),
-    Aes192(aes::Aes192),
-    Aes256(aes::Aes256),
+    Aes128(stela_crypto::Aes128),
+    Aes192(stela_crypto::Aes192),
+    Aes256(stela_crypto::Aes256),
 }
 
 impl Cipher {
     fn new(key: &[u8]) -> Option<Self> {
         Some(match key.len() {
-            16 => Self::Aes128(aes::Aes128::new_from_slice(key).ok()?),
-            24 => Self::Aes192(aes::Aes192::new_from_slice(key).ok()?),
-            32 => Self::Aes256(aes::Aes256::new_from_slice(key).ok()?),
+            16 => Self::Aes128(stela_crypto::Aes128::new_from_slice(key).ok()?),
+            24 => Self::Aes192(stela_crypto::Aes192::new_from_slice(key).ok()?),
+            32 => Self::Aes256(stela_crypto::Aes256::new_from_slice(key).ok()?),
             _ => return None,
         })
     }

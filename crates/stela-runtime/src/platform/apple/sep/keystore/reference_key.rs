@@ -26,7 +26,7 @@ use p256::{
         subtle::{Choice, ConditionallySelectable},
     },
 };
-use sha2::Sha256;
+use stela_crypto::Sha256;
 use zeroize::Zeroizing;
 
 pub(super) const CLASS: u32 = 13;

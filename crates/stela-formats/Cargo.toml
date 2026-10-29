@@ -13,6 +13,7 @@ test-support = []
 std = ["serde/std", "serde_json/std", "stela-contracts/std"]
 
 [dependencies]
+stela-crypto = { path = "../stela-crypto" }
 stela-contracts = { path = "../stela-contracts", default-features = false }
 serde.workspace = true
 serde_json = { version = "1", default-features = false, features = ["alloc"] }

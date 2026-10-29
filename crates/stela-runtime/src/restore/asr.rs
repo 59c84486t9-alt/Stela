@@ -9,7 +9,7 @@ use super::{
 };
 use alloc::{collections::VecDeque, string::String, vec::Vec};
 use core::task::Poll;
-use sha1::{Digest, Sha1};
+use stela_crypto::{Sha1, digest::Digest};
 use stela_formats::payload::ReadAt;
 pub const PORT: u16 = 12345;
 pub const CHUNK_BYTES: usize = 128 * 1024;

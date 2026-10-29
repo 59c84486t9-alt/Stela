@@ -16,7 +16,8 @@
 //! ticket, unchanged: the guest authenticates it.
 use super::{Error, Result, plist, plist::Value, store::Identity};
 use alloc::{format, string::String, vec::Vec};
-use sha2::{Digest, Sha256, Sha384};
+use sha2::{Digest, Sha384};
+use stela_crypto::Sha256;
 
 pub const HOST: &str = "gs.apple.com";
 /// libtatsu's plain-HTTP URL; the ticket it returns is signed, and the guest

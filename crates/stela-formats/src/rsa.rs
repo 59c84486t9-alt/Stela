@@ -6,7 +6,8 @@ use crypto_bigint::{
     Encoding, U4096,
     modular::runtime_mod::{DynResidue, DynResidueParams},
 };
-use sha2::{Digest, Sha256, Sha384};
+use sha2::{Digest, Sha384};
+use stela_crypto::Sha256;
 
 /// RSA public-key or PKCS#1 v1.5 verification failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,7 +136,7 @@ impl Key {
             .to_be_bytes();
         let mut expected = [0xff; MAX_BYTES];
         let (prefix, digest) = match hash {
-            Hash::Sha1 => (SHA1_INFO, sha1::Sha1::digest(message).to_vec()),
+            Hash::Sha1 => (SHA1_INFO, stela_crypto::Sha1::digest(message).to_vec()),
             Hash::Sha256 => (SHA256_INFO, Sha256::digest(message).to_vec()),
             Hash::Sha384 => (SHA384_INFO, Sha384::digest(message).to_vec()),
         };

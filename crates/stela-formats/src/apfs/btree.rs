@@ -17,7 +17,8 @@ use super::{
 use crate::payload::ReadAt;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
-use sha2::{Digest, Sha256, Sha384, Sha512, Sha512_256};
+use sha2::{Digest, Sha384, Sha512, Sha512_256};
+use stela_crypto::Sha256;
 
 pub const BTNODE_ROOT: u16 = 0x0001;
 pub const BTNODE_LEAF: u16 = 0x0002;

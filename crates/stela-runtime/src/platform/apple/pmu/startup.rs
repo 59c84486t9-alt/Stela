@@ -9,7 +9,8 @@
 use super::{FirmwareStartup, firmware::FirmwareMemory};
 use alloc::{vec, vec::Vec};
 use core::ops::Range;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use stela_crypto::Sha256;
 mod clock;
 mod integrity;
 use stela_soc_data::pmu::PmicEpoch;

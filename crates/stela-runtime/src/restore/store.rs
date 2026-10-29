@@ -28,7 +28,8 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use sha2::{Digest, Sha256, Sha384};
+use sha2::{Digest, Sha384};
+use stela_crypto::Sha256;
 use {
     stela_formats::payload::MemberRead, stela_formats::payload::PayloadManifest,
     stela_formats::payload::Purpose, stela_formats::payload::ReadAt,

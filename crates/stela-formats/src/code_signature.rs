@@ -5,8 +5,8 @@
 //! Apple signed it ([`cms`]). Page hashes are not checked here.
 use alloc::{format, string::String, vec::Vec};
 use serde::Serialize;
-use sha1::{Digest as _, Sha1};
-use sha2::Sha256;
+use stela_crypto::Sha256;
+use stela_crypto::{Sha1, digest::Digest as _};
 
 mod cms;
 
