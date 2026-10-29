@@ -36,7 +36,7 @@ use super::{
         object::{ColorBlendAttachment, GraphicsPipelineInfo, ShaderCode, VertexInput},
     },
 };
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 pub const MAX_COLOR_ATTACHMENTS: usize = 8;
 
@@ -413,6 +413,27 @@ fn stage_in(function: &Interface, declared: &[Attribute]) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// Links the varyings a vertex or mesh function outputs to those its
+/// fragment function reads, by identifier as Metal links them: each output
+/// takes the location of its position, and each input must name an output
+/// of its type.
+pub fn link_varyings(producer: &Interface, consumer: Option<&Interface>) -> Result<Vec<String>> {
+    for input in consumer.iter().flat_map(|consumer| &consumer.varyings) {
+        ensure(
+            producer.varyings.iter().any(|output| {
+                (&output.identifier, output.scalar, output.components)
+                    == (&input.identifier, input.scalar, input.components)
+            }),
+            "fragment input without a matching vertex or mesh output",
+        )?;
+    }
+    Ok(producer
+        .varyings
+        .iter()
+        .map(|output| output.identifier.clone())
+        .collect())
 }
 
 pub fn mesh_render_pipeline(

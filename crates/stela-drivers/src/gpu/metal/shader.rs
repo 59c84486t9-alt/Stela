@@ -20,7 +20,7 @@ use super::{
     vertex::{StageInputDescriptor, VertexDescriptor},
     vulkan::{ShaderStages, object::ShaderCode},
 };
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 raw_enum! {
     /// The Metal function types that become pipeline stages.
@@ -137,6 +137,31 @@ pub struct ColorOutput {
     pub dual_source: bool,
 }
 
+/// The scalar type of a varying's components.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Scalar {
+    Float,
+    Half,
+    Int,
+    Uint,
+    Short,
+    Ushort,
+    Char,
+    Uchar,
+}
+
+/// A varying a vertex or mesh function outputs, or a fragment function
+/// reads, linked by its `[[user(name)]]` identifier.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Varying {
+    pub identifier: String,
+    pub scalar: Scalar,
+    pub components: u8,
+    /// Mesh primitive data, which is constant over its primitive. Fragment
+    /// inputs take it from the output they link to.
+    pub per_primitive: bool,
+}
+
 /// The domain a post-tessellation vertex function evaluates.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PatchDomain {
@@ -178,6 +203,9 @@ pub struct Interface {
     pub samplers: Vec<u32>,
     pub threadgroup: Vec<ThreadgroupUse>,
     pub attributes: Vec<AttributeUse>,
+    /// A vertex or mesh function's varying outputs, or a fragment
+    /// function's varying inputs.
+    pub varyings: Vec<Varying>,
     pub color_outputs: Vec<ColorOutput>,
     pub writes_depth: bool,
     pub writes_stencil: bool,
@@ -238,6 +266,21 @@ impl Interface {
             self.attributes.is_empty() || matches!(self.stage, Stage::Vertex | Stage::Kernel),
             "stage-in outside a vertex or kernel function",
         )?;
+        ensure(
+            self.varyings.is_empty()
+                || matches!(self.stage, Stage::Vertex | Stage::Fragment | Stage::Mesh),
+            "varyings outside a vertex, mesh or fragment function",
+        )?;
+        ensure(
+            self.varyings.iter().enumerate().all(|(n, varying)| {
+                (1..=4).contains(&varying.components)
+                    && (!varying.per_primitive || self.stage == Stage::Mesh)
+                    && self.varyings[n + 1..]
+                        .iter()
+                        .all(|other| other.identifier != varying.identifier)
+            }),
+            "varyings",
+        )?;
         if let Some(patch) = self.patch {
             ensure(
                 self.stage == Stage::Vertex,
@@ -279,7 +322,7 @@ pub struct Provenance {
     pub slice_hash: [u8; 32],
     /// The library's source-map section, when present.
     pub source_map: Option<Vec<u8>>,
-    pub entry: alloc::string::String,
+    pub entry: String,
 }
 
 /// A function compiled for a pipeline stage.
@@ -306,6 +349,13 @@ pub struct Specialization {
     /// push constants' `view_mapping` offsets to the render target array and
     /// viewport indices it writes.
     pub amplified: bool,
+    /// The identifiers of a render pipeline's linked varyings; each takes
+    /// the location of its position.
+    pub varyings: Vec<String>,
+    /// The object function of a mesh pipeline, or its mesh function when it
+    /// has none: the stage mesh draws launch, whose threads outside a
+    /// `drawMeshThreads` grid skip the function.
+    pub launched_by_grid: bool,
 }
 
 /// What a post-tessellation vertex function compiles against: its
@@ -402,6 +452,7 @@ pub(crate) mod tests {
             samplers: Vec::new(),
             threadgroup: Vec::new(),
             attributes: Vec::new(),
+            varyings: Vec::new(),
             color_outputs: Vec::new(),
             writes_depth: false,
             writes_stencil: false,
@@ -413,6 +464,31 @@ pub(crate) mod tests {
             amplification: false,
             features: ShaderFeatures::EMPTY,
         }
+    }
+
+    #[test]
+    fn varyings_are_validated() {
+        let varying = |identifier: &str, per_primitive| Varying {
+            identifier: String::from(identifier),
+            scalar: Scalar::Float,
+            components: 4,
+            per_primitive,
+        };
+        let mut mesh = interface(Stage::Mesh);
+        mesh.varyings = alloc::vec![varying("user(a)", false), varying("user(b)", true)];
+        assert_eq!(mesh.validate(), Ok(()));
+        mesh.varyings[1].identifier = String::from("user(a)");
+        assert_eq!(mesh.validate(), Err(Error::Invalid("varyings")));
+        mesh.varyings[1].components = 0;
+        mesh.varyings[1].identifier = String::from("user(b)");
+        assert_eq!(mesh.validate(), Err(Error::Invalid("varyings")));
+
+        let mut vertex = interface(Stage::Vertex);
+        vertex.varyings = alloc::vec![varying("user(a)", true)];
+        assert_eq!(vertex.validate(), Err(Error::Invalid("varyings")));
+        let mut kernel = interface(Stage::Kernel);
+        kernel.varyings = alloc::vec![varying("user(a)", false)];
+        assert!(kernel.validate().is_err());
     }
 
     #[test]

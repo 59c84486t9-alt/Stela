@@ -29,24 +29,24 @@ struct FunctionObject {
     interface: Interface,
 }
 
-impl FunctionObject {
-    fn specialization(&self) -> Specialization {
-        Specialization {
-            constants: self.constants.clone(),
-            ..Specialization::default()
-        }
-    }
-}
-
 #[derive(Debug)]
 struct RenderObject {
     state: RenderPipelineState,
     /// A mesh pipeline's compiled fragment function, which every variant
     /// links.
     fragment: Option<ShaderCode>,
-    /// Object and mesh functions of a mesh pipeline.
-    mesh: Option<(Option<FunctionId>, FunctionId)>,
+    mesh: Option<MeshFunctions>,
     variants: Vec<(MeshShape, Pipeline)>,
+}
+
+/// The object and mesh functions of a mesh pipeline, which its variants
+/// compile, and the varyings its mesh function links to its fragment
+/// function.
+#[derive(Debug)]
+struct MeshFunctions {
+    object: Option<FunctionId>,
+    mesh: FunctionId,
+    varyings: Vec<String>,
 }
 
 /// Threads per object and per mesh threadgroup, which mesh variants are
@@ -159,8 +159,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     ) -> Result<TessellationStages> {
         let function = self.pipelines.functions.get(id.0)?;
         let specialization = Specialization {
-            amplified: specialization.amplified,
-            ..function.specialization()
+            constants: function.constants.clone(),
+            ..specialization
         };
         let stages = self.compiler.compile_tessellation(
             function.library,
@@ -186,11 +186,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         &mut self,
         request: &RenderPipelineRequest,
     ) -> Result<RenderPipelineId> {
-        let function = &self
-            .pipelines
-            .functions
-            .get(request.vertex_function.0)?
-            .interface;
+        let functions = &self.pipelines.functions;
+        let function = &functions.get(request.vertex_function.0)?.interface;
+        let fragment_function = request
+            .fragment_function
+            .map(|id| functions.get(id.0).map(|fragment| &fragment.interface))
+            .transpose()?;
+        let varyings = pipeline::link_varyings(function, fragment_function)?;
         let tessellation = pipeline::tessellation(
             &self.capabilities,
             function,
@@ -199,6 +201,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         )?;
         let specialization = Specialization {
             amplified: request.max_vertex_amplification_count > 1,
+            varyings: varyings.clone(),
             ..Specialization::default()
         };
         let (vertex, feeding) = match &tessellation {
@@ -214,8 +217,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         };
         let mut codes: Vec<ShaderCode> = feeding.into_iter().flatten().collect();
         codes.push(vertex.code);
+        let linked = Specialization {
+            varyings,
+            ..Specialization::default()
+        };
         let fragment = match request.fragment_function {
-            Some(id) => match self.compile(id, Specialization::default()) {
+            Some(id) => match self.compile(id, linked) {
                 Ok(fragment) => Some(fragment),
                 Err(error) => {
                     codes.iter().for_each(|code| self.compiler.release(*code));
@@ -269,9 +276,21 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         &mut self,
         request: &MeshPipelineRequest,
     ) -> Result<RenderPipelineId> {
+        let functions = &self.pipelines.functions;
+        let fragment_function = request
+            .fragment_function
+            .map(|id| functions.get(id.0).map(|fragment| &fragment.interface))
+            .transpose()?;
+        let varyings = pipeline::link_varyings(
+            &functions.get(request.mesh_function.0)?.interface,
+            fragment_function,
+        )?;
         let fragment = match request.fragment_function {
             Some(id) => {
-                let specialization = self.pipelines.functions.get(id.0)?.specialization();
+                let specialization = Specialization {
+                    varyings: varyings.clone(),
+                    ..Specialization::default()
+                };
                 Some(self.compile(id, specialization)?)
             }
             None => None,
@@ -312,7 +331,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 interfaces,
             },
             fragment: fragment.map(|shader| shader.code),
-            mesh: Some((request.object_function, request.mesh_function)),
+            mesh: Some(MeshFunctions {
+                object: request.object_function,
+                mesh: request.mesh_function,
+                varyings,
+            }),
             variants: Vec::new(),
         });
         self.pipelines.render.get_mut(index)?.state.id = u64::from(index);
@@ -336,7 +359,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         if let Some((_, pipeline)) = render.variants.iter().find(|(known, _)| *known == key) {
             return Ok(*pipeline);
         }
-        let (object, mesh) = render.mesh.ok_or(Error::Invalid("not a mesh pipeline"))?;
+        let functions = render
+            .mesh
+            .as_ref()
+            .ok_or(Error::Invalid("not a mesh pipeline"))?;
+        let (object, mesh, varyings) =
+            (functions.object, functions.mesh, functions.varyings.clone());
         let mut info = render.state.plan.info.clone();
         let limits = &self.capabilities.limits;
         let total =
@@ -351,14 +379,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         )?;
         let mut stages = Vec::new();
         let mut codes = Vec::new();
-        for (function, threads, stage) in [
-            (object, object_threads, Stage::Object),
-            (Some(mesh), mesh_threads, Stage::Mesh),
+        // The first stage is the one mesh draws launch; the mesh function
+        // links to the fragment function.
+        for (function, threads, stage, varyings) in [
+            (object, object_threads, Stage::Object, Vec::new()),
+            (Some(mesh), mesh_threads, Stage::Mesh, varyings),
         ] {
             let Some(function) = function else { continue };
             let specialization = Specialization {
                 workgroup_size: Some(threads),
-                ..self.pipelines.functions.get(function.0)?.specialization()
+                varyings,
+                launched_by_grid: stage == Stage::Object || object.is_none(),
+                ..Specialization::default()
             };
             match self.compile(function, specialization) {
                 Ok(compiled) => {

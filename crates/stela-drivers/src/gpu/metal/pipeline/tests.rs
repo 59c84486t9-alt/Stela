@@ -2,7 +2,8 @@ use super::*;
 use crate::gpu::metal::{
     nvidia::fixture::capabilities,
     shader::{
-        AttributeUse, ColorOutput, Patch, PatchDomain, Provenance, ThreadgroupUse, tests::interface,
+        AttributeUse, ColorOutput, Patch, PatchDomain, Provenance, Scalar, ThreadgroupUse, Varying,
+        tests::interface,
     },
     vertex::{Attribute, Layout, StepFunction, VertexFormat},
 };
@@ -479,4 +480,44 @@ fn depth_stencil_states_set_dynamic_tests() {
         stencil_op(StencilOperation::DecrementClamp),
         StencilOp::DecrementAndClamp
     );
+}
+
+fn varying(identifier: &str, scalar: Scalar, components: u8) -> Varying {
+    Varying {
+        identifier: String::from(identifier),
+        scalar,
+        components,
+        per_primitive: false,
+    }
+}
+
+#[test]
+fn varyings_link_by_identifier_and_type() {
+    let mut vertex = interface(Stage::Vertex);
+    vertex.varyings = alloc::vec![
+        varying("user(color)", Scalar::Half, 4),
+        varying("user(uv)", Scalar::Float, 2),
+    ];
+    let mut fragment = interface(Stage::Fragment);
+    fragment.varyings = alloc::vec![varying("user(uv)", Scalar::Float, 2)];
+    // Every output keeps a location, read or not.
+    assert_eq!(
+        link_varyings(&vertex, Some(&fragment)),
+        Ok(alloc::vec![
+            String::from("user(color)"),
+            String::from("user(uv)")
+        ])
+    );
+    assert_eq!(
+        link_varyings(&vertex, None).map(|linked| linked.len()),
+        Ok(2)
+    );
+    for (identifier, scalar, components) in [
+        ("user(color)", Scalar::Float, 4),
+        ("user(uv)", Scalar::Float, 3),
+        ("user(normal)", Scalar::Float, 3),
+    ] {
+        fragment.varyings = alloc::vec![varying(identifier, scalar, components)];
+        assert!(link_varyings(&vertex, Some(&fragment)).is_err());
+    }
 }

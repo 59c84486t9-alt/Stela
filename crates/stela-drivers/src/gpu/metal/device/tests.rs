@@ -27,8 +27,8 @@ use crate::gpu::metal::{
     resource::TextureDescriptor,
     sampler::SamplerDescriptor,
     shader::{
-        Access, BufferUse, CompiledShader, Interface, Patch, PatchDomain, Provenance,
-        Specialization, Stage, Tessellation, TessellationStages, tests::interface,
+        Access, BufferUse, CompiledShader, Interface, Patch, PatchDomain, Provenance, Scalar,
+        Specialization, Stage, Tessellation, TessellationStages, Varying, tests::interface,
     },
     sparse::{MappingUpdate, SparseRegion},
     vulkan::{
@@ -44,7 +44,7 @@ use crate::gpu::metal::{
         physical::PhysicalDevice,
     },
 };
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 #[derive(Default)]
 struct MockBackend {
@@ -232,7 +232,8 @@ impl Backend for MockBackend {
 }
 
 /// Reflects functions by name: `"kernel"`, `"vertex"`, `"fragment"`,
-/// `"object"`, `"mesh"` and the post-tessellation `"patch"`.
+/// `"object"`, `"mesh"`, the post-tessellation `"patch"` and `"unlinked"`, a
+/// fragment function reading a varying nothing outputs.
 #[derive(Default)]
 struct MockCompiler {
     compiled: Vec<Specialization>,
@@ -244,7 +245,7 @@ fn reflected(entry: &str) -> Result<Interface> {
     let stage = match entry {
         "kernel" => Stage::Kernel,
         "vertex" | "patch" => Stage::Vertex,
-        "fragment" => Stage::Fragment,
+        "fragment" | "unlinked" => Stage::Fragment,
         "object" => Stage::Object,
         "mesh" => Stage::Mesh,
         _ => return Err(Error::Invalid("no such function")),
@@ -256,6 +257,18 @@ fn reflected(entry: &str) -> Result<Interface> {
             control_points: Some(4),
         });
     }
+    let varying = |identifier: &str, per_primitive| Varying {
+        identifier: String::from(identifier),
+        scalar: Scalar::Float,
+        components: 4,
+        per_primitive,
+    };
+    interface.varyings = match entry {
+        "vertex" | "patch" | "fragment" => alloc::vec![varying("user(color)", false)],
+        "mesh" => alloc::vec![varying("user(color)", false), varying("user(normal)", true)],
+        "unlinked" => alloc::vec![varying("user(missing)", false)],
+        _ => Vec::new(),
+    };
     if stage == Stage::Kernel {
         interface.buffers = alloc::vec![BufferUse {
             index: 0,
@@ -654,6 +667,9 @@ fn render_pipelines_compile_their_functions_once() {
         device.compiler.compiled[0].constants,
         [(0, alloc::vec![1, 0, 0, 0])]
     );
+    for specialization in &device.compiler.compiled {
+        assert_eq!(specialization.varyings, ["user(color)"], "both stages link");
+    }
     assert_eq!(
         device.compiler.released.len(),
         2,
@@ -671,13 +687,26 @@ fn render_pipelines_compile_their_functions_once() {
 
     let bad = RenderPipelineRequest {
         vertex_function: fragment,
-        ..request
+        ..request.clone()
     };
     assert!(device.new_render_pipeline(&bad).is_err());
     assert_eq!(
         device.compiler.released.len(),
         4,
         "failed pipelines release their NIR"
+    );
+
+    let unlinked = device.new_function(1, "unlinked", Vec::new()).unwrap();
+    let unlinked = RenderPipelineRequest {
+        fragment_function: Some(unlinked),
+        ..request
+    };
+    let compiled = device.compiler.compiled.len();
+    assert!(device.new_render_pipeline(&unlinked).is_err());
+    assert_eq!(
+        device.compiler.compiled.len(),
+        compiled,
+        "unlinked functions compile nothing"
     );
 }
 
@@ -891,10 +920,30 @@ fn compute_and_mesh_variants_compile_per_shape() {
         targets: color_targets(),
         max_vertex_amplification_count: 1,
     };
+    let compiled = device.compiler.compiled.len();
     let id = device.new_mesh_render_pipeline(&request).unwrap();
     let first = device
         .mesh_variant(u64::from(id.0), [32, 1, 1], [64, 1, 1])
         .unwrap();
+    let linked = ["user(color)", "user(normal)"];
+    let stages: Vec<_> = device.compiler.compiled[compiled..]
+        .iter()
+        .map(|specialization| {
+            (
+                specialization.varyings.clone(),
+                specialization.launched_by_grid,
+            )
+        })
+        .collect();
+    assert_eq!(
+        stages,
+        [
+            (linked.map(String::from).to_vec(), false),
+            (Vec::new(), true),
+            (linked.map(String::from).to_vec(), false),
+        ],
+        "the fragment, then the object function the draw launches and the mesh function"
+    );
     let again = device
         .mesh_variant(u64::from(id.0), [32, 1, 1], [64, 1, 1])
         .unwrap();
