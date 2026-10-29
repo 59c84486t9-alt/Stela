@@ -404,3 +404,5 @@ mod analog_routes;
 mod register_failures;
 
 mod dma_positions;
+
+mod controller_identity;

@@ -12,7 +12,7 @@
 //! unmap memory or release controller ownership until shutdown succeeds (or
 //! the platform independently resets and quiesces the device).
 use alloc::vec::Vec;
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{AtomicU64, Ordering, fence};
 
 use super::{Error, Phase};
 use crate::bus::{
@@ -129,11 +129,29 @@ pub struct Capabilities {
     pub input_stream_payload_words: u16,
 }
 
-/// DMA allocation identity plus a non-recycled reset generation. Metadata and
-/// stream handles from another controller/reset must never program this device.
+// Identities are never returned, including after failed construction or shutdown.
+// Exhaustion permanently refuses new controllers instead of recycling a token.
+static NEXT_CONTROLLER_IDENTITY: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ControllerIdentity(u64);
+
+impl ControllerIdentity {
+    fn reserve(identities: &AtomicU64) -> Result<Self, Error> {
+        identities
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1).filter(|_| next != 0)
+            })
+            .map(Self)
+            .map_err(|_| Error::ControllerIdentitiesExhausted)
+    }
+}
+
+/// Non-recycled controller identity plus a non-recycled reset generation.
+/// Handles can outlive both the controller and its reused DMA allocations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ControllerToken {
-    owner: u64,
+    owner: ControllerIdentity,
     generation: u64,
 }
 
@@ -217,6 +235,27 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         allocator: &mut dyn DmaAllocator,
         config: Config,
     ) -> Result<Self, Error> {
+        // SAFETY: forwards the complete controller/allocator ownership contract.
+        unsafe {
+            Self::new_with_identities(
+                registers,
+                timer,
+                allocator,
+                config,
+                &NEXT_CONTROLLER_IDENTITY,
+            )
+        }
+    }
+
+    // The production namespace is permanent. A private injectable namespace lets
+    // tests prove exhaustion without resetting or consuming the global counter.
+    unsafe fn new_with_identities(
+        registers: R,
+        timer: T,
+        allocator: &mut dyn DmaAllocator,
+        config: Config,
+        identities: &AtomicU64,
+    ) -> Result<Self, Error> {
         if config.transition_timeout_us == 0
             || config.verb_timeout_us == 0
             || !(32..=64).contains(&config.dma_address_bits)
@@ -224,6 +263,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(Error::InvalidConfiguration);
         }
         config.probe_policy.budget()?;
+        // Reserve before any register-provider callback, timer or DMA effect.
+        let identity = ControllerIdentity::reserve(identities)?;
         registers.validate_config(&config)?;
         let mut registers = registers;
         let (major, minor) = (registers.read8(VMAJ), registers.read8(VMIN));
@@ -274,9 +315,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             capabilities,
             codec_mask: 0,
             token: ControllerToken {
-                // A domain-local IOVA can repeat for another controller.
-                // The retained live CPU allocation distinguishes this owner.
-                owner: corb.as_ptr() as u64,
+                owner: identity,
                 generation: 1,
             },
             lifecycle_failed: false,
