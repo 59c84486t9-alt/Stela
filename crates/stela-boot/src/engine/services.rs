@@ -222,8 +222,8 @@ impl<'a> Services<'a> {
     }
 }
 
-// SAFETY: each claimed function's configuration page and each BAR is mapped
-// once through the owned aperture, which every host processor and engine
+// SAFETY: each claimed function's or bridge's configuration page and each BAR
+// is mapped once through the owned aperture, which every host processor and engine
 // root reaches; a claimed function is stopped before `from_stopped_pci`
 // checks it. Every domain is the passthrough domain, which is what the
 // requesters have with the remapping units off. The ACPI namespace is
@@ -248,6 +248,15 @@ unsafe impl NativeServices for Services<'_> {
         // stopped above; probe enumerates physical functions only.
         unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) }
             .map_err(|(error, _)| ServiceError::Claim(error))
+    }
+
+    fn bridge(&self, address: Address) -> Result<Function<OwnedConfig>, ServiceError> {
+        let bridge = Function::new(address, self.config(address)?)
+            .ok_or(ServiceError::Refused("no function answers at this address"))?;
+        if bridge.class[..2] != [6, 4] {
+            return Err(ServiceError::Refused("not a PCI-to-PCI bridge"));
+        }
+        Ok(bridge)
     }
 
     fn map_bar(&self, address: Address, bar: Bar) -> Result<Mapping, ServiceError> {

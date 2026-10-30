@@ -54,6 +54,7 @@ pub enum Error {
     IntelWifi(net::wifi::intel::attach::AttachError),
     MediatekWifi(net::wifi::mediatek::attach::AttachError),
     IntelBluetooth(crate::bluetooth::intel_pcie::Error),
+    Bcm4377(crate::bluetooth::bcm4377::Error),
 }
 
 impl fmt::Display for Error {
@@ -70,6 +71,7 @@ impl fmt::Display for Error {
             Self::IntelWifi(error) => write!(f, "iwlwifi: {error}"),
             Self::MediatekWifi(error) => write!(f, "mt76: {error}"),
             Self::IntelBluetooth(error) => write!(f, "btintel_pcie: {error}"),
+            Self::Bcm4377(error) => write!(f, "hci_bcm4377: {error}"),
         }
     }
 }
@@ -455,8 +457,15 @@ impl Devices {
             ))
         });
         let pcie = self.pcie_bluetooth.iter().filter_map(|hci| {
-            let error = hci.initialization.as_ref().err()?;
-            Some((hci.location.as_str(), error as &dyn fmt::Display))
+            let error: &dyn fmt::Display = match &hci.controller {
+                native::PcieController::Intel { initialization, .. } => {
+                    initialization.as_ref().err()?
+                }
+                native::PcieController::Broadcom { initialization, .. } => {
+                    initialization.as_ref().err()?
+                }
+            };
+            Some((hci.location.as_str(), error))
         });
         usb.chain(pcie)
     }
@@ -637,6 +646,69 @@ unsafe fn mediatek_wifi(
     unsafe { native::mediatek_wifi(services, address, inputs) }
 }
 
+/// Attach the Broadcom PCIe Bluetooth function at `address` with its
+/// segment's bridges, for the board SMBIOS names, as `bcm4377_probe_dmi`
+/// selects it.
+///
+/// # Safety
+/// As for [`intel_wifi`]; `bridges` lists every bridge of the segment.
+#[allow(
+    clippy::result_large_err,
+    reason = "a failed attach hands back the owners that must outlive the device"
+)]
+unsafe fn bcm4377(
+    services: &dyn NativeServices,
+    address: Address,
+    bridges: &[native::Bridge],
+    firmware: &'static dyn crate::firmware::Provider,
+    clock: Clock,
+) -> Result<native::Bcm4377, native::Failure> {
+    use crate::bluetooth::bcm4377::{Board, Error as Bcm4377Error};
+    use crate::firmware::smbios::Observation;
+    let refused = |error: ServiceError| (Error::Native(error), None);
+    let text = |observation| match observation {
+        Observation::Value(bytes) => core::str::from_utf8(bytes).ok(),
+        _ => None,
+    };
+    let board = crate::firmware::smbios::load(firmware)
+        .ok()
+        .and_then(|snapshot| {
+            let identity = snapshot.identity;
+            Board::from_dmi(text(identity.system_vendor)?, text(identity.product_name)?).ok()
+        })
+        .ok_or((
+            Error::Bcm4377(Bcm4377Error::Unsupported(
+                "an SMBIOS system the source's DMI board table lists",
+            )),
+            None,
+        ))?;
+    #[cfg(feature = "native-acpi")]
+    let roots = services
+        .acpi()
+        .map(|session| native::root_buses(session, address.segment))
+        .unwrap_or_default();
+    #[cfg(not(feature = "native-acpi"))]
+    let roots = Vec::new();
+    if roots.is_empty() {
+        return Err(refused(ServiceError::Refused(
+            "no ACPI host bridge declares the segment's root buses",
+        )));
+    }
+    let mut owned = Vec::new();
+    for bridge in bridges
+        .iter()
+        .filter(|bridge| bridge.address.segment == address.segment)
+    {
+        owned.push(services.bridge(bridge.address).map_err(refused)?);
+    }
+    // SAFETY: these are the mount's owners of every bridge the scan found
+    // in the segment and the root buses its ACPI host bridges declare; no
+    // other driver sets their link policy.
+    let topology = unsafe { crate::bus::pci::native_aspm::Topology::new(owned, roots) };
+    // SAFETY: forwarded from the caller.
+    unsafe { native::bcm4377(services, address, topology, board, clock) }
+}
+
 /// Enumerate and attach devices using an explicit exact firmware provider.
 /// A loader can observe consumer requirements while delegating the original
 /// lookup result, without reconstructing device identities outside drivers.
@@ -674,6 +746,9 @@ pub unsafe fn probe_with_provider(
     });
     // Intel ISHs, attached once the scan has looked for a Mehlow host bridge.
     let mut sensor_hubs = Vec::new();
+    // Broadcom PCIe Bluetooth functions, attached once the scan has found
+    // every bridge of their segment.
+    let mut broadcom_bluetooth = Vec::new();
     let mut mehlow = false;
     // Each PCI bridge and its secondary bus, for ACPI companion lookups.
     let mut bridges = Vec::new();
@@ -762,8 +837,10 @@ pub unsafe fn probe_with_provider(
                                     );
                                 devices.pcie_bluetooth.push(native::PcieHci {
                                     location: alloc::format!("{address}"),
-                                    transport,
-                                    initialization,
+                                    controller: native::PcieController::Intel {
+                                        transport,
+                                        initialization,
+                                    },
                                 });
                             }
                             Err((error, kept)) => {
@@ -771,6 +848,10 @@ pub unsafe fn probe_with_provider(
                                 devices.owners.extend(kept);
                             }
                         }
+                        continue;
+                    }
+                    native::Kind::Bcm4377 => {
+                        broadcom_bluetooth.push(address);
                         continue;
                     }
                     native::Kind::IntelWifi => {
@@ -1075,6 +1156,31 @@ pub unsafe fn probe_with_provider(
             }
         }
     }
+    for address in broadcom_bluetooth {
+        let Some(services) = services else {
+            devices
+                .failures
+                .push((address, Error::Native(ServiceError::Unavailable)));
+            continue;
+        };
+        // SAFETY: as for tg3; the scan found every bridge of the segment.
+        match unsafe { bcm4377(services, address, &bridges, firmware, handoff.clock) } {
+            Ok(mut transport) => {
+                let initialization = transport.initialize(firmware);
+                devices.pcie_bluetooth.push(native::PcieHci {
+                    location: alloc::format!("{address}"),
+                    controller: native::PcieController::Broadcom {
+                        transport,
+                        initialization,
+                    },
+                });
+            }
+            Err((error, kept)) => {
+                devices.failures.push((address, error));
+                devices.owners.extend(kept);
+            }
+        }
+    }
     for address in sensor_hubs {
         let Some(services) = services else {
             devices
@@ -1206,6 +1312,45 @@ mod tests {
             result,
             Err((
                 Error::IntelWifi(net::wifi::intel::attach::AttachError::NoRegulatoryDatabase),
+                None
+            ))
+        ));
+        assert!(services.requests.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_board_smbios_does_not_name_attaches_no_broadcom_bluetooth() {
+        let services = services::tests::Refusing::default();
+        let handoff = Handoff {
+            ecam: Vec::new(),
+            mapped: Vec::new(),
+            dma: 0..0,
+            clock: crate::Clock {
+                ticks_per_microsecond: 1,
+            },
+            firmware: None,
+            completion: None,
+        };
+        let address = Address {
+            segment: 0,
+            bus: 2,
+            device: 0,
+            function: 0,
+        };
+        // SAFETY: the refusing services cannot grant hardware access.
+        let result = unsafe {
+            bcm4377(
+                &services,
+                address,
+                &[],
+                handoff_provider(&handoff),
+                handoff.clock,
+            )
+        };
+        assert!(matches!(
+            result,
+            Err((
+                Error::Bcm4377(crate::bluetooth::bcm4377::Error::Unsupported(_)),
                 None
             ))
         ));

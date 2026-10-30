@@ -6,7 +6,7 @@ use super::{Error, NativeServices, ServiceError};
 use crate::net::wifi;
 use crate::{
     Clock,
-    bluetooth::intel_pcie,
+    bluetooth::{bcm4377, intel_pcie},
     bus::{
         dma::{DomainAllocator, mapping::DmaDomain},
         mmio::owned::{CacheAttribute, Mapping, Protection},
@@ -73,6 +73,9 @@ pub(super) enum Kind {
     MediatekWifi,
     /// An Intel PCIe Bluetooth function, as `btintel_pcie_table` lists them.
     IntelBluetooth,
+    /// A Broadcom PCIe Bluetooth function, as `bcm4377_devid_table` lists
+    /// them.
+    Bcm4377,
 }
 
 impl Kind {
@@ -95,6 +98,11 @@ impl Kind {
             Some(Self::MediatekWifi)
         } else if function.vendor == 0x8086 && intel_pcie::DEVICE_IDS.contains(&function.device) {
             Some(Self::IntelBluetooth)
+        } else if function.vendor == 0x14e4
+            && function.class[..2] == [2, 0x80]
+            && bcm4377::Chip::of_device(function.device).is_some()
+        {
+            Some(Self::Bcm4377)
         } else {
             None
         }
@@ -400,14 +408,7 @@ pub(super) fn companion(
     address: Address,
     bridges: &[Bridge],
 ) -> Option<crate::platform::acpi::Handle<'static>> {
-    use crate::platform::acpi::{Handle, Value};
-    let integer = |handle: Handle<'static>, name: &str| -> Option<u64> {
-        handle.child(name).ok()?;
-        match handle.evaluate(Some(name), &[]).ok()? {
-            Some(Value::Integer(value)) => Some(value),
-            _ => None,
-        }
-    };
+    use crate::platform::acpi::Handle;
     let parent = |handle: Handle<'static>| -> Option<String> {
         let path = handle.path().ok()?;
         path.rsplit_once('.')
@@ -420,12 +421,9 @@ pub(super) fn companion(
         bus = bridge.address.bus;
     }
     let devices = session.all_devices().ok()?;
-    let mut roots = session.devices("PNP0A08").ok()?;
-    roots.extend(session.devices("PNP0A03").ok()?);
-    let mut current = roots.into_iter().find(|root| {
-        integer(*root, "_SEG").unwrap_or(0) == u64::from(address.segment)
-            && integer(*root, "_BBN").unwrap_or(0) == u64::from(bus)
-    })?;
+    let (mut current, ..) = roots(session)
+        .into_iter()
+        .find(|&(_, segment, root)| segment == address.segment && root == bus)?;
     for (address, bridge) in chain.into_iter().rev() {
         let path = current.path().ok()?;
         let adr = (u64::from(address.device) << 16) | u64::from(address.function);
@@ -653,12 +651,152 @@ pub type IntelBluetooth = intel_pcie::Transport<
     intel_pcie::native::NativePlatform<OwnedConfig, MappedBar, intel_pcie::native::MappedRegisters>,
 >;
 
+/// A Broadcom BCM4377-family transport over its owned BAR0 and BAR2, whose
+/// MSI delivers its interrupts.
+pub type Bcm4377 = bcm4377::Transport<bcm4377::native::NativePlatform>;
+
 /// An attached PCIe Bluetooth controller and its one firmware initialization
 /// attempt. A kept success is not radio or guest readiness.
 pub struct PcieHci {
     pub location: String,
-    pub transport: IntelBluetooth,
-    pub initialization: Result<intel_pcie::firmware::Report, intel_pcie::firmware::Error>,
+    pub controller: PcieController,
+}
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one controller per attached function, kept for the boot"
+)]
+pub enum PcieController {
+    Intel {
+        transport: IntelBluetooth,
+        initialization: Result<intel_pcie::firmware::Report, intel_pcie::firmware::Error>,
+    },
+    Broadcom {
+        transport: Bcm4377,
+        initialization: Result<bcm4377::Report, bcm4377::Error>,
+    },
+}
+
+/// The root buses of `segment`, as the ACPI host bridges' `_SEG` and `_BBN`
+/// declare them.
+#[cfg(feature = "native-acpi")]
+pub(super) fn root_buses(
+    session: &'static crate::platform::acpi::Session,
+    segment: u16,
+) -> Vec<crate::bus::pci::native_aspm::RootBus> {
+    use crate::bus::pci::native_aspm::RootBus;
+    roots(session)
+        .into_iter()
+        .filter(|&(_, root_segment, _)| root_segment == segment)
+        .map(|(_, segment, bus)| RootBus { segment, bus })
+        .collect()
+}
+
+/// Each ACPI PCI host bridge with its `_SEG` and `_BBN`, zero when absent.
+#[cfg(feature = "native-acpi")]
+fn roots(
+    session: &'static crate::platform::acpi::Session,
+) -> Vec<(crate::platform::acpi::Handle<'static>, u16, u8)> {
+    let mut roots = session.devices("PNP0A08").unwrap_or_default();
+    roots.extend(session.devices("PNP0A03").unwrap_or_default());
+    roots
+        .into_iter()
+        .filter_map(|root| {
+            let segment = u16::try_from(integer(root, "_SEG").unwrap_or(0)).ok()?;
+            let bus = u8::try_from(integer(root, "_BBN").unwrap_or(0)).ok()?;
+            Some((root, segment, bus))
+        })
+        .collect()
+}
+
+/// The integer `name` evaluates to on `handle`, when it has one.
+#[cfg(feature = "native-acpi")]
+fn integer(handle: crate::platform::acpi::Handle<'static>, name: &str) -> Option<u64> {
+    use crate::platform::acpi::Value;
+    handle.child(name).ok()?;
+    match handle.evaluate(Some(name), &[]).ok()? {
+        Some(Value::Integer(value)) => Some(value),
+        _ => None,
+    }
+}
+
+/// Attach a Broadcom PCIe Bluetooth function, as `bcm4377_probe` does:
+/// BAR0 and BAR2 hold its registers, `topology` its link's bridges and
+/// `board` the board its firmware is chosen for.
+///
+/// # Safety
+/// As for [`sfh`]; `topology` holds the mount's bridges of the function's
+/// segment and its root buses, and no other owner sets their link policy.
+#[allow(
+    clippy::result_large_err,
+    reason = "a failed attach hands back the owners that must outlive the device"
+)]
+pub(super) unsafe fn bcm4377(
+    services: &dyn NativeServices,
+    address: Address,
+    topology: crate::bus::pci::native_aspm::Topology<OwnedConfig>,
+    board: bcm4377::Board,
+    clock: Clock,
+) -> Result<Bcm4377, Failure> {
+    use bcm4377::native::{
+        Error as NativeError, Inputs, MappedRegisters, MsiCompletion, NativeClock, NativePlatform,
+    };
+    let refused = |error: ServiceError| (Error::Native(error), None);
+    let failed =
+        |error: NativeError, kept: Box<dyn Any>| (Error::Bcm4377(error.into()), Some(kept));
+    // SAFETY: the handoff's clock is the calibrated invariant TSC.
+    let clock =
+        unsafe { NativeClock::new(clock) }.map_err(|error| (Error::Bcm4377(error.into()), None))?;
+    let interrupts = services.interrupts().map_err(refused)?;
+    let authority = services.authority().map_err(refused)?;
+    let (requester, domain, bars) = claim_sized(services, address)?;
+    let bar0 = match map(services, address, &bars, 0) {
+        Ok(mapping) => mapping,
+        Err(error) => return Err((Error::Native(error), Some(Box::new(requester)))),
+    };
+    let bar2 = match map(services, address, &bars, 2) {
+        Ok(mapping) => mapping,
+        Err(error) => return Err((Error::Native(error), Some(Box::new((requester, bar0))))),
+    };
+    let spans = match (bar0.physical_span(), bar2.physical_span()) {
+        (Ok(bar0), Ok(bar2)) => [bar0, bar2],
+        (Err(error), _) | (_, Err(error)) => {
+            return Err(failed(
+                NativeError::Mapping(error),
+                Box::new((requester, bar0, bar2)),
+            ));
+        }
+    };
+    // SAFETY: the mount mapped exactly BAR0 and BAR2 uncached, once each.
+    let registers = match unsafe { MappedRegisters::new(spans, [bar0, bar2]) } {
+        Ok(registers) => registers,
+        Err((error, mappings)) => return Err(failed(error, Box::new((requester, mappings)))),
+    };
+    let inputs = Inputs {
+        function: requester.into_function(),
+        retained: Arc::new(authority),
+        topology,
+        registers,
+        domain,
+        pages: Box::new(services.pages()),
+        board,
+        // An x86 board's firmware node carries none of the device-tree
+        // calibration or address properties Apple silicon boards do.
+        properties: Vec::new(),
+        clock,
+        interrupts,
+        // No root delivery adapter completes posted MSIs yet, so a stopped
+        // function stays quarantined with its owners rather than retired.
+        msi_completion: MsiCompletion::unavailable(),
+    };
+    // SAFETY: the mount claimed the stopped function with its interrupts
+    // drained, mapped its BARs, isolated its domain and handed over its
+    // segment's bridges; the caller's contract covers the rest.
+    let platform = unsafe { NativePlatform::new(inputs) }
+        .map_err(|(error, inputs)| failed(error, Box::new(inputs)))?;
+    platform
+        .into_transport()
+        .map_err(|error| (Error::Bcm4377(error), None))
 }
 
 /// Attach an Intel PCIe Bluetooth function and start its ROM transport, as
@@ -870,5 +1008,38 @@ mod tests {
             Err((Error::Native(ServiceError::Unavailable), None))
         ));
         assert_eq!(*services.requests.borrow(), [address(); 4]);
+    }
+
+    #[test]
+    fn a_broadcom_function_without_interrupts_claims_nothing() {
+        let services = Refusing::default();
+        let clock = Clock {
+            ticks_per_microsecond: 1000,
+        };
+        // SAFETY: an empty topology owns no bridge, and the refusing services
+        // transfer no owner.
+        let topology =
+            unsafe { crate::bus::pci::native_aspm::Topology::new(Vec::new(), Vec::new()) };
+        let board = bcm4377::Board::from_dmi("Apple Inc.", "MacBookAir9,1").unwrap();
+        // SAFETY: as above.
+        let bluetooth = unsafe { bcm4377(&services, address(), topology, board, clock) };
+        assert!(matches!(
+            bluetooth,
+            Err((Error::Native(ServiceError::Unavailable), None))
+        ));
+        assert!(services.requests.borrow().is_empty());
+    }
+
+    #[test]
+    fn broadcom_bluetooth_is_named_by_its_device_table() {
+        assert_eq!(
+            bcm4377::Chip::of_device(0x5fa0),
+            Some(bcm4377::Chip::Bcm4377)
+        );
+        assert_eq!(
+            bcm4377::Chip::of_device(0x5f72),
+            Some(bcm4377::Chip::Bcm4388)
+        );
+        assert_eq!(bcm4377::Chip::of_device(0x4377), None);
     }
 }
