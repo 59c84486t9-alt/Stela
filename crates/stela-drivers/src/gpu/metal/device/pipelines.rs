@@ -18,6 +18,7 @@ use crate::gpu::metal::{
         self, ComputePipelineDescriptor, MeshRenderPipelineDescriptor, RenderPipelineDescriptor,
         RenderTargets, StageThreads, TessellatedVertex, TessellationDescriptor,
     },
+    reflection::Binding,
     shader::{
         CompiledShader, Compiler, Interface, LinkedFunction, Linking, Reflection, Specialization,
         Stage, Tessellation, TessellationStages, Varying,
@@ -440,6 +441,19 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// What the compiler reflects of a function.
     pub fn function_reflection(&self, id: FunctionId) -> Result<&Reflection> {
         Ok(&self.pipelines.functions.get(id.0)?.reflection)
+    }
+
+    /// The bindings of a function specialized with its function constant
+    /// values, for `MTLPipelineOptionBindingInfo` and argument encoders.
+    pub fn function_bindings(&mut self, id: FunctionId) -> Result<Vec<Binding>> {
+        let function = self.pipelines.functions.get(id.0)?;
+        let library = self.pipelines.library(function.library)?;
+        let specialization = Specialization {
+            constants: function.constants.clone(),
+            ..Specialization::default()
+        };
+        self.compiler
+            .bindings(library, &function.entry, &specialization)
     }
 
     pub fn function_type(&self, id: FunctionId) -> Result<FunctionType> {

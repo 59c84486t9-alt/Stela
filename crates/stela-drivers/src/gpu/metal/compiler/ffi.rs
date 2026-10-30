@@ -10,6 +10,9 @@ pub(super) const COLOR_OUTPUTS: usize = 9;
 pub(super) const FUNCTION_CONSTANTS: usize = 256;
 pub(super) const NAME_BYTES: usize = 8192;
 pub(super) const SAMPLER_STATES: usize = 256;
+pub(super) const BINDINGS: usize = 128;
+pub(super) const MEMBERS: usize = 1024;
+pub(super) const BINDING_NAME_BYTES: usize = 32768;
 
 /// `enum stela_air_error_kind`.
 pub(super) mod kind {
@@ -175,6 +178,95 @@ impl Reflection {
     pub(super) const ZERO: Self = unsafe { core::mem::zeroed() };
 }
 
+/// `enum stela_metal_binding_kind`.
+pub(super) mod binding {
+    pub const BUFFER: u32 = 0;
+    pub const THREADGROUP: u32 = 1;
+    pub const TEXTURE: u32 = 2;
+    pub const SAMPLER: u32 = 3;
+    pub const FUNCTION_TABLE: u32 = 4;
+    pub const OBJECT_PAYLOAD: u32 = 5;
+}
+
+/// `enum stela_air_field_kind`.
+pub(super) mod field {
+    pub const DATA: u32 = 0;
+    pub const BUFFER: u32 = 1;
+    pub const ARGUMENTS: u32 = 2;
+    pub const TEXTURE: u32 = 3;
+    pub const SAMPLER: u32 = 4;
+    pub const COMMANDS: u32 = 5;
+    pub const RENDER_PIPELINE: u32 = 6;
+    pub const COMPUTE_PIPELINE: u32 = 7;
+}
+
+/// `struct stela_metal_binding`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Binding {
+    pub kind: u32,
+    pub index: u32,
+    pub count: u32,
+    pub access: u32,
+    pub used: u32,
+    pub argument_buffer: u32,
+    pub name: u32,
+    pub name_bytes: u32,
+    pub type_name: u32,
+    pub type_bytes: u32,
+    pub size: u32,
+    pub alignment: u32,
+    pub texture_type: u32,
+    pub primitive: u32,
+    pub depth: u32,
+    pub members: u32,
+    pub member_count: u32,
+}
+
+/// `struct stela_metal_member`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Member {
+    pub offset: u32,
+    pub size: u32,
+    pub elements: u32,
+    pub count: u32,
+    pub name: u32,
+    pub name_bytes: u32,
+    pub type_name: u32,
+    pub type_bytes: u32,
+    pub members: u32,
+    pub member_count: u32,
+    pub argument: u32,
+    pub kind: u32,
+    pub id: u32,
+    pub access: u32,
+    pub size_pointed: u32,
+    pub alignment_pointed: u32,
+    pub texture_type: u32,
+    pub primitive: u32,
+    pub depth: u32,
+}
+
+/// `struct stela_metal_bindings`.
+#[repr(C)]
+pub struct Bindings {
+    pub(super) binding_count: u32,
+    pub(super) member_count: u32,
+    pub(super) names_bytes: u32,
+    pub(super) bindings: [Binding; BINDINGS],
+    pub(super) members: [Member; MEMBERS],
+    pub(super) names: [u8; BINDING_NAME_BYTES],
+}
+
+impl Bindings {
+    /// Empty bindings, made in place: they are too large for a stack.
+    pub(super) fn zeroed() -> alloc::boxed::Box<Self> {
+        // SAFETY: every member is an integer or an array of integers.
+        unsafe { alloc::boxed::Box::new_zeroed().assume_init() }
+    }
+}
+
 /// `struct stela_metal_target`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -335,6 +427,10 @@ mod tests {
             ("STELA_METAL_FUNCTION_CONSTANTS", FUNCTION_CONSTANTS),
             ("STELA_METAL_NAME_BYTES", NAME_BYTES),
             ("STELA_METAL_SAMPLER_STATES", SAMPLER_STATES),
+            ("STELA_METAL_BINDINGS", BINDINGS),
+            ("STELA_METAL_MEMBERS", MEMBERS),
+            ("STELA_METAL_BINDING_NAME_BYTES", BINDING_NAME_BYTES),
+            ("STELA_METAL_BINDINGS_BYTES", size_of::<Bindings>()),
             ("STELA_METAL_REFLECTION_BYTES", size_of::<Reflection>()),
             ("STELA_METAL_TARGET_BYTES", size_of::<Target>()),
             (

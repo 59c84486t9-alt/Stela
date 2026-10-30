@@ -168,6 +168,65 @@ bool stela_metal_reflect(const void *air, size_t size, const char *entry,
                          uint32_t constant_count, struct stela_metal_reflection *reflection,
                          struct stela_air_error *error);
 
+/* MTLBindingType's kinds of binding a function argument is. */
+enum stela_metal_binding_kind {
+   STELA_METAL_BINDING_BUFFER,
+   STELA_METAL_BINDING_THREADGROUP,
+   STELA_METAL_BINDING_TEXTURE,
+   STELA_METAL_BINDING_SAMPLER,
+   STELA_METAL_BINDING_FUNCTION_TABLE,
+   STELA_METAL_BINDING_OBJECT_PAYLOAD,
+};
+
+#define STELA_METAL_BINDINGS 128u
+#define STELA_METAL_MEMBERS 1024u
+#define STELA_METAL_BINDING_NAME_BYTES 32768u
+
+/* A binding: its kind, index, count of array elements, STELA_METAL_ACCESS
+ * flags and whether the function uses it; a buffer's argument_buffer, and
+ * the size, alignment and MSL type spelling of what a buffer, threadgroup
+ * buffer or payload points to, with its structure's members; a texture's
+ * enum stela_air_texture_type, component enum stela_air_primitive and
+ * depth. Its name and type are in names. */
+struct stela_metal_binding {
+   uint32_t kind, index, count, access, used, argument_buffer;
+   uint32_t name, name_bytes, type, type_bytes;
+   uint32_t size, alignment;
+   uint32_t texture_type, primitive, depth;
+   uint32_t members, member_count;
+};
+/* A structure member: its offset, the bytes of one element, its element
+ * count (zero for one), its name and MSL type spelling, and the members of
+ * the structure it is or, in an argument buffer, points to. An argument
+ * buffer's member is an argument holding count resources of an enum
+ * stela_air_field_kind from [[id]] id: as a binding of that kind, its
+ * access, pointee size and alignment, and texture type, component and
+ * depth. */
+struct stela_metal_member {
+   uint32_t offset, size, elements, count;
+   uint32_t name, name_bytes, type, type_bytes;
+   uint32_t members, member_count;
+   uint32_t argument, kind, id, access, size_pointed, alignment_pointed;
+   uint32_t texture_type, primitive, depth;
+};
+/* A function's bindings, in argument order, and their structures'
+ * members, each structure's contiguous. */
+struct stela_metal_bindings {
+   uint32_t binding_count, member_count, names_bytes;
+   struct stela_metal_binding bindings[STELA_METAL_BINDINGS];
+   struct stela_metal_member members[STELA_METAL_MEMBERS];
+   char names[STELA_METAL_BINDING_NAME_BYTES];
+};
+#define STELA_METAL_BINDINGS_BYTES 119308u
+
+/* The bindings of entry, specialized as stela_metal_reflect specializes
+ * it: MTLPipelineOptionBindingInfo's reflection and the layouts argument
+ * encoders write. False after reporting why in error. */
+bool stela_metal_reflect_bindings(const void *air, size_t size, const char *entry,
+                                  const struct stela_air_constant_value *constants,
+                                  uint32_t constant_count, struct stela_metal_bindings *bindings,
+                                  struct stela_air_error *error);
+
 #define STELA_METAL_SAMPLER_STATES 256u
 
 /* The constexpr sampler states the AIR module declares, each Apple's

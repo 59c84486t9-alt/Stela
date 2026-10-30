@@ -29,6 +29,7 @@ pub mod nvidia;
 pub mod pass;
 pub mod pipeline;
 pub mod pixel_format;
+pub mod reflection;
 pub mod resource;
 pub mod sampler;
 pub mod service;

@@ -127,14 +127,14 @@ impl<B: Backend, C: Compiler> Service<B, C> {
 }
 
 /// The names of a reflection, which follow its `base` bytes of records.
-struct Names {
-    base: usize,
-    bytes: Vec<u8>,
+pub(super) struct Names {
+    pub(super) base: usize,
+    pub(super) bytes: Vec<u8>,
 }
 
 impl Names {
     /// Adds `name`, returning its offset and length in the reflection.
-    fn add(&mut self, name: &str) -> Result<(u32, u32), Fault> {
+    pub(super) fn add(&mut self, name: &str) -> Result<(u32, u32), Fault> {
         let offset = u32::try_from(self.base + self.bytes.len())
             .map_err(|_| Fault::malformed("reflection too large"))?;
         self.bytes.extend_from_slice(name.as_bytes());

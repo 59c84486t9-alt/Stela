@@ -31,6 +31,9 @@ static_assert(sizeof(struct stela_air_constexpr_sampler) == STELA_METAL_CONSTEXP
               "metal/compiler.rs mirrors the constexpr samplers");
 static_assert(STELA_METAL_SAMPLER_STATES == AIR_MAX_SAMPLER_STATES,
               "a module's states fit the listing");
+static_assert(sizeof(struct stela_metal_bindings) == STELA_METAL_BINDINGS_BYTES,
+              "metal/compiler.rs mirrors the bindings");
+static_assert(STELA_METAL_BINDINGS == AIR_MAX_ARGUMENTS, "every argument may be a binding");
 
 /* Reports the first error; always false. */
 static bool
@@ -76,17 +79,24 @@ struct reflecting {
    bool found;
 };
 
-/* Copies bytes into the names, at *offset. */
+/* Copies bytes into names, which hold *used of capacity bytes, at *offset. */
+static bool
+copy_name(struct stela_air_error *error, char *names, uint32_t *used, uint32_t capacity,
+          const char *bytes, size_t size, uint32_t *offset)
+{
+   if (size > capacity - *used)
+      return fail(error, STELA_AIR_LIMIT, "reflected names exceed their capacity");
+   memcpy(names + *used, bytes, size);
+   *offset = *used;
+   *used += (uint32_t)size;
+   return true;
+}
+
 static bool
 add_name(struct reflecting *r, const char *bytes, size_t size, uint32_t *offset)
 {
-   struct stela_metal_reflection *out = r->out;
-   if (size > STELA_METAL_NAME_BYTES - out->names_bytes)
-      return fail(r->error, STELA_AIR_LIMIT, "reflected names exceed their capacity");
-   memcpy(out->names + out->names_bytes, bytes, size);
-   *offset = out->names_bytes;
-   out->names_bytes += (uint32_t)size;
-   return true;
+   return copy_name(r->error, r->out->names, &r->out->names_bytes, STELA_METAL_NAME_BYTES, bytes,
+                    size, offset);
 }
 
 static bool
@@ -291,25 +301,38 @@ reflect_stage(const struct stela_air_inspection *info, const struct stela_air_st
    return module_facts(r, info);
 }
 
+/* Inspects entry, which the AIR list naming it gives *stage: a kernel's
+ * visitor sees every kernel, a stage's only entry. *found reports whether a
+ * visitor took entry. */
+static bool
+inspect_entry(const void *air, size_t size, const char *entry,
+              const struct stela_air_constants *constants, stela_air_visit_entry kernel,
+              stela_air_visit_stage stage_entry, void *data, const bool *found, unsigned *stage,
+              struct stela_air_error *error)
+{
+   if (!stela_air_entry_stage(air, size, entry, stage, error))
+      return false;
+   bool inspected = *stage ? stela_air_inspect_stage(air, size, constants, entry,
+                                                     (enum stela_air_stage)*stage, stage_entry,
+                                                     data, error) :
+                             stela_air_inspect(air, size, constants, AIR_MAX_METADATA_OPERANDS,
+                                               kernel, data, error);
+   /* A receiver's refusal is reported as the inspector's; keep the cause. */
+   return inspected ? *found || fail(error, STELA_AIR_ARGUMENT, "entry is not an AIR kernel") :
+                      false;
+}
+
 /* Reflects entry, and selects its stage by the AIR list that names it. */
 static bool
 reflect(const void *air, size_t size, const char *entry,
         const struct stela_air_constants *constants, struct reflecting *r)
 {
    *r->out = (struct stela_metal_reflection){0};
-   unsigned stage;
-   if (!stela_air_entry_stage(air, size, entry, &stage, r->error))
-      return false;
+   unsigned stage = 0;
+   bool reflected = inspect_entry(air, size, entry, constants, reflect_kernel, reflect_stage, r,
+                                  &r->found, &stage, r->error);
    r->out->stage = function_stages[stage];
-   struct stela_air_error *error = r->error;
-   bool inspected = stage ? stela_air_inspect_stage(air, size, constants, entry,
-                                                    (enum stela_air_stage)stage, reflect_stage, r,
-                                                    error) :
-                            stela_air_inspect(air, size, constants, AIR_MAX_METADATA_OPERANDS,
-                                              reflect_kernel, r, error);
-   /* A receiver's refusal is reported as the inspector's; keep the cause. */
-   return inspected ? r->found || fail(error, STELA_AIR_ARGUMENT, "entry is not an AIR kernel") :
-                      false;
+   return reflected;
 }
 
 bool
@@ -324,6 +347,211 @@ stela_metal_reflect(const void *air, size_t size, const char *entry,
    return reflection && entry && (constants || !constant_count) ?
              reflect(air, size, entry, constants ? &values : NULL, &r) :
              fail(r.error, STELA_AIR_INPUT, "invalid reflection request");
+}
+
+/* A binding reflection in progress: the structure each member row is or
+ * points to, whose members follow once every row before it is filled. */
+struct binding_reflection {
+   const char *entry;
+   const struct stela_air_inspection *info;
+   struct stela_metal_bindings *out;
+   const struct stela_air_layout *layouts[STELA_METAL_MEMBERS];
+   struct stela_air_error *error;
+   bool found;
+};
+
+static bool
+binding_name(struct binding_reflection *r, const char *bytes, size_t size, uint32_t *offset)
+{
+   return copy_name(r->error, r->out->names, &r->out->names_bytes, STELA_METAL_BINDING_NAME_BYTES,
+                    bytes, size, offset);
+}
+
+static bool
+add_member(const struct stela_air_layout_member *member, void *data)
+{
+   struct binding_reflection *r = data;
+   struct stela_metal_bindings *out = r->out;
+   if (out->member_count == STELA_METAL_MEMBERS)
+      return fail(r->error, STELA_AIR_LIMIT, "reflected members exceed their capacity");
+   bool texture = member->kind == STELA_AIR_FIELD_TEXTURE;
+   struct stela_metal_member *row = &out->members[out->member_count];
+   *row = (struct stela_metal_member){
+      .offset = member->offset, .size = member->size, .elements = member->elements,
+      .count = member->count, .name_bytes = (uint32_t)member->name_bytes,
+      .type_bytes = (uint32_t)member->type_name_bytes, .argument = member->argument,
+      .kind = member->kind, .id = member->id,
+      .access = texture ? texture_access(member->texture.access) :
+                          buffer_access(member->buffer.access),
+      .size_pointed = member->buffer.type_size, .alignment_pointed = member->buffer.type_alignment,
+      .texture_type = member->texture.type, .primitive = member->texture.primitive,
+      .depth = member->texture.depth,
+   };
+   r->layouts[out->member_count++] = member->layout;
+   return binding_name(r, member->name, member->name_bytes, &row->name) &&
+          binding_name(r, member->type_name, member->type_name_bytes, &row->type);
+}
+
+/* Appends layout's members, as *first and *count. */
+static bool
+add_members(struct binding_reflection *r, const struct stela_air_layout *layout, uint32_t *first,
+            uint32_t *count)
+{
+   *first = r->out->member_count;
+   if (layout && !stela_air_layout_members(r->info, layout, add_member, r))
+      return false;
+   *count = r->out->member_count - *first;
+   return true;
+}
+
+static bool
+add_binding(struct binding_reflection *r, enum stela_metal_binding_kind kind, unsigned index,
+            unsigned length, const char *name, size_t name_bytes, const char *type,
+            size_t type_bytes, bool used, const struct stela_air_layout *layout,
+            struct stela_metal_binding binding)
+{
+   struct stela_metal_bindings *out = r->out;
+   if (out->binding_count == STELA_METAL_BINDINGS)
+      return fail(r->error, STELA_AIR_LIMIT, "bindings exceed the arguments");
+   binding.kind = kind;
+   binding.index = index;
+   binding.count = length ? length : 1;
+   binding.used = used;
+   binding.name_bytes = (uint32_t)name_bytes;
+   binding.type_bytes = (uint32_t)type_bytes;
+   struct stela_metal_binding *row = &out->bindings[out->binding_count++];
+   *row = binding;
+   return binding_name(r, name, name_bytes, &row->name) &&
+          binding_name(r, type, type_bytes, &row->type) &&
+          add_members(r, layout, &row->members, &row->member_count);
+}
+
+static bool
+add_buffer_binding(struct binding_reflection *r, const struct stela_air_buffer *buffer,
+                   bool argument_buffer, const char *name, size_t name_bytes, const char *type,
+                   size_t type_bytes, bool used, const struct stela_air_layout *layout)
+{
+   enum stela_metal_binding_kind kind =
+      buffer->address_space == 3 ? STELA_METAL_BINDING_THREADGROUP :
+      buffer->address_space == 6 ? STELA_METAL_BINDING_OBJECT_PAYLOAD :
+      buffer->function_table ? STELA_METAL_BINDING_FUNCTION_TABLE : STELA_METAL_BINDING_BUFFER;
+   return add_binding(r, kind, buffer->index, 0, name, name_bytes, type, type_bytes, used, layout,
+                      (struct stela_metal_binding){
+                         .access = buffer_access(buffer->access),
+                         .argument_buffer = argument_buffer, .size = buffer->type_size,
+                         .alignment = buffer->type_alignment});
+}
+
+static bool
+add_texture_binding(struct binding_reflection *r, const struct stela_air_texture *texture,
+                    const char *name, size_t name_bytes, const char *type, size_t type_bytes,
+                    bool used)
+{
+   return add_binding(r, STELA_METAL_BINDING_TEXTURE, texture->index, texture->length, name,
+                      name_bytes, type, type_bytes, used, NULL,
+                      (struct stela_metal_binding){
+                         .access = texture_access(texture->access), .texture_type = texture->type,
+                         .primitive = texture->primitive, .depth = texture->depth});
+}
+
+static bool
+add_sampler_binding(struct binding_reflection *r, const struct stela_air_sampler *sampler,
+                    const char *name, size_t name_bytes, const char *type, size_t type_bytes,
+                    bool used)
+{
+   return add_binding(r, STELA_METAL_BINDING_SAMPLER, sampler->index, sampler->length, name,
+                      name_bytes, type, type_bytes, used, NULL,
+                      (struct stela_metal_binding){.access = STELA_METAL_ACCESS_READ});
+}
+
+/* Fills the members of the structures member rows are or point to, each
+ * after every row before it, so that each structure's are contiguous. */
+static bool
+nested_members(struct binding_reflection *r)
+{
+   for (uint32_t i = 0; i < r->out->member_count; i++) {
+      struct stela_metal_member *row = &r->out->members[i];
+      if (!add_members(r, r->layouts[i], &row->members, &row->member_count))
+         return false;
+   }
+   return true;
+}
+
+static bool
+bind_kernel(const struct stela_air_inspection *info, const struct stela_air_entry *entry,
+            void *data)
+{
+   struct binding_reflection *r = data;
+   if (entry->name_bytes != strlen(r->entry) || memcmp(entry->name, r->entry, entry->name_bytes))
+      return true;
+   r->found = true;
+   r->info = info;
+   for (unsigned i = 0; i < entry->argument_count; i++) {
+      const struct stela_air_argument_info *a = &entry->arguments[i];
+      bool added = a->absent ? true :
+                   a->kind == 1 ? add_buffer_binding(r, &a->buffer, a->argument_buffer, a->name,
+                                                     a->name_bytes, a->type_name,
+                                                     a->type_name_bytes, a->used, a->layout) :
+                   a->kind == 3 ? add_texture_binding(r, &a->texture, a->name, a->name_bytes,
+                                                      a->type_name, a->type_name_bytes, a->used) :
+                   a->kind == 4 ? add_sampler_binding(r, &a->sampler, a->name, a->name_bytes,
+                                                      a->type_name, a->type_name_bytes, a->used) :
+                                  true;
+      if (!added)
+         return false;
+   }
+   return nested_members(r);
+}
+
+static bool
+bind_stage(const struct stela_air_inspection *info, const struct stela_air_stage_entry *entry,
+           void *data)
+{
+   struct binding_reflection *r = data;
+   r->found = true;
+   r->info = info;
+   for (unsigned i = 0; i < entry->input_count; i++) {
+      const struct stela_air_stage_io *io = &entry->inputs[i];
+      bool added = io->absent ? true :
+                   io->semantic == STELA_AIR_STAGE_BUFFER || io->semantic == STELA_AIR_PAYLOAD ?
+                      add_buffer_binding(r, &io->buffer, io->argument_buffer, io->name,
+                                         io->name_bytes, io->type_name, io->type_name_bytes,
+                                         io->used, io->layout) :
+                   io->semantic == STELA_AIR_STAGE_TEXTURE ?
+                      add_texture_binding(r, &io->texture, io->name, io->name_bytes,
+                                          io->type_name, io->type_name_bytes, io->used) :
+                   io->semantic == STELA_AIR_STAGE_SAMPLER ?
+                      add_sampler_binding(r, &io->sampler, io->name, io->name_bytes,
+                                          io->type_name, io->type_name_bytes, io->used) :
+                      true;
+      if (!added)
+         return false;
+   }
+   return nested_members(r);
+}
+
+bool
+stela_metal_reflect_bindings(const void *air, size_t size, const char *entry,
+                             const struct stela_air_constant_value *constants,
+                             uint32_t constant_count, struct stela_metal_bindings *bindings,
+                             struct stela_air_error *error)
+{
+   struct stela_air_error local = {0};
+   error = error ? error : &local;
+   *error = (struct stela_air_error){0};
+   if (!bindings || !entry || (!constants && constant_count))
+      return fail(error, STELA_AIR_INPUT, "invalid binding reflection request");
+   struct binding_reflection *r = calloc(1, sizeof(*r));
+   if (!r)
+      return fail(error, STELA_AIR_ALLOCATION, "binding reflection allocation failed");
+   *r = (struct binding_reflection){.entry = entry, .out = bindings, .error = error};
+   bindings->binding_count = bindings->member_count = bindings->names_bytes = 0;
+   struct stela_air_constants values = {constants, constant_count};
+   unsigned stage = 0;
+   bool reflected = inspect_entry(air, size, entry, constants ? &values : NULL, bind_kernel,
+                                  bind_stage, r, &r->found, &stage, error);
+   free(r);
+   return reflected;
 }
 
 bool

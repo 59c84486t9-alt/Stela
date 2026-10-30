@@ -210,6 +210,77 @@ records! {
         pub reserved: u32,
     }
 
+    /// `FunctionBindings`: the span receiving the function's
+    /// `BindingInfo`s, then the `TypeInfo`s and `MemberInfo`s they reach,
+    /// then their names.
+    pub struct FunctionBindingsRequest {
+        pub function: u64,
+        pub out: Span,
+    }
+
+    /// The counts and length of the bindings written when they fit.
+    pub struct FunctionBindingsResponse {
+        pub binding_count: u32,
+        pub type_count: u32,
+        pub member_count: u32,
+        pub reserved: u32,
+        pub length: u64,
+    }
+
+    /// An `MTLBinding`; names are offsets and lengths in the bindings, and
+    /// `ty` is the index of a `TypeInfo`, or `NO_TYPE`. A buffer's is its
+    /// pointer type, whose element gives `bufferDataType` and
+    /// `bufferStructType`; a texture's its texture reference type. A
+    /// threadgroup buffer or payload has an alignment and data size, and a
+    /// texture or sampler an array length.
+    pub struct BindingInfo {
+        pub name: u32,
+        pub name_length: u32,
+        pub binding_type: u32,
+        pub access: u32,
+        pub index: u32,
+        pub used: u32,
+        pub array_length: u32,
+        pub alignment: u32,
+        pub data_size: u32,
+        pub ty: u32,
+    }
+
+    /// An `MTLStructType`, `MTLArrayType`, `MTLPointerType` or
+    /// `MTLTextureReferenceType`, by `data_type`. A structure's members are
+    /// `MemberInfo`s `[first_member, first_member + member_count)`. An
+    /// array's or pointer's element has `element_data_type` and the
+    /// `TypeInfo` `element`, or `NO_TYPE` for a datum; a texture's
+    /// component type is its `element_data_type`. `access` is a pointer's or
+    /// texture's `MTLBindingAccess`.
+    pub struct TypeInfo {
+        pub data_type: u64,
+        pub element_data_type: u64,
+        pub element: u32,
+        pub first_member: u32,
+        pub member_count: u32,
+        pub length: u32,
+        pub stride: u32,
+        pub argument_index_stride: u32,
+        pub access: u32,
+        pub alignment: u32,
+        pub data_size: u32,
+        pub element_is_argument_buffer: u32,
+        pub texture_type: u32,
+        pub depth: u32,
+    }
+
+    /// An `MTLStructMember`: its `TypeInfo` `ty`, or `NO_TYPE` for a datum.
+    pub struct MemberInfo {
+        pub name: u32,
+        pub name_length: u32,
+        pub data_type: u64,
+        pub offset: u32,
+        pub argument_index: u32,
+        pub ty: u32,
+        pub reserved: u32,
+    }
+
     /// `newBufferWithLength:options:`.
     pub struct NewBufferRequest {
         pub length: u64,
@@ -692,6 +763,9 @@ option_set! {
 /// The offset of a resource the heap places itself.
 pub const AUTOMATIC: u64 = u64::MAX;
 
+/// A binding, member or element without a `TypeInfo`: a datum.
+pub const NO_TYPE: u32 = u32::MAX;
+
 raw_enum! {
     /// How an operation ended.
     pub enum Status: u32 {
@@ -801,6 +875,10 @@ operations! {
     NewFunction = 0x0103 => NewFunctionRequest, Handle;
     /// What `MTLFunction` reports of the function.
     FunctionReflection = 0x0104 => FunctionReflectionRequest, FunctionReflectionResponse;
+    /// `MTLPipelineOptionBindingInfo`'s bindings of a function, which a
+    /// pipeline's reflection gathers from its functions, and the layouts
+    /// of `newArgumentEncoderWithBufferIndex:`.
+    FunctionBindings = 0x0105 => FunctionBindingsRequest, FunctionBindingsResponse;
     /// `newBufferWithLength:options:`.
     NewBuffer = 0x0201 => NewBufferRequest, BufferResponse;
     /// `didModifyRange:`.

@@ -1175,13 +1175,10 @@ field_access(LLVMValueRef key, bool texture, unsigned *access)
    return true;
 }
 
-/* One field's argument tuple: its position, its kind and its keyed
- * reflection, as a top-level argument of that kind spells it. Its [[id]],
- * *id, counts from id_base, that of the structure inlining it. */
+/* The kinds of an argument buffer's fields, as their argument tuples name
+ * them. */
 static bool
-argument_field(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LLVMValueRef node,
-               unsigned argument, unsigned depth, unsigned id_base, struct stela_air_field *field,
-               unsigned *id)
+field_kind(LLVMValueRef name, enum stela_air_field_kind *kind)
 {
    static const struct {
       const char *name;
@@ -1196,16 +1193,30 @@ argument_field(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LL
       {"air.render_pipeline_state", STELA_AIR_FIELD_RENDER_PIPELINE},
       {"air.compute_pipeline_state", STELA_AIR_FIELD_COMPUTE_PIPELINE},
    };
+   for (unsigned k = 0; k < ARRAY_SIZE(kinds); k++) {
+      if (stela_air_md_string(name, kinds[k].name)) {
+         *kind = kinds[k].kind;
+         return true;
+      }
+   }
+   return false;
+}
+
+/* One field's argument tuple: its position, its kind and its keyed
+ * reflection, as a top-level argument of that kind spells it. Its [[id]],
+ * *id, counts from id_base, that of the structure inlining it. */
+static bool
+argument_field(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LLVMValueRef node,
+               unsigned argument, unsigned depth, unsigned id_base, struct stela_air_field *field,
+               unsigned *id)
+{
    LLVMValueRef operands[AIR_MAX_METADATA_OPERANDS];
-   unsigned count, position, k = 0;
+   unsigned count, position;
    if (!stela_air_md_node(m, node, operands, &count) || count < 2 ||
        !stela_air_md_uint(operands[0], &position))
       return fail(m, STELA_AIR_METADATA, "invalid argument buffer field");
-   while (k < ARRAY_SIZE(kinds) && !stela_air_md_string(operands[1], kinds[k].name))
-      k++;
-   if (k == ARRAY_SIZE(kinds))
+   if (!field_kind(operands[1], &field->kind))
       return fail(m, STELA_AIR_ARGUMENT, "unsupported argument buffer field kind");
-   field->kind = kinds[k].kind;
    bool texture = field->kind == STELA_AIR_FIELD_TEXTURE;
    bool buffer = field->kind == STELA_AIR_FIELD_BUFFER || field->kind == STELA_AIR_FIELD_ARGUMENTS;
    bool has_location = false, has_access = false, has_space = false, has_size = false;
@@ -1428,6 +1439,130 @@ argument_fields(struct stela_air_metadata *m, struct stela_air_kernel *kernel, L
    kernel->field_count += count;
    unsigned next = fields->first, end = 0, ids;
    return structure_fields(m, kernel, node, 0, 0, extent, argument, depth, &next, &end, &ids);
+}
+
+/* An argument buffer member's argument tuple, as a top-level argument of
+ * its kind spells it; a nested argument buffer's layout is the member's. */
+static bool
+layout_argument(struct stela_air_metadata *m, LLVMValueRef node,
+                struct stela_air_layout_member *member)
+{
+   LLVMValueRef operands[AIR_MAX_METADATA_OPERANDS];
+   unsigned count, position, locations = 1;
+   if (!stela_air_md_node(m, node, operands, &count) || count < 2 ||
+       !stela_air_md_uint(operands[0], &position) || !field_kind(operands[1], &member->kind))
+      return fail(m, STELA_AIR_METADATA, "invalid argument buffer member argument");
+   bool texture = member->kind == STELA_AIR_FIELD_TEXTURE;
+   const char *type_name = NULL;
+   unsigned type_name_bytes = 0, access, ignored;
+   for (unsigned f = 2; f < count;) {
+      LLVMValueRef key = operands[f++];
+      unsigned *number = stela_air_md_string(key, "air.address_space") ? &member->buffer.address_space :
+                         stela_air_md_string(key, "air.arg_type_size") ? &member->buffer.type_size :
+                         stela_air_md_string(key, "air.arg_type_align_size") ?
+                            &member->buffer.type_alignment :
+                         stela_air_md_string(key, "air.buffer_size") ? &ignored : NULL;
+      if (field_access(key, texture, &access)) {
+         if (texture)
+            member->texture.access = access;
+         else
+            member->buffer.access = access;
+      } else if (stela_air_md_string(key, "air.location_index")) {
+         if (f + 2 > count || !stela_air_md_uint(operands[f], &member->id) ||
+             !stela_air_md_uint(operands[f + 1], &locations))
+            return fail(m, STELA_AIR_METADATA, "invalid argument buffer member location");
+         f += 2;
+      } else if (number) {
+         if (f == count || !stela_air_md_uint(operands[f++], number))
+            return fail(m, STELA_AIR_METADATA, "invalid argument buffer member size or space");
+      } else if (stela_air_md_string(key, "air.struct_type_info")) {
+         if (f == count)
+            return fail(m, STELA_AIR_METADATA, "invalid argument buffer member structure");
+         member->layout = (const struct stela_air_layout *)operands[f++];
+      } else if (stela_air_md_string(key, "air.arg_type_name") ||
+                 stela_air_md_string(key, "air.arg_name")) {
+         if (f == count || !operands[f] || !LLVMIsAMDString(operands[f]))
+            return fail(m, STELA_AIR_METADATA, "invalid argument buffer member name");
+         if (stela_air_md_string(key, "air.arg_type_name"))
+            type_name = LLVMGetMDString(operands[f], &type_name_bytes);
+         f++;
+      } else {
+         return fail(m, STELA_AIR_METADATA, "unsupported argument buffer member metadata");
+      }
+   }
+   member->count = locations;
+   if (!texture)
+      return true;
+   /* An array of textures names its element. */
+   if (type_name && locations > 1)
+      array_type(&type_name, &type_name_bytes, locations);
+   member->texture.length = locations > 1 ? locations : 0;
+   return (type_name && texture_type(type_name, type_name_bytes, &member->texture)) ||
+      fail(m, STELA_AIR_ARGUMENT, "unsupported argument buffer texture");
+}
+
+/* A plain structure's members are (offset, size, elements, type, name);
+ * an argument buffer's follow each with "air.indirect_argument" and its
+ * argument tuple. A member that is a structure is prefixed by
+ * "air.struct_type_info" and its layout, and in an argument buffer has its
+ * first [[id]] in place of a tuple. */
+enum { LAYOUT_FIELDS = 5 };
+
+bool
+stela_air_layout_members(const struct stela_air_inspection *info,
+                         const struct stela_air_layout *layout, stela_air_visit_member visit,
+                         void *data)
+{
+   struct stela_air_metadata *m = info->metadata;
+   LLVMValueRef node = (LLVMValueRef)layout;
+   if (!node || !LLVMIsAMDNode(node))
+      return fail(m, STELA_AIR_METADATA, "expected a structure layout");
+   /* Structures may have more members than other nodes have operands. */
+   unsigned count = LLVMGetMDNodeNumOperands(node);
+   LLVMValueRef *operands = malloc(MAX2(count, 1) * sizeof(*operands));
+   if (!operands)
+      return fail(m, STELA_AIR_ALLOCATION, "structure layout allocation failed");
+   LLVMGetMDNodeOperands(node, operands);
+   bool visited = true;
+   for (unsigned i = 0; visited && i < count;) {
+      struct stela_air_layout_member member = {0};
+      if (stela_air_md_string(operands[i], "air.struct_type_info")) {
+         if (i + 2 > count) {
+            visited = fail(m, STELA_AIR_METADATA, "invalid structure layout");
+            break;
+         }
+         member.layout = (const struct stela_air_layout *)operands[i + 1];
+         i += 2;
+      }
+      unsigned name_bytes, type_name_bytes;
+      if (i + LAYOUT_FIELDS > count || !stela_air_md_uint(operands[i], &member.offset) ||
+          !stela_air_md_uint(operands[i + 1], &member.size) ||
+          !stela_air_md_uint(operands[i + 2], &member.elements) ||
+          !operands[i + 3] || !LLVMIsAMDString(operands[i + 3]) ||
+          !operands[i + 4] || !LLVMIsAMDString(operands[i + 4])) {
+         visited = fail(m, STELA_AIR_METADATA, "invalid structure layout member");
+         break;
+      }
+      member.type_name = LLVMGetMDString(operands[i + 3], &type_name_bytes);
+      member.name = LLVMGetMDString(operands[i + 4], &name_bytes);
+      member.type_name_bytes = type_name_bytes;
+      member.name_bytes = name_bytes;
+      i += LAYOUT_FIELDS;
+      if (i < count && stela_air_md_string(operands[i], "air.indirect_argument")) {
+         member.argument = true;
+         visited = i + 2 <= count &&
+            (member.layout ? stela_air_md_uint(operands[i + 1], &member.id) :
+                             layout_argument(m, operands[i + 1], &member));
+         if (!visited) {
+            fail(m, STELA_AIR_METADATA, "invalid argument buffer member");
+            break;
+         }
+         i += 2;
+      }
+      visited = visit(&member, data);
+   }
+   free(operands);
+   return visited;
 }
 
 /* A post-tessellation vertex function's patch_control_point<T> stage-in:
@@ -1920,11 +2055,13 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          io->type_name = type_name; io->type_name_bytes = type_name_bytes;
          io->used = LLVMGetFirstUse(param) != NULL;
          io->absent = absent;
+         io->layout = (const struct stela_air_layout *)struct_info;
          if (unused && io->used)
             return fail(t, STELA_AIR_METADATA, "used stage argument marked unused");
       }
       kernel->arguments[a] = (struct stela_air_argument) {
-         .value = param, .buffer = desc, .is_buffer = buffer, .components = components,
+         .value = param, .layout = struct_info, .buffer = desc, .is_buffer = buffer,
+         .components = components,
          .is_argument_buffer = indirect, .fields = argument_buffer,
          .is_payload = payload, .is_mesh = mesh, .is_mesh_grid = grid,
          .is_stage_in = vertex_input, .location = location,
@@ -2433,6 +2570,7 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
       .function_constants = function_constants, .function_constant_count = constant_count,
       .ident = m.ident, .ident_bytes = m.ident_bytes,
       .commands = command_use(m.module),
+      .metadata = &m,
    };
    if (render_name) {
       struct stela_air_render render = {.entry = {.stage = stage}};
@@ -2495,7 +2633,7 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
             .name = arg->name, .name_bytes = arg->name_bytes,
             .type_name = arg->type_name, .type_name_bytes = arg->type_name_bytes,
             .primitive = arg->primitive, .type_components = arg->type_components, .used = arg->used,
-            .absent = arg->absent,
+            .absent = arg->absent, .layout = (const struct stela_air_layout *)arg->layout,
          };
       }
       struct stela_air_entry entry = {

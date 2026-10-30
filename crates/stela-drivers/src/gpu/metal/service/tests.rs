@@ -37,6 +37,7 @@ mod commands;
 mod indirect;
 mod pipelines;
 mod queue;
+mod reflection;
 mod resources;
 
 type TestService = Service<MockBackend, MockCompiler>;
@@ -485,7 +486,7 @@ fn libraries_list_and_make_their_functions() {
         })
     );
     let unknown = ConstantRecord {
-        data_type: 2,
+        data_type: 1000,
         ..indexed
     };
     assert_eq!(

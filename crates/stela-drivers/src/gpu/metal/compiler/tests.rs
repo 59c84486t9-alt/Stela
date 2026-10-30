@@ -136,6 +136,35 @@ unsafe extern "C" fn reflect(
     })
 }
 
+/// Answers no bindings, as reflection does, specialized.
+unsafe extern "C" fn reflect_bindings(
+    air: *const c_void,
+    size: usize,
+    entry: *const c_char,
+    constants: *const ffi::ConstantValue,
+    constant_count: u32,
+    bindings: *mut ffi::Bindings,
+    error: *mut ffi::AirError,
+) -> bool {
+    // SAFETY: the compiler passes its bindings and error records, and its
+    // values, which outlive the call.
+    let (bindings, constants) = unsafe {
+        (
+            &mut *bindings,
+            values(slice::from_raw_parts(constants, constant_count as usize)),
+        )
+    };
+    check_input(air, size, entry);
+    FAKE.with_borrow_mut(|fake| {
+        fake.reflected.push(constants);
+        if refused(fake.refuse_reflection, error) {
+            return false;
+        }
+        bindings.binding_count = 0;
+        true
+    })
+}
+
 unsafe extern "C" fn sampler_states(
     air: *const c_void,
     size: usize,
@@ -325,6 +354,7 @@ unsafe extern "C" fn release(shader: *mut c_void) {
 fn compiler(device: &PhysicalDevice) -> AirCompiler {
     let service = Service {
         reflect,
+        reflect_bindings,
         sampler_states,
         compile,
         tessellation_stages,
@@ -1198,6 +1228,28 @@ fn targets_follow_the_device() {
     let target = compiler(&device).target;
     assert_eq!(target.max_threadgroup_bytes, u16::MAX.into());
     assert_eq!(target.max_payload_bytes, 0);
+}
+
+#[test]
+fn bindings_are_reflected_specialized() {
+    let (mut compiler, library) = with_library();
+    let specialization = Specialization {
+        constants: vec![(1, vec![7, 0, 0, 0])],
+        ..Specialization::default()
+    };
+    FAKE.with_borrow_mut(|fake| fake.reflected.clear());
+    assert_eq!(
+        compiler.bindings(library, "kernel", &specialization),
+        Ok(Vec::new())
+    );
+    let reflected = FAKE.with_borrow(|fake| fake.reflected.clone());
+    assert_eq!(reflected, [vec![(1, vec![7, 0, 0, 0])]]);
+    FAKE.with_borrow_mut(|fake| fake.refuse_reflection = Some((ffi::kind::LIMIT, 0, "members")));
+    assert_eq!(
+        compiler.bindings(library, "kernel", &specialization),
+        Err(Error::Unsupported("AIR beyond the compiler's limits"))
+    );
+    FAKE.with_borrow_mut(|fake| fake.refuse_reflection = None);
 }
 
 #[test]

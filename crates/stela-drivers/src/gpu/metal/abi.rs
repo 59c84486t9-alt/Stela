@@ -702,17 +702,37 @@ raw_enum! {
 }
 
 raw_enum! {
-    /// `MTLDataType`'s scalar and vector types, the types of function
-    /// constants.
+    /// `MTLDataType`: function constants' scalar and vector types, and the
+    /// types binding reflection describes.
     pub enum DataType: u64 {
+        Struct = 1,
+        Array = 2,
         Float = 3,
         Float2 = 4,
         Float3 = 5,
         Float4 = 6,
+        Float2x2 = 7,
+        Float2x3 = 8,
+        Float2x4 = 9,
+        Float3x2 = 10,
+        Float3x3 = 11,
+        Float3x4 = 12,
+        Float4x2 = 13,
+        Float4x3 = 14,
+        Float4x4 = 15,
         Half = 16,
         Half2 = 17,
         Half3 = 18,
         Half4 = 19,
+        Half2x2 = 20,
+        Half2x3 = 21,
+        Half2x4 = 22,
+        Half3x2 = 23,
+        Half3x3 = 24,
+        Half3x4 = 25,
+        Half4x2 = 26,
+        Half4x3 = 27,
+        Half4x4 = 28,
         Int = 29,
         Int2 = 30,
         Int3 = 31,
@@ -741,6 +761,12 @@ raw_enum! {
         Bool2 = 54,
         Bool3 = 55,
         Bool4 = 56,
+        Texture = 58,
+        Sampler = 59,
+        Pointer = 60,
+        RenderPipeline = 78,
+        ComputePipeline = 79,
+        IndirectCommandBuffer = 80,
         Long = 81,
         Long2 = 82,
         Long3 = 83,
@@ -749,13 +775,21 @@ raw_enum! {
         ULong2 = 86,
         ULong3 = 87,
         ULong4 = 88,
+        VisibleFunctionTable = 115,
+        IntersectionFunctionTable = 116,
+        PrimitiveAccelerationStructure = 117,
+        InstanceAccelerationStructure = 118,
+        BFloat = 121,
+        BFloat2 = 122,
+        BFloat3 = 123,
+        BFloat4 = 124,
     }
 }
 
 impl DataType {
-    /// The scalar type and the bytes of one lane.
-    const fn scalar(self) -> (Self, usize) {
-        match self.raw() {
+    /// A scalar or vector type's scalar type and the bytes of one lane.
+    fn scalar(self) -> Option<(Self, usize)> {
+        Some(match self.raw() {
             3..=6 => (Self::Float, 4),
             16..=19 => (Self::Half, 2),
             29..=32 => (Self::Int, 4),
@@ -766,22 +800,67 @@ impl DataType {
             49..=52 => (Self::UChar, 1),
             53..=56 => (Self::Bool, 1),
             81..=84 => (Self::Long, 8),
-            _ => (Self::ULong, 8),
-        }
+            85..=88 => (Self::ULong, 8),
+            121..=124 => (Self::BFloat, 2),
+            _ => return None,
+        })
     }
 
     /// The type of `lanes` lanes of `scalar`, a scalar type.
     pub fn vector(scalar: Self, lanes: u64) -> Option<Self> {
-        if (1..=4).contains(&lanes) {
-            Self::from_raw(scalar.scalar().0.raw() + lanes - 1)
-        } else {
-            None
-        }
+        let (scalar, _) = scalar.scalar()?;
+        (1..=4)
+            .contains(&lanes)
+            .then(|| Self::from_raw(scalar.raw() + lanes - 1))
+            .flatten()
     }
 
-    /// The bytes of one lane and the lane count.
-    pub const fn lanes(self) -> (usize, usize) {
-        let (scalar, bytes) = self.scalar();
-        (bytes, (self.raw() - scalar.raw()) as usize + 1)
+    /// A scalar or vector type's bytes of one lane and lane count.
+    pub fn lanes(self) -> Option<(usize, usize)> {
+        let (scalar, bytes) = self.scalar()?;
+        Some((bytes, (self.raw() - scalar.raw()) as usize + 1))
+    }
+
+    /// The scalar, vector, packed vector or matrix type an MSL spelling
+    /// names, as `float`, `uint3`, `packed_half4` or `float4x3`.
+    pub fn from_spelling(spelling: &[u8]) -> Option<Self> {
+        let spelling = spelling.strip_prefix(b"packed_").unwrap_or(spelling);
+        let digit = |byte: u8| {
+            (b'2'..=b'4')
+                .contains(&byte)
+                .then(|| u64::from(byte - b'0'))
+        };
+        let (scalar, lanes, rows) = match spelling {
+            [scalar @ .., columns, b'x', rows] => (scalar, digit(*columns)?, Some(digit(*rows)?)),
+            [scalar @ .., lanes] if digit(*lanes).is_some() => (scalar, digit(*lanes)?, None),
+            scalar => (scalar, 1, None),
+        };
+        let scalar = match scalar {
+            b"float" => Self::Float,
+            b"half" => Self::Half,
+            b"bfloat" => Self::BFloat,
+            b"int" => Self::Int,
+            b"uint" => Self::UInt,
+            b"short" => Self::Short,
+            b"ushort" => Self::UShort,
+            b"char" => Self::Char,
+            b"uchar" => Self::UChar,
+            b"bool" => Self::Bool,
+            b"long" => Self::Long,
+            b"ulong" => Self::ULong,
+            _ => return None,
+        };
+        match rows {
+            None => Self::vector(scalar, lanes),
+            // `MTLDataType{Float,Half}{columns}x{rows}`, by columns, then rows.
+            Some(rows) => {
+                let first = match scalar {
+                    Self::Float => Self::Float2x2,
+                    Self::Half => Self::Half2x2,
+                    _ => return None,
+                };
+                Self::from_raw(first.raw() + (lanes - 2) * 3 + rows - 2)
+            }
+        }
     }
 }

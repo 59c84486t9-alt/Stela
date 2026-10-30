@@ -20,6 +20,7 @@
 //! of its dynamic libraries, without, each module once and none that is the
 //! function's own, with the names of the functions visible function tables
 //! call.
+mod bindings;
 pub mod ffi;
 #[cfg(test)]
 mod tests;
@@ -29,6 +30,7 @@ use super::{
     capabilities::ShaderFeatures,
     error::{Error, Result, ensure, require},
     library::{Air, Header, Library},
+    reflection::Binding,
     shader::{
         Access, AttributeUse, BufferUse, ColorOutput, CompiledShader, Compiler, DeclaredAttribute,
         FunctionConstant, Interface, Linking, MAX_PATCH_CONTROL_POINTS, NumericClass, Patch,
@@ -95,6 +97,16 @@ pub struct Service {
         *const ffi::ConstantValue,
         u32,
         *mut ffi::Reflection,
+        *mut ffi::AirError,
+    ) -> bool,
+    /// `stela_metal_reflect_bindings`.
+    pub reflect_bindings: unsafe extern "C" fn(
+        *const c_void,
+        usize,
+        *const c_char,
+        *const ffi::ConstantValue,
+        u32,
+        *mut ffi::Bindings,
         *mut ffi::AirError,
     ) -> bool,
     /// `stela_metal_sampler_states`.
@@ -207,6 +219,37 @@ impl Compiler for AirCompiler {
         let selected = select(&self.libraries, library, entry)?;
         let (reflection, _) = selected.reflect(&self.service, specialization, &mut self.refusal)?;
         Ok(reflection)
+    }
+
+    fn bindings(
+        &mut self,
+        library: u64,
+        entry: &str,
+        specialization: &Specialization,
+    ) -> Result<Vec<Binding>> {
+        let selected = select(&self.libraries, library, entry)?;
+        let mut bindings = ffi::Bindings::zeroed();
+        let mut error = ffi::AirError::NONE;
+        let air = selected.air.bitcode;
+        let values = constant_values(&specialization.constants);
+        let count = u32::try_from(values.len()).map_err(|_| MALFORMED)?;
+        // SAFETY: the AIR, entry and values outlive the call, which writes
+        // only the bindings and the error.
+        let reflected = unsafe {
+            (self.service.reflect_bindings)(
+                air.as_ptr().cast(),
+                air.len(),
+                selected.entry.as_ptr(),
+                values.as_ptr(),
+                count,
+                &mut *bindings,
+                &mut error,
+            )
+        };
+        if !reflected {
+            return Err(refuse(&mut self.refusal, entry, &error));
+        }
+        bindings::bindings(&bindings)
     }
 
     fn sampler_states(
@@ -758,28 +801,12 @@ fn components(count: u32) -> Result<u8> {
         .ok_or(MALFORMED)
 }
 
-/// The `MTLDataType` of a function constant's MSL type spelling, as
-/// `float`, `uint3` or `bool2`.
+/// The `MTLDataType` of a function constant's MSL type spelling, a scalar
+/// or vector as `float`, `uint3` or `bool2`.
 fn data_type(spelling: &[u8]) -> Result<DataType> {
-    let (scalar, lanes) = match spelling.split_last() {
-        Some((lanes @ b'2'..=b'4', scalar)) => (scalar, u64::from(lanes - b'0')),
-        _ => (spelling, 1),
-    };
-    let scalar = match scalar {
-        b"float" => DataType::Float,
-        b"half" => DataType::Half,
-        b"int" => DataType::Int,
-        b"uint" => DataType::UInt,
-        b"short" => DataType::Short,
-        b"ushort" => DataType::UShort,
-        b"char" => DataType::Char,
-        b"uchar" => DataType::UChar,
-        b"bool" => DataType::Bool,
-        b"long" => DataType::Long,
-        b"ulong" => DataType::ULong,
-        _ => return Err(Error::Unsupported("function constant type")),
-    };
-    DataType::vector(scalar, lanes).ok_or(MALFORMED)
+    DataType::from_spelling(spelling)
+        .filter(|data_type| data_type.lanes().is_some())
+        .ok_or(Error::Unsupported("function constant type"))
 }
 
 /// `enum stela_air_patch` and the control points the function declares.
@@ -870,16 +897,7 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
         .iter()
         .map(|attribute| {
             let name = name(r, attribute.name, attribute.name_bytes)?;
-            let scalar = match scalar(attribute.primitive)? {
-                Scalar::Float => DataType::Float,
-                Scalar::Half => DataType::Half,
-                Scalar::Int => DataType::Int,
-                Scalar::Uint => DataType::UInt,
-                Scalar::Short => DataType::Short,
-                Scalar::Ushort => DataType::UShort,
-                Scalar::Char => DataType::Char,
-                Scalar::Uchar => DataType::UChar,
-            };
+            let scalar = scalar(attribute.primitive)?.data_type();
             let components = components(attribute.components)?;
             Ok(DeclaredAttribute {
                 name: String::from(str::from_utf8(name).map_err(|_| MALFORMED)?),

@@ -17,6 +17,7 @@ use super::{
     },
     error::{Result, ensure},
     pixel_format::Numeric,
+    reflection::Binding,
     vertex::{StageInputDescriptor, VertexDescriptor},
     vulkan::{ShaderStages, object::ShaderCode},
 };
@@ -164,6 +165,21 @@ pub enum Scalar {
     Uchar,
 }
 
+impl Scalar {
+    pub const fn data_type(self) -> DataType {
+        match self {
+            Self::Float => DataType::Float,
+            Self::Half => DataType::Half,
+            Self::Int => DataType::Int,
+            Self::Uint => DataType::UInt,
+            Self::Short => DataType::Short,
+            Self::Ushort => DataType::UShort,
+            Self::Char => DataType::Char,
+            Self::Uchar => DataType::UChar,
+        }
+    }
+}
+
 /// A varying a vertex or mesh function outputs, or a fragment function
 /// reads, linked by its `[[user(name)]]` identifier.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -191,8 +207,9 @@ impl FunctionConstant {
     /// Whether `value` is laid out as the constant's type: its lanes packed,
     /// a three-lane vector optionally padded to four.
     pub fn accepts(&self, value: &[u8]) -> bool {
-        let (bytes, lanes) = self.data_type.lanes();
-        value.len() == bytes * lanes || (lanes == 3 && value.len() == bytes * 4)
+        self.data_type.lanes().is_some_and(|(bytes, lanes)| {
+            value.len() == bytes * lanes || (lanes == 3 && value.len() == bytes * 4)
+        })
     }
 }
 
@@ -591,6 +608,16 @@ pub trait Compiler {
         specialization: &Specialization,
     ) -> Result<Reflection>;
 
+    /// The bindings of `entry` of `library` specialized with
+    /// `specialization`'s function constant values, without those a false
+    /// `[[function_constant]]` makes absent.
+    fn bindings(
+        &mut self,
+        library: u64,
+        entry: &str,
+        specialization: &Specialization,
+    ) -> Result<Vec<Binding>>;
+
     /// The constexpr sampler states of `entry` of `library` and of the
     /// functions and libraries `specialization` links, each once, which
     /// [`SamplerDescriptor::from_constexpr`] decodes. Compiling the function
@@ -675,6 +702,36 @@ pub(crate) mod tests {
         assert!(constant(DataType::ULong).accepts(&[0; 8]));
         assert_eq!(DataType::vector(DataType::Char, 3), Some(DataType::Char3));
         assert_eq!(DataType::vector(DataType::Char, 5), None);
+        assert!(
+            !constant(DataType::Float4x4).accepts(&[0; 64]),
+            "not a constant type"
+        );
+    }
+
+    #[test]
+    fn msl_spellings_name_their_data_types() {
+        let spelled = [
+            ("float", DataType::Float),
+            ("uint3", DataType::UInt3),
+            ("packed_half4", DataType::Half4),
+            ("bfloat2", DataType::BFloat2),
+            ("float4x4", DataType::Float4x4),
+            ("float2x3", DataType::Float2x3),
+            ("half3x2", DataType::Half3x2),
+        ];
+        for (spelling, data_type) in spelled {
+            assert_eq!(
+                DataType::from_spelling(spelling.as_bytes()),
+                Some(data_type)
+            );
+        }
+        for spelling in ["int4x4", "float5", "float1x2", "Inner", "metal::_atomic"] {
+            assert_eq!(
+                DataType::from_spelling(spelling.as_bytes()),
+                None,
+                "{spelling}"
+            );
+        }
     }
 
     #[test]

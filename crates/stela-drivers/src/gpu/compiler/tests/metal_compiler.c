@@ -250,6 +250,50 @@ static const char *arrays =
    " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
    " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n";
 
+/* A kernel binding a uniform structure, which inlines an array of another,
+ * an argument buffer of a texture array, a buffer and a constant, a texture,
+ * a sampler and a threadgroup buffer; it reads only the uniforms. */
+static const char *bound =
+   "define void @bound(ptr addrspace(2) %u, ptr addrspace(2) %args, ptr addrspace(1) %rw,"
+   " ptr addrspace(2) %s, ptr addrspace(3) %tg, ptr addrspace(1) %out) {\n"
+   "%v = load float, ptr addrspace(2) %u, align 16\n"
+   "store float %v, ptr addrspace(1) %out, align 4\n"
+   "ret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @bound, !3, !4}\n!3 = !{}\n!4 = !{!5, !6, !7, !8, !9, !10}\n"
+   "!5 = !{i32 0, !\"air.buffer\", !\"air.buffer_size\", i32 128, !\"air.location_index\", i32 0,"
+   " i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.struct_type_info\", !30,"
+   " !\"air.arg_type_size\", i32 128, !\"air.arg_type_align_size\", i32 16,"
+   " !\"air.arg_type_name\", !\"Uniforms\", !\"air.arg_name\", !\"u\"}\n"
+   "!30 = !{i32 0, i32 64, i32 0, !\"float4x4\", !\"mvp\", !\"air.struct_type_info\", !31,"
+   " i32 64, i32 16, i32 2, !\"Inner\", !\"inner\", i32 96, i32 4, i32 3, !\"int\", !\"k\"}\n"
+   "!31 = !{i32 0, i32 8, i32 0, !\"float2\", !\"uv\", i32 8, i32 2, i32 0, !\"half\", !\"h\"}\n"
+   "!6 = !{i32 1, !\"air.indirect_buffer\", !\"air.buffer_size\", i32 32, !\"air.location_index\","
+   " i32 1, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.struct_type_info\", !32,"
+   " !\"air.arg_type_size\", i32 32, !\"air.arg_type_align_size\", i32 8,"
+   " !\"air.arg_type_name\", !\"Args\", !\"air.arg_name\", !\"args\"}\n"
+   "!32 = !{i32 0, i32 16, i32 0, !\"array<texture2d<float, sample>, 2>\", !\"ts\","
+   " !\"air.indirect_argument\", !33, i32 16, i32 8, i32 0, !\"float\", !\"d\","
+   " !\"air.indirect_argument\", !34, i32 24, i32 4, i32 0, !\"float\", !\"c\","
+   " !\"air.indirect_argument\", !35}\n"
+   "!33 = !{i32 0, !\"air.texture\", !\"air.location_index\", i32 0, i32 2, !\"air.sample\","
+   " !\"air.arg_type_name\", !\"array<texture2d<float, sample>, 2>\", !\"air.arg_name\", !\"ts\"}\n"
+   "!34 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 2, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"d\"}\n"
+   "!35 = !{i32 2, !\"air.indirect_constant\", !\"air.location_index\", i32 3, i32 1,"
+   " !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"c\"}\n"
+   "!7 = !{i32 2, !\"air.texture\", !\"air.location_index\", i32 1, i32 1, !\"air.read_write\","
+   " !\"air.arg_type_name\", !\"texture2d<float, read_write>\", !\"air.arg_name\", !\"rw\"}\n"
+   "!8 = !{i32 3, !\"air.sampler\", !\"air.location_index\", i32 0, i32 1,"
+   " !\"air.arg_type_name\", !\"sampler\", !\"air.arg_name\", !\"s\"}\n"
+   "!9 = !{i32 4, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 3, !\"air.arg_type_size\", i32 16, !\"air.arg_type_align_size\","
+   " i32 16, !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"tg\"}\n"
+   "!10 = !{i32 5, !\"air.buffer\", !\"air.location_index\", i32 2, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"out\"}\n";
+
 /* A kernel calling a [[noinline]] helper, which calls a visible function, and
  * one calling a function that recurses. */
 static const char *calls =
@@ -979,6 +1023,75 @@ arrays_reflect_each_slot(void)
    stela_metal_release(shader);
 }
 
+static const char *
+binding_name(const struct stela_metal_bindings *bindings, uint32_t offset, uint32_t bytes)
+{
+   static char text[STELA_METAL_BINDING_NAME_BYTES + 1];
+   memcpy(text, bindings->names + offset, bytes);
+   text[bytes] = 0;
+   return text;
+}
+
+#define NAMED(row, text) (!strcmp(binding_name(&bindings, (row)->name, (row)->name_bytes), text))
+#define TYPED(row, text) (!strcmp(binding_name(&bindings, (row)->type, (row)->type_bytes), text))
+
+static void
+bindings_reflect_their_structures(void)
+{
+   static struct stela_metal_bindings bindings;
+   struct stela_air_error error;
+   LLVMMemoryBufferRef input = bitcode(bound);
+   bool reflected = stela_metal_reflect_bindings(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                                 "bound", NULL, 0, &bindings, &error);
+   if (!reflected)
+      fprintf(stderr, "bound: %u %s\n", error.kind, error.detail);
+   assert(reflected && bindings.binding_count == 6);
+   const struct stela_metal_binding *u = &bindings.bindings[0];
+   assert(u->kind == STELA_METAL_BINDING_BUFFER && u->index == 0 && u->count == 1 && u->used);
+   assert(u->access == STELA_METAL_ACCESS_READ && !u->argument_buffer);
+   assert(u->size == 128 && u->alignment == 16 && NAMED(u, "u") && TYPED(u, "Uniforms"));
+   assert(u->members == 0 && u->member_count == 3);
+   const struct stela_metal_member *inner = &bindings.members[1];
+   assert(NAMED(&bindings.members[0], "mvp") && TYPED(&bindings.members[0], "float4x4"));
+   assert(NAMED(inner, "inner") && inner->offset == 64 && inner->size == 16 &&
+          inner->elements == 2 && !inner->argument);
+   assert(bindings.members[2].offset == 96 && bindings.members[2].elements == 3 &&
+          bindings.members[2].member_count == 0);
+
+   const struct stela_metal_binding *args = &bindings.bindings[1];
+   assert(args->argument_buffer && !args->used && args->members == 3 && args->member_count == 3);
+   const struct stela_metal_member *ts = &bindings.members[3];
+   assert(ts->argument && ts->kind == STELA_AIR_FIELD_TEXTURE && ts->id == 0 && ts->count == 2);
+   assert(ts->texture_type == STELA_AIR_TEXTURE_2D && ts->primitive == STELA_AIR_FLOAT &&
+          ts->access == STELA_METAL_ACCESS_SAMPLE);
+   const struct stela_metal_member *d = &bindings.members[4];
+   assert(d->kind == STELA_AIR_FIELD_BUFFER && d->id == 2 && d->size_pointed == 4 &&
+          d->alignment_pointed == 4 &&
+          d->access == (STELA_METAL_ACCESS_READ | STELA_METAL_ACCESS_WRITE));
+   assert(bindings.members[5].kind == STELA_AIR_FIELD_DATA && bindings.members[5].id == 3);
+   /* A nested structure's members follow its parents'. */
+   assert(inner->members == 6 && inner->member_count == 2 && bindings.member_count == 8);
+   assert(NAMED(&bindings.members[7], "h") && bindings.members[7].offset == 8);
+
+   const struct stela_metal_binding *rw = &bindings.bindings[2];
+   assert(rw->kind == STELA_METAL_BINDING_TEXTURE && rw->index == 1 && rw->count == 1 &&
+          rw->texture_type == STELA_AIR_TEXTURE_2D && rw->primitive == STELA_AIR_FLOAT &&
+          !rw->depth && rw->access == (STELA_METAL_ACCESS_READ | STELA_METAL_ACCESS_WRITE));
+   assert(bindings.bindings[3].kind == STELA_METAL_BINDING_SAMPLER &&
+          NAMED(&bindings.bindings[3], "s"));
+   const struct stela_metal_binding *tg = &bindings.bindings[4];
+   assert(tg->kind == STELA_METAL_BINDING_THREADGROUP && tg->size == 16 && tg->alignment == 16);
+   assert(bindings.bindings[5].index == 2 && bindings.bindings[5].used);
+
+   assert(!stela_metal_reflect_bindings(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                        "missing", NULL, 0, &bindings, &error) &&
+          error.kind == STELA_AIR_ARGUMENT);
+   LLVMDisposeMemoryBuffer(input);
+}
+
+#undef NAMED
+#undef TYPED
+
 /* Calls to the module's functions are inlined; recursion is refused. */
 static void
 defined_functions_inline_into_their_callers(void)
@@ -1294,6 +1407,7 @@ main(void)
    derived_constants_are_constructed_from_their_function_constants();
    function_constants_select_arguments();
    arrays_reflect_each_slot();
+   bindings_reflect_their_structures();
    defined_functions_inline_into_their_callers();
    linked_functions_resolve_tables_and_externals();
    recursion_unrolls_to_the_call_stack_depth();

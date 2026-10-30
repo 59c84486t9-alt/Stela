@@ -104,6 +104,12 @@ struct stela_air_function_constant {
 };
 #define AIR_MAX_FUNCTION_CONSTANTS 256u
 
+struct stela_air_metadata;
+/* A structure an argument points to or a member is, as its
+ * air.struct_type_info reflects it; stela_air_layout_members visits its
+ * members during the inspection's callback. */
+struct stela_air_layout;
+
 /* Borrowed callback views expire on callback return. Inspection validates LLVM,
  * module/entry ABI and metadata, not executable-body support, bindings, GPU
  * capability, or compiler provenance. Only actual air.kernel entries are
@@ -120,6 +126,7 @@ struct stela_air_inspection {
    const struct stela_air_function_constant *function_constants;
    unsigned function_constant_count;
    unsigned commands; /* enum stela_air_command_use flags. */
+   struct stela_air_metadata *metadata; /* Decodes layouts. */
 };
 /* What a module's functions do with indirect command buffers. */
 enum stela_air_command_use {
@@ -226,6 +233,7 @@ struct stela_air_argument_info {
    unsigned type_components; /* 1..4 only for known reflected builtin types. */
    bool used; /* Actual uses in this AIR module, not a final machine-code liveness claim. */
    bool absent; /* Its [[function_constant]] is false. */
+   const struct stela_air_layout *layout; /* kind 1: the structure it points to, or NULL. */
 };
 struct stela_air_entry {
    const char *name;
@@ -332,6 +340,8 @@ struct stela_air_stage_io {
    size_t name_bytes, type_name_bytes, identifier_bytes;
    unsigned member_count;
    const struct stela_air_struct_member *members;
+   /* STAGE_BUFFER and PAYLOAD: the structure it points to, or NULL. */
+   const struct stela_air_layout *layout;
 };
 /* The primitives a mesh function outputs. */
 enum stela_air_topology { STELA_AIR_POINTS = 1, STELA_AIR_LINES, STELA_AIR_TRIANGLES };
@@ -378,6 +388,43 @@ bool stela_air_entry_stage(const void *, size_t, const char *entry, unsigned *st
 #define AIR_MAX_SAMPLER_STATES AIR_MAX_METADATA_OPERANDS
 bool stela_air_sampler_states(const void *, size_t, uint64_t *states, unsigned *count,
                               struct stela_air_error *);
+
+enum stela_air_field_kind {
+   STELA_AIR_FIELD_DATA, /* Inline constant data. */
+   STELA_AIR_FIELD_BUFFER, /* A device or constant buffer's address. */
+   STELA_AIR_FIELD_ARGUMENTS, /* A nested argument buffer's address. */
+   STELA_AIR_FIELD_TEXTURE, /* A texture's 64-bit MTLResourceID. */
+   STELA_AIR_FIELD_SAMPLER, /* A sampler's 64-bit MTLResourceID. */
+   /* An indirect command buffer's or a pipeline state's 64-bit
+    * gpuResourceID, which only AIR's command functions use. */
+   STELA_AIR_FIELD_COMMANDS,
+   STELA_AIR_FIELD_RENDER_PIPELINE,
+   STELA_AIR_FIELD_COMPUTE_PIPELINE,
+};
+/* A member of a layout: its offset, the bytes of one element, its element
+ * count (zero for one), and its MSL type spelling and name. layout is the
+ * structure the member is, or a nested argument buffer's, which it points
+ * to. An argument buffer's members are arguments: each holds count
+ * resources of kind from [[id]] id, and a buffer's or texture's descriptor
+ * as a top-level argument of its kind spells it; an inlined structure's id
+ * is its first member's. */
+struct stela_air_layout_member {
+   unsigned offset, size, elements, count;
+   const char *name, *type_name;
+   size_t name_bytes, type_name_bytes;
+   const struct stela_air_layout *layout;
+   bool argument;
+   enum stela_air_field_kind kind;
+   unsigned id;
+   struct stela_air_buffer buffer;
+   struct stela_air_texture texture;
+};
+typedef bool (*stela_air_visit_member)(const struct stela_air_layout_member *, void *);
+/* Visits layout's members in increasing offsets, during the callback of the
+ * inspection that gave the layout; false when a member is malformed or the
+ * visitor refuses one. */
+bool stela_air_layout_members(const struct stela_air_inspection *, const struct stela_air_layout *,
+                              stela_air_visit_member, void *);
 
 /* One validated VS/FS varying map. Identifiers borrow from the supplied entry
  * descriptors; caller must own/copy those strings beyond inspector callbacks.
@@ -484,18 +531,6 @@ bool stela_air_metadata_constructed(LLVMValueRef global);
 struct stela_air_fields {
    unsigned first, count, size;
 };
-enum stela_air_field_kind {
-   STELA_AIR_FIELD_DATA, /* Inline constant data. */
-   STELA_AIR_FIELD_BUFFER, /* A device or constant buffer's address. */
-   STELA_AIR_FIELD_ARGUMENTS, /* A nested argument buffer's address. */
-   STELA_AIR_FIELD_TEXTURE, /* A texture's 64-bit MTLResourceID. */
-   STELA_AIR_FIELD_SAMPLER, /* A sampler's 64-bit MTLResourceID. */
-   /* An indirect command buffer's or a pipeline state's 64-bit
-    * gpuResourceID, which only AIR's command functions use. */
-   STELA_AIR_FIELD_COMMANDS,
-   STELA_AIR_FIELD_RENDER_PIPELINE,
-   STELA_AIR_FIELD_COMPUTE_PIPELINE,
-};
 /* One argument of an argument buffer: count elements filling size bytes at
  * offset. Addresses and resource IDs are aligned 8-byte elements. The
  * descriptors' argument is the argument buffer's top-level argument and
@@ -513,6 +548,7 @@ struct stela_air_field {
 
 struct stela_air_argument {
    LLVMValueRef value; /* Borrowed, decoder/compiler internal only. */
+   LLVMValueRef layout; /* Its air.struct_type_info, or NULL. */
    struct stela_air_buffer buffer;
    struct stela_air_texture texture;
    struct stela_air_sampler sampler;

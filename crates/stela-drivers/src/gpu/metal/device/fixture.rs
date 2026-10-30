@@ -3,12 +3,16 @@
 
 use super::{Device, LibraryId};
 use crate::gpu::metal::{
-    abi::DataType,
+    abi::{DataType, TextureType},
     capabilities::ShaderFeatures,
     command_buffer::Segment,
     error::{Error, Result},
     library::tests::fixture,
     nvidia::{CHIPS, Chip, PcieLink, fixture::nvk},
+    reflection::{
+        ArrayType, Binding, BindingAccess, BindingKind, PointerType, StructMember, StructType,
+        TextureReferenceType, Type,
+    },
     shader::{
         Access, BufferUse, CompiledShader, Compiler, FunctionConstant, Interface, Patch,
         PatchDomain, Provenance, Reflection, Scalar, Specialization, Stage, Tessellation,
@@ -290,6 +294,86 @@ pub(crate) struct MockCompiler {
     pub(crate) released: Vec<ShaderCode>,
 }
 
+/// Every function's bindings: uniforms holding a matrix and an array of
+/// structures, an argument buffer of a texture and a buffer, and a sampler.
+pub(crate) fn bound() -> Vec<Binding> {
+    let member = |name: &str, offset, ty, argument_index| StructMember {
+        name: String::from(name),
+        offset,
+        ty,
+        argument_index,
+    };
+    let inner = StructType {
+        members: alloc::vec![
+            member("uv", 0, Type::Data(DataType::Float2), 0),
+            member("h", 8, Type::Data(DataType::Half), 0),
+        ],
+    };
+    let uniforms = StructType {
+        members: alloc::vec![
+            member("mvp", 0, Type::Data(DataType::Float4x4), 0),
+            member(
+                "inner",
+                64,
+                Type::Array(ArrayType {
+                    element: Box::new(Type::Struct(inner)),
+                    length: 2,
+                    stride: 16,
+                    argument_index_stride: 0,
+                }),
+                0,
+            ),
+        ],
+    };
+    let texture = TextureReferenceType {
+        data_type: DataType::Float,
+        texture_type: TextureType::D2,
+        access: BindingAccess::ReadOnly,
+        depth: false,
+    };
+    let arguments = StructType {
+        members: alloc::vec![
+            member("t", 0, Type::Texture(texture), 0),
+            member(
+                "d",
+                8,
+                Type::Pointer(PointerType {
+                    element: Box::new(Type::Data(DataType::Float)),
+                    access: BindingAccess::ReadWrite,
+                    alignment: 4,
+                    data_size: 4,
+                    element_is_argument_buffer: false,
+                }),
+                1,
+            ),
+        ],
+    };
+    let buffer = |name: &str, index, element, alignment, data_size, argument_buffer| Binding {
+        name: String::from(name),
+        index,
+        access: BindingAccess::ReadOnly,
+        used: true,
+        kind: BindingKind::Buffer(PointerType {
+            element: Box::new(element),
+            access: BindingAccess::ReadOnly,
+            alignment,
+            data_size,
+            element_is_argument_buffer: argument_buffer,
+        }),
+    };
+    alloc::vec![
+        buffer("u", 0, Type::Struct(uniforms), 16, 96, false),
+        buffer("args", 1, Type::Struct(arguments), 8, 16, true),
+        Binding {
+            name: String::from("s"),
+            index: 0,
+            access: BindingAccess::ReadOnly,
+            used: false,
+            kind: BindingKind::Sampler { array_length: 1 },
+        },
+    ]
+}
+
 fn reflected(entry: &str) -> Result<Interface> {
     let stage = match entry {
         "kernel" => Stage::Kernel,
@@ -376,6 +460,9 @@ impl Compiler for MockCompiler {
             }),
             _ => reflected(entry).map(|interface| Reflection::Stage(Box::new(interface))),
         }
+    }
+    fn bindings(&mut self, _: u64, entry: &str, _: &Specialization) -> Result<Vec<Binding>> {
+        reflected(entry).map(|_| bound())
     }
     fn sampler_states(&mut self, _: u64, entry: &str, _: &Specialization) -> Result<Vec<u64>> {
         // The default state, and filter::linear with the default's state.
