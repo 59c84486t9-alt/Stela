@@ -64,16 +64,6 @@ const OPEN: &[(&str, &[&str])] = &[
     ("device model references", &["put_device"]),
     ("interrupts", &["free_irq", "request_threaded_irq"]),
     (
-        "workqueues",
-        &[
-            "alloc_workqueue_noprof",
-            "destroy_workqueue",
-            "flush_work",
-            "queue_work_on",
-            "system_percpu_wq",
-        ],
-    ),
-    (
         "the I2C core and its bit-banging algorithm",
         &[
             "i2c_add_adapter",

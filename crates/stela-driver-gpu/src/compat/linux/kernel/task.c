@@ -15,6 +15,7 @@
 #include <stela/linux.h>
 #include <stela/page.h>
 #include <stela/task.h>
+#include <stela/workqueue.h>
 #include "sched/sched.h"
 
 static_assert(CONFIG_THREAD_INFO_IN_TASK == 1);
@@ -590,9 +591,13 @@ static int finish_prepared(struct stela_linux_task *task, int result)
 int stela_linux_task_park(bool scheduler_preempt_disabled)
 {
 	struct stela_linux_task *task = current_record();
+	/* As Linux's sched_submit_work, before the switch is prepared. */
+	stela_linux_worker_sleeping(true);
 	int error = prepare(task, scheduler_preempt_disabled ? 1 : 0);
-	if (error)
+	if (error) {
+		stela_linux_worker_sleeping(false);
 		return error;
+	}
 	/* Same selected scheduler effect as try_to_block_task: a signal posted
 	 * by a process PREPARE retirement callback must not be lost. Native IRQ
 	 * views only publish generic pending wake, never mutate Linux sigsets. */
@@ -604,7 +609,9 @@ int stela_linux_task_park(bool scheduler_preempt_disabled)
 	int result = task->scope_ops->park(task->scope);
 	if (result > 1)
 		__builtin_trap();
-	return finish_prepared(task, result);
+	result = finish_prepared(task, result);
+	stela_linux_worker_sleeping(false);
+	return result;
 }
 
 int stela_linux_task_yield(void)

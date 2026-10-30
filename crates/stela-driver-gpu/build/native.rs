@@ -241,6 +241,7 @@ impl Linux {
                     format!("{COMPAT}/stela/mutex_test.c"),
                     format!("{COMPAT}/stela/resource_test.c"),
                     format!("{COMPAT}/stela/timer_test.c"),
+                    format!("{COMPAT}/stela/workqueue_test.c"),
                 ])
                 .objects(helper_objects)
                 .compile("linux-task-fixture");

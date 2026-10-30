@@ -31,23 +31,6 @@ void __iomem *ioremap(phys_addr_t offset, size_t size)
 /* Nothing ioremap returned can reach it. */
 STELA_UNSUPPORTED(void, iounmap, volatile void __iomem *)
 
-/* Stela runs no kernel threads, so Linux code has no workers to queue
- * work for. */
-STELA_UNSUPPORTED(struct workqueue_struct *, alloc_workqueue_noprof, const char *, unsigned int,
-		  int, ...)
-STELA_UNSUPPORTED(void, destroy_workqueue, struct workqueue_struct *)
-STELA_UNSUPPORTED(bool, queue_work_on, int, struct workqueue_struct *, struct work_struct *)
-STELA_UNSUPPORTED(void, __flush_workqueue, struct workqueue_struct *)
-STELA_UNSUPPORTED(void, __warn_flushing_systemwide_wq, void)
-STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_wq);
-STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_percpu_wq);
-STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_highpri_wq);
-STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_long_wq);
-STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_unbound_wq);
-STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_dfl_wq);
-STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_freezable_wq);
-STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_power_efficient_wq);
-STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_freezable_power_efficient_wq);
+/* Workqueues that run their work in softirq context. */
 STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_bh_wq);
 STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_bh_highpri_wq);
-STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_dfl_long_wq);

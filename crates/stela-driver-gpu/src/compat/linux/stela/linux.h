@@ -45,6 +45,10 @@ struct stela_linux_services {
 	 * state. The caller retains actual IRQ-safe non-migrating serialization;
 	 * this table is not a native execution/interrupt grant. */
 	void (*random_bytes)(void *context, void *bytes, size_t size);
+	/* Start a Linux task that runs stela_linux_workers_run in this owner,
+	 * or return a negative errno when none can start now. The request must
+	 * not run the worker inline. */
+	int (*start_worker)(void *context);
 };
 
 struct stela_linux_owner {
@@ -54,7 +58,7 @@ struct stela_linux_owner {
 
 /* Private x86-64 C ABI. All producers and consumers rebuild from this header;
  * Rust currently passes owners opaquely rather than mirroring this table. */
-_Static_assert(sizeof(struct stela_linux_services) == 56, "Linux services ABI");
+_Static_assert(sizeof(struct stela_linux_services) == 64, "Linux services ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_services, random_bytes) == 48,
 	       "Linux random callback ABI");
 _Static_assert(sizeof(struct stela_linux_owner) == 16, "Linux owner ABI");
