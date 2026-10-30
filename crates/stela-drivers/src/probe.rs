@@ -64,6 +64,7 @@ pub enum Error {
     Ehci(usb::ehci::Error),
     HdaPci(crate::audio::hda::pci::AttachError),
     Hda(crate::audio::Error),
+    Usb4(native::usb4::Refusal),
 }
 
 impl fmt::Display for Error {
@@ -84,6 +85,7 @@ impl fmt::Display for Error {
             Self::Ehci(error) => write!(f, "EHCI: {error:?}"),
             Self::HdaPci(error) => write!(f, "HD Audio PCI: {error:?}"),
             Self::Hda(error) => write!(f, "HD Audio: {error:?}"),
+            Self::Usb4(refusal) => write!(f, "USB4 host: {refusal}"),
         }
     }
 }
@@ -368,7 +370,8 @@ fn unsupported(class: [u8; 3]) -> Option<&'static str> {
         [0x0c, 0x03, _] => {
             Some("UHCI or OHCI USB host controller (taken from firmware, not driven)")
         }
-        [0x0c, 0x0a, _] => Some("USB4/Thunderbolt host (not attached yet)"),
+        // Listed NHIs attach through the mount's native services.
+        [0x0c, 0x0a, _] => Some("USB4/Thunderbolt host outside the supported NHI identities"),
         [0x0c, 0x05, _] => Some(
             "SMBus host other than an Intel i801 under native ACPI (no Host Notify for touchpad companions)",
         ),
@@ -401,6 +404,8 @@ pub struct Devices {
     pub ehci_hosts: Vec<usb::ehci::host::Shared>,
     /// HD Audio controllers and their bound codecs.
     pub hda_hosts: Vec<native::hda::Host>,
+    /// USB4/Thunderbolt hosts whose firmware connection manager answered.
+    pub usb4_hosts: Vec<native::usb4::Host>,
     /// Native SDHCI socket owners, including empty/removable card sockets.
     pub sd_hosts: Vec<sdhci::Host>,
     /// Native Realtek socket owners, kept for empty/removable SD/MMC cards.
@@ -780,6 +785,7 @@ pub unsafe fn probe_with_provider(
     // Broadcom PCIe Bluetooth functions, attached once the scan has found
     // every bridge of their segment.
     let mut broadcom_bluetooth = Vec::new();
+    let mut usb4_hosts = Vec::new();
     let mut mehlow = false;
     // Each PCI bridge and its secondary bus, for ACPI companion lookups.
     let mut bridges = Vec::new();
@@ -892,6 +898,10 @@ pub unsafe fn probe_with_provider(
                     }
                     native::Kind::Bcm4377 => {
                         broadcom_bluetooth.push(address);
+                        continue;
+                    }
+                    native::Kind::Usb4 => {
+                        usb4_hosts.push(address);
                         continue;
                     }
                     native::Kind::Ehci => {
@@ -1248,6 +1258,22 @@ pub unsafe fn probe_with_provider(
             match result {
                 Ok(found) => devices.disks.extend(found),
                 Err(error) => devices.failures.push((address, error.into())),
+            }
+        }
+    }
+    for address in usb4_hosts {
+        let Some(services) = services else {
+            devices
+                .failures
+                .push((address, Error::Native(ServiceError::Unavailable)));
+            continue;
+        };
+        // SAFETY: as for tg3; the scan found every bridge of the segment.
+        match unsafe { native::usb4::attach(services, address, &bridges, handoff.clock) } {
+            Ok(host) => devices.usb4_hosts.push(host),
+            Err((error, kept)) => {
+                devices.failures.push((address, error));
+                devices.owners.extend(kept);
             }
         }
     }

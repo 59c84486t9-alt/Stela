@@ -32,6 +32,7 @@ use alloc::{boxed::Box, rc::Rc, string::String, sync::Arc, vec::Vec};
 use core::{any::Any, cell::RefCell};
 
 pub mod hda;
+pub mod usb4;
 
 /// A Broadcom Tigon3 adapter over owned BAR0 and APE mappings.
 pub type Tg3 = tg3::Packet<tg3::io::Mmio<OwnedConfig>, Clock>;
@@ -83,6 +84,8 @@ pub(super) enum Kind {
     Ehci,
     /// An HD Audio controller the bounded identity table admits.
     Hda,
+    /// A USB4/Thunderbolt host interface, as `pci.c::nhi_ids` lists them.
+    Usb4,
 }
 
 impl Kind {
@@ -114,6 +117,14 @@ impl Kind {
             Some(Self::Ehci)
         } else if crate::audio::hda::pci::identify(function).is_ok() {
             Some(Self::Hda)
+        } else if crate::bus::thunderbolt::controller::Profile::identify(
+            function.vendor,
+            function.device,
+            u32::from_be_bytes([0, function.class[0], function.class[1], function.class[2]]),
+        )
+        .is_ok()
+        {
+            Some(Self::Usb4)
         } else {
             None
         }
