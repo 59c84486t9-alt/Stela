@@ -1,9 +1,14 @@
-//! Functions and pipeline states, with their compiled variants.
+//! Libraries, functions and pipeline states, with their compiled variants.
 //!
 //! A pipeline stage compiles its linked functions into its function
 //! ([`Linking`]). A visible function table is a buffer of 64-bit
 //! [`FunctionHandle`]s, which the compiler's dispatch reads.
-use super::{BufferId, ComputePipelineId, Device, FunctionId, RenderPipelineId, Slab};
+//!
+//! As in Metal, a function keeps its library and a pipeline the functions
+//! and libraries its descriptor names, whose variants it compiles later:
+//! destroying a library or function ends its creator's use, and the object
+//! goes once nothing uses it.
+use super::{BufferId, ComputePipelineId, Device, FunctionId, LibraryId, RenderPipelineId, Slab};
 use crate::gpu::metal::{
     abi::{FunctionType, PrimitiveTopologyClass},
     command_buffer::{ComputePipelineState, IndirectCompute, RenderPipelineState},
@@ -25,13 +30,43 @@ use crate::gpu::metal::{
 };
 use alloc::{string::String, vec::Vec};
 
+/// What a destroyed object's id fails with.
+const DESTROYED: &str = "unknown or destroyed object";
+
+/// Who uses a library or function: its creator until it destroys the
+/// object, and the functions and pipelines made from it.
+#[derive(Debug)]
+struct Users {
+    creator: bool,
+    others: u32,
+}
+
+impl Users {
+    const CREATED: Self = Self {
+        creator: true,
+        others: 0,
+    };
+
+    fn none(&self) -> bool {
+        !self.creator && self.others == 0
+    }
+}
+
+/// `MTLLibrary`: the compiler's library.
+#[derive(Debug)]
+struct LibraryObject {
+    library: u64,
+    users: Users,
+}
+
 /// A specialized function (`newFunctionWithName:constantValues:`).
 #[derive(Debug)]
 struct FunctionObject {
-    library: u64,
+    library: LibraryId,
     entry: String,
     constants: Vec<(u32, Vec<u8>)>,
     reflection: Reflection,
+    users: Users,
 }
 
 impl FunctionObject {
@@ -68,9 +103,43 @@ impl Linked {
     }
 }
 
+/// The functions and libraries an object uses: those a pipeline's
+/// descriptor names, or a function's library.
+#[derive(Debug, Default)]
+struct Kept {
+    functions: Vec<FunctionId>,
+    libraries: Vec<LibraryId>,
+}
+
+impl Kept {
+    fn new<'a>(
+        functions: impl IntoIterator<Item = FunctionId>,
+        linked: impl IntoIterator<Item = &'a LinkedFunctions>,
+    ) -> Self {
+        let mut kept = Self {
+            functions: functions.into_iter().collect(),
+            libraries: Vec::new(),
+        };
+        for linked in linked {
+            kept.functions.extend(&linked.functions);
+            kept.functions.extend(&linked.private_functions);
+            kept.libraries.extend(&linked.libraries);
+        }
+        kept
+    }
+
+    fn library(library: LibraryId) -> Self {
+        Self {
+            functions: Vec::new(),
+            libraries: alloc::vec![library],
+        }
+    }
+}
+
 #[derive(Debug)]
 struct RenderObject {
     state: RenderPipelineState,
+    kept: Kept,
     /// Each stage's linked functions.
     linked: Vec<(Stage, Linked)>,
     /// A mesh pipeline's compiled fragment function, which every variant
@@ -97,6 +166,7 @@ type MeshShape = ([u32; 3], [u32; 3]);
 #[derive(Debug)]
 struct ComputeObject {
     state: ComputePipelineState,
+    kept: Kept,
     function: FunctionId,
     linked: Linked,
     variants: Vec<(Specialization, Pipeline)>,
@@ -104,6 +174,7 @@ struct ComputeObject {
 
 #[derive(Debug, Default)]
 pub(super) struct Pipelines {
+    libraries: Slab<LibraryObject>,
     functions: Slab<FunctionObject>,
     render: Slab<RenderObject>,
     compute: Slab<ComputeObject>,
@@ -112,6 +183,23 @@ pub(super) struct Pipelines {
 impl Pipelines {
     fn interface(&self, id: FunctionId) -> Result<&Interface> {
         self.functions.get(id.0)?.interface()
+    }
+
+    /// The compiler's id of a library.
+    fn library(&self, id: LibraryId) -> Result<u64> {
+        Ok(self.libraries.get(id.0)?.library)
+    }
+
+    /// Refuses a library or function its creator destroyed: what uses it
+    /// keeps it, but nothing new may.
+    fn ensure_created(&self, kept: &Kept) -> Result<()> {
+        for &id in &kept.functions {
+            ensure(self.functions.get(id.0)?.users.creator, DESTROYED)?;
+        }
+        for &id in &kept.libraries {
+            ensure(self.libraries.get(id.0)?.users.creator, DESTROYED)?;
+        }
+        Ok(())
     }
 }
 
@@ -125,8 +213,7 @@ impl RenderObject {
 }
 
 /// `MTLLinkedFunctions`, the `preloadedLibraries` and the call stack depth
-/// of a pipeline stage, with the device's function ids and the compiler's
-/// library ids. Every function compiles into the stage, so
+/// of a pipeline stage. Every function compiles into the stage, so
 /// `binaryFunctions` join `functions`.
 #[derive(Clone, Debug)]
 pub struct LinkedFunctions {
@@ -135,7 +222,7 @@ pub struct LinkedFunctions {
     /// Visible functions only external calls reach.
     pub private_functions: Vec<FunctionId>,
     /// Dynamic libraries resolving external calls.
-    pub libraries: Vec<u64>,
+    pub libraries: Vec<LibraryId>,
     /// The stage's `maxCallStackDepth` (`maxVertexCallStackDepth`,
     /// `maxFragmentCallStackDepth`, ...).
     pub max_call_stack_depth: u32,
@@ -199,11 +286,38 @@ pub struct MeshPipelineRequest {
 }
 
 impl<B: Backend, C: Compiler> Device<B, C> {
+    /// `newLibraryWithData:`: keeps a Metal library for its functions.
+    pub fn new_library(&mut self, data: Vec<u8>) -> Result<LibraryId> {
+        let library = self.compiler.add_library(data)?;
+        let index = self.pipelines.libraries.insert(LibraryObject {
+            library,
+            users: Users::CREATED,
+        });
+        Ok(LibraryId(index))
+    }
+
+    /// Ends the creator's use of a library, which goes with the last
+    /// function and pipeline using it.
+    pub fn destroy_library(&mut self, id: LibraryId) -> Result<()> {
+        let users = &mut self.pipelines.libraries.get_mut(id.0)?.users;
+        ensure(users.creator, DESTROYED)?;
+        users.creator = false;
+        self.collect_library(id)
+    }
+
+    fn collect_library(&mut self, id: LibraryId) -> Result<()> {
+        if self.pipelines.libraries.get(id.0)?.users.none() {
+            let library = self.pipelines.libraries.remove(id.0)?;
+            self.compiler.remove_library(library.library)?;
+        }
+        Ok(())
+    }
+
     /// `newFunctionWithName:constantValues:`: reflects the function without
     /// compiling it.
     pub fn new_function(
         &mut self,
-        library: u64,
+        library: LibraryId,
         entry: &str,
         constants: Vec<(u32, Vec<u8>)>,
     ) -> Result<FunctionId> {
@@ -211,7 +325,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             constants: constants.clone(),
             ..Specialization::default()
         };
-        let reflection = self.compiler.reflect(library, entry, &specialization)?;
+        let kept = Kept::library(library);
+        self.pipelines.ensure_created(&kept)?;
+        let compiled = self.pipelines.library(library)?;
+        let reflection = self.compiler.reflect(compiled, entry, &specialization)?;
         reflection.validate()?;
         ensure(
             constants
@@ -240,7 +357,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             entry: String::from(entry),
             constants,
             reflection,
+            users: Users::CREATED,
         };
+        self.keep(&kept)?;
         Ok(FunctionId(self.pipelines.functions.insert(function)))
     }
 
@@ -258,8 +377,45 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .function_type())
     }
 
+    /// Ends the creator's use of a function, which goes with the last
+    /// pipeline using it.
     pub fn destroy_function(&mut self, id: FunctionId) -> Result<()> {
-        self.pipelines.functions.remove(id.0).map(drop)
+        let users = &mut self.pipelines.functions.get_mut(id.0)?.users;
+        ensure(users.creator, DESTROYED)?;
+        users.creator = false;
+        self.collect_function(id)
+    }
+
+    fn collect_function(&mut self, id: FunctionId) -> Result<()> {
+        if self.pipelines.functions.get(id.0)?.users.none() {
+            let function = self.pipelines.functions.remove(id.0)?;
+            self.release(Kept::library(function.library))?;
+        }
+        Ok(())
+    }
+
+    /// Adds a use of each of `kept`'s functions and libraries.
+    fn keep(&mut self, kept: &Kept) -> Result<()> {
+        for &id in &kept.functions {
+            self.pipelines.functions.get_mut(id.0)?.users.others += 1;
+        }
+        for &id in &kept.libraries {
+            self.pipelines.libraries.get_mut(id.0)?.users.others += 1;
+        }
+        Ok(())
+    }
+
+    /// Ends a use of each of `kept`'s functions and libraries.
+    fn release(&mut self, kept: Kept) -> Result<()> {
+        for id in kept.functions {
+            self.pipelines.functions.get_mut(id.0)?.users.others -= 1;
+            self.collect_function(id)?;
+        }
+        for id in kept.libraries {
+            self.pipelines.libraries.get_mut(id.0)?.users.others -= 1;
+            self.collect_library(id)?;
+        }
+        Ok(())
     }
 
     /// `specialization` of function `id`, with its function constant values
@@ -271,7 +427,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         specialization: Specialization,
     ) -> Result<(u64, String, Specialization)> {
         let function = self.pipelines.functions.get(id.0)?;
-        let (library, entry) = (function.library, function.entry.clone());
+        let library = self.pipelines.library(function.library)?;
+        let entry = function.entry.clone();
         let specialization = Specialization {
             constants: function.constants.clone(),
             ..specialization
@@ -337,6 +494,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         &mut self,
         request: &RenderPipelineRequest,
     ) -> Result<RenderPipelineId> {
+        let kept = Kept::new(
+            [request.vertex_function]
+                .into_iter()
+                .chain(request.fragment_function),
+            [
+                &request.vertex_linked_functions,
+                &request.fragment_linked_functions,
+            ],
+        );
+        self.pipelines.ensure_created(&kept)?;
         let vertex_linked = self.link(&request.vertex_linked_functions, true)?;
         let fragment_linked = self.link(&request.fragment_linked_functions, true)?;
         let pipelines = &self.pipelines;
@@ -428,7 +595,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         } else {
             None
         };
+        self.keep(&kept)?;
         let index = self.pipelines.render.insert(RenderObject {
+            kept,
             state: RenderPipelineState {
                 id: 0,
                 pipeline: Some(vulkan),
@@ -454,6 +623,19 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         &mut self,
         request: &MeshPipelineRequest,
     ) -> Result<RenderPipelineId> {
+        let kept = Kept::new(
+            request
+                .object_function
+                .into_iter()
+                .chain([request.mesh_function])
+                .chain(request.fragment_function),
+            [
+                &request.object_linked_functions,
+                &request.mesh_linked_functions,
+                &request.fragment_linked_functions,
+            ],
+        );
+        self.pipelines.ensure_created(&kept)?;
         let linked = [
             (Stage::Object, &request.object_linked_functions),
             (Stage::Mesh, &request.mesh_linked_functions),
@@ -510,7 +692,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 return Err(error);
             }
         };
+        self.keep(&kept)?;
         let index = self.pipelines.render.insert(RenderObject {
+            kept,
             state: RenderPipelineState {
                 id: 0,
                 pipeline: None,
@@ -648,7 +832,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         if let Some(code) = render.fragment {
             self.compiler.release(code);
         }
-        Ok(())
+        self.release(render.kept)
     }
 
     /// `newComputePipelineStateWithDescriptor:`; variants compile per
@@ -658,6 +842,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         request: &ComputePipelineRequest,
     ) -> Result<ComputePipelineId> {
         let function = request.compute_function;
+        let kept = Kept::new([function], [&request.linked_functions]);
+        self.pipelines.ensure_created(&kept)?;
         let linked = self.link(&request.linked_functions, false)?;
         let interface = self.pipelines.interface(function)?.clone();
         let descriptor = ComputePipelineDescriptor {
@@ -695,7 +881,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             interface,
             indirect,
         };
+        self.keep(&kept)?;
         let index = self.pipelines.compute.insert(ComputeObject {
+            kept,
             state,
             function,
             linked,
@@ -869,7 +1057,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                     let mut constants = function.constants.clone();
                     constants.sort_unstable_by_key(|&(index, _)| index);
                     Ok(LinkedFunction {
-                        library: function.library,
+                        library: self.pipelines.library(function.library)?,
                         entry: function.entry.clone(),
                         constants,
                     })
@@ -881,7 +1069,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             linking: Linking {
                 functions: entries(&linked.functions)?,
                 private_functions: entries(&linked.private_functions)?,
-                libraries: linked.libraries.clone(),
+                libraries: linked
+                    .libraries
+                    .iter()
+                    .map(|&id| self.pipelines.library(id))
+                    .collect::<Result<_>>()?,
                 max_call_stack_depth: linked.max_call_stack_depth,
             },
         })
@@ -897,6 +1089,6 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         for pipeline in indirect.into_iter().chain(variants) {
             self.defer(Object::Pipeline(pipeline));
         }
-        Ok(())
+        self.release(compute.kept)
     }
 }

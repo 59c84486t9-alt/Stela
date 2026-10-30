@@ -558,6 +558,15 @@ pub trait Compiler {
     /// Shader constructs this compiler lowers completely.
     fn features(&self) -> ShaderFeatures;
 
+    /// Keeps `data`, a Metal library, until [`remove_library`]; the id it
+    /// returns names the library to the other calls and is never reused.
+    ///
+    /// [`remove_library`]: Self::remove_library
+    fn add_library(&mut self, data: Vec<u8>) -> Result<u64>;
+
+    /// Forgets a library; its functions can no longer compile.
+    fn remove_library(&mut self, library: u64) -> Result<()>;
+
     /// Reflects `entry` of `library` without compiling it.
     fn reflect(
         &mut self,

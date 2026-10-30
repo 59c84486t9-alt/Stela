@@ -1,7 +1,7 @@
 //! A device over a recording Vulkan backend and a compiler that reflects
 //! functions by name, for the tests of the device and the layers above it.
 
-use super::Device;
+use super::{Device, LibraryId};
 use crate::gpu::metal::{
     abi::DataType,
     capabilities::ShaderFeatures,
@@ -258,9 +258,10 @@ impl Backend for MockBackend {
 /// kernel with a required and an optional function constant, and the
 /// visible functions `"visible"`, `"barriers"`, whose module sets indirect
 /// commands' barriers, and `"tinted"`, whose module has a function
-/// constant.
+/// constant. Library `n` is the `n`-th added, `None` once removed.
 #[derive(Default)]
 pub(crate) struct MockCompiler {
+    pub(crate) libraries: Vec<Option<Vec<u8>>>,
     pub(crate) compiled: Vec<Specialization>,
     pub(crate) tessellations: Vec<Tessellation>,
     pub(crate) released: Vec<ShaderCode>,
@@ -320,6 +321,16 @@ fn reflected(entry: &str) -> Result<Interface> {
 impl Compiler for MockCompiler {
     fn features(&self) -> ShaderFeatures {
         ShaderFeatures::KNOWN
+    }
+    fn add_library(&mut self, data: Vec<u8>) -> Result<u64> {
+        self.libraries.push(Some(data));
+        Ok(self.libraries.len() as u64 - 1)
+    }
+    fn remove_library(&mut self, library: u64) -> Result<()> {
+        self.libraries[library as usize]
+            .take()
+            .map(drop)
+            .ok_or(Error::Invalid("unknown library"))
     }
     fn reflect(&mut self, _: u64, entry: &str, _: &Specialization) -> Result<Reflection> {
         match entry {
@@ -386,6 +397,11 @@ impl Compiler for MockCompiler {
 
 pub(crate) type TestDevice = Device<MockBackend, MockCompiler>;
 
+/// The library [`device`] opens with, whose functions [`MockCompiler`]
+/// reflects.
+pub(crate) const LIBRARY: LibraryId = LibraryId(0);
+
+/// A device of the first chip, holding [`LIBRARY`].
 pub(crate) fn device() -> TestDevice {
     let chip: &Chip = &CHIPS[0];
     let platform = chip.platform(crate::gpu::metal::nvidia::Attachment {
@@ -396,5 +412,7 @@ pub(crate) fn device() -> TestDevice {
         external: false,
         location_number: 0,
     });
-    Device::new(MockBackend::new(), MockCompiler::default(), &platform).unwrap()
+    let mut device = Device::new(MockBackend::new(), MockCompiler::default(), &platform).unwrap();
+    assert_eq!(device.new_library(Vec::new()), Ok(LIBRARY));
+    device
 }

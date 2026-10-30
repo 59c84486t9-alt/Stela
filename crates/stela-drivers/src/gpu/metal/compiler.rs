@@ -172,26 +172,6 @@ impl AirCompiler {
         }
     }
 
-    /// Keeps `data`, a Metal library, until [`remove_library`]; the id it
-    /// returns names the library to [`Compiler`] calls.
-    ///
-    /// [`remove_library`]: Self::remove_library
-    pub fn add_library(&mut self, data: Vec<u8>) -> Result<u64> {
-        Library::parse(&data).map_err(|_| Error::Invalid("Metal library"))?;
-        let id = self.next_library;
-        self.next_library += 1;
-        self.libraries.insert(id, data);
-        Ok(id)
-    }
-
-    /// Forgets a library; its functions can no longer compile.
-    pub fn remove_library(&mut self, library: u64) -> Result<()> {
-        self.libraries
-            .remove(&library)
-            .map(drop)
-            .ok_or(Error::Invalid("unknown library"))
-    }
-
     /// The detail of the last call the service refused.
     pub fn refusal(&self) -> Option<&Refusal> {
         self.refusal.as_ref()
@@ -201,6 +181,21 @@ impl AirCompiler {
 impl Compiler for AirCompiler {
     fn features(&self) -> ShaderFeatures {
         FEATURES
+    }
+
+    fn add_library(&mut self, data: Vec<u8>) -> Result<u64> {
+        Library::parse(&data).map_err(|_| Error::Invalid("Metal library"))?;
+        let id = self.next_library;
+        self.next_library += 1;
+        self.libraries.insert(id, data);
+        Ok(id)
+    }
+
+    fn remove_library(&mut self, library: u64) -> Result<()> {
+        self.libraries
+            .remove(&library)
+            .map(drop)
+            .ok_or(Error::Invalid("unknown library"))
     }
 
     fn reflect(
