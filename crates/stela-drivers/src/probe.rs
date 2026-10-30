@@ -1315,6 +1315,29 @@ mod tests {
                 None
             ))
         ));
+        // SAFETY: as above.
+        let result = unsafe {
+            mediatek_wifi(
+                &services,
+                address,
+                &WifiInputs {
+                    clock: handoff.clock,
+                    observations: Default::default(),
+                    firmware,
+                    network: &network,
+                },
+                &None,
+                &[],
+                false,
+            )
+        };
+        assert!(matches!(
+            result,
+            Err((
+                Error::MediatekWifi(net::wifi::mediatek::attach::AttachError::NoRegulatoryDatabase),
+                None
+            ))
+        ));
         assert!(services.requests.borrow().is_empty());
     }
 
