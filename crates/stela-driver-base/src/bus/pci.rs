@@ -13,6 +13,7 @@ use core::{
 
 mod aspm;
 pub mod capability;
+pub mod hotplug;
 pub mod msi;
 pub mod msix;
 pub mod native;
@@ -104,6 +105,18 @@ impl EcamWindow {
     pub fn range(&self) -> Range<u64> {
         let start = self.base + (u64::from(self.start_bus) << 20);
         start..self.base + ((u64::from(self.end_bus) + 1) << 20)
+    }
+
+    /// The configuration space of one function in this window.
+    ///
+    /// # Safety
+    /// The window is mapped, and the caller excludes every other accessor of
+    /// the function while it holds the configuration.
+    pub unsafe fn config(&self, bus: u8, device: u8, function: u8) -> EcamConfig {
+        let offset =
+            (u64::from(bus) << 20) | (u64::from(device) << 15) | (u64::from(function) << 12);
+        // SAFETY: forwarded.
+        unsafe { EcamConfig::raw(self.base + offset) }
     }
 }
 
@@ -828,10 +841,8 @@ impl Function {
                 device,
                 function,
             };
-            let offset =
-                (u64::from(bus) << 20) | (u64::from(device) << 15) | (u64::from(function) << 12);
             // SAFETY: forwarded exclusive mapped-window contract.
-            let config = unsafe { EcamConfig::raw(window.base + offset) };
+            let config = unsafe { window.config(bus, device, function) };
             (address, config)
         };
         let mut scans = [None; 256];
