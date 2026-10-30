@@ -143,15 +143,17 @@ impl Session {
         });
         Ok(())
     }
-    pub fn advance(&mut self, peer: &mut impl BusPeer, now: u64) -> Result<()> {
+    /// One packet on the bus. Whether another call at the same `now` can
+    /// move one ([`Host::advance`]), or this call submitted a transfer.
+    pub fn advance(&mut self, peer: &mut impl BusPeer, now: u64) -> Result<bool> {
         if self.generation.is_none() {
-            return Ok(());
+            return Ok(false);
         }
         // Log backpressure cannot discard a diagnostic or grow without bound.
         if self.logs.len() >= 32 {
-            return Ok(());
+            return Ok(false);
         }
-        self.host.advance(peer, now)?;
+        let moved = self.host.advance(peer, now)?;
         while let Some(completion) = self.host.completion() {
             let input = self.input == Some(completion.id);
             let output = self.output == Some(completion.id);
@@ -184,7 +186,7 @@ impl Session {
             }
         }
         if !self.host.ready() {
-            return Ok(());
+            return Ok(moved);
         }
         if !self.descriptors_logged {
             for descriptor in self.host.descriptors() {
@@ -196,8 +198,10 @@ impl Session {
             self.logs.push_back(Log::MuxControl(log));
         }
         self.advance_probe()?;
+        let mut submitted = false;
         if self.input.is_none() {
             self.input = Some(self.host.submit_in(MAX_PACKET)?);
+            submitted = true;
         }
         if self.output.is_none()
             && let Some(packet) = self.mux.take_packet()
@@ -208,8 +212,9 @@ impl Session {
                 self.host
                     .submit_out(&packet, packet.len().is_multiple_of(MAX_PACKET))?,
             );
+            submitted = true;
         }
-        Ok(())
+        Ok(moved || submitted)
     }
     fn advance_probe(&mut self) -> Result<()> {
         if self.mux.state() != State::Active {

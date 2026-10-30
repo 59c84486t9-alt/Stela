@@ -3761,6 +3761,16 @@ fn pmgr_shared_usb_leaf_pauses_both_clients_and_cancels_sessions_only_on_reset_o
 }
 
 #[test]
+fn a_late_usb_poll_moves_the_packets_of_the_microframes_it_missed() {
+    assert_eq!(usb_packets(USB_POLL_TICKS, USB_POLL_TICKS), 13);
+    assert_eq!(usb_packets(2 * USB_POLL_TICKS - 1, USB_POLL_TICKS), 13);
+    assert_eq!(usb_packets(3 * USB_POLL_TICKS + 7, USB_POLL_TICKS), 3 * 13);
+    // A frame's at most, as for a session's first poll.
+    assert_eq!(usb_packets(100 * USB_POLL_TICKS, USB_POLL_TICKS), 8 * 13);
+    assert_eq!(usb_packets(100 * USB_POLL_TICKS, 0), 8 * 13);
+}
+
+#[test]
 fn usb_core_aliases_platform_refusals_and_port_driven_polling() {
     const BASE: u64 = 0x382280000;
     let mut devices = AppleDevices::new();

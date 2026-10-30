@@ -236,6 +236,18 @@ pub struct AppleDevices {
 /// a bulk pipe moves at most 13 512-byte packets (USB 2.0 Table 5-10).
 const USB_POLL_TICKS: u64 = 24_000_000 / 8000;
 const USB_PACKETS_PER_MICROFRAME: usize = 13;
+/// The microframes a late poll catches up, a frame's: this bounds one poll's
+/// work under the devices' lock.
+const USB_BACKLOG_MICROFRAMES: u64 = 8;
+
+/// The packets a poll at `now`, due at `next_poll`, moves: a microframe's
+/// for each microframe since the last poll, so one that comes late moves
+/// those it missed.
+fn usb_packets(now: u64, next_poll: u64) -> usize {
+    let microframes =
+        (now.saturating_sub(next_poll) / USB_POLL_TICKS + 1).min(USB_BACKLOG_MICROFRAMES);
+    microframes as usize * USB_PACKETS_PER_MICROFRAME
+}
 /// A native host handle, owned by this AppleDevices instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsbId(DeviceId);
@@ -1317,10 +1329,20 @@ impl Devices for AppleDevices {
                 master.attached = true;
             }
             if now >= master.next_poll {
+                let packets = usb_packets(now, master.next_poll);
                 master.next_poll = now.saturating_add(USB_POLL_TICKS);
-                let advanced = (0..USB_PACKETS_PER_MICROFRAME)
-                    .try_for_each(|_| master.session.advance(&mut controller.peer(&mut port), now))
-                    .and_then(|()| controller.flush(&mut port));
+                let advanced = (|| {
+                    // Moving stops where every pending transfer NAKs.
+                    for _ in 0..packets {
+                        if !master
+                            .session
+                            .advance(&mut controller.peer(&mut port), now)?
+                        {
+                            break;
+                        }
+                    }
+                    controller.flush(&mut port)
+                })();
                 advanced.map_err(|why| match controller.dma_fault() {
                     Some(fault) => fail(refuse!("USB DMA fault", ?fault).because(why)),
                     None => fail(why),
