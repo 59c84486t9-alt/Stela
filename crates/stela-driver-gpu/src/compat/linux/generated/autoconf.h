@@ -24,6 +24,12 @@
 /* Original task_struct embeds each retained continuation's thread_info. */
 #define CONFIG_THREAD_INFO_IN_TASK 1
 #define CONFIG_ARCH_DMA_ADDR_T_64BIT 1
+/* Each device's owner supplies its dma_map_ops. Stela's arch is coherent, as
+ * x86 is, so no DMA sync hooks are configured. */
+#define CONFIG_HAS_DMA 1
+#define CONFIG_ARCH_HAS_DMA_OPS 1
+#define CONFIG_NEED_DMA_MAP_STATE 1
+#define CONFIG_HAS_IOMEM 1
 #define CONFIG_PHYS_ADDR_T_64BIT 1
 #define CONFIG_NR_CPUS 1
 #define CONFIG_HZ 1000

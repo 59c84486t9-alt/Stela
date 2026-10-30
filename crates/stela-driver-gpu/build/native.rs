@@ -180,6 +180,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/string.c")),
             PathBuf::from(format!("{LINUX}/lib/hexdump.c")),
             PathBuf::from(format!("{LINUX}/lib/ratelimit.c")),
+            PathBuf::from(format!("{LINUX}/drivers/i2c/algos/i2c-algo-bit.c")),
             PathBuf::from(format!("{LINUX}/lib/scatterlist.c")),
             PathBuf::from(format!("{LINUX}/lib/find_bit.c")),
             PathBuf::from(format!("{LINUX}/lib/bitmap.c")),
@@ -242,6 +243,7 @@ impl Linux {
                     format!("{COMPAT}/stela/resource_test.c"),
                     format!("{COMPAT}/stela/timer_test.c"),
                     format!("{COMPAT}/stela/workqueue_test.c"),
+                    format!("{COMPAT}/stela/i2c_test.c"),
                 ])
                 .objects(helper_objects)
                 .compile("linux-task-fixture");
@@ -359,6 +361,10 @@ impl Linux {
             ("linux_uuid", "uuid.c", "STELA_LINUX_UUID_TEST"),
             ("linux_kstrtox", "kstrtox.c", "STELA_LINUX_KSTRTOX_TEST"),
             ("linux_jiffies", "jiffies.c", "STELA_LINUX_JIFFIES_TEST"),
+            ("linux_device", "device.c", "STELA_LINUX_DEVICE_TEST"),
+            ("linux_dma", "dma.c", "STELA_LINUX_DMA_TEST"),
+            ("linux_pci", "pci.c", "STELA_LINUX_PCI_TEST"),
+            ("linux_vmalloc", "vmalloc.c", "STELA_LINUX_VMALLOC_TEST"),
             ("linux_refcount", "refcount.c", "STELA_LINUX_REFCOUNT_TEST"),
             (
                 "linux_const_string",

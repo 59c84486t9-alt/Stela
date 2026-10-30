@@ -19,18 +19,6 @@ void *memremap(resource_size_t offset, size_t size, unsigned long flags)
 /* Nothing memremap returned can reach it. */
 STELA_UNSUPPORTED(void, memunmap, void *)
 
-/* Device memory, likewise, is mapped by its device's owner: ioremap maps
- * nothing. */
-void __iomem *ioremap(phys_addr_t offset, size_t size)
-{
-	(void)offset;
-	(void)size;
-	stela_linux_unsupported("ioremap");
-	return NULL;
-}
-/* Nothing ioremap returned can reach it. */
-STELA_UNSUPPORTED(void, iounmap, volatile void __iomem *)
-
 /* Workqueues that run their work in softirq context. */
 STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_bh_wq);
 STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_bh_highpri_wq);

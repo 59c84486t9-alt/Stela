@@ -25,57 +25,6 @@ const RUNTIME: [&str; 4] = ["memcpy", "memmove", "memset", "memcmp"];
 /// lacks, or defines only as a trap, by service. Building fails when the
 /// imports change, so each supplied service leaves this list with its change.
 const OPEN: &[(&str, &[&str])] = &[
-    (
-        "mm/vmalloc.c",
-        &[
-            "__kvmalloc_node_noprof",
-            "vfree",
-            "vmalloc_noprof",
-            "vmalloc_to_page",
-            "vmap",
-            "vunmap",
-            "vzalloc_noprof",
-        ],
-    ),
-    ("device memory mappings", &["ioremap", "iounmap"]),
-    ("DMA pages", &["dma_alloc_pages", "dma_free_pages"]),
-    (
-        "PCI device control and configuration",
-        &[
-            "pci_dev_put",
-            "pci_disable_device",
-            "pci_enable_device",
-            "pci_find_capability",
-            "pci_get_domain_bus_and_slot",
-            "pci_read_config_dword",
-            "pci_set_master",
-            "pci_write_config_byte",
-        ],
-    ),
-    (
-        "PCI option ROMs",
-        &[
-            "pci_disable_rom",
-            "pci_enable_rom",
-            "pci_map_rom",
-            "pci_unmap_rom",
-        ],
-    ),
-    ("device model references", &["put_device"]),
-    ("interrupts", &["free_irq", "request_threaded_irq"]),
-    (
-        "the I2C core and its bit-banging algorithm",
-        &[
-            "i2c_add_adapter",
-            "i2c_bit_add_bus",
-            "i2c_bit_algo",
-            "i2c_del_adapter",
-            "i2c_new_client_device",
-            "i2c_transfer",
-            "i2c_unregister_device",
-        ],
-    ),
-    ("orderly shutdown", &["orderly_poweroff"]),
     // NVKM's client driver, defined by nouveau's DRM layer.
     ("nouveau_nvif.c", &["nvif_driver_nvkm"]),
 ];

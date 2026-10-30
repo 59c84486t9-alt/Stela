@@ -49,6 +49,20 @@ struct stela_linux_services {
 	 * or return a negative errno when none can start now. The request must
 	 * not run the worker inline. */
 	int (*start_worker)(void *context);
+	/* Power the machine off, without waiting for clean exits if force. */
+	void (*shutdown)(void *context, bool force);
+	/* Map page-aligned device memory uncached, or return NULL; unmapped by
+	 * the address map_device returned. */
+	void *(*map_device)(void *context, u64 physical, size_t size);
+	void (*unmap_device)(void *context, void *address);
+	/* Map count write-back pages contiguously, or return NULL. */
+	void *(*map_pages)(void *context, const u64 *physical, size_t count);
+	void (*unmap_pages)(void *context, void *address, size_t count);
+	/* Route a line to the owner's service, which calls stela_linux_irq_run
+	 * when it fires, or return a negative errno; disabling masks it and
+	 * returns only once no new firing can reach the service. */
+	int (*irq_enable)(void *context, unsigned int irq);
+	void (*irq_disable)(void *context, unsigned int irq);
 };
 
 struct stela_linux_owner {
@@ -58,7 +72,7 @@ struct stela_linux_owner {
 
 /* Private x86-64 C ABI. All producers and consumers rebuild from this header;
  * Rust currently passes owners opaquely rather than mirroring this table. */
-_Static_assert(sizeof(struct stela_linux_services) == 64, "Linux services ABI");
+_Static_assert(sizeof(struct stela_linux_services) == 120, "Linux services ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_services, random_bytes) == 48,
 	       "Linux random callback ABI");
 _Static_assert(sizeof(struct stela_linux_owner) == 16, "Linux owner ABI");

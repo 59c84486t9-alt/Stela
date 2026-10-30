@@ -12,6 +12,7 @@ use core::{
     sync::atomic::{AtomicPtr, AtomicUsize},
 };
 use std::{alloc::System, sync::Mutex, thread};
+use stela_driver_base::platform::image::NativeReadOnlyImage;
 use stela_driver_base::platform::work::service;
 use stela_driver_base::platform::work::{Cpu, Executor, Kind, Queue, Stack, StackBacking};
 
@@ -601,8 +602,20 @@ fn trees_child() {
     clock_service_roundtrip(1);
     clock_service_roundtrip(2);
     timer_service_roundtrip();
+    // SAFETY: this child borrows no constant Linux names, which classifying
+    // no address as immutable data requires.
+    assert!(unsafe { crate::linux::image::register(alloc::sync::Arc::new(NoImage)) }.is_ok());
     workqueue_roundtrip();
     stack_catalog_capacity();
+}
+
+struct NoImage;
+
+// SAFETY: no address is classified as immutable data, and none is read.
+unsafe impl NativeReadOnlyImage for NoImage {
+    fn contains(&self, _address: usize) -> bool {
+        false
+    }
 }
 
 unsafe extern "C" fn service_wait(context: *mut c_void) {
