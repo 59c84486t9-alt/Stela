@@ -136,6 +136,14 @@ impl SepOs {
         Ok(self)
     }
 
+    /// Record the booted sepOS's manifest hash for xART manifest commits.
+    pub fn with_booted_manifest(mut self, manifest: Option<[u8; 48]>) -> Self {
+        if let Some(services) = self.services.as_mut() {
+            services.xart.set_booted_manifest(manifest);
+        }
+        self
+    }
+
     /// Drain observed traffic and sanitized unsupported system-key metadata.
     /// The latter is available without enabling raw traffic observation.
     pub fn observations(&mut self) -> Vec<String> {

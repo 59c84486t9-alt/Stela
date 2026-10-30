@@ -227,7 +227,14 @@ impl Firmware for SepFirmware {
             .ok_or(refuse!("sepOS activated twice"))?
             .clone();
         let (store, _) = state::open(location, self.ecid, self.rom.entropy())?;
-        let os = SepOs::new(self.security).with_services(store, self.observe)?;
+        let os = SepOs::new(self.security)
+            .with_services(store, self.observe)?
+            .with_booted_manifest(
+                evidence
+                    .manifest
+                    .as_ref()
+                    .map(|manifest| manifest.signature.manifest_sha384),
+            );
         // Stela is the SEP: under its own explicit, TSS-free trust policy it
         // accepts the delivered container (evidence recorded above) and brings
         // up its native sepOS. No Apple key or signing service is consulted.

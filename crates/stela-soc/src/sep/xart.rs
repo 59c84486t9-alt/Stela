@@ -36,7 +36,11 @@
 //! - commit hash (18): byte 6 the hash type, byte 7 bit 0 set when a hash
 //!   follows, and then the caller's hash or the 48-byte
 //!   `/chosen/boot-manifest-hash` in (the block 0x2d71b70..0x2d71c40; with
-//!   the bit clear a caller hash panics and nothing is sent); no result;
+//!   the bit clear a caller hash panics and nothing is sent); no result.
+//!   Restore's `seputil --commit-hash --erase` sends the manifest type with
+//!   the bit clear and no payload (observed: length 0), so the SEP commits
+//!   the manifest of the sepOS it booted, which it alone holds (Stela's
+//!   inference: no other hash reaches it);
 //! - boot nonce (21): exactly 8 bytes out; commit epochs (22): 16 bytes in
 //!   although the length field is 0; get epochs (23): exactly 32 bytes out;
 //!   AP slot info (24): exactly 56 bytes out (8 nonce, 48 hash); set and get
@@ -244,6 +248,9 @@ pub fn unsupported(frame: Frame) -> Frame {
 pub struct Xart {
     os_uuid: Option<Vec<u8>>,
     store: Nonces<Box<dyn Backend>>,
+    /// The SHA-384 of the IM4M that came with the sepOS this SEP booted,
+    /// when it came with one: what a hash-less manifest commit commits.
+    booted_manifest: Option<[u8; HASH_BYTES]>,
     /// The AP unmounted the xART volume for shutdown, or disabled xART for
     /// Erase All Content and Settings: the anti-replay state is frozen.
     frozen: Option<stela_contracts::Refusal>,
@@ -254,8 +261,14 @@ impl Xart {
         Self {
             os_uuid: None,
             store,
+            booted_manifest: None,
             frozen: None,
         }
+    }
+
+    /// Record the booted sepOS's manifest hash ([`Self::booted_manifest`]).
+    pub fn set_booted_manifest(&mut self, manifest: Option<[u8; HASH_BYTES]>) {
+        self.booted_manifest = manifest;
     }
 
     /// The OS UUID the AP handed over with `setup_OS_UUID`, if any.
@@ -432,16 +445,27 @@ impl Xart {
                         "xART commit-hash types other than the manifest hash are not recovered"
                     ));
                 }
-                if message.reserved != HASH_FOLLOWS || message.flags != 0 {
-                    return Err(refuse!(
-                        "xART manifest commit without a hash is not recovered"
-                    ));
+                if message.flags != 0 || message.reserved & !HASH_FOLLOWS != 0 {
+                    return Err(refuse!("xART manifest commit sets unrecovered flag bits"));
                 }
-                if length != HASH_BYTES {
-                    return Err(refuse!("xART manifest commit is not one SHA-384 hash"));
-                }
-                let mut hash = [0; HASH_BYTES];
-                payload.input(&mut hash)?;
+                let hash = if message.reserved == HASH_FOLLOWS {
+                    if length != HASH_BYTES {
+                        return Err(refuse!("xART manifest commit is not one SHA-384 hash"));
+                    }
+                    let mut hash = [0; HASH_BYTES];
+                    payload.input(&mut hash)?;
+                    hash
+                } else {
+                    if length != 0 {
+                        return Err(refuse!(
+                            "xART manifest commit carries a payload without its hash flag"
+                        ));
+                    }
+                    self.booted_manifest.ok_or(refuse!(
+                        "xART manifest commit names the booted sepOS manifest, but the \
+                         booted firmware carried none"
+                    ))?
+                };
                 self.live()?;
                 *committed = true;
                 self.store.commit_firmware(hash)?;
@@ -622,13 +646,42 @@ mod tests {
         let reply = XartMessage::from_frame(reply);
         assert_eq!((reply.tag, reply.op, reply.length), (4, 0, 0));
         assert_eq!(xart.store.firmware(), Ok(Some([0x3c; HASH_BYTES])));
-        // Other types, a missing hash and other lengths are not recovered.
+        // Other types, a hash-less commit with no booted manifest and other
+        // lengths refuse.
         for frame in [commit(0, 1, 48), commit(0xff, 0, 0), commit(0xff, 1, 32)] {
             assert!(ask(&mut xart, frame, &mut buffers).is_err());
         }
         // An unmounted volume takes no commit.
         ask(&mut xart, request(SLAVE_ID, 1, 13, 0), &mut buffers).unwrap();
         assert!(ask(&mut xart, commit(0xff, 1, 48), &mut buffers).is_err());
+    }
+
+    #[test]
+    fn a_hashless_manifest_commit_commits_the_booted_manifest() {
+        let mut xart = xart();
+        let mut buffers = Buffers {
+            input: vec![0x3c; HASH_BYTES],
+            output: Vec::new(),
+        };
+        let commit = |reserved, length| {
+            XartMessage {
+                slot: MANIFEST_HASH_TYPE,
+                reserved,
+                ..XartMessage::from_frame(request(SLAVE_ID, 6, 18, length))
+            }
+            .frame()
+        };
+        // Restore's `seputil --commit-hash --erase` request, as observed.
+        assert_eq!(commit(0, 0).data, 0x00ff_0000);
+        xart.set_booted_manifest(Some([0x5a; HASH_BYTES]));
+        // A payload without its flag and unrecovered flag bits refuse first.
+        for frame in [commit(0, 48), commit(2, 0), commit(3, 48)] {
+            assert!(ask(&mut xart, frame, &mut buffers).is_err());
+        }
+        assert_eq!(xart.store.firmware(), Ok(None));
+        let reply = XartMessage::from_frame(ask(&mut xart, commit(0, 0), &mut buffers).unwrap());
+        assert_eq!((reply.tag, reply.op, reply.length), (6, 0, 0));
+        assert_eq!(xart.store.firmware(), Ok(Some([0x5a; HASH_BYTES])));
     }
 
     #[test]
