@@ -1897,3 +1897,32 @@ fn synchronized_managed_buffers_are_invalidated_on_completion() {
     let invalidated = (range.memory, range.offset, range.length);
     assert_eq!(device.backend().invalidated, [invalidated]);
 }
+
+#[test]
+fn uncommitted_command_buffers_return_their_upload_memory() {
+    let mut device = device();
+    let encode = |device: &mut TestDevice| {
+        let mut commands = device.new_command_buffer();
+        commands.begin_compute(DispatchType::Serial).unwrap();
+        commands
+            .set_compute_bytes(&mut device.resolver(), &[7; 64], 0)
+            .unwrap();
+        commands
+    };
+    let commands = encode(&mut device);
+    let created = device.backend().next;
+    assert_eq!(
+        device.commit(commands),
+        Err(Error::Invalid("another encoder is still encoding"))
+    );
+    let commands = encode(&mut device);
+    device.discard(commands);
+    let mut commands = encode(&mut device);
+    commands.end_encoding(&mut device.resolver()).unwrap();
+    device.commit(commands).unwrap();
+    assert_eq!(
+        device.backend().next,
+        created,
+        "each command buffer reused the first one's chunk"
+    );
+}

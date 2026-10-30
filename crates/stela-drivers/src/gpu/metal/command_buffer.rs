@@ -533,13 +533,13 @@ impl CommandBuffer {
         self.recorder.resume_statistics(resolver, false)
     }
 
-    /// `commit`: the recording, whose last segment signals `completion`.
+    /// `commit`: ends the commands; the last segment signals `completion`.
     /// Statistic samples not yet resolved are written last.
-    pub fn commit(
-        mut self,
+    pub fn finish(
+        &mut self,
         resolver: &mut dyn Resolver,
         completion: (Semaphore, u64),
-    ) -> Result<Recording> {
+    ) -> Result<()> {
         self.idle()?;
         self.recorder.pause_statistics();
         self.recorder.resolve_statistics(resolver)?;
@@ -547,13 +547,19 @@ impl CommandBuffer {
         last.signals.push(completion);
         // An empty trailing segment left by a final signal still carries the
         // completion signal; it orders after everything before it.
-        Ok(Recording {
+        Ok(())
+    }
+
+    /// The recording: once finished, for the queue to submit; otherwise
+    /// for the device to take back what the commands acquired.
+    pub fn into_recording(self) -> Recording {
+        Recording {
             segments: self.recorder.segments,
             uploads: self.recorder.uploads.finish(),
             query_pools: self.recorder.query_pools,
             mappings: self.recorder.mappings,
             invalidations: self.recorder.invalidations,
-        })
+        }
     }
 }
 

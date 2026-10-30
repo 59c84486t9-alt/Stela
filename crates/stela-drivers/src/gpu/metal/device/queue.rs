@@ -22,7 +22,7 @@ use crate::gpu::metal::{
     },
     binding::ResourceId,
     command_buffer::{
-        BufferRef, CommandBuffer, ComputePipelineState, DynamicFeatures, MappedRange,
+        BufferRef, CommandBuffer, ComputePipelineState, DynamicFeatures, MappedRange, Recording,
         RenderPipelineState, Resolver, Segment,
         counters::{self, CounterRange, CounterSample, STATISTIC_SAMPLE_BYTES},
         generated::{GeneratedLayoutKey, IndirectRenderClass},
@@ -333,20 +333,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         })
     }
 
-    /// `commit`: submits the command buffer and returns its serial.
-    pub fn commit(&mut self, commands: CommandBuffer) -> Result<u64> {
+    /// `commit`: submits the command buffer and returns its serial. A
+    /// command buffer that cannot be submitted is discarded.
+    pub fn commit(&mut self, mut commands: CommandBuffer) -> Result<u64> {
         let serial = self.submitted + 1;
         let completion = (self.timeline, serial);
-        self.flush_indirect_writes()?;
-        let recording = commands.commit(&mut self.resolver(), completion)?;
-        for (_, mapping) in &recording.mappings {
-            match mapping {
-                Mapping::Request(request) => self.check_mapping(request)?,
-                // The region is checked once the host reads it.
-                Mapping::Indirect { image, .. } => {
-                    self.sparse_texture(*image)?;
-                }
-            }
+        let finished = self
+            .flush_indirect_writes()
+            .and_then(|()| commands.finish(&mut self.resolver(), completion));
+        let recording = commands.into_recording();
+        if let Err(error) = finished.and_then(|()| self.check_mappings(&recording.mappings)) {
+            self.recycle(recording);
+            return Err(error);
         }
         let mut held = self.hold(serial, recording.segments, recording.mappings)?;
         // CPU-copy writes reach the images first, after the opening barrier.
@@ -368,6 +366,32 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.queue.held.extend(held);
         self.advance()?;
         Ok(serial)
+    }
+
+    /// Drops a command buffer that will not be committed.
+    pub fn discard(&mut self, commands: CommandBuffer) {
+        self.recycle(commands.into_recording());
+    }
+
+    /// Takes back the upload chunks and query pools of a recording that was
+    /// never submitted, so its queries are still reset.
+    fn recycle(&mut self, recording: Recording) {
+        let chunks = recording.uploads.into_iter().map(|(chunk, _)| chunk);
+        self.queue.free_chunks.extend(chunks);
+        self.queue.free_pools.extend(recording.query_pools);
+    }
+
+    fn check_mappings(&self, mappings: &[(usize, Mapping)]) -> Result<()> {
+        for (_, mapping) in mappings {
+            match mapping {
+                Mapping::Request(request) => self.check_mapping(request)?,
+                // The region is checked once the host reads it.
+                Mapping::Indirect { image, .. } => {
+                    self.sparse_texture(*image)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Splits a command buffer before each segment whose mapping operations

@@ -433,7 +433,7 @@ fn patch_draws_upload_their_tessellation_arguments() {
         .draw_patches_indirect(&mut resolver, &source, buffer(6, 64), 16)
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let commands = &recording.segments[0].commands;
 
     assert!(commands.contains(&Command::SetPrimitiveTopology(
@@ -544,7 +544,7 @@ fn patch_draws_bind_their_stage_in_strides() {
         .unwrap();
     draw(&mut commands).unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let constants = recording.segments[0]
         .commands
         .iter()
@@ -605,7 +605,7 @@ fn mesh_thread_draws_cover_the_grid_with_the_first_stage() {
             .draw_mesh_threads(&mut resolver, [100, 1, 1], [32, 1, 1], [8, 1, 1])
             .unwrap();
         commands.end_encoding(&mut resolver).unwrap();
-        let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+        let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
         assert!(
             recording.segments[0]
                 .commands
@@ -621,6 +621,16 @@ fn buffer(id: u64, length: u64) -> BufferRef {
         address: id << 32,
         length,
     }
+}
+
+/// Finishes `commands` and takes their recording.
+fn commit(
+    mut commands: CommandBuffer,
+    resolver: &mut MockResolver,
+    completion: (Semaphore, u64),
+) -> Recording {
+    commands.finish(resolver, completion).unwrap();
+    commands.into_recording()
 }
 
 fn count(commands: &[Command], matches: impl Fn(&Command) -> bool) -> usize {
@@ -663,7 +673,7 @@ fn a_draw_binds_state_buffers_and_tables() {
         .draw_primitives(&mut resolver, PrimitiveType::TriangleStrip, 0, 4, 1, 0)
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 5)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 5));
 
     assert_eq!(recording.segments.len(), 1);
     let segment = &recording.segments[0];
@@ -768,7 +778,7 @@ fn render_barriers_split_the_pass_and_keep_its_contents() {
         )
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let begins: Vec<_> = recording.segments[0]
         .commands
         .iter()
@@ -858,7 +868,7 @@ fn visibility_results_copy_or_sum_their_queries() {
             .unwrap();
     }
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let commands = &recording.segments[0].commands;
     assert_eq!(
         count(commands, |command| matches!(
@@ -938,7 +948,7 @@ fn amplified_draws_repeat_per_view() {
         .draw_primitives(&mut resolver, PrimitiveType::Triangle, 0, 3, 1, 0)
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let views: Vec<_> = recording.segments[0]
         .commands
         .iter()
@@ -1118,7 +1128,7 @@ fn stage_in_dispatches_pass_their_region() {
         Some(&layout),
         "the compiler specializes on the layout"
     );
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let pushed: Vec<PushConstants> = recording.segments[0]
         .commands
         .iter()
@@ -1167,10 +1177,7 @@ fn serial_dispatches_order_writes_and_concurrent_ones_do_not() {
             .dispatch_threads(&mut resolver, [100, 1, 1], threads)
             .unwrap();
         commands.end_encoding(&mut resolver).unwrap();
-        (
-            commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap(),
-            resolver,
-        )
+        (commit(commands, &mut resolver, (Semaphore(1), 1)), resolver)
     };
     let (serial, resolver) = run(DispatchType::Serial, true);
     assert_eq!(barriers(&serial), 1);
@@ -1232,7 +1239,7 @@ fn encoders_after_writes_wait_for_them() {
         .copy_buffer(buffer(4, 64), 0, buffer(5, 64), 0, 64)
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let barrier = recording.segments[0]
         .commands
         .iter()
@@ -1264,7 +1271,7 @@ fn unaligned_fills_copy_their_edges() {
         .fill_buffer(&mut resolver, buffer(6, 64), 41, 2, 0xcd)
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let commands = &recording.segments[0].commands;
     assert!(commands.contains(&Command::FillBuffer {
         buffer: Buffer(6),
@@ -1340,7 +1347,7 @@ fn buffer_texture_copies_use_texel_strides() {
         .unwrap();
     commands.generate_mipmaps(target, true).unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let copies: Vec<_> = recording.segments[0]
         .commands
         .iter()
@@ -1396,7 +1403,7 @@ fn events_split_command_buffers_into_submissions() {
     commands
         .encode_wait_for_event(&mut resolver, Semaphore(7), 4)
         .unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 9)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 9));
     let shape: Vec<_> = recording
         .segments
         .iter()
@@ -1517,7 +1524,7 @@ fn statistic_samples_sum_intervals_no_query_spans() {
     commands
         .sample_counters(&mut resolver, CounterSample::Statistic(first + 64), false)
         .unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let commands = &recording.segments[0].commands;
 
     let mut active = false;
@@ -1621,7 +1628,7 @@ fn render_pass_timestamps_reset_before_the_pass() {
         .sample_counters(&mut resolver, sample(2), true)
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let commands = &recording.segments[0].commands;
     let begin = commands
         .iter()
@@ -1686,7 +1693,7 @@ fn blits_resolve_counters_on_the_gpu() {
         )
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let commands = &recording.segments[0].commands;
 
     let fill = commands
@@ -1855,7 +1862,7 @@ fn indirect_draws_replay_and_restore_the_encoder() {
             .is_err()
     );
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let commands = &recording.segments[0].commands;
 
     let pipelines: Vec<Pipeline> = commands
@@ -1929,7 +1936,7 @@ fn gpu_ranges_select_commands_outside_the_pass() {
         .execute_commands(&mut resolver, id, range(8))
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let commands = &recording.segments[0].commands;
 
     let select = commands
@@ -2042,7 +2049,7 @@ fn indirect_dispatches_compile_their_variants() {
         2,
         "one variant per threadgroup size"
     );
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let commands = &recording.segments[0].commands;
     let dispatches: Vec<usize> = commands
         .iter()
@@ -2142,7 +2149,7 @@ fn blits_copy_records_of_resident_buffers_in_order() {
         "the layouts differ"
     );
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let copies: Vec<_> = recording.segments[0]
         .commands
         .iter()
@@ -2238,7 +2245,7 @@ fn resident_draws_execute_one_generated_sequence_per_slot() {
             },
         }]
     );
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let commands = &recording.segments[0].commands;
 
     let resolve = commands
@@ -2341,7 +2348,7 @@ fn resident_draws_switch_pipelines_through_execution_sets() {
     commands.end_encoding(&mut resolver).unwrap();
     assert_eq!(resolver.layouts.len(), 2, "draws and indexed draws");
     assert!(resolver.layouts.iter().all(|key| key.execution_set));
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let commands = &recording.segments[0].commands;
 
     // Two classes, two draw kinds, two triangle primitive types.
@@ -2422,7 +2429,7 @@ fn resident_barriers_order_every_command() {
         )
         .unwrap();
     commands.end_encoding(&mut resolver).unwrap();
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     // The resolve and each command end the pass instance, as does the
     // encoder.
     let ends = recording.segments[0]
@@ -2552,7 +2559,7 @@ fn resident_dispatches_run_concurrently_in_one_execution() {
             work: GeneratedWork::Dispatch,
         }]
     );
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let commands = &recording.segments[0].commands;
 
     let resolves: Vec<usize> = commands
@@ -2643,7 +2650,7 @@ fn resident_dispatches_with_barriers_run_one_execution_each() {
             work: GeneratedWork::Dispatch,
         }]
     );
-    let recording = commands.commit(&mut resolver, (Semaphore(1), 1)).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
     let commands = &recording.segments[0].commands;
     let resolve = commands
         .iter()
