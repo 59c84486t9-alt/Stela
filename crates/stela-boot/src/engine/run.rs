@@ -231,6 +231,9 @@ pub(super) fn report_drained<H: Host>(
             )),
         }
     }
+    for (port, line) in drained.usb_transfers {
+        output::arguments(format_args!("USB transfer port={port} {line}\n"));
+    }
     for (port, line) in drained.usb_host {
         output::arguments(format_args!("XHCI port={port} {line}\n"));
     }

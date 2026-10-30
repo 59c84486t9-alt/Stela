@@ -78,6 +78,8 @@ const DEVTEN_FIELDS: u32 = 1 | 1 << 1 | 1 << 2 | 1 << 4 | 1 << 6 | 1 << 10;
 const DCFG_FIELDS: u32 = 7 | 0x7f << 3 | 0x1f << 17 | 1 << 22;
 const MAX_PENDING_EVENTS: usize = 256;
 const MAX_LINKS_PER_PACKET: usize = 8;
+/// Bulk and interrupt transfer steps kept for diagnosis (`transfer_history`).
+const HISTORY_STEPS: usize = 48;
 const FIFO_WORDS: u32 = 4096;
 const CORE_RESET: u32 = 1 << 11;
 const HALTED: u32 = 1 << 22;
@@ -145,6 +147,26 @@ struct Endpoint {
 struct Transfer {
     trb: u64,
     done: u32,
+}
+
+/// A step of a non-control endpoint's transfer, kept so a peer that
+/// reports lost or misordered data can be diagnosed from the ring's view.
+#[derive(Clone, Copy)]
+enum Step {
+    /// Start (6), Update (7) or End (8) Transfer, with Start's TRB.
+    Command { ep: usize, command: u32, trb: u64 },
+    /// A completed TRB: its buffer, size and status, where the core
+    /// resumes after it (past owned links), and whether it raised an event.
+    Completed {
+        ep: usize,
+        trb: u64,
+        buffer: u64,
+        size: u32,
+        done: u32,
+        ctrl: u32,
+        resume: Option<u64>,
+        event: bool,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -221,6 +243,7 @@ pub struct Dwc3 {
     poisoned: Option<DmaFault>,
     host: xhci::Xhci,
     apple: apple::Registers,
+    history: VecDeque<Step>,
 }
 
 impl Dwc3 {
@@ -264,7 +287,43 @@ impl Dwc3 {
             poisoned: None,
             host: xhci::Xhci::new(),
             apple: apple::Registers::default(),
+            history: VecDeque::with_capacity(HISTORY_STEPS),
         }
+    }
+
+    fn record(&mut self, step: Step) {
+        if self.history.len() == HISTORY_STEPS {
+            self.history.pop_front();
+        }
+        self.history.push_back(step);
+    }
+
+    /// The last non-control transfer steps, oldest first, for a peer that
+    /// reports lost or misordered data.
+    pub fn transfer_history(&self) -> impl Iterator<Item = String> + '_ {
+        self.history.iter().map(|step| match *step {
+            Step::Command { ep, command, trb } => {
+                let name = match command {
+                    6 => "start",
+                    7 => "update",
+                    _ => "end",
+                };
+                format!("ep={ep} {name} trb={trb:#x}")
+            }
+            Step::Completed {
+                ep,
+                trb,
+                buffer,
+                size,
+                done,
+                ctrl,
+                resume,
+                event,
+            } => format!(
+                "ep={ep} completed trb={trb:#x} buffer={buffer:#x} size={size} done={done}                  ctrl={ctrl:#x} event={event} resume={}",
+                resume.map_or_else(|| String::from("none"), |trb| format!("{trb:#x}"))
+            ),
+        })
     }
 
     fn mmio_ready(&self) -> Result<()> {
@@ -773,6 +832,17 @@ impl Dwc3 {
         }
         if failed {
             result |= CMD_FAILURE;
+        } else if n >= 2 && matches!(command, 6..=8) {
+            let trb = if command == 6 {
+                u64::from(p1) | u64::from(p0) << 32
+            } else {
+                0
+            };
+            self.record(Step::Command {
+                ep: n,
+                command,
+                trb,
+            });
         }
         self.endpoints[n].command = result;
         self.endpoints[n].not_ready = false;
@@ -992,9 +1062,9 @@ impl Dwc3 {
             let last = ctrl & LST != 0 || (short && ctrl & CSP == 0);
             let event_kind = if last { XFER_COMPLETE } else { XFER_PROGRESS };
             let event_enable = if last { CFG_COMPLETE } else { CFG_PROGRESS };
-            if ep.events & event_enable != 0
-                && (last || ctrl & IOC != 0 || (short && ctrl & ISP != 0))
-            {
+            let event = ep.events & event_enable != 0
+                && (last || ctrl & IOC != 0 || (short && ctrl & ISP != 0));
+            if event {
                 let status = if short { EV_SHORT } else { 0 }
                     | if ctrl & IOC != 0 { EV_IOC } else { 0 }
                     | if ctrl & LST != 0 { EV_LST } else { 0 };
@@ -1012,6 +1082,18 @@ impl Dwc3 {
                     done: 0,
                 })
             };
+            if n >= 2 {
+                self.record(Step::Completed {
+                    ep: n,
+                    trb: transfer.trb,
+                    buffer,
+                    size: size & LENGTH,
+                    done: transfer.done,
+                    ctrl,
+                    resume: ep.active.map(|transfer| transfer.trb),
+                    event,
+                });
+            }
         } else {
             ep.active = Some(transfer);
         }

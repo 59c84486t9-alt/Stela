@@ -397,6 +397,9 @@ pub(super) struct Drained {
     pub(super) sep: Vec<String>,
     pub(super) usb: Vec<stela_soc::machine::UsbLog>,
     pub(super) usb_host: Vec<(u32, String)>,
+    /// The controllers' recent transfer steps, after the guest reported on the
+    /// mux control channel, which carries its errors.
+    pub(super) usb_transfers: Vec<(u32, String)>,
     pub(super) smc: Vec<stela_soc::machine::SmcWriteLog>,
     pub(super) display: Vec<stela_soc::machine::DisplayLog>,
     pub(super) power: Vec<stela_soc::machine::PowerLog>,
@@ -404,6 +407,10 @@ pub(super) struct Drained {
 
 impl Drained {
     pub(super) fn take(devices: &mut AppleDevices) -> Self {
+        let usb: Vec<_> = core::iter::from_fn(|| devices.take_usb_log()).collect();
+        let mux_error = usb
+            .iter()
+            .any(|log| matches!(log, stela_soc::machine::UsbLog::MuxControl(_)));
         Self {
             // The console that adds them is a device another PE can reach.
             lines: GUEST_LINES
@@ -413,7 +420,12 @@ impl Drained {
                 .unwrap_or_default(),
             unmodeled: devices.take_unmodeled(),
             sep: devices.sep_observations(),
-            usb: core::iter::from_fn(|| devices.take_usb_log()).collect(),
+            usb_transfers: if mux_error {
+                devices.usb_transfer_history()
+            } else {
+                Vec::new()
+            },
+            usb,
             usb_host: core::iter::from_fn(|| devices.take_usb_host_trace()).collect(),
             smc: core::iter::from_fn(|| devices.take_smc_log()).collect(),
             display: core::iter::from_fn(|| devices.take_display_log()).collect(),

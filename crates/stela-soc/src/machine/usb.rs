@@ -290,6 +290,20 @@ impl AppleDevices {
             .find_map(|master| master.session.take_log())
     }
 
+    /// Each USB controller's recent bulk and interrupt transfer steps, with
+    /// its port: what the core did before a peer reported lost data.
+    pub fn usb_transfer_history(&self) -> Vec<(u32, String)> {
+        self.usb_masters
+            .iter()
+            .flat_map(|master| {
+                let controller = self.bus.device::<Dwc3>(master.device).expect("USB core");
+                controller
+                    .transfer_history()
+                    .map(move |line| (master.number, line))
+            })
+            .collect()
+    }
+
     /// The next line of a USB controller's host trace, with its port.
     pub fn take_usb_host_trace(&mut self) -> Option<(u32, String)> {
         self.usb_masters.iter().find_map(|master| {
