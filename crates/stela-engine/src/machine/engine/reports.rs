@@ -288,6 +288,50 @@ pub(super) struct Survey {
     pub(super) fresh: Vec<(u64, bool)>,
 }
 
+/// Why the engine discarded every installed block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Discard {
+    /// Guest IC maintenance of every page, on this PE or broadcast by
+    /// another.
+    Maintenance,
+    /// Low memory that releasing older code could not relieve.
+    Memory,
+    /// The block table could not grow.
+    Table,
+    /// A full code arena of one part.
+    Arena,
+    /// Breakpoints or traces changed, which every block embeds.
+    Diagnostics,
+    /// A new parallel chain control, whose address every thunk embeds.
+    Control,
+    /// The run ended.
+    Finished,
+}
+
+impl Discard {
+    pub const ALL: [Self; 7] = [
+        Self::Maintenance,
+        Self::Memory,
+        Self::Table,
+        Self::Arena,
+        Self::Diagnostics,
+        Self::Control,
+        Self::Finished,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Maintenance => "maintenance",
+            Self::Memory => "memory",
+            Self::Table => "table",
+            Self::Arena => "arena",
+            Self::Diagnostics => "diagnostics",
+            Self::Control => "control",
+            Self::Finished => "finished",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "std", feature = "native-profile"),
@@ -350,7 +394,8 @@ pub struct Statistics {
     pub interrupts: u64,
     pub system_exits: u64,
     pub device_accesses: u64,
-    pub code_discards: u64,
+    /// Discards of every installed block, by [`Discard`] cause.
+    pub code_discards: [u64; Discard::ALL.len()],
     /// Parts of the code arena reclaimed for new code, oldest first.
     pub code_evictions: u64,
     /// Pages of compiled code an IC IVAU made stale.
@@ -441,6 +486,9 @@ impl core::ops::AddAssign for Statistics {
         for (total, count) in self.exit_kinds.iter_mut().zip(exit_kinds) {
             *total += count;
         }
+        for (total, count) in self.code_discards.iter_mut().zip(code_discards) {
+            *total += count;
+        }
         for (total, count) in self.lookup_misses.iter_mut().zip(lookup_misses) {
             *total += count;
         }
@@ -470,7 +518,6 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.interrupts, interrupts),
             (&mut self.system_exits, system_exits),
             (&mut self.device_accesses, device_accesses),
-            (&mut self.code_discards, code_discards),
             (&mut self.code_evictions, code_evictions),
             (&mut self.code_invalidations, code_invalidations),
             (&mut self.waits, waits),

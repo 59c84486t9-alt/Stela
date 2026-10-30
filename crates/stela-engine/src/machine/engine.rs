@@ -8,8 +8,8 @@ pub use boundary::{ConsumedPair, DeviceError, Devices, Host, NoDevices, Start};
 use mirrors::*;
 use reports::*;
 pub use reports::{
-    Event, Occupancy, Requirement, RequirementKind, Reset, Statistics, Stop, Surveyed, Suspension,
-    TRACE_HITS, TraceHit, WATCH_HITS, WatchHit,
+    Discard, Event, Occupancy, Requirement, RequirementKind, Reset, Statistics, Stop, Surveyed,
+    Suspension, TRACE_HITS, TraceHit, WATCH_HITS, WatchHit,
 };
 mod amx;
 mod apple_maintenance;

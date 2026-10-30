@@ -50,7 +50,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.breakpoints = pcs.to_vec();
         self.breakpoints.sort_unstable();
         self.breakpoints.dedup();
-        self.discard_code();
+        self.discard_code(Discard::Diagnostics);
     }
 
     /// Record, without stopping, when a PE reaches one of these guest PCs
@@ -61,7 +61,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.traces = pcs.to_vec();
         self.traces.sort_unstable();
         self.traces.dedup();
-        self.discard_code();
+        self.discard_code(Discard::Diagnostics);
     }
 
     /// Record, without stopping, every device access whose first byte lies

@@ -189,7 +189,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn reclaim_code(&mut self) {
         match self.host.reclaim_code() {
             Some(range) => self.evict_code(range),
-            None => self.discard_code(),
+            None => self.discard_code(Discard::Arena),
         }
     }
 
@@ -216,7 +216,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let retained = self.fault_recovery.len();
             self.reclaim_code();
             if !self.blocks.is_empty() && self.fault_recovery.len() == retained {
-                self.discard_code();
+                self.discard_code(Discard::Memory);
             }
         }
     }
@@ -268,7 +268,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    pub(super) fn discard_code(&mut self) {
+    pub(super) fn discard_code(&mut self, cause: Discard) {
         self.exit_words = self.exit_words();
         self.host.discard_code();
         self.blocks.clear();
@@ -280,12 +280,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.pages.clear();
         self.scalable_leaves.clear();
         self.code_generation += 1;
-        self.statistics.code_discards += 1;
+        self.statistics.code_discards[cause as usize] += 1;
     }
 
     /// Discard every installed block, freeing its metadata, as a run that
     /// has ended does before work that needs the memory.
     pub fn discard_blocks(&mut self) {
-        self.discard_code();
+        self.discard_code(Discard::Finished);
     }
 }

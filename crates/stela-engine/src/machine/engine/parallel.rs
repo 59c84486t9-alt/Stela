@@ -28,7 +28,8 @@
 use super::chain_control;
 use super::{
     CanonicalDeviceMemory, CanonicalDeviceWrite, ConsumedPair, ConsumedScalar, ConsumedWrite,
-    DeviceError, DeviceReadShape, Devices, Host, Machine, RequirementKind, Reset, Start, Step,
+    DeviceError, DeviceReadShape, Devices, Discard, Host, Machine, RequirementKind, Reset, Start,
+    Step,
     clock::{ClockStatus, Pace, SharedClock},
     processors::Peer,
     step_timing,
@@ -766,7 +767,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let contexts = self.chain.contexts();
         // Every installed thunk embeds the old control address. Retire the
         // whole local arena and lookup table before dropping that allocation.
-        self.discard_code();
+        self.discard_code(Discard::Control);
         self.targets
             .fill(stela_compiler::x86_64::chain::LookupEntry::default());
         self.chain = control;
@@ -912,7 +913,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.host.code_invalidated(Some(physical));
             }
             Maintenance::Code(None) => {
-                self.discard_code();
+                self.discard_code(Discard::Maintenance);
                 self.host.code_invalidated(None);
             }
             Maintenance::Power(change) => {

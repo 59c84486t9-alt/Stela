@@ -12,7 +12,7 @@
 //! A refusal is reported once and the register behaves as storage
 //! (`Machine::register_refused`).
 use super::{
-    Devices, Host, Machine, Step,
+    Devices, Discard, Host, Machine, Step,
     mmu::{
         self, Access as MemoryAccess, Outcome as Translated,
         tlbi::{self, Reach, Scope},
@@ -873,7 +873,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
             }
             Code::All => {
-                self.discard_code();
+                self.discard_code(Discard::Maintenance);
                 self.host.code_invalidated(None);
                 if let Err(stop) = self.broadcast(super::parallel::Maintenance::Code(None)) {
                     return Some(Err(stop));

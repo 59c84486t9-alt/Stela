@@ -389,7 +389,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if self.free_blocks.is_empty() && !self.blocks.try_reserve_one() {
             self.reclaim_code();
             if self.free_blocks.is_empty() && !self.blocks.try_reserve_one() {
-                self.discard_code();
+                self.discard_code(Discard::Table);
             }
         }
         let code = match self.host.install(&compiled.native().x86_64_code) {

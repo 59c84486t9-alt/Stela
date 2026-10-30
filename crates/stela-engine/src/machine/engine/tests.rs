@@ -1890,7 +1890,7 @@ fn a_full_arena_reclaims_its_oldest_part_and_forgets_those_pages() {
     let left: Vec<u64> = machine.index.keys().map(|&(pc, ..)| pc).collect();
     assert_eq!(left, [page(1) + 8, page(2), page(3)]);
     assert_eq!(machine.statistics.code_evictions, 1);
-    assert_eq!(machine.statistics.code_discards, 0);
+    assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
     assert_eq!(machine.blocks.len(), 4);
     assert_eq!(&slots[4..], [1, 0]);
 }
@@ -1927,7 +1927,7 @@ fn pressure_reclaims_before_reading_new_compile_input() {
     machine.host.require_empty_code_on_read = true;
     assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
     assert_eq!(machine.fault_recovery.len(), 1);
-    assert_eq!(machine.statistics.code_discards, 1);
+    assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 1);
 }
 
 #[test]
@@ -1944,9 +1944,12 @@ fn pressure_reclaims_metadata_when_the_next_arena_part_is_empty() {
     assert!(!machine.index.keys().any(|&(pc, ..)| pc == base));
     assert_ne!(machine.code_generation, old_generation);
     // A cached hit adds no compilation scratch and keeps its owner.
-    let discarded = machine.statistics.code_discards;
+    let discarded = machine.statistics.code_discards.iter().sum::<u64>();
     assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
-    assert_eq!(machine.statistics.code_discards, discarded);
+    assert_eq!(
+        machine.statistics.code_discards.iter().sum::<u64>(),
+        discarded
+    );
     // Continued foreign pressure must not permit unbounded local growth.
     assert!(machine.fetch_block(base + 2 * FETCH_PAGE, false).is_ok());
     assert_eq!(machine.fault_recovery.len(), 1);
@@ -1963,7 +1966,7 @@ fn a_block_installed_while_memory_runs_low_discards_the_others_first() {
     assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
     let left: Vec<u64> = machine.index.keys().map(|&(pc, ..)| pc).collect();
     assert_eq!(left, [base + FETCH_PAGE]);
-    assert_eq!(machine.statistics.code_discards, 1);
+    assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 1);
 }
 
 #[test]
@@ -1978,7 +1981,7 @@ fn memory_pressure_reclaims_before_each_new_compilation() {
     // releases this machine's old owners before allocating more.
     assert!(machine.fetch_block(base + 2 * FETCH_PAGE, false).is_ok());
     assert_eq!(machine.index.len(), 1);
-    assert_eq!(machine.statistics.code_discards, 2);
+    assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 2);
 }
 
 #[test]
@@ -1993,21 +1996,21 @@ fn pressure_this_machine_cannot_relieve_waits_for_it_to_regrow() {
     // Pressure that releasing this machine's two blocks does not end.
     machine.host.memory_low = true;
     assert!(machine.fetch_block(page(2), false).is_ok());
-    assert_eq!(machine.statistics.code_discards, 1);
+    assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 1);
     // One block held: it installs the next without discarding again.
     assert!(machine.fetch_block(page(3), false).is_ok());
-    assert_eq!(machine.statistics.code_discards, 1);
+    assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 1);
     assert_eq!(machine.index.len(), 2);
     // Two again, as many as at the last reclaim: the next one reclaims.
     assert!(machine.fetch_block(page(4), false).is_ok());
-    assert_eq!(machine.statistics.code_discards, 2);
+    assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 2);
     assert_eq!(machine.index.len(), 1);
     // Once memory recovers, the next stretch of pressure reclaims at once.
     machine.host.memory_low = false;
     assert!(machine.fetch_block(page(0), false).is_ok());
     machine.host.memory_low = true;
     assert!(machine.fetch_block(page(1), false).is_ok());
-    assert_eq!(machine.statistics.code_discards, 3);
+    assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 3);
 }
 
 #[test]
@@ -2033,10 +2036,10 @@ fn ic_ivau_forgets_its_pages_blocks_and_ic_iallu_every_block() {
     let left: Vec<u64> = machine.index.keys().map(|&(pc, ..)| pc).collect();
     assert_eq!(left, [base + FETCH_PAGE]);
     assert_eq!(machine.statistics.code_invalidations, 1);
-    assert_eq!(machine.statistics.code_discards, 0);
+    assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
     machine.system_instruction(IC_IALLU).unwrap();
     assert!(machine.index.is_empty() && machine.code_pages.is_empty());
-    assert_eq!(machine.statistics.code_discards, 1);
+    assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 1);
 }
 
 /// Two blocks that branch to each other in one page: each direct exit

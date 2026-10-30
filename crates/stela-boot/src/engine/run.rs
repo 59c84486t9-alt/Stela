@@ -676,6 +676,22 @@ fn heap_report(heap: &stela_boot_core::heap::Usage) {
     output::arguments(format_args!("{line}\n"));
 }
 
+/// `(maintenance=9,memory=2)`: the causes of the discards so far, or
+/// nothing before the first.
+fn discard_causes(counts: &[u64]) -> String {
+    let causes: Vec<String> = stela_engine::machine::engine::Discard::ALL
+        .iter()
+        .zip(counts)
+        .filter(|&(_, &count)| count != 0)
+        .map(|(cause, count)| format!("{}={count}", cause.name()))
+        .collect();
+    if causes.is_empty() {
+        String::new()
+    } else {
+        format!("({})", causes.join(","))
+    }
+}
+
 /// The heartbeat's position and engine lines: the boot PE's place, the
 /// ticks per block and compiled share, compilation, discards, chaining and
 /// events over the interval, the heap and the shadow and code pools.
@@ -691,7 +707,7 @@ pub(super) fn beat_report<H: Host>(
     let shadow = host::statistics();
     output::arguments(format_args!(
         "BEAT blocks={} pc={:#x} {}{} lr={:#x} ticks/block={} native={}% \
-         compiled={} discards={} evictions={} chained={}% exceptions={} interrupts={} \
+         compiled={} discards={}{} evictions={} chained={}% exceptions={} interrupts={} \
          waits={} \
          heap={}M/{}M carved={}M peak={}M largest={}M extents={} carves={} walked={} \
          shadow_peak={}M/{}M/{}M exhausted={} code_peak={}M/{}M\n",
@@ -703,7 +719,8 @@ pub(super) fn beat_report<H: Host>(
         elapsed / blocks,
         (next.native - last.native) * 100 / elapsed.max(1),
         next.compiled - last.compiled,
-        machine.statistics.code_discards,
+        machine.statistics.code_discards.iter().sum::<u64>(),
+        discard_causes(&machine.statistics.code_discards),
         machine.statistics.code_evictions,
         (next.chained - last.chained) * 100 / blocks,
         next.events.0 - last.events.0,
