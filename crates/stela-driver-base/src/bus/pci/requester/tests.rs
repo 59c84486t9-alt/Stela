@@ -226,12 +226,16 @@ fn device_identity_interrupt_gating_and_header_are_observed_not_assumed() {
         (4, 0x0404, ClaimError::Active { offset: 4 }),
         (4, 0, ClaimError::Active { offset: 4 }),
         (4, 0xffff, ClaimError::ReadFailed { offset: 4 }),
-        (0x100, u32::MAX, ClaimError::ReadFailed { offset: 0x100 }),
     ] {
         let mut function = endpoint();
         function.config().write32(offset, value);
         assert_eq!(validate_stopped(&mut function), Err(expected));
     }
+    // A conventional function has no extended space: its first extended
+    // header reads all-ones.
+    let mut function = endpoint();
+    function.config().write32(0x100, u32::MAX);
+    assert_eq!(validate_stopped(&mut function), Ok(()));
     let mut function = endpoint();
     function.config().write8(0x0e, 1);
     assert_eq!(
