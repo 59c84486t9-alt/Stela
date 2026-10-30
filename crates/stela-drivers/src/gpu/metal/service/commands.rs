@@ -2,12 +2,12 @@
 //! and submits it. A command the encoders refuse discards the command
 //! buffer, as Metal's validation would, and the commit answers why.
 use super::{
-    Call, Service,
+    Call, Service, boolean,
     wire::{
         self, Empty, Fault, Record, Status, Value,
         commands::{
             BufferLayoutRecord, CommandBufferCode, CommandCode, CommandHeader, CommitRequest,
-            EventCommand,
+            EventCommand, SampleCounters,
         },
     },
 };
@@ -18,7 +18,7 @@ use crate::gpu::metal::{
         BufferRef, CommandBuffer,
         blit::{BlitTexture, BufferLayout},
     },
-    device::{BufferId, EventId, SamplerId, TextureId},
+    device::{BufferId, SamplerId, TextureId},
     shader::Compiler,
     vulkan::backend::Backend,
 };
@@ -28,6 +28,7 @@ use core::num::NonZeroU64;
 mod blit;
 mod compute;
 mod render;
+mod resource_state;
 
 /// The entries of a command stream.
 struct Stream<'a>(&'a [u8]);
@@ -113,6 +114,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             CommandCode::Compute(code) => self.compute(connection, commands, code, payload),
             CommandCode::Blit(code) => self.blit(connection, commands, code, payload),
             CommandCode::Render(code) => self.render(connection, commands, code, payload),
+            CommandCode::ResourceState(code) => {
+                self.resource_state(connection, commands, code, payload)
+            }
         }
     }
 
@@ -123,19 +127,40 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         code: CommandBufferCode,
         payload: Payload,
     ) -> Result<(), Fault> {
-        if code == CommandBufferCode::EndEncoding {
-            payload.record::<Empty>()?;
-            return Ok(commands.end_encoding(&mut self.device.resolver())?);
+        match code {
+            CommandBufferCode::EndEncoding => {
+                payload.record::<Empty>()?;
+                commands.end_encoding(&mut self.device.resolver())?;
+            }
+            CommandBufferCode::SignalEvent | CommandBufferCode::WaitForEvent => {
+                let EventCommand { event, value } = payload.record()?;
+                let event = self
+                    .device
+                    .event_semaphore(self.object(connection, event)?)?;
+                let resolver = &mut self.device.resolver();
+                match code {
+                    CommandBufferCode::SignalEvent => {
+                        commands.encode_signal_event(resolver, event, value)
+                    }
+                    _ => commands.encode_wait_for_event(resolver, event, value),
+                }?;
+            }
+            CommandBufferCode::SampleCounters => {
+                let SampleCounters {
+                    buffer,
+                    index,
+                    barrier,
+                    reserved: _,
+                } = payload.record()?;
+                let index = u32::try_from(index).map_err(|_| Fault::malformed("sample index"))?;
+                let sample = self
+                    .device
+                    .counter_sample(self.object(connection, buffer)?, index)?;
+                let barrier = boolean(barrier)?;
+                commands.sample_counters(&mut self.device.resolver(), sample, barrier)?;
+            }
         }
-        let EventCommand { event, value } = payload.record()?;
-        let event = self
-            .device
-            .event_semaphore(self.object::<EventId>(connection, event)?)?;
-        let resolver = &mut self.device.resolver();
-        Ok(match code {
-            CommandBufferCode::SignalEvent => commands.encode_signal_event(resolver, event, value),
-            _ => commands.encode_wait_for_event(resolver, event, value),
-        }?)
+        Ok(())
     }
 
     fn buffer_ref(&self, connection: NonZeroU64, handle: u64) -> Result<BufferRef, Fault> {

@@ -10,14 +10,16 @@ use crate::gpu::metal::{
     service::{
         Outcome,
         wire::{
-            self, BufferResponse, ComputePipelineResponse, Empty, NewBufferRequest,
-            NewComputePipelineRequest, Operation, Record, RenderPipelineResponse, Status,
-            TextureDescriptorRecord, TextureResponse, Value,
+            self, BufferResponse, ComputePipelineResponse, CounterSetCode, Empty, Handle,
+            NewBufferRequest, NewComputePipelineRequest, NewCounterBufferRequest, Operation,
+            Record, RenderPipelineResponse, Status, TextureDescriptorRecord, TextureResponse,
+            Value,
             commands::{
                 BeginCompute, BeginRender, BlitCode, CommandBufferCode, CommandHeader,
                 CommitRequest, ComputeCode, CopyBuffer, DepthStencilRecord, Dispatch,
-                DrawPrimitives, FillBuffer, Mode, PassAttachmentRecord, RenderCode, Resource,
-                SetBuffer, SetBytes, SetPipeline, StencilRecord, ViewportRecord,
+                DrawPrimitives, FillBuffer, MappingRecord, Mode, PassAttachmentRecord, RenderCode,
+                ResolveCounters, Resource, ResourceStateCode, SampleCounters, SetBuffer, SetBytes,
+                SetPipeline, StencilRecord, UpdateMappings, ViewportRecord,
             },
         },
     },
@@ -388,5 +390,99 @@ fn render_passes_replay_their_state_and_draws() {
     assert_eq!(
         status(commit(&mut service, connection, &stream)),
         Status::Malformed
+    );
+}
+
+#[test]
+fn encoders_sample_and_resolve_counters() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let request = NewCounterBufferRequest {
+        counter_set: CounterSetCode::Timestamp.raw(),
+        sample_count: 2,
+    };
+    let counters: Handle = call(
+        &mut service,
+        connection,
+        Operation::NewCounterBuffer,
+        &request,
+        &mut Memory::default(),
+    )
+    .unwrap();
+    let destination = new_buffer(&mut service, connection, StorageMode::Shared);
+    let sample = |index, barrier| SampleCounters {
+        buffer: counters.handle,
+        index,
+        barrier,
+        reserved: 0,
+    };
+    let resolve = ResolveCounters {
+        buffer: counters.handle,
+        first: 0,
+        count: 2,
+        destination,
+        offset: 0,
+    };
+    let mut stream = Stream::default();
+    stream
+        .push(BlitCode::Begin.raw(), &Empty {}, &[])
+        .push(CommandBufferCode::SampleCounters.raw(), &sample(0, 1), &[])
+        .push(CommandBufferCode::SampleCounters.raw(), &sample(1, 0), &[])
+        .push(BlitCode::ResolveCounters.raw(), &resolve, &[])
+        .end();
+    assert_eq!(
+        commit(&mut service, connection, &stream),
+        Ok(Value { value: 1 })
+    );
+    let commands = submitted(&mut service);
+    let count = |matches: fn(&Command) -> bool| commands.iter().filter(|c| matches(c)).count();
+    assert_eq!(
+        count(|command| matches!(command, Command::WriteTimestamp { .. })),
+        2
+    );
+    assert_eq!(
+        count(|command| matches!(command, Command::CopyQueryResults { count: 2, .. })),
+        1
+    );
+
+    let mut beyond = Stream::default();
+    beyond.push(CommandBufferCode::SampleCounters.raw(), &sample(2, 0), &[]);
+    assert_eq!(
+        status(commit(&mut service, connection, &beyond)),
+        Status::Invalid
+    );
+}
+
+#[test]
+fn mapping_updates_name_sparse_textures() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let dense: TextureResponse = call(
+        &mut service,
+        connection,
+        Operation::NewTexture,
+        &texture(StorageMode::Private),
+        &mut Memory::default(),
+    )
+    .unwrap();
+    let region = MappingRecord {
+        size: [1; 3],
+        ..Default::default()
+    };
+    let update = UpdateMappings {
+        texture: dense.handle,
+        mode: 0,
+    };
+    let mut stream = Stream::default();
+    stream
+        .push(ResourceStateCode::Begin.raw(), &Empty {}, &[])
+        .push(
+            ResourceStateCode::UpdateMappings.raw(),
+            &update,
+            wire::bytes(&region),
+        );
+    assert_eq!(
+        commit(&mut service, connection, &stream).map_err(|outcome| outcome.reason),
+        Err("the texture is not sparse")
     );
 }

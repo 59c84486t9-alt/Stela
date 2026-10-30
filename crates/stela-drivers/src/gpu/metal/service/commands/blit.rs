@@ -15,7 +15,7 @@ use crate::gpu::metal::{
             Empty, Fault,
             commands::{
                 BlitCode, CopyBuffer, CopyBufferToTexture, CopyTexture, CopyTextureSlices,
-                CopyTextureToBuffer, FillBuffer, Resource, SynchronizeTexture,
+                CopyTextureToBuffer, FillBuffer, ResolveCounters, Resource, SynchronizeTexture,
             },
         },
     },
@@ -130,6 +130,20 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     }
                     _ => return Err(Fault::STALE),
                 }
+            }
+            BlitCode::ResolveCounters => {
+                let request: ResolveCounters = payload.record()?;
+                let range =
+                    |value| u32::try_from(value).map_err(|_| Fault::malformed("sample range"));
+                let counters = self.object(connection, request.buffer)?;
+                let range = self.device.counter_range(
+                    counters,
+                    range(request.first)?,
+                    range(request.count)?,
+                )?;
+                let destination = self.buffer_ref(connection, request.destination)?;
+                let resolver = &mut self.device.resolver();
+                commands.resolve_counters(resolver, range, destination, request.offset)?;
             }
             BlitCode::SynchronizeTexture => {
                 let SynchronizeTexture {

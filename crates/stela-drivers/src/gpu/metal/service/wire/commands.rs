@@ -28,6 +28,14 @@ records! {
         pub value: u64,
     }
 
+    /// `sampleCountersInBuffer:atSampleIndex:withBarrier:` of any encoder.
+    pub struct SampleCounters {
+        pub buffer: u64,
+        pub index: u64,
+        pub barrier: u32,
+        pub reserved: u32,
+    }
+
     /// `computeCommandEncoderWithDispatchType:`.
     pub struct BeginCompute {
         pub dispatch_type: u64,
@@ -190,6 +198,53 @@ records! {
         pub texture: u64,
         pub slice: u64,
         pub level: u64,
+    }
+
+    /// `resolveCounters:inRange:destinationBuffer:destinationOffset:`.
+    pub struct ResolveCounters {
+        pub buffer: u64,
+        pub first: u64,
+        pub count: u64,
+        pub destination: u64,
+        pub offset: u64,
+    }
+
+    /// `updateTextureMappings:mode:…` of a sparse texture; its
+    /// `MappingRecord`s follow.
+    pub struct UpdateMappings {
+        pub texture: u64,
+        pub mode: u64,
+    }
+
+    /// One region of `updateTextureMappings:mode:…`, in tiles.
+    pub struct MappingRecord {
+        pub level: u64,
+        pub slice: u64,
+        pub origin: [u64; 3],
+        pub size: [u64; 3],
+    }
+
+    /// `updateTextureMapping:mode:indirectBuffer:indirectBufferOffset:`.
+    pub struct UpdateMappingIndirect {
+        pub texture: u64,
+        pub mode: u64,
+        pub buffer: u64,
+        pub offset: u64,
+    }
+
+    /// One texture's side of a mapping move: a tile-aligned pixel origin.
+    pub struct MoveEndRecord {
+        pub texture: u64,
+        pub slice: u64,
+        pub level: u64,
+        pub origin: [u64; 3],
+    }
+
+    /// `moveTextureMappingsFromTexture:…toTexture:…`, of a size in pixels.
+    pub struct MoveMappings {
+        pub source: MoveEndRecord,
+        pub destination: MoveEndRecord,
+        pub size: [u64; 3],
     }
 
     /// An attachment of a render pass: its texture (zero for none), the
@@ -510,6 +565,8 @@ raw_enum! {
         SignalEvent = 0x0002,
         /// `EventCommand`.
         WaitForEvent = 0x0003,
+        /// `SampleCounters`.
+        SampleCounters = 0x0004,
     }
 }
 
@@ -570,6 +627,22 @@ raw_enum! {
         Synchronize = 0x0209,
         /// `SynchronizeTexture`.
         SynchronizeTexture = 0x020a,
+        /// `ResolveCounters`.
+        ResolveCounters = 0x020b,
+    }
+}
+
+raw_enum! {
+    /// Commands of `MTLResourceStateCommandEncoder`.
+    pub enum ResourceStateCode: u32 {
+        /// `resourceStateCommandEncoder`, without a record.
+        Begin = 0x0401,
+        /// `UpdateMappings` and its `MappingRecord`s.
+        UpdateMappings = 0x0402,
+        /// `UpdateMappingIndirect`.
+        UpdateMappingIndirect = 0x0403,
+        /// `MoveMappings`.
+        MoveMappings = 0x0404,
     }
 }
 
@@ -656,6 +729,7 @@ pub enum CommandCode {
     Compute(ComputeCode),
     Blit(BlitCode),
     Render(RenderCode),
+    ResourceState(ResourceStateCode),
 }
 
 impl CommandCode {
@@ -665,6 +739,7 @@ impl CommandCode {
             0x01 => ComputeCode::from_raw(raw).map(Self::Compute),
             0x02 => BlitCode::from_raw(raw).map(Self::Blit),
             0x03 => RenderCode::from_raw(raw).map(Self::Render),
+            0x04 => ResourceStateCode::from_raw(raw).map(Self::ResourceState),
             _ => None,
         }
     }
