@@ -57,13 +57,13 @@
 //! interpreted. Commits keep no record against replaying an older wrapped
 //! key and retained unlock records do not outlive the sepOS start; each
 //! checks its key and reports that once. Loading class keys opens the VEK
-//! as an unwrap does, which checks the secret and KEK, and keeps no class
-//! keys, as no command takes per-file keys; the sealed-System bit is not
-//! interpreted. It reports both once. Dropping a VEK's or an unlock
-//! record's state releases nothing, as none is held. Other protection
-//! operations, the remaining `fv` commands and other types refuse.
-//! [`media`] serves the container media keys under the same root and
-//! inline engine.
+//! as an unwrap does, which checks the secret and KEK, and keeps the
+//! volume's class keys for [`file_key`] until the sepOS restarts or the
+//! VEK's state is dropped; the sealed-System bit is not interpreted, which
+//! it reports once. Dropping an unlock record's state releases nothing, as
+//! none is held. Other protection operations, the remaining `fv` commands
+//! and other types refuse. [`media`] serves the container media keys under
+//! the same root and inline engine.
 use super::super::Entropy;
 use super::Fields;
 use super::dictionary::{dictionary, number, tagged};
@@ -124,8 +124,10 @@ const UNINTERPRETED: &str = "SEP volume keys: keybag handle and parameters are n
 const UNRECORDED_COMMIT: &str =
     "SEP volume keys: commit keeps no anti-replay record of superseded wrapped keys";
 const UNRETAINED: &str = "SEP volume keys: retained unlock records do not outlive the sepOS start";
-const UNKEPT_CLASS_KEYS: &str = "SEP volume keys: loading class keys checks the VEK and keeps no      class keys, as no command takes per-file keys; the sealed-System bit is not interpreted";
+const UNREAD_SEALED_SYSTEM: &str =
+    "SEP volume keys: loading class keys does not interpret the sealed-System bit";
 
+mod file_key;
 mod media;
 
 pub(super) fn recognizes(command: u8) -> bool {
@@ -133,12 +135,15 @@ pub(super) fn recognizes(command: u8) -> bool {
         command,
         NEW_VEK | UNWRAP_VEK | NEW_KEK | GET_SIZE | SET_PROTECTION | GET_BLOB_STATE
     ) || media::recognizes(command)
+        || file_key::recognizes(command)
 }
 
 /// The volume keys of one sepOS start.
 pub(super) struct VolumeKeys {
     root: Zeroizing<[u8; 32]>,
     engine: Engine,
+    /// The volumes whose class keys are loaded.
+    class_keys: Vec<file_key::ClassKeys>,
     /// Degraded answers already reported.
     reported: Vec<&'static str>,
 }
@@ -157,6 +162,7 @@ impl VolumeKeys {
         Ok(Self {
             root: derive(machine_root, ROOT_DOMAIN, &[]),
             engine,
+            class_keys: Vec::new(),
             reported: Vec::new(),
         })
     }
@@ -173,6 +179,9 @@ impl VolumeKeys {
     ) -> Result<Vec<u8>> {
         if media::recognizes(command) {
             return self.media(command, variant, fields, entropy);
+        }
+        if file_key::recognizes(command) {
+            return self.file_key(command, variant, fields, entropy, notes);
         }
         let expected = if command == UNWRAP_VEK {
             matches!(variant, 0 | 1)
@@ -258,7 +267,8 @@ impl VolumeKeys {
                         self.report(UNRECORDED_COMMIT, notes);
                     }
                     REMOVE_VEK_STATE if vek_only => {
-                        Vek::parse(third)?;
+                        let volume = Vek::parse(third)?.volume();
+                        self.class_keys.retain(|keys| keys.volume() != volume);
                     }
                     COMMIT_KEK if kek_only => {
                         kek_uuid(second)?;
@@ -272,8 +282,13 @@ impl VolumeKeys {
                         kek_uuid(second)?;
                     }
                     LOAD_CLASS_KEYS if value & !SEALED_SYSTEM == 0 => {
-                        self.open_vek(third, first, second)?;
-                        self.report(UNKEPT_CLASS_KEYS, notes);
+                        let vek = self.open_vek(third, first, second)?;
+                        let volume = Vek::parse(third)?.volume();
+                        self.class_keys.retain(|keys| keys.volume() != volume);
+                        self.class_keys.push(file_key::ClassKeys::new(volume, &vek));
+                        if value & SEALED_SYSTEM != 0 {
+                            self.report(UNREAD_SEALED_SYSTEM, notes);
+                        }
                     }
                     _ => {
                         notes(alloc::format!(
@@ -444,6 +459,10 @@ impl<'a> Vek<'a> {
             system,
             user,
         })
+    }
+
+    fn volume(&self) -> [u8; UUID_BYTES] {
+        self.uuid.try_into().unwrap()
     }
 
     /// Its blob state, the dictionary `_decode_fv_blob_state` reads.

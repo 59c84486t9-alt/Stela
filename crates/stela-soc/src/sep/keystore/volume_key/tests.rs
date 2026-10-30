@@ -284,7 +284,7 @@ fn state_operations_check_their_key_and_report_what_is_not_kept() {
 }
 
 #[test]
-fn loading_class_keys_unlocks_the_vek_and_reports_that_none_are_kept() {
+fn loading_class_keys_unlocks_the_vek_and_reports_the_sealed_system_bit() {
     let (mut keys, _) = keys(1);
     let (system, _) = new_vek(&mut keys, &[], &[]);
     let kek = new_kek(&mut keys, b"secret");
@@ -307,7 +307,7 @@ fn loading_class_keys_unlocks_the_vek_and_reports_that_none_are_kept() {
         let reply = load(&mut keys, value, blobs, &mut notes).unwrap();
         assert_eq!(reply, 0u32.to_le_bytes());
     }
-    assert_eq!(notes, [UNKEPT_CLASS_KEYS]);
+    assert_eq!(notes, [UNREAD_SEALED_SYSTEM]);
     // The wrong secret, a user VEK without its KEK, another machine's VEK
     // or another u64 bit refuses.
     for (value, blobs) in [
@@ -319,6 +319,179 @@ fn loading_class_keys_unlocks_the_vek_and_reports_that_none_are_kept() {
     }
     let (mut other, _) = self::keys(2);
     assert!(load(&mut other, 0, [&[], &[], &system], &mut notes).is_err());
+}
+
+/// Loads the class keys of `vek`, a system-protected VEK.
+fn load_class_keys(keys: &mut VolumeKeys, vek: &[u8]) {
+    let reply = protect(keys, LOAD_CLASS_KEYS, [&[], &[], vek], &mut Vec::new()).unwrap();
+    assert_eq!(reply, 0u32.to_le_bytes());
+}
+
+/// Encoded per-file key parameters naming `volume`, and a persona.
+fn parameters(volume: &[u8]) -> Vec<u8> {
+    dictionary(&[
+        (b"persona_uuid", tagged(4, &USER)),
+        (b"volume_uuid", tagged(4, volume)),
+    ])
+}
+
+/// A per-file key request's fields: the u64 1, a handle, the parameters
+/// and the class.
+fn file_request(volume: &[u8], class: u32) -> Request {
+    Request::default()
+        .lword(1)
+        .word(u32::MAX - 4)
+        .blob(&parameters(volume))
+        .word(class)
+}
+
+fn send_file_key(
+    keys: &mut VolumeKeys,
+    command: u8,
+    request: Request,
+    notes: &mut Vec<String>,
+) -> Result<Vec<u8>> {
+    let variant = if command == file_key::NEW_KEY { 2 } else { 1 };
+    send(keys, command, variant, request, notes)
+}
+
+/// NEW_KEY's reply: the inline key area and the wrapped key.
+fn new_file_key(keys: &mut VolumeKeys, volume: &[u8], class: u32) -> Result<(Vec<u8>, Vec<u8>)> {
+    let request = file_request(volume, class).word(2).blob(&[0; 28]).blob(&[]);
+    let reply = send_file_key(keys, file_key::NEW_KEY, request, &mut Vec::new())?;
+    let mut fields = reply_fields(&reply);
+    let area = fields.blob().unwrap().to_vec();
+    assert!(fields.blob().unwrap().is_empty());
+    assert!(fields.blob().unwrap().is_empty());
+    let wrapped = fields.blob().unwrap().to_vec();
+    assert!(fields.blob().unwrap().is_empty());
+    assert_eq!(fields.word().unwrap(), 1 << 1);
+    assert_eq!(fields.word().unwrap(), class);
+    fields.end().unwrap();
+    Ok((area, wrapped))
+}
+
+fn unwrap_file_key(
+    keys: &mut VolumeKeys,
+    volume: &[u8],
+    class: u32,
+    wrapped: &[u8],
+) -> Result<Vec<u8>> {
+    let request = file_request(volume, class).blob(wrapped).word(0x102);
+    let reply = send_file_key(keys, file_key::UNWRAP_KEY, request, &mut Vec::new())?;
+    let mut fields = reply_fields(&reply);
+    let area = fields.blob().unwrap().to_vec();
+    assert!(fields.blob().unwrap().is_empty());
+    assert_eq!(fields.word().unwrap(), 1 << 1);
+    fields.end().unwrap();
+    Ok(area)
+}
+
+#[test]
+fn a_per_file_key_unwraps_to_the_same_inline_key_only_under_its_volume_class_keys() {
+    let (mut keys, engine) = keys(1);
+    let (vek, _) = new_vek(&mut keys, &[], &[]);
+    assert!(new_file_key(&mut keys, &VOLUME, 4).is_err());
+    load_class_keys(&mut keys, &vek);
+    let (area, wrapped) = new_file_key(&mut keys, &VOLUME, 4).unwrap();
+    assert_eq!(wrapped.len(), file_key::WRAPPED_BYTES);
+    let again = unwrap_file_key(&mut keys, &VOLUME, 4, &wrapped).unwrap();
+    assert_eq!(cipher(&engine, &again), cipher(&engine, &area));
+    let (other_area, _) = new_file_key(&mut keys, &VOLUME, 4).unwrap();
+    assert_ne!(cipher(&engine, &other_area), cipher(&engine, &area));
+    // Another class, volume, machine or a changed key does not unwrap.
+    assert!(unwrap_file_key(&mut keys, &VOLUME, 3, &wrapped).is_err());
+    assert!(unwrap_file_key(&mut keys, &USER, 4, &wrapped).is_err());
+    let mut bad = wrapped.clone();
+    bad[30] ^= 1;
+    assert!(unwrap_file_key(&mut keys, &VOLUME, 4, &bad).is_err());
+    let (mut other, _) = self::keys(2);
+    let (other_vek, _) = new_vek(&mut other, &[], &[]);
+    load_class_keys(&mut other, &other_vek);
+    assert!(unwrap_file_key(&mut other, &VOLUME, 4, &wrapped).is_err());
+    // Dropping the VEK's state unloads its class keys until they load again.
+    protect(
+        &mut keys,
+        REMOVE_VEK_STATE,
+        [&[], &[], &vek],
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert!(unwrap_file_key(&mut keys, &VOLUME, 4, &wrapped).is_err());
+    load_class_keys(&mut keys, &vek);
+    let again = unwrap_file_key(&mut keys, &VOLUME, 4, &wrapped).unwrap();
+    assert_eq!(cipher(&engine, &again), cipher(&engine, &area));
+}
+
+#[test]
+fn per_file_keys_report_what_they_do_not_interpret_once_and_refuse_unmodeled_requests() {
+    let (mut keys, _) = keys(1);
+    let (vek, _) = new_vek(&mut keys, &[], &[]);
+    load_class_keys(&mut keys, &vek);
+    let mut notes = Vec::new();
+    for _ in 0..2 {
+        let request = file_request(&VOLUME, 3).word(3).blob(&[0; 28]).blob(&[]);
+        send_file_key(&mut keys, file_key::NEW_KEY, request, &mut notes).unwrap();
+    }
+    assert_eq!(notes, [file_key::UNINTERPRETED]);
+    let new_key = |request: Request| request.word(2).blob(&[0; 28]).blob(&[]);
+    for request in [
+        // Class 0, no volume, another key or a short UUID in the parameters.
+        new_key(file_request(&VOLUME, 0)),
+        new_key(Request::default().lword(1).word(0).blob(&[]).word(3)),
+        new_key(
+            Request::default()
+                .lword(1)
+                .word(0)
+                .blob(&dictionary(&[(b"other", tagged(4, &VOLUME))]))
+                .word(3),
+        ),
+        new_key(file_request(&VOLUME[1..], 3)),
+        // Another u64, flags without a SEP-wrapped key or with unknown bits,
+        // a short context, a trailing blob or trailing bytes.
+        new_key(
+            Request::default()
+                .lword(2)
+                .word(0)
+                .blob(&parameters(&VOLUME))
+                .word(3),
+        ),
+        file_request(&VOLUME, 3)
+            .word(0x100)
+            .blob(&[0; 28])
+            .blob(&[]),
+        file_request(&VOLUME, 3).word(6).blob(&[0; 28]).blob(&[]),
+        file_request(&VOLUME, 3).word(2).blob(&[0; 27]).blob(&[]),
+        file_request(&VOLUME, 3).word(2).blob(&[0; 28]).blob(b"x"),
+        new_key(file_request(&VOLUME, 3)).word(0),
+    ] {
+        assert!(send_file_key(&mut keys, file_key::NEW_KEY, request, &mut notes).is_err());
+    }
+    let request = new_key(file_request(&VOLUME, 3));
+    assert!(send(&mut keys, file_key::NEW_KEY, 1, request, &mut notes).is_err());
+    let (_, wrapped) = new_file_key(&mut keys, &VOLUME, 3).unwrap();
+    let request = file_request(&VOLUME, 3).blob(&wrapped).word(0x102);
+    assert!(send(&mut keys, file_key::UNWRAP_KEY, 2, request, &mut notes).is_err());
+}
+
+#[test]
+fn octet_string_dictionaries_read_back_and_malformed_ones_refuse() {
+    use super::super::dictionary::octet_strings;
+    let long = [7; 200];
+    let bytes = dictionary(&[(b"a", tagged(4, &[1, 2])), (b"b", tagged(4, &long))]);
+    let entries = octet_strings(&bytes).unwrap();
+    assert_eq!(entries, [(&b"a"[..], &[1, 2][..]), (&b"b"[..], &long[..])]);
+    assert!(octet_strings(&[]).unwrap().is_empty());
+    let malformed: [&[u8]; 5] = [
+        &bytes[..bytes.len() - 1],
+        &[bytes.as_slice(), &[0]].concat(),
+        &dictionary(&[(b"a", number(1))]),
+        &[0x30, 0],
+        &[0x31, 0x81, 1, 0],
+    ];
+    for bad in malformed {
+        assert!(octet_strings(bad).is_err());
+    }
 }
 
 fn send_media(keys: &mut VolumeKeys, command: u8, request: Request) -> Result<Vec<u8>> {
