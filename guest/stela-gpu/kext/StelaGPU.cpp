@@ -1,0 +1,143 @@
+#include "StelaGPU.h"
+
+#include <IOKit/IOLib.h>
+#include <stela/gate.h>
+
+OSDefineMetaClassAndStructors(StelaGPU, IOAccelerator);
+
+bool
+StelaGPU::start(IOService *provider)
+{
+	if (!IOAccelerator::start(provider)) {
+		return false;
+	}
+	if (!attachGate(provider)) {
+		stop(provider);
+		return false;
+	}
+	registerService();
+	return true;
+}
+
+bool
+StelaGPU::attachGate(IOService *provider)
+{
+	window = provider->getDeviceMemoryWithIndex(0);
+	if (!window || window->getLength() != STELA_GATE_BYTES) {
+		IOLog("StelaGPU: the gate window is not %llu bytes\n", STELA_GATE_BYTES);
+		window = nullptr;
+		return false;
+	}
+	window->retain();
+	IODeviceMemory *page = IODeviceMemory::withSubRange(window, 0, STELA_GATE_PAGE);
+	if (page) {
+		control = page->map(kIOMapInhibitCache);
+		page->release();
+	}
+	if (!control) {
+		IOLog("StelaGPU: cannot map the gate's control page\n");
+		return false;
+	}
+	if (read(STELA_GATE_COUNT) != STELA_GATE_CONNECTIONS) {
+		IOLog("StelaGPU: the gate has %llu connections, not %llu\n",
+		    read(STELA_GATE_COUNT), STELA_GATE_CONNECTIONS);
+		return false;
+	}
+	lock = IOLockAlloc();
+	workLoop = IOWorkLoop::workLoop();
+	if (!lock || !workLoop) {
+		return false;
+	}
+	interrupt = IOInterruptEventSource::interruptEventSource(this, &StelaGPU::interruptOccurred, provider, 0);
+	if (!interrupt || workLoop->addEventSource(interrupt) != kIOReturnSuccess) {
+		IOLog("StelaGPU: cannot take the gate's interrupt\n");
+		OSSafeReleaseNULL(interrupt);
+		return false;
+	}
+	interrupt->enable();
+	return true;
+}
+
+void
+StelaGPU::stop(IOService *provider)
+{
+	if (interrupt) {
+		interrupt->disable();
+		workLoop->removeEventSource(interrupt);
+		OSSafeReleaseNULL(interrupt);
+	}
+	IOAccelerator::stop(provider);
+}
+
+void
+StelaGPU::free()
+{
+	OSSafeReleaseNULL(interrupt);
+	OSSafeReleaseNULL(workLoop);
+	OSSafeReleaseNULL(control);
+	OSSafeReleaseNULL(window);
+	if (lock) {
+		IOLockFree(lock);
+		lock = nullptr;
+	}
+	IOAccelerator::free();
+}
+
+uint64_t
+StelaGPU::openGate()
+{
+	IOLockLock(lock);
+	write(STELA_GATE_OPEN, 1);
+	uint64_t page = read(STELA_GATE_OPENED);
+	IOLockUnlock(lock);
+	return page;
+}
+
+void
+StelaGPU::closeGate(uint64_t page)
+{
+	IOLockLock(lock);
+	write(STELA_GATE_CLOSE, page);
+	IOLockUnlock(lock);
+}
+
+IODeviceMemory *
+StelaGPU::copyGateMemory(uint64_t page)
+{
+	return IODeviceMemory::withSubRange(window, page * STELA_GATE_PAGE, STELA_GATE_PAGE);
+}
+
+uint64_t
+StelaGPU::completions() const
+{
+	return __atomic_load_n(&completionCount, __ATOMIC_ACQUIRE);
+}
+
+/*
+ * The gate holds its level interrupt until acknowledged. Acknowledging
+ * before counting means work completing after the count raises it again.
+ */
+void
+StelaGPU::interruptOccurred(OSObject *owner, IOInterruptEventSource *, int)
+{
+	auto gpu = static_cast<StelaGPU *>(owner);
+	gpu->write(STELA_GATE_ACK, 1);
+	uint64_t now = __atomic_add_fetch(&gpu->completionCount, 1, __ATOMIC_ACQ_REL);
+	gpu->applyToClients([](IOService *client, void *context) {
+		if (auto user = OSDynamicCast(StelaGPUUserClient, client)) {
+			user->notify(*static_cast<uint64_t *>(context));
+		}
+	}, &now);
+}
+
+uint64_t
+StelaGPU::read(uint64_t reg) const
+{
+	return *reinterpret_cast<volatile uint64_t *>(control->getVirtualAddress() + reg);
+}
+
+void
+StelaGPU::write(uint64_t reg, uint64_t value)
+{
+	*reinterpret_cast<volatile uint64_t *>(control->getVirtualAddress() + reg) = value;
+}

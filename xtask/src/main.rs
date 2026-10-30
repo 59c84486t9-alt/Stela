@@ -60,6 +60,7 @@ mod boot;
 mod check;
 mod dist;
 mod gpu;
+mod guest;
 mod links;
 mod oracles;
 mod pages;
@@ -95,6 +96,9 @@ enum Task {
     /// Build native GPU components and report their remaining platform imports.
     #[command(subcommand)]
     Gpu(gpu::Command),
+    /// Build the ARM64e components Stela installs in macOS: the StelaGPU
+    /// kext's objects, against `third_party/xnu`.
+    Guest,
     /// Compare Stela's AMX model with the corsix/amx emulator on QEMU.
     AmxReference(amx::AmxReference),
     /// Disassemble, size and time the native AMX kernels against the model.
@@ -114,6 +118,7 @@ fn main() -> ExitCode {
         Task::Oracles(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::Boot(command) => boot::run(command),
         Task::Gpu(command) => gpu::run(command).map(|()| ExitCode::SUCCESS),
+        Task::Guest => guest::run().map(|()| ExitCode::SUCCESS),
         Task::AmxReference(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::RestoreDryRun(task) => task.run(),
