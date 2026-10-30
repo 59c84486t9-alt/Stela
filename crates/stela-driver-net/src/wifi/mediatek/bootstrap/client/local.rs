@@ -29,8 +29,9 @@ pub enum LocalError {
     Selection(crate::wifi::mediatek::firmware::auxiliary::Error),
     Capabilities(phy::Error),
 }
-/// Preserve the optional NIC TLV facts. No MLD association or extra
-/// link/WCID/radio resource is manufactured from a reported support bit.
+/// Preserve the optional NIC TLV facts. The station requests an AP MLD's
+/// links only where the NIC reports MLO support, as `mt7925_init_mlo_caps`
+/// sets WIPHY_FLAG_SUPPORTS_MLO only under MT792x_CHIP_CAP_MLO_EN.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MloObservations {
     pub flags: Option<u64>,

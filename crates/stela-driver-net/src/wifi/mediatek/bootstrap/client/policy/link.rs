@@ -297,6 +297,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     pub fn bss(&self) -> impl Iterator<Item = (BssHandle, &scan::result::Bss)> {
         self.state().client.bss()
     }
+    /// The client's own record of the beacon of the BSS `handle` names, as
+    /// another link of an AP MLD association takes it.
+    pub fn observation(
+        &self,
+        handle: BssHandle,
+    ) -> Result<Arc<super::PmfBssObservation>, LinkControlError> {
+        Ok(self.state().client.observation(handle)?)
+    }
     /// The 6 GHz part of a split scan (WIPHY_FLAG_SPLIT_SCAN_6GHZ), planned
     /// from the BSSes this link knows as `cfg80211_scan_6ghz` plans from the
     /// BSS list; `scan::six_ghz::first_part` is the scan before it.

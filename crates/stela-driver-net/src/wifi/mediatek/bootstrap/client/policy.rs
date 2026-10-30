@@ -918,7 +918,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
                 .join_modern(join, beacon, profile, now, source, &mut check)
                 .map_err(PolicyError::Client);
         }
-        let beacon = self.native_beacon(handle)?;
+        let beacon = self.observation(handle)?;
         self.peer = Some(join.channel);
         self.protection.set(true, false);
         // SAFETY: permission and client are private disjoint fields of this
@@ -938,8 +938,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         }
         .map_err(PolicyError::Client)
     }
-    /// The client's own record of the beacon the OS chose.
-    fn native_beacon(&self, handle: BssHandle) -> Result<Arc<PmfBssObservation>, PolicyError> {
+    /// The client's own record of the beacon of the BSS `handle` names.
+    pub fn observation(&self, handle: BssHandle) -> Result<Arc<PmfBssObservation>, PolicyError> {
         let observed = self
             .observed
             .iter()

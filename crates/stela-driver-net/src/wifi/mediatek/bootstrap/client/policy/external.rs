@@ -91,7 +91,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
     ) -> Result<Arc<Session>, PolicyError> {
         self.live()?;
         self.authentication_bss(handle, &profile, now)?;
-        let beacon = self.native_beacon(handle)?;
+        let beacon = self.observation(handle)?;
         self.protection.set(true, false);
         // SAFETY: permission and client are private disjoint fields of this
         // same exclusive owning attachment, and the OS selected this network.
@@ -182,7 +182,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             }
             .map_err(PolicyError::Client);
         }
-        let beacon = self.native_beacon(handle)?;
+        let beacon = self.observation(handle)?;
         let mut check = Check {
             snapshot: &self.snapshot,
             country: &self.country,
