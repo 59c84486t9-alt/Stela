@@ -26,7 +26,7 @@ pub enum Error {
     InvalidOmac,
     InvalidWmm,
     InvalidWcid,
-    UnsupportedLink,
+    InvalidLink,
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -35,8 +35,9 @@ impl core::fmt::Display for Error {
 }
 impl core::error::Error for Error {}
 
-/// The exact two source requests in submission order. Only ordinary
-/// station/non-MLO registration is supported; an AP/P2P/NAN context is not
+/// The exact two source requests in submission order: an ordinary station,
+/// or one link of a station MLD, whose `link_index` counts the links before
+/// it as `mt7925_mac_link_bss_add` does. An AP/P2P/NAN context is not
 /// silently represented by the station connection type.
 pub struct Requests {
     context: Context,
@@ -61,8 +62,9 @@ impl Requests {
         if context.broadcast_wcid >= 20 {
             return Err(Error::InvalidWcid);
         }
-        if context.link_index != 0 {
-            return Err(Error::UnsupportedLink);
+        // MT792x_MAX_INTERFACES links at most, one interface each.
+        if context.link_index >= 4 {
+            return Err(Error::InvalidLink);
         }
         let mut device = [0; 16];
         device[0] = context.omac_index;
@@ -214,10 +216,10 @@ mod tests {
             ),
             (
                 Context {
-                    link_index: 1,
+                    link_index: 4,
                     ..context()
                 },
-                Error::UnsupportedLink,
+                Error::InvalidLink,
             ),
         ] {
             assert!(matches!(Requests::station(context, true), Err(actual) if actual == expected));

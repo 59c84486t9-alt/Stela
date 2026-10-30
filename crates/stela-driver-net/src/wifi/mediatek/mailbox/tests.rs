@@ -1545,6 +1545,54 @@ pub(crate) fn initial_context(chip: Chip, bss: u8) -> super::super::mcu::device:
     }
 }
 #[test]
+fn an_interface_rebinds_its_slots_to_a_station_mld_link_address() {
+    use device::{Error, Interface, Step};
+    let response = Arc::new(Mutex::new(Response {
+        device_execution: true,
+        ..Response::default()
+    }));
+    let (mut mailbox, _, _, _) = setup_controlled(Chip::Mt7925, true, false, 4, response.clone());
+    let context = initial_context(Chip::Mt7925, 0);
+    // SAFETY: modeled exclusive interface resources with no earlier users.
+    let mut interface = unsafe { Interface::claim(&mailbox, context, ()) }.unwrap();
+    interface.activate(&mut mailbox).unwrap();
+    let link = super::super::mcu::device::Context {
+        address: crate::Mac([2, 0xa, 0, 0, 0, 1]),
+        ..context
+    };
+    interface.rebind(&mut mailbox, link).unwrap();
+    assert_eq!(interface.registered_context(), Some(link));
+    assert!(response.lock().unwrap().device_active && response.lock().unwrap().bss_active);
+    assert_eq!(
+        interface
+            .replies()
+            .iter()
+            .map(|r| r.step)
+            .collect::<Vec<_>>(),
+        vec![
+            Step::DeactivateBss,
+            Step::DeactivateDevice,
+            Step::ActivateDevice,
+            Step::ActivateBss
+        ]
+    );
+    // Other firmware slots are another interface's to claim.
+    let other = super::super::mcu::device::Context {
+        bss_index: 1,
+        ..link
+    };
+    assert!(matches!(
+        interface.rebind(&mut mailbox, other),
+        Err(Error::OtherSlots)
+    ));
+    // Back to the single-link station.
+    interface.rebind(&mut mailbox, context).unwrap();
+    assert_eq!(interface.registered_context(), Some(context));
+    let receipt = interface.deactivate(&mut mailbox).unwrap();
+    // SAFETY: the model has no users of the removed registration.
+    unsafe { interface.retire_after_drain(receipt) }.unwrap();
+}
+#[test]
 fn native_initial_interface_requires_both_real_commands_and_later_user_drain() {
     use device::{Disposition, Interface, Step};
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
