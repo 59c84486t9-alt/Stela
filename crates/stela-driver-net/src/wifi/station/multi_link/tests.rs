@@ -373,3 +373,50 @@ fn an_mld_association_addresses_the_mlds_on_every_link() {
         (&AP_MLD.0[..], &LOCAL.0[..])
     );
 }
+
+/// An MLD association's port opens with the MLDs' PTK and each link's own
+/// GTK, every link's keys in the order of its links.
+#[test]
+fn an_mld_port_opens_with_a_ptk_and_gtk_on_every_link() {
+    use crate::wifi::{
+        security::KeyScope,
+        station::{Completion, tests::key},
+    };
+    let (mut station, action) = associate_station(association_response(vec![answer(0)]));
+    let Action::Configure {
+        context: Some(context),
+        ..
+    } = action
+    else {
+        panic!("configuration");
+    };
+    station
+        .complete_configuration(context.ticket(), Completion::Accepted, 12)
+        .unwrap();
+    let epoch = station.association_epoch().unwrap();
+    let ptk = key(1, KeyScope::Pairwise(AP_MLD));
+    let gtk = key(19, KeyScope::Group(AP));
+    let link_ptk = key(2, KeyScope::Pairwise(AP_MLD));
+    let link_gtk = key(18, KeyScope::Group(OTHER));
+    for links in [
+        // Each link needs its keys.
+        &[(&ptk, &gtk)][..],
+        // A link's GTK is its own AP's.
+        &[(&ptk, &gtk), (&link_ptk, &gtk)][..],
+        // The PTK is the AP MLD's, not a link's AP's.
+        &[
+            (&key(1, KeyScope::Pairwise(AP)), &gtk),
+            (&link_ptk, &link_gtk),
+        ][..],
+    ] {
+        assert_eq!(
+            station.authorize_protected_port(&context, epoch, links),
+            Err(Error::WrongKey)
+        );
+    }
+    station
+        .authorize_protected_port(&context, epoch, &[(&ptk, &gtk), (&link_ptk, &link_gtk)])
+        .unwrap();
+    assert!(station.port_open(&[&ptk, &gtk, &link_ptk, &link_gtk]));
+    assert!(!station.port_open(&[&ptk, &gtk]));
+}

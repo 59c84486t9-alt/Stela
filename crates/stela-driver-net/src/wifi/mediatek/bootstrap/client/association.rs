@@ -292,11 +292,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::WrongPhase);
         }
         s.station
-            .authorize_port(
-                epoch,
-                s.ptk.as_ref().ok_or(Error::NoKey)?.slot(),
-                s.gtk.as_ref().ok_or(Error::NoKey)?.slot(),
-            )
+            .authorize_port(epoch, &Self::link_keys(&s.ptk, &s.gtk)?)
             .map_err(Error::Station)
     }
 }

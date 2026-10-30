@@ -218,14 +218,20 @@ fn msdu(ethernet: &[u8]) -> Result<(Mac, Mac, u16, Vec<u8>), Error> {
 }
 
 impl Station {
-    fn authorized_keys_present<K: Borrow<KeySlot>>(&self, keys: &[K]) -> bool {
-        self.authorization.is_some_and(|(ptk, gtk)| {
+    /// The authorized PTK and GTK of the link whose keys `keys` holds.
+    fn authorized_link<K: Borrow<KeySlot>>(
+        &self,
+        keys: &[K],
+    ) -> Option<(KeyIdentity, KeyIdentity)> {
+        let present = |key| {
             keys.iter()
-                .any(|slot| slot.borrow().installed() == Some(ptk))
-                && keys
-                    .iter()
-                    .any(|slot| slot.borrow().installed() == Some(gtk))
-        })
+                .any(|slot| slot.borrow().installed() == Some(key))
+        };
+        self.authorization
+            .as_ref()?
+            .iter()
+            .copied()
+            .find(|&(ptk, gtk)| present(ptk) && present(gtk))
     }
 
     /// Recheck immediately before queue publication, serialized with
@@ -281,11 +287,14 @@ impl Station {
             Protection::None => None,
             Protection::Firmware { key } | Protection::HostIv { key, .. } => Some(key),
         };
+        // Frames leave with the setup link's PTK; the device puts them on a
+        // link.
         if !plan.control_port && join.policy == PortPolicy::Controlled {
-            if !self.authorized_keys_present(keys) {
+            let setup = self.authorization.as_ref().and_then(|links| links.first());
+            if self.authorized_link(keys).is_none() || setup.is_none() {
                 return Err(Error::ClosedPort);
             }
-            if key != self.authorization.map(|pair| pair.0) {
+            if key != setup.map(|pair| pair.0) {
                 return Err(Error::WrongKey);
             }
         }
@@ -406,17 +415,12 @@ impl Station {
             });
         }
         if join.policy == PortPolicy::Controlled {
-            if !self.authorized_keys_present(keys) {
-                return Err(Error::ClosedPort);
-            }
+            let (ptk, gtk) = self.authorized_link(keys).ok_or(Error::ClosedPort)?;
             if !header.protected() {
                 return Err(Error::Unencrypted);
             }
             // A newly installed key cannot bypass explicit frontend activation.
-            if !self
-                .authorization
-                .is_some_and(|(ptk, gtk)| selected_key == Some(ptk) || selected_key == Some(gtk))
-            {
+            if selected_key != Some(ptk) && selected_key != Some(gtk) {
                 return Err(Error::WrongKey);
             }
         }
@@ -484,12 +488,8 @@ impl Station {
                     });
                 } else {
                     if join.policy == PortPolicy::Controlled {
-                        if !self.authorized_keys_present(keys) {
-                            return Err(Error::ClosedPort);
-                        }
-                        if !self.authorization.is_some_and(|(ptk, gtk)| {
-                            selected == Some(ptk) || selected == Some(gtk)
-                        }) {
+                        let (ptk, gtk) = self.authorized_link(keys).ok_or(Error::ClosedPort)?;
+                        if selected != Some(ptk) && selected != Some(gtk) {
                             return Err(Error::WrongKey);
                         }
                     }
@@ -591,10 +591,11 @@ impl Station {
                     ));
                 }
                 if join.policy == PortPolicy::Controlled {
-                    if !self.authorized_keys_present(keys) {
+                    let setup = self.authorization.as_ref().and_then(|links| links.first());
+                    if self.authorized_link(keys).is_none() {
                         return Err(Error::ClosedPort);
                     }
-                    Some(self.authorization.ok_or(Error::ClosedPort)?.0)
+                    Some(setup.ok_or(Error::ClosedPort)?.0)
                 } else {
                     None
                 }

@@ -77,7 +77,7 @@ pub(crate) fn response(control: u16, body: &[u8]) -> Mpdu {
 pub(crate) fn configure(station: &mut Station, policy: PortPolicy) -> Ticket {
     let auth = station.begin(join(policy), 1, &mut Policy(true)).unwrap();
     let epoch = ticket(&auth).epoch();
-    assert!(!station.port_open(None, None));
+    assert!(!station.port_open(&[]));
     station.submitted(ticket(&auth)).unwrap();
     let assoc = station
         .receive(
@@ -294,11 +294,11 @@ fn open_port_needs_auth_association_and_firmware_ack() {
     let mut station = Station::new(LOCAL).unwrap();
     let config = configure(&mut station, PortPolicy::Open);
     assert_eq!(station.phase(), Phase::Configuring);
-    assert!(!station.port_open(None, None));
+    assert!(!station.port_open(&[]));
     station
         .complete_configuration(config, Completion::Accepted, 4)
         .unwrap();
-    assert!(station.port_open(None, None));
+    assert!(station.port_open(&[]));
     assert_eq!(
         station.complete_configuration(config, Completion::Accepted, 4),
         Err(Error::Stale)
@@ -425,16 +425,18 @@ fn secured_port_needs_frontend_command_and_current_keys() {
         .unwrap();
     let mut ptk = key(1, KeyScope::Pairwise(AP));
     let gtk = key(2, KeyScope::Group(AP));
-    assert!(!station.port_open(Some(&ptk), Some(&gtk)));
+    assert!(!station.port_open(&[&ptk, &gtk]));
     assert_eq!(
-        station.authorize_port(config.epoch() + 1, &ptk, &gtk),
+        station.authorize_port(config.epoch() + 1, &[(&ptk, &gtk)]),
         Err(Error::NotAssociated)
     );
-    station.authorize_port(config.epoch(), &ptk, &gtk).unwrap();
-    assert!(station.port_open(Some(&ptk), Some(&gtk)));
-    assert!(!station.port_open(Some(&ptk), None));
+    station
+        .authorize_port(config.epoch(), &[(&ptk, &gtk)])
+        .unwrap();
+    assert!(station.port_open(&[&ptk, &gtk]));
+    assert!(!station.port_open(&[&ptk]));
     ptk.invalidate();
-    assert!(!station.port_open(Some(&ptk), Some(&gtk)));
+    assert!(!station.port_open(&[&ptk, &gtk]));
 }
 
 #[test]
@@ -447,14 +449,14 @@ fn wrong_bss_purpose_or_key_ack_cannot_open_port() {
     let ptk = key(1, KeyScope::Pairwise(Mac([2, 0, 0, 0, 0, 1])));
     let gtk = key(2, KeyScope::Group(AP));
     assert_eq!(
-        station.authorize_port(config.epoch(), &ptk, &gtk),
+        station.authorize_port(config.epoch(), &[(&ptk, &gtk)]),
         Err(Error::WrongKey)
     );
     assert_eq!(
-        station.authorize_port(config.epoch(), &gtk, &gtk),
+        station.authorize_port(config.epoch(), &[(&gtk, &gtk)]),
         Err(Error::WrongKey)
     );
-    assert!(!station.port_open(Some(&ptk), Some(&gtk)));
+    assert!(!station.port_open(&[&ptk, &gtk]));
 }
 
 #[test]
@@ -545,7 +547,7 @@ fn three_attempt_timeout_closes_session_and_does_not_assume_idle() {
         .complete_removal(ticket(&remove), Completion::Uncertain)
         .unwrap();
     assert_eq!(station.phase(), Phase::Quarantined);
-    assert!(!station.port_open(None, None));
+    assert!(!station.port_open(&[]));
 }
 
 #[test]
@@ -618,7 +620,7 @@ fn peer_departure_closes_open_port_before_device_teardown() {
             ..
         }
     ));
-    assert!(!station.port_open(None, None));
+    assert!(!station.port_open(&[]));
 }
 
 #[test]
@@ -664,7 +666,7 @@ fn truncated_or_wrong_peer_management_cannot_advance_authentication() {
         ));
     }
     assert_eq!(station.phase(), Phase::Authenticating);
-    assert!(!station.port_open(None, None));
+    assert!(!station.port_open(&[]));
 }
 
 #[test]
@@ -675,14 +677,14 @@ fn uncertain_configuration_and_deadline_overflow_stay_closed() {
         .complete_configuration(config, Completion::Uncertain, 4)
         .unwrap();
     assert_eq!(station.phase(), Phase::Quarantined);
-    assert!(!station.port_open(None, None));
+    assert!(!station.port_open(&[]));
     let mut fresh = Station::new(LOCAL).unwrap();
     assert!(matches!(
         fresh.begin(join(PortPolicy::Open), u64::MAX - 1, &mut Policy(true)),
         Err(Error::Overflow)
     ));
     assert_eq!(fresh.phase(), Phase::Idle);
-    assert!(!fresh.port_open(None, None));
+    assert!(!fresh.port_open(&[]));
 }
 
 #[test]
@@ -710,7 +712,7 @@ fn late_success_cannot_bypass_response_or_configuration_deadline() {
         Err(Error::Timeout)
     );
     assert_eq!(fresh.phase(), Phase::Quarantined);
-    assert!(!fresh.port_open(None, None));
+    assert!(!fresh.port_open(&[]));
 }
 
 #[test]
@@ -723,8 +725,10 @@ fn broadcast_ap_departures_close_authorized_controlled_port() {
             .unwrap();
         let ptk = key(1, KeyScope::Pairwise(AP));
         let gtk = key(2, KeyScope::Group(AP));
-        station.authorize_port(config.epoch(), &ptk, &gtk).unwrap();
-        assert!(station.port_open(Some(&ptk), Some(&gtk)));
+        station
+            .authorize_port(config.epoch(), &[(&ptk, &gtk)])
+            .unwrap();
+        assert!(station.port_open(&[&ptk, &gtk]));
         let action = station
             .receive(
                 config.epoch(),
@@ -741,7 +745,7 @@ fn broadcast_ap_departures_close_authorized_controlled_port() {
             }
         ));
         assert_eq!(station.phase(), Phase::Disconnecting);
-        assert!(!station.port_open(Some(&ptk), Some(&gtk)));
+        assert!(!station.port_open(&[&ptk, &gtk]));
     }
 }
 
@@ -755,7 +759,9 @@ fn broadcast_departure_from_wrong_ap_does_not_close_port() {
             .unwrap();
         let ptk = key(1, KeyScope::Pairwise(AP));
         let gtk = key(2, KeyScope::Group(AP));
-        station.authorize_port(config.epoch(), &ptk, &gtk).unwrap();
+        station
+            .authorize_port(config.epoch(), &[(&ptk, &gtk)])
+            .unwrap();
         for offset in [10, 16] {
             let frame = broadcast(response(subtype, &[3, 0]));
             let mut bytes = frame.bytes().to_vec();
@@ -765,7 +771,7 @@ fn broadcast_departure_from_wrong_ap_does_not_close_port() {
                 station.receive(config.epoch(), &wrong, 5, &mut Policy(true)),
                 Err(Error::Wire(wire::Error::WrongPeer))
             ));
-            assert!(station.port_open(Some(&ptk), Some(&gtk)));
+            assert!(station.port_open(&[&ptk, &gtk]));
         }
     }
 }
@@ -810,7 +816,7 @@ fn broadcast_authentication_and_association_responses_are_not_accepted() {
         Err(Error::Wire(wire::Error::WrongPeer))
     ));
     assert_eq!(station.phase(), Phase::Associating);
-    assert!(!station.port_open(None, None));
+    assert!(!station.port_open(&[]));
 }
 
 #[test]
@@ -841,10 +847,10 @@ fn receive_only_pairwise_key_cannot_authorize_a_data_port() {
     );
     let gtk = key(2, KeyScope::Group(AP));
     assert_eq!(
-        station.authorize_port(config.epoch(), &ptk, &gtk),
+        station.authorize_port(config.epoch(), &[(&ptk, &gtk)]),
         Err(Error::WrongKey)
     );
-    assert!(!station.port_open(Some(&ptk), Some(&gtk)));
+    assert!(!station.port_open(&[&ptk, &gtk]));
 }
 
 #[test]
@@ -871,11 +877,13 @@ fn host_nonce_exhaustion_closes_a_previously_authorized_data_port() {
         .unwrap();
     let identity = ptk.installed().unwrap();
     let gtk = key(2, KeyScope::Group(AP));
-    station.authorize_port(config.epoch(), &ptk, &gtk).unwrap();
-    assert!(station.port_open(Some(&ptk), Some(&gtk)));
+    station
+        .authorize_port(config.epoch(), &[(&ptk, &gtk)])
+        .unwrap();
+    assert!(station.port_open(&[&ptk, &gtk]));
     assert!(ptk.reserve_host_tx_nonce(identity).is_ok());
     assert!(ptk.reserve_host_tx_nonce(identity).is_err());
-    assert!(!station.port_open(Some(&ptk), Some(&gtk)));
+    assert!(!station.port_open(&[&ptk, &gtk]));
 }
 
 #[test]
@@ -946,7 +954,7 @@ fn modern_uncertainty_keeps_configuration_but_never_usable_identity() {
     assert!(s.association_context().is_none());
     assert!(s.validate_association_context(&context).is_err());
     assert!(s.context.is_some());
-    assert!(!s.port_open(None, None));
+    assert!(!s.port_open(&[]));
     assert!(matches!(
         s.begin_modern(j.clone(), beacon(&j), 4, &mut Policy(true)),
         Err(Error::Busy)

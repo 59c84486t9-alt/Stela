@@ -54,7 +54,7 @@ fn sae_commit_token_retry_confirm_transport_never_grants_association() {
         station::Phase::ExternalAuthenticating
     );
     assert_eq!(client.phase(), Phase::Joining);
-    assert!(!client.station().port_open(None, None));
+    assert!(!client.station().port_open(&[]));
     assert!(client.station().association_context().is_none());
     assert!(
         client
@@ -132,7 +132,7 @@ fn sae_commit_token_retry_confirm_transport_never_grants_association() {
         client.station().phase(),
         station::Phase::ExternalAuthenticating
     );
-    assert!(!client.station().port_open(None, None));
+    assert!(!client.station().port_open(&[]));
     for (index, (transaction, bytes)) in [
         (1_u16, &[19, 0, 0xff, 7][..]),
         (2_u16, &[0x34, 0x12, 0xaa][..]),
@@ -632,7 +632,7 @@ fn frontend_and_native_deadlines_cancel_without_retransmission_or_permission() {
         assert_eq!(client.phase(), Phase::NeedsDrain);
         assert_eq!(model.queues[&0xd4300].lock().unwrap().head, 0);
         assert_eq!(client.state().roc_token, 0);
-        assert!(!client.station().port_open(None, None));
+        assert!(!client.station().port_open(&[]));
         assert!(matches!(
             client.transmit_external_authentication(
                 &session,
@@ -697,7 +697,7 @@ fn rx_rejects_wrong_peer_channel_algorithm_transaction_and_short_fixed_fields() 
                 client.station().external_authentication().unwrap(),
                 &session
             ));
-            assert!(!client.station().port_open(None, None));
+            assert!(!client.station().port_open(&[]));
             assert!(client.station().association_context().is_none());
         }
         assert!(matches!(
@@ -876,7 +876,7 @@ fn peer_firmware_refusal_quarantines_original_exchange_and_resources() {
         station::Phase::ExternalAuthenticating
     );
     assert!(client.state().format_generation.is_none());
-    assert!(!client.station().port_open(None, None));
+    assert!(!client.station().port_open(&[]));
     assert_eq!(model.queues[&0xd4300].lock().unwrap().head, 0);
     let before = model.response.lock().unwrap().client_commands.len();
     assert!(matches!(

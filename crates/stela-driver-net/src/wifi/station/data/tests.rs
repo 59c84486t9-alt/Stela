@@ -223,7 +223,7 @@ fn separately_boxed_keys_keep_original_replay_and_publication_guards() {
     let mut unrelated = Box::new(key(9, KeyScope::Group(AP), TransmitSeed::RECEIVE_ONLY));
     let ptk_id = ptk.installed().unwrap();
     let gtk_id = gtk.installed().unwrap();
-    station.authorize_port(42, &ptk, &gtk).unwrap();
+    station.authorize_port(42, &[(&ptk, &gtk)]).unwrap();
     let plan = station
         .prepare_msdu_refs(
             42,
@@ -353,7 +353,7 @@ fn authenticated_key_does_not_implicitly_authorize_data_but_allows_eapol() {
         station.receive_msdu(42, &packet(LOCAL, 0x0800, protected(ptk, 2)), &mut keys),
         Err(Error::ClosedPort)
     ));
-    station.authorize_port(42, &keys[0], &keys[1]).unwrap();
+    station.authorize_port(42, &[(&keys[0], &keys[1])]).unwrap();
     assert!(matches!(
         station.receive_msdu(42, &packet(LOCAL, 0x0800, protected(ptk, 3)), &mut keys),
         Ok(Ingress::Data(_))
@@ -377,7 +377,7 @@ fn key_scope_and_generation_are_not_interchangeable() {
     let (mut station, mut keys) = station(PortPolicy::Controlled, false);
     let ptk = keys[0].installed().unwrap();
     let gtk = keys[1].installed().unwrap();
-    station.authorize_port(42, &keys[0], &keys[1]).unwrap();
+    station.authorize_port(42, &[(&keys[0], &keys[1])]).unwrap();
     assert!(matches!(
         station.receive_msdu(
             42,
@@ -404,7 +404,7 @@ fn key_scope_and_generation_are_not_interchangeable() {
 #[test]
 fn stale_channel_integrity_and_aggregate_failures_do_not_advance_replay() {
     let (mut station, mut keys) = station(PortPolicy::Controlled, false);
-    station.authorize_port(42, &keys[0], &keys[1]).unwrap();
+    station.authorize_port(42, &[(&keys[0], &keys[1])]).unwrap();
     let key = keys[0].installed().unwrap();
     let packet = packet(LOCAL, 0x0800, protected(key, 1));
     assert!(matches!(
@@ -438,7 +438,7 @@ fn stale_channel_integrity_and_aggregate_failures_do_not_advance_replay() {
 #[test]
 fn host_iv_plan_reserves_pn_and_keeps_cipher_mic_as_explicit_hardware_work() {
     let (mut station, mut keys) = station(PortPolicy::Controlled, true);
-    station.authorize_port(42, &keys[0], &keys[1]).unwrap();
+    station.authorize_port(42, &[(&keys[0], &keys[1])]).unwrap();
     let key = keys[0].installed().unwrap();
     let first = station
         .prepare_msdu(
@@ -536,7 +536,7 @@ fn firmware_crypto_has_no_host_iv_and_eapol_policy_cannot_leak_data() {
 #[test]
 fn regulatory_denial_does_not_reserve_nonce_and_host_generation_is_rechecked() {
     let (mut station, mut keys) = station(PortPolicy::Controlled, true);
-    station.authorize_port(42, &keys[0], &keys[1]).unwrap();
+    station.authorize_port(42, &[(&keys[0], &keys[1])]).unwrap();
     let key = keys[0].installed().unwrap();
     assert!(matches!(
         station.prepare_msdu(
@@ -641,7 +641,7 @@ fn short_llc_and_exact_mtu_bounds_are_preserved() {
 #[test]
 fn queued_plan_permission_is_revoked_by_port_epoch_key_or_policy_change() {
     let (mut station, mut keys) = station(PortPolicy::Controlled, true);
-    station.authorize_port(42, &keys[0], &keys[1]).unwrap();
+    station.authorize_port(42, &[(&keys[0], &keys[1])]).unwrap();
     let plan = station
         .prepare_msdu(
             42,
@@ -664,7 +664,7 @@ fn queued_plan_permission_is_revoked_by_port_epoch_key_or_policy_change() {
         station.validate_tx_plan(&plan, &keys, &mut Policy(true)),
         Err(Error::ClosedPort)
     );
-    station.authorize_port(42, &keys[0], &keys[1]).unwrap();
+    station.authorize_port(42, &[(&keys[0], &keys[1])]).unwrap();
     station.epoch = 43;
     assert_eq!(
         station.validate_tx_plan(&plan, &keys, &mut Policy(true)),
@@ -757,7 +757,7 @@ fn eapol_cannot_bypass_negotiated_cipher_or_unsupported_pairwise_key_id() {
 #[test]
 fn foreign_ap_receiver_fragment_and_monitor_frames_cannot_poison_replay() {
     let (mut station, mut keys) = station(PortPolicy::Controlled, false);
-    station.authorize_port(42, &keys[0], &keys[1]).unwrap();
+    station.authorize_port(42, &[(&keys[0], &keys[1])]).unwrap();
     let key = keys[0].installed().unwrap();
     let valid = packet(LOCAL, 0x0800, protected(key, 1));
     for variant in 0..5 {

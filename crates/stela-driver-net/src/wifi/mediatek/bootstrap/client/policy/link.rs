@@ -208,11 +208,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     }
     fn up(s: &State<I, Q, C, S>) -> bool {
         let c = s.client.client.state();
-        Self::active(s)
-            && c.station.port_open(
-                c.ptk.as_ref().map(HardwareKey::slot),
-                c.gtk.as_ref().map(HardwareKey::slot),
-            )
+        Self::active(s) && c.station.port_open(&Client::key_slots(c))
     }
     fn reconcile(s: &mut State<I, Q, C, S>) {
         let epoch = s.client.station().association_epoch();

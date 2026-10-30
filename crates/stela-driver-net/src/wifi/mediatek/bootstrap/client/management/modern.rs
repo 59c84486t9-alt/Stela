@@ -47,8 +47,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         .authorize_protected_port(
                             context,
                             session.association,
-                            s.ptk.as_ref().ok_or(Error::NoKey)?.slot(),
-                            s.gtk.as_ref().ok_or(Error::NoKey)?.slot(),
+                            &Self::link_keys(&s.ptk, &s.gtk)?,
                         )
                         .map_err(Error::Station)
                 },
@@ -91,12 +90,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     pub(in crate::wifi::mediatek::bootstrap::client) fn validate_pmf_data(
         s: &Owned<I, Q, C>,
     ) -> Result<(), Error> {
-        if s.station.requires_protected_management()
-            && s.station.port_open(
-                s.ptk.as_ref().map(|key| key.slot()),
-                s.gtk.as_ref().map(|key| key.slot()),
-            )
-        {
+        if s.station.requires_protected_management() && s.station.port_open(&Self::key_slots(s)) {
             Self::validate_management(s, s.management.as_ref().ok_or(Error::NoKey)?)?;
         }
         Ok(())

@@ -22,10 +22,10 @@ fn port_requires_key_acks_and_os_handshake() {
     // acknowledged session. Original native memory, key owners and both serialized
     // model guards remain held.
     unsafe { driver.authorize_port_pmf(&mut owner, admission, &session) }.unwrap();
-    assert!(driver.station().port_open(
-        Some(driver.state().ptk.as_ref().unwrap().slot()),
-        Some(driver.state().gtk.as_ref().unwrap().slot())
-    ));
+    assert!(driver.station().port_open(&[
+        driver.state().ptk.as_ref().unwrap().slot(),
+        driver.state().gtk.as_ref().unwrap().slot()
+    ]));
     assert_eq!(
         model.response.lock().unwrap().keys[&19],
         [vec![0x44; 16], vec![0x55; 16]].concat()

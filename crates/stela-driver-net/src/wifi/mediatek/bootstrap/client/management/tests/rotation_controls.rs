@@ -85,10 +85,10 @@ fn native_live_igtk_update_revokes_old_envelopes_and_keeps_both_real_rx_windows(
     .unwrap();
     assert!(Arc::ptr_eq(&second, &retry));
     assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
-    assert!(!driver.station().port_open(
-        Some(driver.state().ptk.as_ref().unwrap().slot()),
-        Some(driver.state().gtk.as_ref().unwrap().slot())
-    ));
+    assert!(!driver.station().port_open(&[
+        driver.state().ptk.as_ref().unwrap().slot(),
+        driver.state().gtk.as_ref().unwrap().slot()
+    ]));
     stop(&mut driver, &model);
     drop(driver);
     drop(first);

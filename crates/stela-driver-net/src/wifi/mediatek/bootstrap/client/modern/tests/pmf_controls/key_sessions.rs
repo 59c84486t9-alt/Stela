@@ -26,7 +26,7 @@ fn configuration_and_igtk_failure() {
             model.response.lock().unwrap().client_commands.len(),
             before + 1
         );
-        assert!(!driver.station().port_open(None, None));
+        assert!(!driver.station().port_open(&[]));
         drop(driver);
         drop(owner);
         drop(state);
@@ -78,10 +78,10 @@ fn configuration_and_igtk_failure() {
         );
         assert_eq!(driver.phase(), ClientPhase::Quarantined);
         assert!(driver.state().management.is_none());
-        assert!(!driver.station().port_open(
-            Some(driver.state().ptk.as_ref().unwrap().slot()),
-            Some(driver.state().gtk.as_ref().unwrap().slot())
-        ));
+        assert!(!driver.station().port_open(&[
+            driver.state().ptk.as_ref().unwrap().slot(),
+            driver.state().gtk.as_ref().unwrap().slot()
+        ]));
         drop(driver);
         drop(owner);
         drop(state);
@@ -128,10 +128,10 @@ fn igtk_rotation_revokes_old_session() {
     assert!(!Arc::ptr_eq(&first, &second));
     assert_eq!(first.pairwise_key(), second.pairwise_key());
     assert_eq!(first.group_key(), second.group_key());
-    assert!(driver.station().port_open(
-        Some(driver.state().ptk.as_ref().unwrap().slot()),
-        Some(driver.state().gtk.as_ref().unwrap().slot())
-    ));
+    assert!(driver.station().port_open(&[
+        driver.state().ptk.as_ref().unwrap().slot(),
+        driver.state().gtk.as_ref().unwrap().slot()
+    ]));
     let before = model.bar.0.lock().unwrap().log.len();
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
     assert!(

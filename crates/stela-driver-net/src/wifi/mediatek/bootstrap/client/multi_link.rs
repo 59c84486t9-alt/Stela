@@ -5,7 +5,7 @@
 //! interface rebound to the setup link's own address for authentication,
 //! and back to the interface's once the association's peers retire.
 use super::*;
-use crate::wifi::{mediatek::mcu::client::MldLink, station::AssociationContext};
+use crate::wifi::{mediatek::mcu::client::MldLink, security::KeySlot, station::AssociationContext};
 use alloc::borrow::Cow;
 use station::multi_link::Affiliation;
 
@@ -71,6 +71,27 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         frame[10..16].copy_from_slice(&affiliation.local.0);
         frame[16..22].copy_from_slice(&ap.0);
         Cow::Owned(frame)
+    }
+
+    /// Each link's PTK and GTK, the setup link's first, as the station
+    /// authorizes its port.
+    pub(super) fn link_keys<'a>(
+        ptk: &'a Option<HardwareKey<Arc<C>>>,
+        gtk: &'a Option<HardwareKey<Arc<C>>>,
+    ) -> Result<Vec<(&'a KeySlot, &'a KeySlot)>, Error> {
+        let pairwise = ptk.as_ref().ok_or(Error::NoKey)?.slot();
+        let group = gtk.as_ref().ok_or(Error::NoKey)?.slot();
+        Ok(Vec::from([(pairwise, group)]))
+    }
+
+    /// Every key the association installed, as the station checks its port
+    /// open.
+    pub(super) fn key_slots(s: &Owned<I, Q, C>) -> Vec<&KeySlot> {
+        [s.ptk.as_ref(), s.gtk.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(HardwareKey::slot)
+            .collect()
     }
 
     /// `mt7925_change_vif_links` restoring the single-link station once the
