@@ -13,12 +13,17 @@
 //! record in place; the store retires once the call has. Only when the
 //! record itself is out of the thread's reach does the gate's `FAULT`
 //! report why.
+//!
+//! Calls never block on the GPU: when the service reports completed work,
+//! the gate raises its interrupt until the kext acknowledges it, so threads
+//! waiting for command buffers sleep in the kernel and ask again on wake.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::{boxed::Box, collections::BTreeMap};
 use core::num::NonZeroU64;
 use stela_contracts::{
     bus::AdvancePolicy,
     gate::{CallerFault, CallerMemory},
+    interrupt::{AicInput, Wire},
 };
 
 /// The guest's page: the unit one task maps.
@@ -36,6 +41,10 @@ const OPENED: u64 = 0x08;
 const CLOSE: u64 = 0x10;
 /// Control: the number of gate pages.
 const COUNT: u64 = 0x18;
+/// Control: 1 while completed work is unacknowledged.
+const STATUS: u64 = 0x20;
+/// Control: a store acknowledges completed work.
+const ACK: u64 = 0x28;
 /// Gate: a store names a call record.
 const CALL: u64 = 0x00;
 /// Gate: why the last call's record was out of reach, 0 for none.
@@ -61,10 +70,15 @@ pub trait GateService {
         record: u64,
         caller: &mut dyn CallerMemory,
     ) -> Result<(), CallerFault>;
+    /// Whether the GPU completed work since this last answered true.
+    fn signaled(&mut self) -> bool;
 }
 
 pub struct Gate {
     service: Box<dyn GateService>,
+    irq: AicInput,
+    /// Completed work the kext has not acknowledged.
+    status: bool,
     /// The connection of each gate page, by page - 1.
     connections: [Option<NonZeroU64>; CONNECTIONS],
     faults: [u64; CONNECTIONS],
@@ -74,9 +88,11 @@ pub struct Gate {
 }
 
 impl Gate {
-    pub fn new(service: Box<dyn GateService>) -> Self {
+    pub fn new(service: Box<dyn GateService>, irq: AicInput) -> Self {
         Self {
             service,
+            irq,
+            status: false,
             connections: [None; CONNECTIONS],
             faults: [0; CONNECTIONS],
             opened: 0,
@@ -130,7 +146,15 @@ fn gate_index(page: u64) -> Option<usize> {
 
 impl MmioDevice for Gate {
     fn advance_policy(&self) -> AdvancePolicy {
-        AdvancePolicy::Passive
+        AdvancePolicy::Always
+    }
+
+    fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
+        if self.service.signaled() {
+            self.status = true;
+            access.interrupts.set_level(Wire::Aic(self.irq), true);
+        }
+        Ok(None)
     }
 
     fn name(&self) -> &'static str {
@@ -151,6 +175,7 @@ impl MmioDevice for Gate {
         match (page, register) {
             (0, OPENED) => Ok(self.opened),
             (0, COUNT) => Ok(CONNECTIONS as u64),
+            (0, STATUS) => Ok(self.status.into()),
             (_, FAULT) => {
                 let gate = gate_index(page).ok_or_else(|| refused("no such register"))?;
                 Ok(self.faults[gate])
@@ -174,6 +199,10 @@ impl MmioDevice for Gate {
         match (page, register) {
             (0, OPEN) => self.open(),
             (0, CLOSE) => self.close(value).map_err(refused)?,
+            (0, ACK) => {
+                self.status = false;
+                access.interrupts.set_level(Wire::Aic(self.irq), false);
+            }
             (_, CALL) => {
                 let gate = gate_index(page).ok_or_else(|| refused("no such register"))?;
                 if self.connections[gate].is_none() {
@@ -196,6 +225,7 @@ mod tests {
 
     #[derive(Default)]
     struct Log {
+        signaled: bool,
         next: u64,
         disconnected: Vec<u64>,
         served: Vec<(u64, u64, u8)>,
@@ -228,6 +258,10 @@ mod tests {
                 .push((connection.get(), record, byte[0]));
             Ok(())
         }
+
+        fn signaled(&mut self) -> bool {
+            core::mem::take(&mut self.0.borrow_mut().signaled)
+        }
     }
 
     /// One byte per address below 0x100.
@@ -245,10 +279,22 @@ mod tests {
         }
     }
 
+    const IRQ: AicInput = AicInput::new(0, 700);
+
     struct NoInterrupts;
 
     impl InterruptSink for NoInterrupts {
         fn set_level(&mut self, _wire: Wire, _asserted: bool) {}
+    }
+
+    #[derive(Default)]
+    struct Line(Option<bool>);
+
+    impl InterruptSink for Line {
+        fn set_level(&mut self, wire: Wire, asserted: bool) {
+            assert_eq!(wire, Wire::Aic(IRQ));
+            self.0 = Some(asserted);
+        }
     }
 
     fn store(gate: &mut Gate, cpu: usize, offset: u64, value: u64) -> Result<(), MmioError> {
@@ -277,7 +323,7 @@ mod tests {
     #[test]
     fn each_pe_serves_the_call_its_own_store_named() {
         let log = Rc::new(RefCell::new(Log::default()));
-        let mut gate = Gate::new(Box::new(Service(log.clone())));
+        let mut gate = Gate::new(Box::new(Service(log.clone())), IRQ);
         assert_eq!(load(&mut gate, COUNT), CONNECTIONS as u64);
         let (first, second) = (opened(&mut gate), opened(&mut gate));
         assert_eq!((first, second), (1, 2));
@@ -295,7 +341,7 @@ mod tests {
     #[test]
     fn closed_gates_refuse_calls_and_drop_pending_ones() {
         let log = Rc::new(RefCell::new(Log::default()));
-        let mut gate = Gate::new(Box::new(Service(log.clone())));
+        let mut gate = Gate::new(Box::new(Service(log.clone())), IRQ);
         let page = opened(&mut gate);
         store(&mut gate, 0, page * PAGE + CALL, 0x11).unwrap();
         store(&mut gate, 0, CLOSE, page).unwrap();
@@ -314,5 +360,21 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn completed_work_holds_the_interrupt_until_acknowledged() {
+        let log = Rc::new(RefCell::new(Log::default()));
+        let mut gate = Gate::new(Box::new(Service(log.clone())), IRQ);
+        let mut line = Line::default();
+        gate.advance(&mut Access::new(0, 0, &mut line)).unwrap();
+        assert_eq!((line.0, load(&mut gate, STATUS)), (None, 0));
+        log.borrow_mut().signaled = true;
+        gate.advance(&mut Access::new(0, 0, &mut line)).unwrap();
+        gate.advance(&mut Access::new(0, 0, &mut line)).unwrap();
+        assert_eq!((line.0, load(&mut gate, STATUS)), (Some(true), 1));
+        gate.write(ACK, Width::Double, 0, &mut Access::new(0, 0, &mut line))
+            .unwrap();
+        assert_eq!((line.0, load(&mut gate, STATUS)), (Some(false), 0));
     }
 }

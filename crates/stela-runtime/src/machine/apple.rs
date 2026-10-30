@@ -797,16 +797,18 @@ impl AppleDevices {
         self.register_power_device(first.physical, device, false)
     }
 
-    /// StelaGPU's call gate over `service`, its window at `physical`.
+    /// StelaGPU's call gate over `service`, its window at `physical` and
+    /// its completion interrupt at `irq`.
     pub fn add_gpu_gate(
         &mut self,
         physical: u64,
+        irq: AicInput,
         service: Box<dyn gpu_gate::GateService>,
     ) -> Result<(), String> {
         if self.gpu_gate.is_some() {
             return Err("the board has one StelaGPU gate".into());
         }
-        let device = self.bus.add(Box::new(gpu_gate::Gate::new(service)));
+        let device = self.bus.add(Box::new(gpu_gate::Gate::new(service, irq)));
         self.bus
             .map(device, physical, gpu_gate::BYTES, 0)
             .map_err(|error| format!("StelaGPU gate placement: {error:?}"))?;
@@ -3739,6 +3741,9 @@ mod tests {
                 self.0.borrow_mut().push((connection.get(), record));
                 Ok(())
             }
+            fn signaled(&mut self) -> bool {
+                false
+            }
         }
         struct Caller;
         impl CallerMemory for Caller {
@@ -3751,10 +3756,11 @@ mod tests {
         }
         let served = Rc::new(RefCell::new(Vec::new()));
         let mut d = AppleDevices::new();
-        d.add_gpu_gate(GATE, Box::new(Service(served.clone())))
+        let irq = AicInput::new(0, 700);
+        d.add_gpu_gate(GATE, irq, Box::new(Service(served.clone())))
             .unwrap();
         assert!(
-            d.add_gpu_gate(GATE, Box::new(Service(served.clone())))
+            d.add_gpu_gate(GATE, irq, Box::new(Service(served.clone())))
                 .is_err()
         );
         d.write(0, GATE, 8, 0, 0).unwrap();
