@@ -7,6 +7,26 @@ use crate::x86_64::asm::{
     ShiftOp, Size,
 };
 
+/// SXTB, UXTH, SXTW and the other extensions of a field at bit zero as one
+/// MOVSX, MOVZX or MOV of (e/r)ax; false for any other field width.
+fn extend(code: &mut Code, width: Width, signed: bool, field_width: u8) -> bool {
+    let wide = width == Width::X64;
+    let narrow = if field_width == 8 {
+        Size::Byte
+    } else {
+        Size::Word
+    };
+    let mut asm = code.asm();
+    match (field_width, signed) {
+        (8 | 16, false) => asm.movzx(Size::Dword, Rax, narrow, Rax),
+        (8 | 16, true) => asm.movsx(Size::of(wide), Rax, narrow, Rax),
+        (32, false) if wide => asm.mov(Size::Dword, Rax, Rax),
+        (32, true) if wide => asm.movsxd(Rax, Rax),
+        _ => return false,
+    }
+    true
+}
+
 /// `op (e/r)ax,amount`, or nothing for a zero amount.
 fn shift(code: &mut Code, width: Width, op: ShiftOp, amount: u8) {
     if amount != 0 {
@@ -33,6 +53,27 @@ pub(super) fn emit(code: &mut Code, operand: &Operand) {
     };
 
     load(code, operand.source);
+    // A field from bit zero is either extended in place or, when it reaches
+    // the top bit (LSL and the widest SBFIZ and UBFIZ), shifted there alone:
+    // the bits above it leave either way.
+    let from_bit_zero = operand.kind != Kind::Insert && source_shift == 0;
+    if from_bit_zero
+        && destination_shift == 0
+        && extend(
+            code,
+            operand.width,
+            operand.kind == Kind::Signed,
+            field_width,
+        )
+    {
+        store(code, operand.destination);
+        return;
+    }
+    if from_bit_zero && destination_shift != 0 && destination_shift + field_width == bits {
+        shift(code, operand.width, ShiftOp::Shl, destination_shift);
+        store(code, operand.destination);
+        return;
+    }
     if operand.width == Width::W32 {
         // Required even when both shifts are absent (the full-width MOV alias).
         code.asm().mov(Size::Dword, Rax, Rax);
@@ -133,6 +174,79 @@ mod tests {
             &extraction[7..extraction.len() - 7],
             [0x48, 0xc1, 0xe0, 48, 0x48, 0xc1, 0xe8, 56]
         );
+    }
+
+    #[test]
+    fn extensions_and_top_reaching_fields_take_one_instruction() {
+        // GNU as: MOVZX EAX, AL; MOVSX RAX, AX; MOVSXD RAX, EAX; MOV EAX,
+        // EAX; MOVSX EAX, AL; SHL RAX, 3; SHL EAX, 5.
+        for (width, kind, rotation, mask_end, expected) in [
+            (Width::W32, Kind::Unsigned, 0, 7, &[0x0f, 0xb6, 0xc0][..]),
+            (Width::X64, Kind::Signed, 0, 15, &[0x48, 0x0f, 0xbf, 0xc0]),
+            (Width::X64, Kind::Signed, 0, 31, &[0x48, 0x63, 0xc0]),
+            (Width::X64, Kind::Unsigned, 0, 31, &[0x89, 0xc0]),
+            (Width::W32, Kind::Signed, 0, 7, &[0x0f, 0xbe, 0xc0]),
+            (Width::X64, Kind::Unsigned, 61, 60, &[0x48, 0xc1, 0xe0, 3]),
+            (Width::W32, Kind::Signed, 27, 26, &[0xc1, 0xe0, 5]),
+        ] {
+            let emitted = code(width, kind, rotation, mask_end);
+            assert_eq!(&emitted[7..emitted.len() - 7], expected);
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn every_extract_field_matches_the_arm_definition() {
+        use crate::x86_64::asm::vector_extensions::execution::Native;
+        use crate::{GuestState, context::ExecutionContext};
+        let mut random = 0x2545_f491_4f6c_dd1d_u64;
+        for (width, bits) in [(Width::W32, 32u8), (Width::X64, 64)] {
+            for kind in [Kind::Signed, Kind::Unsigned] {
+                for rotation in 0..bits {
+                    for mask_end in 0..bits {
+                        let mut function = code(width, kind, rotation, mask_end);
+                        function.push(0xc3); // RET
+                        let native = Native::new(&function);
+                        for _ in 0..4 {
+                            random ^= random << 13;
+                            random ^= random >> 7;
+                            random ^= random << 17;
+                            let source = if bits == 32 {
+                                random & u64::from(u32::MAX)
+                            } else {
+                                random
+                            };
+                            // UBFM/SBFM: the source field ends at bit mask_end;
+                            // it moves right by rotation, or left by
+                            // bits - rotation when it starts below rotation.
+                            let (low, high, left) = if rotation <= mask_end {
+                                (rotation, mask_end, 0)
+                            } else {
+                                (0, mask_end, bits - rotation)
+                            };
+                            let field_bits = u32::from(high - low + 1);
+                            let field = source >> low & (u64::MAX >> (64 - field_bits));
+                            let extended = if kind == Kind::Signed {
+                                ((field << (64 - field_bits)) as i64 >> (64 - field_bits)) as u64
+                            } else {
+                                field
+                            };
+                            let mut expected = extended << left;
+                            if bits == 32 {
+                                expected &= u64::from(u32::MAX);
+                            }
+                            let mut state = GuestState::default();
+                            state.x[1] = random;
+                            native.run(&mut state, &mut ExecutionContext::default());
+                            assert_eq!(
+                                state.x[2], expected,
+                                "{width:?} {kind:?} {rotation} {mask_end} {source:#x}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
