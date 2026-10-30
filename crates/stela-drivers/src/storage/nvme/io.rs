@@ -397,8 +397,10 @@ impl Controller {
             self.fail_all();
             return;
         }
+        // One clock reading serves every retry delay and command deadline.
+        let now = crate::Clock::ticks();
         for tag in 0..self.tags.len() {
-            if matches!(&self.tags[tag], Tag::Delayed { until, .. } if until.passed()) {
+            if matches!(&self.tags[tag], Tag::Delayed { until, .. } if until.passed_at(now)) {
                 let Tag::Delayed {
                     namespace,
                     block,
@@ -422,7 +424,7 @@ impl Controller {
             else {
                 continue;
             };
-            if !deadline.passed() {
+            if !deadline.passed_at(now) {
                 continue;
             }
             if *aborted {

@@ -338,7 +338,7 @@ impl Deadline {
     /// start. A counter before the start, as another core's may read by a
     /// few cycles, has not passed it: intervals span at most a quarter of
     /// the counter's revolution ([`Clock::check_duration`]).
-    fn passed_at(&self, counter: u64) -> bool {
+    pub(crate) fn passed_at(&self, counter: u64) -> bool {
         let elapsed = counter.wrapping_sub(self.start) as i64;
         elapsed >= 0 && elapsed as u64 >= self.ticks
     }
