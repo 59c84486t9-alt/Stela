@@ -24,7 +24,9 @@
 //! MMIO-only devices need a separate register accessor. [`i2c_block`] adds
 //! fixed-length I²C blocks with kept PCI configuration ownership and opt-in
 //! hardware PEC and E32B block process calls through that owner. Raw I801 handles
-//! still refuse PEC; SMBALERT and Host Notify remain unsupported.
+//! still refuse PEC; SMBALERT remains unsupported. Host Notify follows Linux
+//! `i801_enable_host_notify` and `i801_host_notify_isr`, its status polled with
+//! the interrupt left disabled, as every input device here is polled.
 //! The kept owner also exposes payload-free SMBus Quick without PEC.
 //!
 //! Read-to-acquire INUSE semantics are documented in Intel's Host Status
@@ -44,6 +46,9 @@ const HOST_DATA1: u8 = 6;
 const BLOCK_DATA: u8 = 7;
 const AUX_STATUS: u8 = 12;
 const AUX_CONTROL: u8 = 13;
+const SLAVE_STATUS: u8 = 16;
+const SLAVE_COMMAND: u8 = 17;
+const NOTIFY_ADDRESS: u8 = 20;
 
 const HOST_BUSY: u8 = 1;
 const INTR: u8 = 1 << 1;
@@ -60,6 +65,9 @@ const START: u8 = 1 << 6;
 const AUX_CRC: u8 = 1;
 const AUX_BUFFER: u8 = 1 << 1;
 const AUX_CRC_ERROR: u8 = 1;
+const HOST_NOTIFY_STATUS: u8 = 1;
+const HOST_NOTIFY_INTERRUPT: u8 = 1;
+const SMBALERT_DISABLE: u8 = 1 << 2;
 const HOST_ENABLED: u8 = 1;
 const HOST_SMI: u8 = 1 << 1;
 const HOST_I2C: u8 = 1 << 2;
@@ -127,6 +135,11 @@ impl ControllerInfo {
     /// Linux advertises block process calls from ICH5; ICH4 only has E32B/PEC.
     pub fn has_block_process_call(self) -> bool {
         self.block_buffer && self.device != 0x24c3
+    }
+
+    /// Linux FEATURE_HOST_NOTIFY: ICH3 (82801CA) and every later profile.
+    pub fn has_host_notify(self) -> bool {
+        self.device == 0x2483 || self.block_buffer
     }
 
     /// Exact pinned FEATURE_SMBUS_PEC profiles: ICH4 and later. This reports
@@ -223,6 +236,8 @@ pub struct I801<R = PortIo, T = Clock> {
     config: Config,
     ready: bool,
     locked: bool,
+    /// SMBSLVCMD as found, kept while Host Notify is enabled.
+    slave_command: Option<u8>,
 }
 
 impl<R: Registers, T: Timer> I801<R, T> {
@@ -259,6 +274,7 @@ impl<R: Registers, T: Timer> I801<R, T> {
             config,
             ready: true,
             locked: false,
+            slave_command: None,
         };
         controller.prepare()?;
         controller.release();
@@ -665,6 +681,56 @@ impl<R: Registers, T: Timer> I801<R, T> {
                 self.block(address, command, None, Some(data), start)
             }
             transaction => self.simple(address, transaction, start),
+        }
+    }
+}
+
+impl<R: Registers, T: Timer> I801<R, T> {
+    /// Linux `i801_enable_host_notify`: SMBALERT# stops raising interrupts and
+    /// the Host Notify status is cleared for the next notification. Its
+    /// interrupt stays disabled; [`Self::take_host_notify`] polls the status.
+    pub fn enable_host_notify(&mut self) -> Result<(), Error> {
+        if !self.info.has_host_notify() {
+            return Err(ErrorKind::UnsupportedTransaction.into());
+        }
+        if !self.ready {
+            return Err(ErrorKind::NeedsReset.into());
+        }
+        let original = *self
+            .slave_command
+            .get_or_insert_with(|| self.registers.read8(SLAVE_COMMAND));
+        self.registers.write8(
+            SLAVE_COMMAND,
+            (original & !HOST_NOTIFY_INTERRUPT) | SMBALERT_DISABLE,
+        );
+        self.registers.write8(SLAVE_STATUS, HOST_NOTIFY_STATUS);
+        Ok(())
+    }
+
+    /// Linux `i801_host_notify_isr`, polled: the seven-bit address of the
+    /// peripheral whose Host Notify arrived, its status then cleared for the
+    /// next one. The notification's data bytes are not read, as Linux reads
+    /// none.
+    pub fn take_host_notify(&mut self) -> Result<Option<u8>, Error> {
+        if self.slave_command.is_none() {
+            return Err(ErrorKind::UnsupportedTransaction.into());
+        }
+        if !self.ready {
+            return Err(ErrorKind::NeedsReset.into());
+        }
+        if self.registers.read8(SLAVE_STATUS) & HOST_NOTIFY_STATUS == 0 {
+            return Ok(None);
+        }
+        let address = self.registers.read8(NOTIFY_ADDRESS) >> 1;
+        self.registers.write8(SLAVE_STATUS, HOST_NOTIFY_STATUS);
+        Ok(Some(address))
+    }
+
+    /// Linux `i801_disable_host_notify`: SMBSLVCMD returns to its value as
+    /// found.
+    pub fn disable_host_notify(&mut self) {
+        if let Some(original) = self.slave_command.take() {
+            self.registers.write8(SLAVE_COMMAND, original);
         }
     }
 }

@@ -249,7 +249,7 @@ impl Model {
                 }
                 self.registers[usize::from(offset)] = value;
             }
-            AUX_STATUS => self.registers[usize::from(offset)] &= !value,
+            AUX_STATUS | SLAVE_STATUS => self.registers[usize::from(offset)] &= !value,
             AUX_CONTROL if self.refuse_buffer => {
                 self.registers[usize::from(offset)] = value & !AUX_BUFFER;
             }
@@ -315,6 +315,44 @@ fn new_controller(device: u16, buffer: bool) -> (Controller, Rc<RefCell<Model>>)
 
 fn address() -> Address {
     Address::new(0x2c).unwrap()
+}
+
+#[test]
+fn host_notify_is_polled_with_its_interrupt_disabled_and_slvcmd_restored() {
+    let (mut controller, state) = new_controller(0x7aa3, true);
+    assert_eq!(
+        controller.take_host_notify().unwrap_err().kind,
+        ErrorKind::UnsupportedTransaction
+    );
+    state.borrow_mut().registers[usize::from(SLAVE_COMMAND)] = HOST_NOTIFY_INTERRUPT | 0x10;
+    state.borrow_mut().registers[usize::from(SLAVE_STATUS)] = HOST_NOTIFY_STATUS;
+    controller.enable_host_notify().unwrap();
+    assert_eq!(
+        state.borrow().registers[usize::from(SLAVE_COMMAND)],
+        SMBALERT_DISABLE | 0x10
+    );
+    assert_eq!(
+        controller.take_host_notify(),
+        Ok(None),
+        "a stale notification is cleared"
+    );
+    let mut model = state.borrow_mut();
+    model.registers[usize::from(NOTIFY_ADDRESS)] = 0x2c << 1;
+    model.registers[usize::from(SLAVE_STATUS)] = HOST_NOTIFY_STATUS;
+    drop(model);
+    assert_eq!(controller.take_host_notify(), Ok(Some(0x2c)));
+    assert_eq!(controller.take_host_notify(), Ok(None));
+    controller.disable_host_notify();
+    assert_eq!(
+        state.borrow().registers[usize::from(SLAVE_COMMAND)],
+        HOST_NOTIFY_INTERRUPT | 0x10
+    );
+    let (mut old, _) = new_controller(0x2443, false);
+    assert_eq!(
+        old.enable_host_notify().unwrap_err().kind,
+        ErrorKind::UnsupportedTransaction,
+        "ICH2 predates Host Notify"
+    );
 }
 
 #[test]
