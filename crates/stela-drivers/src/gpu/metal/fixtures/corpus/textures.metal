@@ -31,8 +31,16 @@ kernel void sampled(texture1d<float> t1 [[texture(0)]], texture2d<float> t2 [[te
     r += float4(ti.read(gid)) + float4(tu.read(gid)) + float4(th.sample(s, uv));
     r += float4(t2.get_width(), t2.get_height(1), t2.get_num_mip_levels(), t3.get_depth());
     r += float4(ta.get_array_size(), tms.get_num_samples(), tb.get_width(), tc.get_width());
-    r += float4(t2.calculate_clamped_lod(s, uv), t2.calculate_unclamped_lod(s, uv), 0, 0);
     out[gid.y * 64 + gid.x] = r;
+}
+
+// Level-of-detail queries take the implicit derivatives of fragments.
+fragment float4 lod_queried(float4 position [[position]], texture2d<float> t [[texture(0)]],
+                            texturecube<float> tc [[texture(1)]], sampler s [[sampler(0)]])
+{
+    float2 uv = position.xy / 64.0f;
+    return float4(t.calculate_clamped_lod(s, uv), t.calculate_unclamped_lod(s, uv),
+                  tc.calculate_clamped_lod(s, float3(uv, 1.0f)), 0);
 }
 
 kernel void written(texture1d<float, access::write> w1 [[texture(0)]],
