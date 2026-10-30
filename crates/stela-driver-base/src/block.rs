@@ -349,7 +349,8 @@ pub enum Command {
 }
 
 /// The kinds of command a disk's I/O accounting tells apart, as Linux's
-/// `/proc/diskstats` does: Write Zeroes counts as a write.
+/// `/proc/diskstats` does, except that a Write Zeroes which unmaps counts as
+/// a discard: it stores nothing, so writes stay the bytes that wear the disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
     Read,
@@ -405,7 +406,14 @@ impl Command {
             Self::Write { data, .. } => (Direction::Write, data.len() as u64),
             Self::Flush => (Direction::Flush, 0),
             Self::Discard { blocks, .. } => (Direction::Discard, blocks * block as u64),
-            Self::WriteZeroes { blocks, .. } => (Direction::Write, blocks * block as u64),
+            Self::WriteZeroes { blocks, unmap, .. } => (
+                if *unmap {
+                    Direction::Discard
+                } else {
+                    Direction::Write
+                },
+                blocks * block as u64,
+            ),
         }
     }
 
