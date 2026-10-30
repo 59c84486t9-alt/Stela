@@ -39,6 +39,8 @@ use crate::Result;
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, VecDeque},
+    format,
+    string::String,
     vec,
     vec::Vec,
 };
@@ -61,6 +63,8 @@ use {
 };
 
 const NAME: &str = "ans2";
+/// The oldest commands a diagnostic lists.
+const DIAGNOSTIC_COMMANDS: usize = 8;
 /// Historical default software tag slots; configured dies use QueueGeometry.
 #[cfg(test)]
 pub const TAGS: u16 = 64;
@@ -241,6 +245,8 @@ pub struct Ans {
     tcb_bases: [u64; 2],
     nvmmu_control: u16,
     valid: Vec<bool>,
+    /// When each tag's command was submitted, in counter ticks.
+    submitted: Vec<u64>,
     /// Submitted commands not yet executed, in order.
     pending: VecDeque<(usize, u16)>,
     /// Commands whose host transfers run ([`host::HostDisk`]), by host key.
@@ -324,6 +330,7 @@ impl Ans {
             tcb_bases: [0; 2],
             nvmmu_control: NVMMU_CONTROL,
             valid: vec![false; geometry.tag_slots() as usize],
+            submitted: vec![0; geometry.tag_slots() as usize],
             pending: VecDeque::new(),
             inflight: BTreeMap::new(),
             look: 0,
@@ -384,6 +391,52 @@ impl Ans {
         } else {
             self.look
         })
+    }
+
+    /// The commands the controller owns at counter `now`, oldest first, each
+    /// as queue:tag/stage/age in counter ticks: queued to execute, running
+    /// its host transfer or completed while its CQ is full. Then each CQ's
+    /// unconsumed completions, the interrupt and the host disk: what tells
+    /// a lost command from a lost completion or interrupt.
+    pub fn diagnostic(&self, now: u64) -> String {
+        let age = |tag: u16| now.saturating_sub(self.submitted[usize::from(tag)]);
+        let mut owned: Vec<(u64, &str, usize, u16)> = self
+            .pending
+            .iter()
+            .map(|&(queue, tag)| (age(tag), "queued", queue, tag))
+            .chain(self.inflight.values().map(|run| {
+                let tag = run.command.cid();
+                (age(tag), "host", run.queue, tag)
+            }))
+            .chain(self.completed.iter().map(|done| {
+                let tag = done.command.cid();
+                (age(tag), "cq-full", done.queue, tag)
+            }))
+            .collect();
+        owned.sort_unstable_by_key(|&(age, ..)| core::cmp::Reverse(age));
+        let oldest = owned
+            .iter()
+            .take(DIAGNOSTIC_COMMANDS)
+            .map(|(age, stage, queue, tag)| format!("{queue}:{tag:#x}/{stage}/{age}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let queues = self
+            .queues
+            .iter()
+            .map(|q| format!("{}/{}@{}-{}", q.pending, q.cq_entries, q.head, q.tail))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "owned={} oldest=[{oldest}] cq=[{queues}] irq={} mask={:#x} look={:#x} executing={} \
+             lifecycle={:?} host=[{}]",
+            owned.len(),
+            self.irq_level,
+            self.interrupt_mask,
+            self.look,
+            self.executing(),
+            self.lifecycle,
+            self.medium.device.diagnostic(now),
+        )
     }
 
     fn executing(&self) -> bool {
@@ -558,7 +611,7 @@ impl Ans {
             )
     }
 
-    fn submit(&mut self, queue: usize, tag: u16) -> Result<()> {
+    fn submit(&mut self, queue: usize, tag: u16, now: u64) -> Result<()> {
         if self.status != READY || self.shutdown || !self.linear || !self.queues[queue].sq_enabled {
             return Err(refuse!(
                 "ANS submission requires a ready controller and an enabled linear SQ"
@@ -587,6 +640,7 @@ impl Ans {
             ));
         }
         self.valid[tag as usize] = true;
+        self.submitted[tag as usize] = now;
         self.pending.push_back((queue, tag));
         Ok(())
     }
@@ -1038,6 +1092,7 @@ impl MmioDevice for Ans {
                 .submit(
                     usize::from(offset == IO_SUBMIT),
                     u16::try_from(value).map_err(|_| error(refuse!("ANS tag exceeds 16 bits")))?,
+                    access.now,
                 )
                 .map_err(error)?,
             TCB_INVALIDATE if value < u32::from(self.geometry.tag_slots()) => {

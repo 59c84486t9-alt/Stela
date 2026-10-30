@@ -714,6 +714,11 @@ impl Submission {
         })
     }
 
+    /// The commands the device runs for this submission now.
+    pub fn started(&self) -> usize {
+        self.running.len()
+    }
+
     /// Collect the device's completions of this request's commands and
     /// start those that may run; the request's result once every command
     /// has completed. A failure starts no more commands and ends the

@@ -14,7 +14,7 @@
 //! while no transfer runs. A disk that runs nothing queued executes each
 //! command on the calling PE. One poll admits at most 64 commands, so larger
 //! transfers keep their partial progress until later polls.
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, format, string::String, vec::Vec};
 use stela_drivers::block::{BlockDevice, BlockError, Finished, Identity, Request, Submission};
 
 /// The latency assumed before any transfer completed: 100 us of the 24 MHz
@@ -119,6 +119,31 @@ impl HostDisk {
     /// [`Self::poll`]; a look at memory alone.
     pub(super) fn posted(&self) -> bool {
         !self.running.is_empty() && self.device.posted()
+    }
+
+    /// The running transfers at counter `now`, oldest first, each as
+    /// key/age in counter ticks/commands the disk runs for it (none while
+    /// it waits for room), then the disk's latency and readiness.
+    pub(super) fn diagnostic(&self, now: u64) -> String {
+        let mut running: Vec<_> = self.running.iter().collect();
+        running.sort_unstable_by_key(|(_, started, _)| *started);
+        let oldest = running
+            .iter()
+            .take(super::DIAGNOSTIC_COMMANDS)
+            .map(|(key, started, submission)| {
+                let age = now.saturating_sub(*started);
+                format!("{key:#x}/{age}/{}", submission.started())
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "running={} oldest=[{oldest}] latency={} room={} posted={} signals={}",
+            self.running.len(),
+            self.latency,
+            self.device.room(),
+            self.device.posted(),
+            self.device.signals(),
+        )
     }
 
     /// When to look for the running transfers' completions next, at counter

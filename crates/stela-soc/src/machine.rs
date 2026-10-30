@@ -661,6 +661,15 @@ impl AppleDevices {
             .collect()
     }
 
+    /// Each storage controller's owned commands and queues at counter `now`
+    /// ([`Ans::diagnostic`]).
+    pub fn storage_diagnostics(&self, now: u64) -> Vec<String> {
+        self.storage_masters
+            .iter()
+            .filter_map(|&(ans, _)| Some(self.bus.device::<Ans>(ans)?.diagnostic(now)))
+            .collect()
+    }
+
     fn map(&mut self, device: DeviceId, ranges: &[Range]) -> Result<(), MapError> {
         let mut offset = 0;
         for range in ranges {

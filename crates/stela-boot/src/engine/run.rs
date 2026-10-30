@@ -481,6 +481,13 @@ impl Heartbeat {
         {
             output::arguments(format_args!("ASC {state}\n"));
         }
+        let (now, _) = machine.timer_snapshot();
+        for state in machine
+            .devices
+            .with(|devices| devices.storage_diagnostics(now))
+        {
+            output::arguments(format_args!("ANS {state}\n"));
+        }
         for state in machine.devices.with(|devices| devices.usb_diagnostics()) {
             output::arguments(format_args!("USB {state}\n"));
         }
