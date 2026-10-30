@@ -193,9 +193,15 @@ impl AssociationContext {
         // Negotiation requires WMM for every mode beyond legacy, which
         // mac80211 enters for an AP without it.
         let operations = Operations::parse(&bytes).map_err(failure)?;
-        let definition = operations
+        let mut definition = operations
             .channel_for(join.channel, &negotiated)
             .map_err(failure)?;
+        // ieee80211_config_bw narrows the AP's channel to the selected width.
+        let selected = ChannelDefinition {
+            width: selection.width(),
+            ..definition
+        };
+        while definition.bandwidth_mhz() > selected.bandwidth_mhz() && definition.downgrade() {}
         if definition.width != selection.width() {
             return Err(Error::Unsupported("selected/advertised width mismatch"));
         }

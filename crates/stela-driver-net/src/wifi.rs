@@ -4,9 +4,12 @@
 //! bit and removing FCS and vendor alignment padding. Decryption observations
 //! never imply association, authentication, replay validation or Ethernet
 //! carrier. Station management and scanning require vendor commands
-//! and completion/retirement. The OS owns credentials and WPA authentication.
+//! and completion/retirement. `connection` decides an association from the
+//! configured network and the AP's elements; vendor stations run it through
+//! WPA2-Personal authentication.
 
 mod allocation;
+pub mod connection;
 pub mod frame;
 pub mod intel;
 pub mod mediatek;

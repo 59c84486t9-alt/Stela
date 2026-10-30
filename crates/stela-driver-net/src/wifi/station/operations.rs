@@ -184,6 +184,15 @@ impl ChannelDefinition {
         mhz(self.width)
     }
 
+    /// The bandwidth a station needs for it
+    /// (`ieee80211_min_bw_limit_from_chandef`): 80+80 MHz needs 160.
+    pub fn bandwidth_mhz(&self) -> u32 {
+        match self.width {
+            Width::Mhz80P80 => 160,
+            width => mhz(width),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), Error> {
         let number =
             u8::try_from(self.control.number).map_err(|_| Error::Invalid("control channel"))?;
@@ -313,7 +322,7 @@ impl Operations {
         self.channel(control, negotiated.mode, caps)
     }
 
-    pub(super) fn channel(
+    pub(in crate::wifi) fn channel(
         &self,
         control: Channel,
         mode: Mode,
