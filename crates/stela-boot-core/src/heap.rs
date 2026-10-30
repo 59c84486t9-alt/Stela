@@ -1,11 +1,13 @@
-//! Boot heap. Each allocation records its full extent, including alignment gaps,
-//! so deallocation can coalesce the original physical range.
+//! Boot heap: two-level segregated fit (TLSF). Every block starts with a
+//! boundary tag naming its size and the block before it, so deallocation
+//! coalesces both neighbours without a walk, and free blocks are kept in bins
+//! by size, 16 per power of two, whose bitmaps find the smallest fitting one
+//! in constant time.
 //!
-//! The address-ordered free list costs a walk per allocation and release, and
-//! the system engine allocates and frees small blocks constantly. Blocks of up
+//! The system engine allocates and frees small blocks constantly. Blocks of up
 //! to 4 KiB with at most 16-byte alignment are therefore rounded up to a
 //! power-of-two size class and, once freed, kept on that class's LIFO list
-//! for the next allocation of the class instead of returning to the free list.
+//! for the next allocation of the class instead of returning to the bins.
 //!
 //! Every PE on a core of its own allocates at once, so each core the engine
 //! runs on keeps a small cache of free blocks per class ([`Heap::tag_cpu`]),
@@ -23,17 +25,88 @@ use core::{
 #[path = "heap/failure.rs"]
 mod failure;
 
-const WORD: usize = core::mem::align_of::<usize>();
 const PAGE_BYTES: usize = 4096;
-#[repr(C)]
-struct Free {
-    bytes: usize,
-    next: *mut Free,
-}
+/// A block's boundary tag, at its start: the address of the block before it
+/// and its own size, a multiple of [`GRANULE`] whose low bits hold [`FREE`]
+/// and [`PREVIOUS_FREE`]. A payload follows it.
 #[repr(C)]
 struct Header {
-    base: usize,
-    bytes: usize,
+    previous: usize,
+    size: usize,
+}
+/// A free block's links in its bin, after its header.
+#[repr(C)]
+struct Links {
+    next: *mut Header,
+    previous: *mut Header,
+}
+/// Block sizes and payload addresses are multiples of this.
+const GRANULE: usize = 16;
+const HEADER_BYTES: usize = core::mem::size_of::<Header>();
+/// The smallest block: a header and its links. A remainder smaller than
+/// this stays in the allocation beside it.
+const MIN_BLOCK: usize = HEADER_BYTES + core::mem::size_of::<Links>();
+const FREE: usize = 1;
+const PREVIOUS_FREE: usize = 2;
+const FLAGS: usize = FREE | PREVIOUS_FREE;
+/// Bins per power of two.
+const SUB_BITS: u32 = 4;
+const SUBS: usize = 1 << SUB_BITS;
+/// Blocks smaller than this share the first level, a bin per granule.
+const LINEAR: usize = GRANULE << SUB_BITS;
+/// First levels: the linear one, then one per power of two from [`LINEAR`].
+const LEVELS: usize = (usize::BITS - LINEAR.trailing_zeros() + 1) as usize;
+
+/// The bin of a free block of `size` bytes.
+fn bin(size: usize) -> (usize, usize) {
+    if size < LINEAR {
+        return (0, size / GRANULE);
+    }
+    let top = usize::BITS - 1 - size.leading_zeros();
+    (
+        (top + 1 - LINEAR.trailing_zeros()) as usize,
+        (size >> (top - SUB_BITS)) & (SUBS - 1),
+    )
+}
+
+/// `size` rounded up to the next bin boundary, so that every block of its
+/// bin holds it.
+fn bin_round(size: usize) -> Option<usize> {
+    if size < LINEAR {
+        return Some(size);
+    }
+    let step = (1 << (usize::BITS - 1 - size.leading_zeros() - SUB_BITS)) - 1;
+    size.checked_add(step).map(|size| size & !step)
+}
+
+/// The size of `block`.
+///
+/// # Safety
+/// `block` is a block header of the heap, read with its lock held.
+unsafe fn size(block: *mut Header) -> usize {
+    // SAFETY: the caller's live header.
+    unsafe { (*block).size & !FLAGS }
+}
+
+/// A free `block`'s links.
+///
+/// # Safety
+/// `block` is a block of at least [`MIN_BLOCK`] bytes.
+unsafe fn links(block: *mut Header) -> *mut Links {
+    // SAFETY: the links lie inside the caller's block.
+    unsafe { block.cast::<u8>().add(HEADER_BYTES).cast() }
+}
+
+/// The free blocks of the bin whose first block is `head`.
+///
+/// # Safety
+/// The lock is held while the iterator is used.
+unsafe fn bin_blocks(head: *mut Header) -> impl Iterator<Item = *mut Header> {
+    core::iter::successors((!head.is_null()).then_some(head), |&block| {
+        // SAFETY: a binned free block, read with the lock held.
+        let next = unsafe { (*links(block)).next };
+        (!next.is_null()).then_some(next)
+    })
 }
 /// A freed size-class block, linked through its first word.
 struct Small {
@@ -82,25 +155,144 @@ fn class(layout: Layout) -> Option<usize> {
         .then(|| (bytes / SMALLEST).trailing_zeros() as usize)
 }
 struct State {
-    first: *mut Free,
+    /// The heap's extent.
+    start: usize,
+    end: usize,
+    /// Nonempty levels, each level's nonempty bins, and the bins' free
+    /// blocks.
+    levels: u64,
+    bins: [u16; LEVELS],
+    heads: [[*mut Header; SUBS]; LEVELS],
+    /// Free blocks in the bins.
+    extents: usize,
     small: [*mut Small; CLASSES],
     ready: bool,
     total: usize,
     /// Bytes allocated and not freed, size-class blocks by their class.
     live: usize,
-    /// Bytes carved from the free list and not released: live blocks and
-    /// the size-class blocks kept for reuse.
+    /// Bytes carved from the bins and not released: live blocks and the
+    /// size-class blocks kept for reuse.
     carved: usize,
     peak: usize,
-    /// Allocations the free list served, and the free extents they passed
-    /// over before the one they took.
+    /// Allocations the bins served.
     carves: u64,
-    walked: u64,
-    /// Live free-list allocations' count and bytes by [`large_bucket`].
+    /// Live allocations the bins served: count and bytes by [`large_bucket`].
     large: [(u64, usize); LARGE_BUCKETS],
 }
 
 impl State {
+    /// Link free `block` into its bin.
+    ///
+    /// # Safety
+    /// The lock is held and `block` is a free block in no bin.
+    unsafe fn insert(&mut self, block: *mut Header) {
+        // SAFETY: the caller's free block, which holds its links.
+        let (level, sub) = bin(unsafe { size(block) });
+        let head = self.heads[level][sub];
+        // SAFETY: as above; `head`, when not null, is a binned free block.
+        unsafe {
+            links(block).write(Links {
+                next: head,
+                previous: ptr::null_mut(),
+            });
+            if !head.is_null() {
+                (*links(head)).previous = block;
+            }
+        }
+        self.heads[level][sub] = block;
+        self.bins[level] |= 1 << sub;
+        self.levels |= 1 << level;
+        self.extents += 1;
+    }
+
+    /// Unlink free `block` from its bin.
+    ///
+    /// # Safety
+    /// The lock is held and `block` is in its bin.
+    unsafe fn remove(&mut self, block: *mut Header) {
+        // SAFETY: the caller's binned free block and its binned neighbours.
+        unsafe {
+            let (level, sub) = bin(size(block));
+            let Links { next, previous } = links(block).read();
+            if !next.is_null() {
+                (*links(next)).previous = previous;
+            }
+            if previous.is_null() {
+                self.heads[level][sub] = next;
+                if next.is_null() {
+                    self.bins[level] &= !(1 << sub);
+                    if self.bins[level] == 0 {
+                        self.levels &= !(1 << level);
+                    }
+                }
+            } else {
+                (*links(previous)).next = next;
+            }
+        }
+        self.extents -= 1;
+    }
+
+    /// Tell the block after `block`, if any, where `block` starts and
+    /// whether it is free.
+    ///
+    /// # Safety
+    /// The lock is held and `block`'s header is current.
+    unsafe fn tell_following(&mut self, block: *mut Header) {
+        // SAFETY: the caller's block; the one after it, inside the heap, is
+        // a block whose header this updates.
+        unsafe {
+            let following = block as usize + size(block);
+            if following < self.end {
+                let following = following as *mut Header;
+                let free = if (*block).size & FREE != 0 {
+                    PREVIOUS_FREE
+                } else {
+                    0
+                };
+                (*following).previous = block as usize;
+                (*following).size = (*following).size & !PREVIOUS_FREE | free;
+            }
+        }
+    }
+
+    /// A free block `fits` accepts: the first of the smallest bin all of
+    /// whose blocks hold `need` bytes, else one of `need`'s own bin.
+    ///
+    /// # Safety
+    /// The lock is held.
+    unsafe fn find(&self, need: usize, fits: impl Fn(*mut Header) -> bool) -> *mut Header {
+        if let Some((level, sub)) = bin_round(need).map(bin)
+            && level < LEVELS
+        {
+            let subs = u32::from(self.bins[level]) & (u32::MAX << sub);
+            let found = if subs != 0 {
+                Some((level, subs))
+            } else {
+                let above = u64::MAX.checked_shl(level as u32 + 1).unwrap_or(0);
+                let levels = self.levels & above;
+                (levels != 0).then(|| {
+                    let level = levels.trailing_zeros() as usize;
+                    (level, u32::from(self.bins[level]))
+                })
+            };
+            if let Some((level, subs)) = found {
+                let block = self.heads[level][subs.trailing_zeros() as usize];
+                if fits(block) {
+                    return block;
+                }
+            }
+        }
+        // Rounding passed over the blocks of `need`'s own bin that hold it.
+        let (level, sub) = bin(need);
+        if level >= LEVELS {
+            return ptr::null_mut();
+        }
+        // SAFETY: the caller's lock.
+        unsafe { bin_blocks(self.heads[level][sub]) }
+            .find(|&block| fits(block))
+            .unwrap_or(ptr::null_mut())
+    }
+
     fn count_large(&mut self, bytes: usize, allocated: bool) {
         let (count, total) = &mut self.large[large_bucket(bytes)];
         if allocated {
@@ -120,14 +312,13 @@ pub struct Usage {
     pub live: usize,
     pub carved: usize,
     pub peak: usize,
-    /// The largest free extent: the most one allocation can get.
+    /// The largest free block: the most one allocation can get.
     pub largest: usize,
-    /// Free extents on the address-ordered list.
+    /// Free blocks in the bins.
     pub extents: usize,
-    /// Allocations the free list served, and the extents they passed over.
+    /// Allocations the bins served.
     pub carves: u64,
-    pub walked: u64,
-    /// Live allocations the free list served, as count and bytes by power
+    /// Live allocations the bins served, as count and bytes by power
     /// of two from 4 KiB ([`LARGE_BUCKETS`]); the rest of `live` is
     /// size-class blocks.
     pub large: [(u64, usize); LARGE_BUCKETS],
@@ -192,7 +383,12 @@ impl Heap {
             total: AtomicUsize::new(0),
             waits: AtomicU64::new(0),
             state: UnsafeCell::new(State {
-                first: ptr::null_mut(),
+                start: 0,
+                end: 0,
+                levels: 0,
+                bins: [0; LEVELS],
+                heads: [[ptr::null_mut(); SUBS]; LEVELS],
+                extents: 0,
                 small: [ptr::null_mut(); CLASSES],
                 ready: false,
                 total: 0,
@@ -200,7 +396,6 @@ impl Heap {
                 carved: 0,
                 peak: 0,
                 carves: 0,
-                walked: 0,
                 large: [(0, 0); LARGE_BUCKETS],
             }),
         }
@@ -277,20 +472,25 @@ impl Heap {
         // SAFETY: this live acquire/release guard excludes every metadata
         // writer and masks local reentry until this state borrow ends.
         let state = unsafe { &mut *self.state.get() };
-        assert!(!state.ready && !base.is_null() && (base as usize).is_multiple_of(WORD));
-        assert!(bytes >= core::mem::size_of::<Free>() && bytes.is_multiple_of(WORD));
-        let node = base.cast::<Free>();
-        // SAFETY: initialize's exclusive live extent is aligned for Free and
-        // the assertions above establish space for its complete first node.
+        assert!(!state.ready && !base.is_null());
+        let start = aligned(base as usize, GRANULE).expect("a heap below the address space's end");
+        let end = (base as usize + bytes) & !(GRANULE - 1);
+        assert!(end >= start + MIN_BLOCK);
+        let block = start as *mut Header;
+        // SAFETY: initialize's exclusive live extent holds this first block,
+        // aligned to a granule and at least the smallest block.
         unsafe {
-            node.write(Free {
-                bytes,
-                next: ptr::null_mut(),
+            block.write(Header {
+                previous: 0,
+                size: (end - start) | FREE,
             });
         }
-        state.first = node;
+        state.start = start;
+        state.end = end;
+        // SAFETY: the guard and the one free block just written.
+        unsafe { state.insert(block) };
         state.ready = true;
-        state.total = bytes;
+        state.total = end - start;
     }
 
     /// Attempt ordinary heap allocation without waiting for the heap lock.
@@ -582,8 +782,8 @@ impl Heap {
     /// The heap's usage, walking the free list for its largest extent.
     pub fn usage(&self) -> Usage {
         let _guard = self.lock();
-        // SAFETY: the guard excludes metadata writers throughout
-        // this free-list walk; no state reference escapes the guard.
+        // SAFETY: the guard excludes metadata writers throughout; no state
+        // reference escapes it.
         let state = unsafe { &*self.state.get() };
         self.usage_locked(state)
     }
@@ -591,16 +791,19 @@ impl Heap {
     // The caller keeps the metadata guard; CPU cache counters remain
     // relaxed estimates even while this free-list metadata is exclusively read.
     fn usage_locked(&self, state: &State) -> Usage {
-        let (mut largest, mut extents) = (0, 0);
-        let mut node = state.first;
-        while !node.is_null() {
-            // SAFETY: a free-list node, read with the lock held.
-            unsafe {
-                largest = largest.max((*node).bytes);
-                node = (*node).next;
-            }
-            extents += 1;
-        }
+        // The largest block is in the highest nonempty bin.
+        let largest = if state.levels == 0 {
+            0
+        } else {
+            let level = 63 - state.levels.leading_zeros() as usize;
+            let sub = 15 - state.bins[level].leading_zeros() as usize;
+            // SAFETY: the caller's guard.
+            unsafe { bin_blocks(state.heads[level][sub]) }
+                // SAFETY: binned free blocks, read with the guard held.
+                .map(|block| unsafe { size(block) })
+                .max()
+                .unwrap_or(0)
+        };
         let live = state.live.saturating_add_signed(self.cached_live());
         Usage {
             total: state.total,
@@ -608,9 +811,8 @@ impl Heap {
             carved: state.carved,
             peak: state.peak,
             largest,
-            extents,
+            extents: state.extents,
             carves: state.carves,
-            walked: state.walked,
             large: state.large,
         }
     }
@@ -776,48 +978,117 @@ unsafe impl GlobalAlloc for Heap {
     }
 }
 
-/// Split `size` bytes aligned to `alignment` from the free list.
+/// Where a payload of `payload` bytes aligned to `alignment` fits in free
+/// `block`, starting at or after `from` and ending by `limit`: its address,
+/// after a gap before its header that is empty or large enough to stay free.
+///
+/// # Safety
+/// The lock is held and `block` is a free block.
+unsafe fn fit(
+    block: *mut Header,
+    payload: usize,
+    alignment: usize,
+    from: usize,
+    limit: usize,
+) -> Option<usize> {
+    let base = block as usize;
+    // SAFETY: the caller's free block.
+    let end = (base + unsafe { size(block) }).min(limit);
+    let mut user = aligned(base.checked_add(HEADER_BYTES)?.max(from), alignment)?;
+    let gap = user - HEADER_BYTES - base;
+    if gap != 0 && gap < MIN_BLOCK {
+        user = aligned(user.checked_add(MIN_BLOCK - gap)?, alignment)?;
+    }
+    (user.checked_add(payload)? <= end).then_some(user)
+}
+
+/// Allocate the payload at `user` of `payload` bytes from free `block`,
+/// which is out of its bin: a gap before its header and a remainder after
+/// it that can hold a block become free blocks; a smaller remainder stays
+/// in the allocation.
+///
+/// # Safety
+/// The lock is held, `block` is a free block in no bin and `fit` placed
+/// `user` in it.
+unsafe fn take(state: &mut State, block: *mut Header, user: usize, payload: usize) -> *mut u8 {
+    let base = block as usize;
+    let head = user - HEADER_BYTES;
+    // SAFETY: the caller's free block, unbinned; every header written lies
+    // inside it, and each new block is at least the smallest one.
+    unsafe {
+        let end = base + size(block);
+        let (previous, previous_free) = if head > base {
+            (*block).size = (head - base) | FREE;
+            state.insert(block);
+            (base, PREVIOUS_FREE)
+        } else {
+            ((*block).previous, 0)
+        };
+        let mut used_end = user + payload;
+        if end - used_end < MIN_BLOCK {
+            used_end = end;
+        }
+        let used = head as *mut Header;
+        used.write(Header {
+            previous,
+            size: (used_end - head) | previous_free,
+        });
+        if used_end < end {
+            let rest = used_end as *mut Header;
+            rest.write(Header {
+                previous: head,
+                size: (end - used_end) | FREE,
+            });
+            state.tell_following(rest);
+            state.insert(rest);
+        } else {
+            state.tell_following(used);
+        }
+        state.carved += used_end - head;
+    }
+    state.peak = state.peak.max(state.carved);
+    user as *mut u8
+}
+
+/// `size` bytes aligned to `alignment` from the bins.
 ///
 /// # Safety
 /// The heap's lock is held and `state` is initialized.
 unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
-    let header = core::mem::size_of::<Header>();
-    let alignment = alignment.max(WORD);
-    let mut link = &mut state.first as *mut *mut Free;
+    let alignment = alignment.max(GRANULE);
+    let Some(payload) = aligned(size.max(1), GRANULE) else {
+        return ptr::null_mut();
+    };
+    // A larger alignment may need a gap before the header that can hold a
+    // block of its own.
+    let extra = if alignment > GRANULE {
+        alignment + MIN_BLOCK
+    } else {
+        0
+    };
+    let Some(need) = payload
+        .checked_add(HEADER_BYTES)
+        .and_then(|need| need.checked_add(extra))
+    else {
+        return ptr::null_mut();
+    };
     state.carves += 1;
-    loop {
-        // SAFETY: link is State.first or a next field in its free
-        // node, protected against mutation by the same heap guard.
-        let node = unsafe { *link };
-        if node.is_null() {
-            return ptr::null_mut();
-        }
-        let base = node as usize;
-        // SAFETY: a nonnull live free node owned by this locked list; read
-        // its initialized extent before any split/publication changes it.
-        let Some(end) = base.checked_add(unsafe { (*node).bytes }) else {
-            return ptr::null_mut();
-        };
-        let Some(user) = base.checked_add(header).and_then(|v| aligned(v, alignment)) else {
-            return ptr::null_mut();
-        };
-        let Some(used_end) = user.checked_add(size.max(1)).and_then(|v| aligned(v, WORD)) else {
-            return ptr::null_mut();
-        };
-        if used_end > end {
-            // SAFETY: the whole current node is still free and locked; its
-            // next link remains live until the following iteration completes.
-            link = unsafe { &mut (*node).next };
-            state.walked += 1;
-            continue;
-        }
-        // SAFETY: the original selection proved a complete aligned fit.
-        return unsafe { publish_carve(state, link, node, end, user, used_end) };
+    // SAFETY: binned free blocks, with the caller's guard held.
+    let fits = |block| unsafe { fit(block, payload, alignment, 0, usize::MAX) };
+    // SAFETY: the caller's guard.
+    let block = unsafe { state.find(need, |block| fits(block).is_some()) };
+    let Some(user) = (!block.is_null()).then(|| fits(block)).flatten() else {
+        return ptr::null_mut();
+    };
+    // SAFETY: the guard; `block` is binned and `fit` placed `user` in it.
+    unsafe {
+        state.remove(block);
+        take(state, block, user, payload)
     }
 }
 
-/// Page selection over the same address-ordered free extents. All candidate
-/// arithmetic precedes publication, including skipped fragmented extents.
+/// Page selection inside a CPU interval: the lowest payload address that
+/// fits, over every free block. Selection changes nothing until it fits.
 ///
 /// # Safety
 /// Heap lock held; nonzero page-sized payload and at least page alignment.
@@ -827,173 +1098,57 @@ unsafe fn carve_within(
     alignment: usize,
     allowed: Range<usize>,
 ) -> *mut u8 {
-    let header = core::mem::size_of::<Header>();
-    let mut link = &mut state.first as *mut *mut Free;
-    loop {
-        // SAFETY: the lock protects the original live free-list links.
-        let node = unsafe { *link };
-        if node.is_null() {
-            return ptr::null_mut();
-        }
-        let base = node as usize;
-        // SAFETY: a nonnull live free node owned by this locked list; read
-        // its initialized extent before any split/publication changes it.
-        let Some(end) = base.checked_add(unsafe { (*node).bytes }) else {
-            return ptr::null_mut();
-        };
-        let Some(user) = base
-            .checked_add(header)
-            .map(|start| start.max(allowed.start))
-            .and_then(|start| aligned(start, alignment))
-        else {
-            return ptr::null_mut();
-        };
-        let Some(used_end) = user.checked_add(size) else {
-            return ptr::null_mut();
-        };
-        if used_end > allowed.end {
-            // Later free extents cannot start at a smaller CPU address.
-            return ptr::null_mut();
-        }
-        if used_end > end {
-            // SAFETY: the whole current node is still free and locked; its
-            // next link remains live until the following iteration completes.
-            link = unsafe { &mut (*node).next };
-            continue;
-        }
-        // Page-sized/aligned requests already end on WORD alignment.
-        // SAFETY: complete payload/header fit, locked free-list owner.
-        return unsafe { publish_carve(state, link, node, end, user, used_end) };
-    }
-}
-
-/// Publish one fully checked selection. Ordinary and constrained allocations
-/// share exactly this header, split and accounting operation.
-///
-/// # Safety
-/// Heap lock held. `link` names `node` in the free list; `end` is that
-/// node's end, and aligned `[user, used_end)` plus the preceding Header fit
-/// inside it. No pointer or state reference escapes the owning exclusion.
-#[inline(always)]
-unsafe fn publish_carve(
-    state: &mut State,
-    link: *mut *mut Free,
-    node: *mut Free,
-    end: usize,
-    user: usize,
-    mut used_end: usize,
-) -> *mut u8 {
-    let base = node as usize;
-    // A gap smaller than a header and the smallest block could never be
-    // carved, so it stays in the allocation rather than lengthening every
-    // later walk.
-    let minimum = core::mem::size_of::<Header>() + SMALLEST;
-    let header_base = user - core::mem::size_of::<Header>();
-    let prefix = header_base - base;
-    let allocated_base = if prefix >= minimum { header_base } else { base };
-    if end - used_end < minimum {
-        used_end = end;
-    }
-    // SAFETY: caller keeps this free node and link under the guard;
-    // save the successor before splitting or overwriting the node.
-    let next = unsafe { (*node).next };
-    let suffix = if used_end < end {
-        let suffix = used_end as *mut Free;
-        // SAFETY: the checked fit leaves at least minimum bytes at this
-        // WORD-aligned suffix, disjoint from payload and allocation header.
-        unsafe {
-            suffix.write(Free {
-                bytes: end - used_end,
-                next,
-            });
-        }
-        suffix
-    } else {
-        next
+    let chosen = state
+        .heads
+        .iter()
+        .flatten()
+        // SAFETY: the caller's guard.
+        .flat_map(|&head| unsafe { bin_blocks(head) })
+        .filter_map(|block| {
+            // SAFETY: a binned free block, read with the guard held.
+            unsafe { fit(block, size, alignment, allowed.start, allowed.end) }
+                .map(|user| (user, block))
+        })
+        .min_by_key(|&(user, _)| user);
+    let Some((user, block)) = chosen else {
+        return ptr::null_mut();
     };
-    if prefix >= minimum {
-        // SAFETY: the original aligned node owns this prefix, large
-        // enough for Free, disjoint from header/payload and suffix.
-        unsafe {
-            node.write(Free {
-                bytes: prefix,
-                next: suffix,
-            });
-        }
-    } else {
-        // SAFETY: link is the exclusively guarded predecessor/State.first;
-        // replacing it removes the consumed original node from the list.
-        unsafe {
-            *link = suffix;
-        }
-    }
-    // SAFETY: the caller proved this aligned Header lies inside the removed
-    // extent immediately before the disjoint user payload; it stays private.
+    // SAFETY: the guard; `block` is binned and `fit` placed `user` in it.
     unsafe {
-        (header_base as *mut Header).write(Header {
-            base: allocated_base,
-            bytes: used_end - allocated_base,
-        });
+        state.remove(block);
+        take(state, block, user, size)
     }
-    state.carved += used_end - allocated_base;
-    state.peak = state.peak.max(state.carved);
-    user as *mut u8
 }
 
-/// Return the extent of a block `carve` made to the free list, coalescing it
-/// with its neighbours.
+/// Return the block of an allocation `carve` made to the bins, coalescing
+/// it with free neighbours.
 ///
 /// # Safety
 /// The heap's lock is held, and `pointer` came from `carve` and is no longer
 /// accessed.
 unsafe fn release(state: &mut State, pointer: *mut u8) {
-    // SAFETY: exact pointer from alloc; the caller has ended all accesses.
-    let header = unsafe { (pointer.sub(core::mem::size_of::<Header>()) as *const Header).read() };
-    let base = header.base;
-    let end = base + header.bytes;
-    state.carved -= header.bytes;
-    let mut previous: *mut Free = ptr::null_mut();
-    let mut next = state.first;
-    while !next.is_null() && (next as usize) < base {
-        previous = next;
-        // SAFETY: nonnull free-list nodes stay allocated and initialized
-        // throughout the guarded walk; address order prevents aliasing payload.
-        next = unsafe { (*next).next };
-    }
-    let node = base as *mut Free;
-    // SAFETY: the exact allocation header returns its original WORD-aligned
-    // extent; its owner ended all accesses and the extent can hold Free.
+    // SAFETY: the allocation's header precedes its payload; its neighbours'
+    // headers are current, and free ones are binned.
     unsafe {
-        node.write(Free {
-            bytes: header.bytes,
-            next,
-        });
-    }
-    if !next.is_null() && end == next as usize {
-        // SAFETY: both guarded free nodes are contiguous and disjoint from
-        // live payload; absorb the complete initialized successor once.
-        unsafe {
-            (*node).bytes += (*next).bytes;
-            (*node).next = (*next).next;
+        let mut block = pointer.sub(HEADER_BYTES).cast::<Header>();
+        let mut bytes = size(block);
+        state.carved -= bytes;
+        let following = block as usize + bytes;
+        if following < state.end && (*(following as *mut Header)).size & FREE != 0 {
+            let following = following as *mut Header;
+            state.remove(following);
+            bytes += size(following);
         }
-    }
-    if previous.is_null() {
-        state.first = node;
-    // SAFETY: a nonnull predecessor is an initialized node in this guarded
-    // address-ordered list; its extent is valid through this comparison.
-    } else if previous as usize + unsafe { (*previous).bytes } == base {
-        // SAFETY: contiguous guarded free extents; relink before the removed
-        // node can be allocated again, with no references escaping this call.
-        unsafe {
-            (*previous).bytes += (*node).bytes;
-            (*previous).next = (*node).next;
+        if (*block).size & PREVIOUS_FREE != 0 {
+            let previous = (*block).previous as *mut Header;
+            state.remove(previous);
+            bytes += size(previous);
+            block = previous;
         }
-    } else {
-        // SAFETY: initialized guarded predecessor; the new free node lies
-        // between it and its prior successor in the same owned heap extent.
-        unsafe {
-            (*previous).next = node;
-        }
+        // A free block's predecessor is never free: it would have merged.
+        (*block).size = bytes | FREE;
+        state.tell_following(block);
+        state.insert(block);
     }
 }
 

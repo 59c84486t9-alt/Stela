@@ -248,6 +248,56 @@ fn size_class_reuse_preserves_other_live_bytes() {
 }
 
 #[test]
+fn a_release_between_free_neighbours_merges_all_three() {
+    let heap = Heap::new();
+    let mut ram = backing();
+    let layout = Layout::from_size_align(5000, 16).unwrap();
+    // SAFETY: `ram` is this test's own backing, handed to the heap once and
+    // outliving every block.
+    unsafe {
+        heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
+        let [a, b, c] = [(); 3].map(|()| heap.alloc(layout));
+        assert!(!a.is_null() && !b.is_null() && !c.is_null());
+        assert_eq!(heap.usage().extents, 1);
+        heap.dealloc(a, layout);
+        assert_eq!(heap.usage().extents, 2);
+        heap.dealloc(c, layout);
+        assert_eq!(heap.usage().extents, 2, "c joins the rest");
+        heap.dealloc(b, layout);
+    }
+    let usage = heap.usage();
+    assert_eq!((usage.extents, usage.carved), (1, 0));
+    assert_eq!(usage.largest, ram.0.len());
+}
+
+#[test]
+fn an_exact_fit_below_its_rounded_bin_is_found() {
+    let heap = Heap::new();
+    let mut ram = backing();
+    // A 4176-byte block, between the bins' 256-byte steps above 4 KiB.
+    let hole = Layout::from_size_align(4160, 16).unwrap();
+    let guard = Layout::from_size_align(4112, 16).unwrap();
+    let rest = Layout::from_size_align(ram.0.len() - 4176 - 4128 - 16, 16).unwrap();
+    // SAFETY: `ram` is this test's own backing, handed to the heap once and
+    // outliving every block.
+    unsafe {
+        heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
+        let a = heap.alloc(hole);
+        let b = heap.alloc(guard);
+        let c = heap.alloc(rest);
+        assert!(!a.is_null() && !b.is_null() && !c.is_null());
+        assert_eq!(heap.usage().extents, 0);
+        heap.dealloc(a, hole);
+        let again = heap.alloc(hole);
+        assert_eq!(again, a);
+        for (block, layout) in [(again, hole), (b, guard), (c, rest)] {
+            heap.dealloc(block, layout);
+        }
+    }
+    assert_eq!(heap.usage().largest, ram.0.len());
+}
+
+#[test]
 fn constrained_pages_use_real_cpu_interval_and_exact_payload_end() {
     let heap = Heap::new();
     let mut ram = backing();
@@ -331,7 +381,7 @@ fn remainders_too_small_for_a_block_stay_allocated() {
     let heap = Heap::new();
     let mut ram = backing();
     let header = core::mem::size_of::<Header>();
-    let layout = Layout::from_size_align(ram.0.len() - header - 24, WORD).unwrap();
+    let layout = Layout::from_size_align(ram.0.len() - header - 24, align_of::<usize>()).unwrap();
     // SAFETY: the one payload is freed with its layout before `ram` goes.
     unsafe {
         heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
