@@ -18,10 +18,10 @@ mod authentication;
 mod six_ghz_authentication;
 pub use authentication::PmfAuthenticationOperation;
 pub(crate) use authentication::{PmfAuthenticationBinding, PmfAuthenticationGuard};
-pub(crate) use six_ghz_authentication::{SixGhzAuthenticationBinding, SixGhzAuthenticationGuard};
 pub use six_ghz_authentication::{
-    SixGhzAuthenticationOperation, SixGhzAuthenticationUse, SixGhzTransportProfile,
+    PowerType, SixGhzAuthenticationOperation, SixGhzAuthenticationUse, SixGhzTransportProfile,
 };
+pub(crate) use six_ghz_authentication::{SixGhzAuthenticationBinding, SixGhzAuthenticationGuard};
 mod scan;
 pub use scan::{ScanAdmission, ScanOperation};
 pub mod channel;

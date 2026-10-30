@@ -40,12 +40,14 @@ impl station::RegulatoryPolicy for Policy {
     }
 }
 
-/// Which provider permits 6 GHz transport, and how often the board was asked.
+/// Which provider permits 6 GHz transport, how often the board was asked and
+/// the AP power type it was asked about.
 #[derive(Default)]
 struct Permission {
     hardware: Cell<bool>,
     os: Cell<bool>,
     asked: Cell<usize>,
+    power_type: Cell<Option<u8>>,
 }
 const NATIVE: reg::NativeContext = reg::NativeContext {
     device: 1,
@@ -71,6 +73,9 @@ impl reg::HardwareLease for Hardware {
     ) -> bool {
         assert_eq!(operation.session().channel(), SIX);
         self.0.asked.set(self.0.asked.get() + 1);
+        self.0
+            .power_type
+            .set(Some(operation.profile().raw_ap_power_type));
         self.0.hardware.get()
     }
 }
@@ -161,6 +166,14 @@ fn beacon_elements() -> Vec<u8> {
 }
 
 fn observe(driver: &mut Client<Bar, Q, NativeGuard>, model: &Model) -> Arc<PmfBssObservation> {
+    observe_with(driver, model, &beacon_elements())
+}
+
+fn observe_with(
+    driver: &mut Client<Bar, Q, NativeGuard>,
+    model: &Model,
+    elements: &[u8],
+) -> Arc<PmfBssObservation> {
     let request = scan::Request::new(vec![SIX], vec![], vec![]).unwrap();
     driver
         .begin_scan(request, 0, 1_000_000, &mut Policy)
@@ -168,7 +181,7 @@ fn observe(driver: &mut Client<Bar, Q, NativeGuard>, model: &Model) -> Arc<PmfBs
     let mut body = vec![0; 8];
     body.extend_from_slice(&100u16.to_le_bytes());
     body.extend_from_slice(&0x11u16.to_le_bytes());
-    body.extend_from_slice(&beacon_elements());
+    body.extend_from_slice(elements);
     let mut beacon = response(0x80, &body);
     beacon[4..10].copy_from_slice(&crate::Mac::BROADCAST.0);
     let mut raw = incoming_bytes(&beacon, None, false);
@@ -193,6 +206,40 @@ fn six_profile() -> Profile {
     let mut profile = profile();
     profile.channel = SIX;
     profile
+}
+
+#[test]
+fn a_wide_standard_power_ap_authenticates_on_its_primary_as_mac80211_does() {
+    let (mut driver, model) = six_setup();
+    let mut elements = beacon_elements();
+    // The HE operation's 6 GHz information: 80 MHz around channel 7 from a
+    // standard-power AP, its primary still channel 1.
+    let he = elements
+        .windows(3)
+        .position(|w| w == [255, 12, 36])
+        .unwrap();
+    elements[he + 10] = 2 | 1 << 3;
+    elements[he + 11] = 7;
+    let observed = observe_with(&mut driver, &model, &elements);
+    let permission = Rc::new(Permission::default());
+    permission.hardware.set(true);
+    permission.os.set(true);
+    let mut owner = reg::Owner::new(Hardware(permission.clone()), Os(permission.clone())).unwrap();
+    // SAFETY: the modeled requester owns this controller and both providers.
+    unsafe {
+        driver.begin_six_ghz_external_authentication(
+            &mut owner,
+            &observed,
+            Selection::new(selected()).unwrap(),
+            six_profile(),
+            10,
+            1_000_000,
+        )
+    }
+    .unwrap();
+    assert_eq!(driver.phase(), Phase::Joining);
+    // The board decides on the AP's power type.
+    assert_eq!(permission.power_type.get(), Some(1));
 }
 
 #[test]

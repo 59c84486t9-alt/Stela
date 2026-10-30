@@ -1,11 +1,50 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// The power type follows pinned Linux include/net/cfg80211.h and
+// net/wireless/scan.c; full source notices in THIRD_PARTY.md.
 //! Fresh held board and OS permission for finite6GHz SAE transport only.
 //! None of these observations authenticate SAE or permit an association.
 use super::{
-    AssociationOwner, Error, HardwareLease, HardwarePolicy, NativeContext, OsLease, OsPolicy, Owner,
+    AssociationOwner, Error, HardwareLease, HardwarePolicy, NativeContext, OsLease, OsPolicy,
+    Owner,
+    channel::{NO_6GHZ_AFC_CLIENT, NO_6GHZ_VLP_CLIENT},
 };
 use crate::wifi::{frame::Mpdu, station::external::Session};
 use alloc::sync::Arc;
+
+/// `enum ieee80211_ap_reg_power` of a 6 GHz AP a client may know.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PowerType {
+    LowPowerIndoor,
+    StandardPower,
+    VeryLowPower,
+}
+impl PowerType {
+    /// `cfg80211_6ghz_power_type`: the type of an AP whose HE 6 GHz operation
+    /// carries Regulatory Info `info`, for a client on a channel with `flags`;
+    /// None is IEEE80211_REG_UNSET_AP.
+    pub const fn of(info: u8, flags: u32) -> Option<Self> {
+        match info {
+            // LPI, indoor LPI, the old indoor SP and AP-role-not-relevant.
+            0 | 3 | 4 | 7 => Some(Self::LowPowerIndoor),
+            1 => Some(Self::StandardPower),
+            2 => Some(Self::VeryLowPower),
+            // Indoor SP: an LPI AP to a client without AFC.
+            8 if flags & NO_6GHZ_AFC_CLIENT != 0 => Some(Self::LowPowerIndoor),
+            8 => Some(Self::StandardPower),
+            _ => None,
+        }
+    }
+    /// `cfg80211_6ghz_power_type_valid`: whether a client may use an AP whose
+    /// Regulatory Info is `info` on a channel with `flags`.
+    pub const fn usable(info: u8, flags: u32) -> bool {
+        match Self::of(info, flags) {
+            Some(Self::LowPowerIndoor) => true,
+            Some(Self::StandardPower) => flags & NO_6GHZ_AFC_CLIENT == 0,
+            Some(Self::VeryLowPower) => flags & NO_6GHZ_VLP_CLIENT == 0,
+            None => false,
+        }
+    }
+}
 
 /// Source-enabled native initial peer envelope. Public fields are
 /// inspection facts, never a constructor for held permission or native state.

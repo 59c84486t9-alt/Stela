@@ -28,6 +28,8 @@ pub const NO_10MHZ: u32 = 1 << 12;
 pub const NO_HE: u32 = 1 << 13;
 pub const NO_320MHZ: u32 = 1 << 19;
 pub const NO_EHT: u32 = 1 << 20;
+pub const NO_6GHZ_VLP_CLIENT: u32 = 1 << 22;
+pub const NO_6GHZ_AFC_CLIENT: u32 = 1 << 23;
 
 /// A channel's `flags` and `max_reg_power` once its country applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

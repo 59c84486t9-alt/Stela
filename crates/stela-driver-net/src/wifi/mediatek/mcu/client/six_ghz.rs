@@ -42,15 +42,12 @@ impl Preauthentication {
         let operations = Operations::parse(&bss.elements).map_err(|_| Error::InvalidGeometry)?;
         let he = operations.he.as_ref().ok_or(Error::InvalidGeometry)?;
         let six = he.six_ghz.ok_or(Error::InvalidGeometry)?;
+        // The SAE frames go at 20 MHz on the primary whatever the AP's width
+        // or EHT; whether its power type is usable is the board's decision.
         let power_type = (six[1] & 0x78) >> 3;
         if six[0] != profile.channel.number as u8
-            || six[1] & 3 != 0
-            || six[2] != six[0]
-            || six[3] != 0
-            || !matches!(power_type, 0 | 3)
             || operations.ht.is_some()
             || operations.vht.is_some()
-            || operations.eht.is_some()
         {
             return Err(Error::InvalidGeometry);
         }

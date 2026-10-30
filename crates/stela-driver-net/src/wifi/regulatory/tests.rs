@@ -426,3 +426,21 @@ fn native_submission_failure_is_returned_with_both_guards_released() {
     assert!(!os.held.get());
     assert_eq!(hardware.submissions.get(), 0);
 }
+
+#[test]
+fn a_six_ghz_client_uses_the_power_types_cfg80211_admits_on_its_channel() {
+    use channel::{NO_6GHZ_AFC_CLIENT, NO_6GHZ_VLP_CLIENT};
+    let types = |flags| (0..16).map(move |info| PowerType::of(info, flags));
+    let lpi = Some(PowerType::LowPowerIndoor);
+    let sp = Some(PowerType::StandardPower);
+    let vlp = Some(PowerType::VeryLowPower);
+    assert!(types(0).eq([
+        lpi, sp, vlp, lpi, lpi, None, None, lpi, sp, None, None, None, None, None, None, None
+    ]));
+    // An indoor SP AP serves a client without AFC at low power.
+    assert_eq!(PowerType::of(8, NO_6GHZ_AFC_CLIENT), lpi);
+    let usable = |flags| (0..16).filter(move |&info| PowerType::usable(info, flags));
+    assert!(usable(0).eq([0, 1, 2, 3, 4, 7, 8]));
+    assert!(usable(NO_6GHZ_AFC_CLIENT).eq([0, 2, 3, 4, 7, 8]));
+    assert!(usable(NO_6GHZ_VLP_CLIENT).eq([0, 1, 3, 4, 7, 8]));
+}
