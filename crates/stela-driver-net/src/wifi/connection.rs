@@ -3,7 +3,7 @@
 // Instant802 Networks, Inc.; 2005-2006, Devicescape Software, Inc.; 2006-2010
 // Johannes Berg; 2018-2026 Intel Corporation. Full source notices in
 // THIRD_PARTY.md.
-//! What the OS decides for one WPA2-Personal station connection, apart from
+//! What the OS decides for one WPA-Personal station connection, apart from
 //! any adapter: the network's [`security`] suites and RSN element, the
 //! association's PHY [`mode`] and channel, and the association request's
 //! capability field and elements as `ieee80211_send_assoc` builds them.
@@ -62,6 +62,8 @@ pub struct Request<'a> {
     pub ssid: &'a [u8],
     /// The whole RSN element.
     pub rsn: &'a [u8],
+    /// The whole RSN Extension element after a hash-to-element SAE exchange.
+    pub rsnxe: Option<&'a [u8]>,
     pub mode: Mode,
     /// Whether the AP uses WMM.
     pub wmm: bool,
@@ -72,8 +74,10 @@ pub struct Request<'a> {
 
 /// The association request's elements in `ieee80211_send_assoc`'s order:
 /// SSID, the station's rates, power capability and supported channels for
-/// spectrum management, the RSN element, then each capability element of
-/// `advertised` the mode uses, WMM last when the AP has it.
+/// spectrum management, the RSN element, each capability element of
+/// `advertised` the mode uses, the RSN Extension element among the
+/// supplicant's remaining non-vendor elements, and WMM last when the AP has
+/// it.
 pub fn request_elements(request: &Request<'_>, advertised: &[u8]) -> Vec<u8> {
     let mut elements = Vec::new();
     push(&mut elements, 0, request.ssid);
@@ -93,11 +97,18 @@ pub fn request_elements(request: &Request<'_>, advertised: &[u8]) -> Vec<u8> {
             (191, _) => request.mode >= Mode::Vht,
             (255, Some(35 | 59)) => request.mode >= Mode::He,
             (255, Some(108)) => request.mode >= Mode::Eht,
-            (221, _) => request.wmm,
             _ => false,
         };
         if used {
             push(&mut elements, id, body);
+        }
+    }
+    if let Some(rsnxe) = request.rsnxe {
+        elements.extend_from_slice(rsnxe);
+    }
+    for &(_, body) in parts.iter().filter(|(id, _)| *id == 221) {
+        if request.wmm {
+            push(&mut elements, 221, body);
         }
     }
     elements

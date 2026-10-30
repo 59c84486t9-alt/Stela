@@ -6,7 +6,7 @@
 //! carrier. Station management and scanning require vendor commands
 //! and completion/retirement. `connection` decides an association from the
 //! configured network and the AP's elements; vendor stations run it through
-//! WPA2-Personal authentication.
+//! WPA-Personal (PSK or SAE) authentication.
 
 mod allocation;
 pub mod connection;

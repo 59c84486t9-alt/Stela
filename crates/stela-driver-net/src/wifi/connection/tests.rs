@@ -16,6 +16,7 @@ fn the_request_orders_elements_as_mac80211_and_keeps_the_mode_s() {
     let mut request = Request {
         ssid: b"nw",
         rsn: &rsn,
+        rsnxe: None,
         mode: Mode::Vht,
         wmm: true,
         spectrum: Some((23, &[36, 40])),
@@ -36,6 +37,14 @@ fn the_request_orders_elements_as_mac80211_and_keeps_the_mode_s() {
     assert_eq!(
         request_elements(&request, &advertised()),
         [0, 2, b'n', b'w', 1, 1, 12, 50, 1, 48, 48, 2, 1, 0]
+    );
+    // The RSN Extension element follows the capabilities, before WMM.
+    request.mode = Mode::Ht;
+    request.wmm = true;
+    request.rsnxe = Some(&crate::wifi::sae::H2E_RSNXE);
+    assert_eq!(
+        request_elements(&request, &advertised())[14..],
+        [45, 1, 0xa, 244, 1, 0x20, 221, 1, 0xf]
     );
 }
 

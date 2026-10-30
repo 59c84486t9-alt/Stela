@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2026 Stela contributors
-//! The suites wpa_supplicant selects for a WPA2-Personal network against an
+//! The suites wpa_supplicant selects for a WPA-Personal network against an
 //! AP's RSN element (`wpa_supplicant_set_suites`) and the RSN element it
 //! then sends (`wpa_write_rsn_ie`). The network is configured as
-//! NetworkManager configures one: `key_mgmt=WPA-PSK WPA-PSK-SHA256`,
-//! wpa_supplicant's default pairwise (CCMP, TKIP) and group (CCMP, TKIP)
-//! ciphers, and `ieee80211w=1`, optional management frame protection.
+//! NetworkManager configures one: `key_mgmt=WPA-PSK WPA-PSK-SHA256 SAE`, SAE
+//! only for a passphrase, wpa_supplicant's default pairwise (CCMP, TKIP) and
+//! group (CCMP, TKIP) ciphers, and `ieee80211w=1`, optional management frame
+//! protection.
 use crate::wifi::{
     security::{Cipher, management::ManagementCipher},
     supplicant::{Akm, Suites},
@@ -15,6 +16,7 @@ use alloc::vec::Vec;
 const OUI: [u8; 3] = [0x00, 0x0f, 0xac];
 const PSK: u8 = 2;
 const PSK_SHA256: u8 = 6;
+const SAE: u8 = 8;
 const CCMP: [u8; 4] = [0, 0x0f, 0xac, 4];
 const PSK_SUITE: [u8; 4] = [0, 0x0f, 0xac, PSK];
 const MFPR: u16 = 1 << 6;
@@ -27,7 +29,8 @@ pub enum Refusal {
     NoRsn,
     /// A truncated or malformed RSN element.
     Malformed,
-    /// No PSK AKM: 802.1X, SAE-only (WPA3-Personal) or FT-only networks.
+    /// No PSK or SAE AKM the station may use: 802.1X or FT-only networks,
+    /// or SAE-only (WPA3-Personal) ones without a passphrase or protection.
     Akm,
     /// No CCMP-128 pairwise cipher.
     Pairwise,
@@ -117,10 +120,11 @@ impl<'a> Advertised<'a> {
 
 impl Security {
     /// The suites for the AP whose beacon or probe response carries
-    /// `elements`: PSK-SHA256 over PSK when management frames are
-    /// protected, as `wpa_supplicant_set_suites` prefers it and the
-    /// station's association request admits it only with protection.
-    pub fn select(elements: &[u8]) -> Result<Self, Refusal> {
+    /// `elements`: SAE, for a `passphrase`, over PSK-SHA256 over PSK, as
+    /// `wpa_supplicant_set_suites` prefers them, the first two only when
+    /// management frames are protected, as the station's association
+    /// request admits them.
+    pub fn select(elements: &[u8], passphrase: bool) -> Result<Self, Refusal> {
         let body = rsn_element(elements).ok_or(Refusal::NoRsn)?;
         let rsn = Advertised::parse(body)?;
         if !rsn.pairwise.contains(&CCMP) {
@@ -138,7 +142,9 @@ impl Security {
             return Err(Refusal::ManagementProtection);
         }
         let offers = |akm| rsn.akms.contains(&[0, 0x0f, 0xac, akm]);
-        let akm = if protected && offers(PSK_SHA256) {
+        let akm = if protected && passphrase && offers(SAE) {
+            Akm::Sae
+        } else if protected && offers(PSK_SHA256) {
             Akm::PskSha256
         } else if offers(PSK) {
             Akm::Psk
@@ -174,13 +180,14 @@ impl Security {
     }
 
     /// `wpa_write_rsn_ie`: the whole RSN element the station sends, with one
-    /// pairwise cipher and AKM, MFPC when it protects management frames, and
-    /// the group management cipher when it is not the default BIP-CMAC-128.
-    pub fn element(&self) -> Vec<u8> {
+    /// pairwise cipher and AKM, MFPC when it protects management frames, the
+    /// `pmkid` of the SAE exchange as `wpa_insert_pmkid` adds it, and the
+    /// group management cipher when it is not the default BIP-CMAC-128.
+    pub fn element(&self, pmkid: Option<&[u8; 16]>) -> Vec<u8> {
         let akm = match self.akm {
             Akm::Psk => PSK,
             Akm::PskSha256 => PSK_SHA256,
-            Akm::Sae => 8,
+            Akm::Sae => SAE,
         };
         let group = match self.group {
             Cipher::Tkip => 2,
@@ -193,10 +200,19 @@ impl Security {
         body.extend_from_slice(&[1, 0, 0, 0x0f, 0xac, akm]);
         let capabilities = if self.management.is_some() { MFPC } else { 0 };
         body.extend_from_slice(&capabilities.to_le_bytes());
-        if let Some(cipher) = self.management
-            && cipher != ManagementCipher::Cmac128
-        {
-            body.extend_from_slice(&[0, 0, 0, 0x0f, 0xac, cipher.suite()]);
+        let management = self
+            .management
+            .filter(|&cipher| cipher != ManagementCipher::Cmac128);
+        match pmkid {
+            Some(pmkid) => {
+                body.extend_from_slice(&[1, 0]);
+                body.extend_from_slice(pmkid);
+            }
+            None if management.is_some() => body.extend_from_slice(&[0, 0]),
+            None => {}
+        }
+        if let Some(cipher) = management {
+            body.extend_from_slice(&[0, 0x0f, 0xac, cipher.suite()]);
         }
         let mut element = Vec::from([48, body.len() as u8]);
         element.extend_from_slice(&body);

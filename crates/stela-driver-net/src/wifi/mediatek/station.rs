@@ -3,10 +3,10 @@
 // THIRD_PARTY.md. The connection policy follows wpa_supplicant's behavior.
 //! One MT7925 station kept connected to the configured network, as
 //! wpa_supplicant and mac80211 keep one: an active scan, the strongest BSS
-//! of the network whose security the station supports, authentication and
-//! association on mac80211's channel and mode, the 4-way and group key
-//! handshakes, their keys and the controlled port. A lost or failed
-//! connection scans again after wpa_supplicant's delays.
+//! of the network whose security the station supports, open-system or SAE
+//! authentication and association on mac80211's channel and mode, the 4-way
+//! and group key handshakes, their keys and the controlled port. A lost or
+//! failed connection scans again after wpa_supplicant's delays.
 use super::{
     bootstrap::client::{
         self, BssHandle, Event, LinkControlError, LinkEvent, ManagedLink, Phase, PolicyError,
@@ -27,18 +27,20 @@ use crate::{
             mode::{self, Channels},
             security::{self, Security},
         },
-        network::Network,
+        network::{Network, Secret},
         regulatory::database::Country,
+        sae::{self, Derivation, Exchange},
         scan::{self, result::Bss},
         security::KeyIdentity,
         station::{
             Join, PortPolicy,
             data::Ingress,
+            external::{self, Received},
             operations::Operations,
             phy::{Capabilities, Role},
             wire::AssociationRequest,
         },
-        supplicant::{EAPOL, IntegrityKey, Step, Supplicant},
+        supplicant::{Akm, EAPOL, IntegrityKey, Step, Supplicant},
     },
 };
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
@@ -53,6 +55,9 @@ const SCAN_INTERVAL_US: u64 = 5_000_000;
 const RECONNECT_US: u64 = 100_000;
 /// wpa_supplicant's 10 s authentication timeout around the handshake.
 const HANDSHAKE_TIMEOUT_US: u64 = 10_000_000;
+/// The longest an SAE exchange may take, its commits, anti-clogging retry
+/// and confirms included: the same 10 s wpa_supplicant allows.
+const SAE_BUDGET_US: u64 = 10_000_000;
 /// mac80211's `hw.conf.listen_interval`: mt76 leaves `max_listen_interval`
 /// at mac80211's default of 5.
 const LISTEN_INTERVAL: u16 = 5;
@@ -89,10 +94,24 @@ fn failure_delay_us(failures: u32) -> u64 {
 struct Candidate {
     bssid: Mac,
     security: Security,
+    /// The PMK the 4-way handshake proves: the passphrase's or the PSK, or
+    /// the SAE exchange's.
+    pmk: Zeroizing<[u8; 32]>,
     /// The station's whole RSN element.
     own_rsn: Vec<u8>,
     /// The AP's whole RSN element.
     peer_rsn: Vec<u8>,
+}
+
+/// An SAE exchange with the chosen BSS, before its association.
+struct Authenticating {
+    handle: BssHandle,
+    bss: Bss,
+    security: Security,
+    session: Arc<external::Session>,
+    exchange: Exchange,
+    /// Whether the exchange derives its element by hash-to-element.
+    h2e: bool,
 }
 
 enum State {
@@ -101,6 +120,7 @@ enum State {
         at: u64,
     },
     Scanning,
+    Authenticating(Box<Authenticating>),
     Joining(Box<Candidate>),
     Handshake {
         supplicant: Box<Supplicant>,
@@ -223,6 +243,18 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
                 })) => {
                     self.eapol(&ethernet, now);
                 }
+                LinkEvent::Controller(Event::ExternalAuthentication(received)) => {
+                    self.sae(&received, now);
+                }
+                LinkEvent::Controller(Event::ExternalAuthenticationEnded {
+                    failure: Some(failure),
+                    ..
+                }) if matches!(self.state, State::Authenticating(_)) => {
+                    self.failed(
+                        now,
+                        format!("MT7925: SAE authentication ended: {failure:?}"),
+                    );
+                }
                 LinkEvent::Controller(Event::ConnectionLost(_)) => {
                     self.fail(String::from("MT7925: the AP ended the association"));
                     self.state = State::Leaving {
@@ -251,8 +283,17 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
                     Err(error) => self.fail(format!("{error}")),
                 }
             }
+            State::Authenticating(authenticating)
+                if authenticating.exchange.accepted()
+                    && self.link.station().external_authenticated() =>
+            {
+                self.associate(now)
+            }
             State::Joining(_) if phase == Phase::AwaitingModernAdmission => self.configure(now),
-            State::Joining(_) | State::Handshake { .. } | State::Connected { .. }
+            State::Authenticating(_)
+            | State::Joining(_)
+            | State::Handshake { .. }
+            | State::Connected { .. }
                 if matches!(phase, Phase::Idle | Phase::NeedsDrain) =>
             {
                 self.failed(
@@ -315,17 +356,18 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
     }
 
     /// Join the strongest BSS of the network whose security the station
-    /// supports.
+    /// supports, after an SAE exchange when that is the security.
     fn choose(&mut self, now: u64) {
         let mut best: Option<(BssHandle, &Bss, Security)> = None;
         let mut refusal = None;
+        let passphrase = matches!(self.network.secret, Secret::Passphrase(_));
         for (handle, bss) in self.link.bss() {
             if bss.ssid.as_deref() != Some(&self.network.ssid[..])
                 || !matches!(bss.channel.band, Band::Ghz2 | Band::Ghz5)
             {
                 continue;
             }
-            match Security::select(&bss.elements) {
+            match Security::select(&bss.elements, passphrase) {
                 Ok(security) => {
                     let signal = |bss: &Bss| bss.signal_dbm.unwrap_or(i8::MIN);
                     if best
@@ -350,20 +392,158 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
             return;
         };
         let bss = bss.clone();
-        match self.join(handle, &bss, security) {
+        let started = if security.akm == Akm::Sae {
+            self.authenticate(handle, bss, security)
+                .map(State::Authenticating)
+        } else {
+            self.association(&bss, security, None, None, self.pmk.clone())
+                .and_then(|(join, profile, candidate)| {
+                    self.link
+                        .join(handle, join, profile)
+                        .map_err(|error| format!("{error}"))?;
+                    Ok(State::Joining(Box::new(candidate)))
+                })
+        };
+        match started {
+            Ok(state) => self.state = state,
+            Err(message) => self.failed(now, message),
+        }
+    }
+
+    /// `sme_send_authentication` for SAE: claim the BSS's peer and send the
+    /// exchange's commit, its element by hash-to-element when the AP's RSNXE
+    /// offers it.
+    fn authenticate(
+        &mut self,
+        handle: BssHandle,
+        bss: Bss,
+        security: Security,
+    ) -> Result<Box<Authenticating>, String> {
+        let Secret::Passphrase(passphrase) = &self.network.secret else {
+            return Err(String::from("MT7925: SAE needs the network's passphrase"));
+        };
+        let (_, profile, _) = self.association(&bss, security, None, None, self.pmk.clone())?;
+        let session = self
+            .link
+            .begin_external_authentication(handle, profile, SAE_BUDGET_US)
+            .map_err(|error| format!("{error}"))?;
+        let derivation = Derivation::for_rsnxe(connection::find(&bss.elements, 244));
+        let mut unavailable = None;
+        let mut random = || {
+            let mut bytes = [0; 32];
+            if let Err(error) = self.entropy.fill(&mut bytes) {
+                unavailable = Some(error);
+            }
+            bytes
+        };
+        let exchange = Exchange::for_session(
+            &session,
+            derivation,
+            passphrase.as_bytes(),
+            None,
+            &mut random,
+        );
+        if let Some(error) = unavailable {
+            return Err(format!("MT7925 SAE: {error}"));
+        }
+        let exchange = exchange.map_err(|error| format!("MT7925 SAE: {error:?}"))?;
+        self.send_sae(&session, exchange.commit())?;
+        Ok(Box::new(Authenticating {
+            handle,
+            bss,
+            security,
+            session,
+            exchange,
+            h2e: derivation == Derivation::HashToElement,
+        }))
+    }
+
+    /// Send one SAE frame of `session`.
+    fn send_sae(&mut self, session: &external::Session, frame: sae::Frame) -> Result<(), String> {
+        self.link
+            .transmit_external_authentication(
+                session,
+                external::Frame {
+                    transaction: frame.transaction,
+                    status: frame.status,
+                    data: &frame.data,
+                },
+            )
+            .map(|_| ())
+            .map_err(|error| format!("{error}"))
+    }
+
+    /// One SAE frame from the AP: the exchange's answer goes back to it.
+    fn sae(&mut self, received: &Received, now: u64) {
+        let State::Authenticating(authenticating) = &mut self.state else {
+            return;
+        };
+        if !Arc::ptr_eq(received.session(), &authenticating.session) {
+            return;
+        }
+        let reply = match authenticating.exchange.receive_from(received) {
+            Ok(reply) => reply,
+            Err(sae::Error::Confirm) => {
+                return self.failed(
+                    now,
+                    String::from("MT7925: SAE confirm failed: the passphrase may be wrong"),
+                );
+            }
+            Err(error) => return self.failed(now, format!("MT7925 SAE: {error:?}")),
+        };
+        let session = authenticating.session.clone();
+        if let Some(frame) = reply
+            && let Err(message) = self.send_sae(&session, frame)
+        {
+            self.failed(now, message);
+        }
+    }
+
+    /// `sme_associate` once SAE authenticated the station: the association
+    /// request carries the exchange's PMKID, and its PMK keys the handshake.
+    fn associate(&mut self, now: u64) {
+        let State::Authenticating(authenticating) =
+            core::mem::replace(&mut self.state, State::Scanning)
+        else {
+            return;
+        };
+        let Authenticating {
+            handle,
+            bss,
+            security,
+            session,
+            exchange,
+            h2e,
+        } = *authenticating;
+        let (Some(pmk), Some(pmkid)) = (exchange.pmk(), exchange.pmkid()) else {
+            return self.failed(now, String::from("MT7925: SAE gave no PMK"));
+        };
+        let rsnxe = h2e.then_some(&sae::H2E_RSNXE[..]);
+        let started = self
+            .association(&bss, security, Some(&pmkid), rsnxe, pmk)
+            .and_then(|(join, _, candidate)| {
+                self.link
+                    .associate_external(&session, handle, join)
+                    .map_err(|error| format!("{error}"))?;
+                Ok(candidate)
+            });
+        match started {
             Ok(candidate) => self.state = State::Joining(Box::new(candidate)),
             Err(message) => self.failed(now, message),
         }
     }
 
     /// `ieee80211_mgd_assoc`: the association request and station profile
-    /// for `bss` on mac80211's mode and channel.
-    fn join(
-        &mut self,
-        handle: BssHandle,
+    /// for `bss` on mac80211's mode and channel, its RSN element with an SAE
+    /// exchange's `pmkid` and `rsnxe`, and the handshake's `pmk`.
+    fn association(
+        &self,
         bss: &Bss,
         security: Security,
-    ) -> Result<Candidate, String> {
+        pmkid: Option<&[u8; 16]>,
+        rsnxe: Option<&[u8]>,
+        pmk: Zeroizing<[u8; 32]>,
+    ) -> Result<(Join, Profile, Candidate), String> {
         let band = bss.channel.band;
         let advertisement = self
             .link
@@ -389,11 +569,12 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
                 regd::channels(band),
             )
         });
-        let own_rsn = security.element();
+        let own_rsn = security.element(pmkid);
         let elements = connection::request_elements(
             &Request {
                 ssid: &self.network.ssid,
                 rsn: &own_rsn,
+                rsnxe,
                 mode: chosen.mode,
                 wmm: peer.wmm().is_some(),
                 spectrum,
@@ -461,18 +642,20 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
             policy: PortPolicy::Controlled,
             request,
         };
-        self.link
-            .join(handle, join, profile)
-            .map_err(|error| format!("{error}"))?;
         let body = security::rsn_element(&bss.elements).unwrap_or_default();
         let mut peer_rsn = vec![48, body.len() as u8];
         peer_rsn.extend_from_slice(body);
-        Ok(Candidate {
-            bssid: bss.bssid,
-            security,
-            own_rsn,
-            peer_rsn,
-        })
+        Ok((
+            join,
+            profile,
+            Candidate {
+                bssid: bss.bssid,
+                security,
+                pmk,
+                own_rsn,
+                peer_rsn,
+            },
+        ))
     }
 
     /// Configure the association the AP accepted, then await message 1.
@@ -485,7 +668,7 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
         }
         match Supplicant::new(
             candidate.security.suites(),
-            self.pmk.clone(),
+            candidate.pmk,
             self.link.mac(),
             candidate.bssid,
             candidate.own_rsn,
