@@ -74,6 +74,7 @@ use crate::platform::apple::fuse::AonFuses;
 use crate::platform::apple::gpio::Gpio;
 use crate::platform::apple::gpio::Net;
 use crate::platform::apple::gpio::OpenDrain;
+use crate::platform::apple::gpu_gate;
 use crate::platform::apple::hpm::Firmware;
 use crate::platform::apple::hpm::Hpm;
 use crate::platform::apple::hpm::Summary;
@@ -184,6 +185,8 @@ pub struct AppleDevices {
     coprocessors: Vec<(&'static str, DeviceId)>,
     /// The SPI controller holding the NOR die.
     nor: Option<DeviceId>,
+    /// StelaGPU's call gate (`platform::apple::gpu_gate`).
+    gpu_gate: Option<DeviceId>,
     storage_masters: Vec<(DeviceId, DeviceId)>,
     /// The GFX coprocessor's ASC and the `sgx` block whose UAT it masters
     /// memory through.
@@ -547,6 +550,7 @@ impl AppleDevices {
             gfx_masters: Vec::new(),
             coprocessors: Vec::new(),
             nor: None,
+            gpu_gate: None,
             sep_masters: Vec::new(),
             dcp_masters: Vec::new(),
             dart_irqs: Vec::new(),
@@ -791,6 +795,23 @@ impl AppleDevices {
         self.map(device, ranges)
             .map_err(|error| format!("UART placement: {error:?}"))?;
         self.register_power_device(first.physical, device, false)
+    }
+
+    /// StelaGPU's call gate over `service`, its window at `physical`.
+    pub fn add_gpu_gate(
+        &mut self,
+        physical: u64,
+        service: Box<dyn gpu_gate::GateService>,
+    ) -> Result<(), String> {
+        if self.gpu_gate.is_some() {
+            return Err("the board has one StelaGPU gate".into());
+        }
+        let device = self.bus.add(Box::new(gpu_gate::Gate::new(service)));
+        self.bus
+            .map(device, physical, gpu_gate::BYTES, 0)
+            .map_err(|error| format!("StelaGPU gate placement: {error:?}"))?;
+        self.gpu_gate = Some(device);
+        Ok(())
     }
 
     /// The lock pair at the end of one DT-placed CoreSight component page.
@@ -3394,6 +3415,21 @@ impl Devices for AppleDevices {
             .min()
     }
 
+    fn serve_call(
+        &mut self,
+        cpu: usize,
+        caller: &mut dyn stela_engine::machine::engine::CallerMemory,
+        _now: u64,
+    ) -> Result<(), DeviceError> {
+        if let Some(gate) = self.gpu_gate {
+            self.bus
+                .device_mut::<gpu_gate::Gate>(gate)
+                .expect("the gate is mapped")
+                .serve(cpu, caller);
+        }
+        Ok(())
+    }
+
     fn transfer(
         &mut self,
         cpu: usize,
@@ -3681,6 +3717,55 @@ mod tests {
         d.observe_time(5, "deadline");
         d.observe_time(3, "read");
         assert_eq!(d.rtc_regression(), " (deadline at 0x5 after lines at 0xa)");
+    }
+
+    #[test]
+    fn a_gate_store_is_served_in_its_own_pes_step() {
+        use core::num::NonZeroU64;
+        use stela_contracts::gate::{CallerFault, CallerMemory};
+        const GATE: u64 = 0x5_0000_0000;
+        struct Service(Rc<RefCell<Vec<(u64, u64)>>>);
+        impl gpu_gate::GateService for Service {
+            fn connect(&mut self) -> Result<NonZeroU64, &'static str> {
+                Ok(NonZeroU64::MIN)
+            }
+            fn disconnect(&mut self, _: NonZeroU64) {}
+            fn serve(
+                &mut self,
+                connection: NonZeroU64,
+                record: u64,
+                _: &mut dyn CallerMemory,
+            ) -> Result<(), CallerFault> {
+                self.0.borrow_mut().push((connection.get(), record));
+                Ok(())
+            }
+        }
+        struct Caller;
+        impl CallerMemory for Caller {
+            fn read(&mut self, address: u64, _: &mut [u8]) -> Result<(), CallerFault> {
+                Err(CallerFault::Denied { address })
+            }
+            fn write(&mut self, address: u64, _: &[u8]) -> Result<(), CallerFault> {
+                Err(CallerFault::Denied { address })
+            }
+        }
+        let served = Rc::new(RefCell::new(Vec::new()));
+        let mut d = AppleDevices::new();
+        d.add_gpu_gate(GATE, Box::new(Service(served.clone())))
+            .unwrap();
+        assert!(
+            d.add_gpu_gate(GATE, Box::new(Service(served.clone())))
+                .is_err()
+        );
+        d.write(0, GATE, 8, 0, 0).unwrap();
+        let page = d.read(0, GATE + 8, 8, 0).unwrap();
+        assert_eq!(page, 1);
+        d.write(2, GATE + page * gpu_gate::PAGE, 8, 0x1234, 0)
+            .unwrap();
+        d.serve_call(1, &mut Caller, 0).unwrap();
+        assert!(served.borrow().is_empty());
+        d.serve_call(2, &mut Caller, 0).unwrap();
+        assert_eq!(*served.borrow(), [(1, 0x1234)]);
     }
 
     #[test]

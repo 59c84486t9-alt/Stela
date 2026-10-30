@@ -33,6 +33,7 @@ pub mod dwc3;
 pub mod energy;
 pub mod fuse;
 pub mod gpio;
+pub mod gpu_gate;
 pub mod hpm;
 pub mod i2c;
 #[cfg(test)]
