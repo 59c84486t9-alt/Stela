@@ -20,7 +20,7 @@ pub mod owned;
 pub mod power;
 pub mod regs;
 pub mod requester;
-pub use aspm::{disable_aspm_l1_2_link, disable_aspm_link, native as native_aspm};
+pub use aspm::{aspm_control, disable_aspm_l1_2_link, disable_aspm_link, native as native_aspm};
 pub use capability::{
     Capabilities, Capability, CapabilityError, ExtendedCapabilities, ExtendedCapability, Layout,
 };

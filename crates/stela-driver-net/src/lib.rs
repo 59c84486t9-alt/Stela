@@ -2,8 +2,8 @@
 //! PCH (I217–I219) [`e1000e`], discrete Intel Gigabit [`igb`], I225/I226
 //! [`igc`], Realtek RTL8169/8168/8125/8126 [`realtek`] and [`virtio`]-net.
 //! USB Ethernet adapters are in the `stela-drivers` USB stack (`usb::cdc` and
-//! `usb::ethernet`). [`wifi`] holds the Wi-Fi
-//! libraries, which no adapter attaches through yet.
+//! `usb::ethernet`). [`wifi`] holds the shared 802.11 code and the Intel
+//! and MediaTek MT7925 Wi-Fi drivers.
 #![no_std]
 #[macro_use]
 extern crate alloc;

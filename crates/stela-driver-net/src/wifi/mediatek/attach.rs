@@ -4,7 +4,7 @@
 //! link: `mt7925_pci_probe` identifies and boots it, `mt7925_regd_update`
 //! programs its country, `mt7925_mac_init` and `mt7925_start` bring up its
 //! MAC on mac80211's default channel, and `mt7925_add_interface` registers
-//! its station interface.
+//! its station interface, which a [`Station`] then keeps connected.
 use super::{
     acpi::Sar,
     bootstrap::{
@@ -19,20 +19,20 @@ use super::{
     },
     identity::{Chip, PciIdentity},
     mcu::device::Context,
-    registers::MmioBar,
-    ring::MmioQueue,
+    station::{Station, Wifi},
 };
 use crate::{
     Clock,
     bus::dma::{mapping::DmaDomain, memory::PageSource},
     firmware::Provider,
-    wifi::regulatory::database::Country,
+    wifi::{
+        network::Network,
+        regulatory::database::{self, Database},
+    },
 };
 use alloc::sync::Arc;
 use core::{any::Any, fmt, ptr::NonNull};
-
-/// An attached function's station link.
-pub type Link<C> = ManagedLink<MmioBar, MmioQueue, C, &'static dyn PageSource>;
+use stela_driver_base::entropy::Entropy;
 
 /// The services and platform facts the attach borrows.
 pub struct Inputs {
@@ -41,8 +41,13 @@ pub struct Inputs {
     pub clock: Clock,
     /// `mt76_pci_aspm_supported`: whether the function's link enables ASPM.
     pub aspm: bool,
-    pub country: Country,
+    /// regulatory.db, whose country the network names, or the world domain
+    /// `00` cfg80211 starts from when it names none.
+    pub database: Database,
+    pub network: Network,
     pub sar: Sar,
+    /// The source of the station's handshake nonces.
+    pub entropy: Arc<dyn Entropy>,
 }
 
 /// Why the function did not reach a managed link. Every owner the device may
@@ -51,6 +56,10 @@ pub struct Inputs {
 pub enum AttachError {
     /// Only MT7925's regulatory programming is ported.
     UnsupportedChip(PciIdentity),
+    /// No regulatory database loaded, so the radio may not transmit.
+    NoRegulatoryDatabase,
+    /// regulatory.db holds no usable rules for the network's country.
+    Country([u8; 2], database::Error),
     Firmware(LoadError),
     Bootstrap(bootstrap::Error),
     /// Neither the capabilities nor the EEPROM report a station address.
@@ -74,14 +83,20 @@ impl fmt::Display for AttachError {
             Self::Firmware(error) => write!(f, "{error}"),
             Self::Bootstrap(error) => write!(f, "{error}"),
             Self::Link(error) => write!(f, "{error}"),
+            Self::NoRegulatoryDatabase => f.write_str("MT7925: no regulatory database"),
+            Self::Country(alpha2, error) => write!(
+                f,
+                "MT7925: regulatory.db country {}: {error:?}",
+                alpha2.escape_ascii()
+            ),
             error => write!(f, "MT7925 attach: {error:?}"),
         }
     }
 }
 
-/// A managed link and what limits it without stopping it.
-pub struct Attached<C: 'static> {
-    pub link: Link<C>,
+/// A kept station connection and what limits it without stopping it.
+pub struct Attached<C: Send + Sync + 'static> {
+    pub station: Wifi<C>,
     /// The firmware offers its own regulatory domain
     /// (`MT7925_REGD_SUPPORTED`). The link programs and verifies
     /// regulatory.db's country instead, so the firmware's stays unused.
@@ -89,14 +104,14 @@ pub struct Attached<C: 'static> {
 }
 
 /// Identify, boot and program the function `pci` names, then register its
-/// station interface and hand it to [`ManagedLink`].
+/// station interface and keep it connected to `inputs.network`.
 ///
 /// # Safety
 /// [`Controller::new`]'s and [`Controller::install`]'s contracts hold for
 /// `base..base + bytes`, `resource` and `domain`, with `inputs.pages` as the
 /// page source: `resource` keeps the claimed function and its uncached BAR0
 /// mapping, whose interrupts are off.
-pub unsafe fn attach<C: 'static>(
+pub unsafe fn attach<C: Send + Sync + 'static>(
     pci: PciIdentity,
     base: NonNull<u8>,
     bytes: usize,
@@ -107,6 +122,11 @@ pub unsafe fn attach<C: 'static>(
     if pci.chip() != Some(Chip::Mt7925) {
         return Err(AttachError::UnsupportedChip(pci));
     }
+    let alpha2 = inputs.network.country.unwrap_or(*b"00");
+    let country = inputs
+        .database
+        .select(alpha2)
+        .map_err(|error| AttachError::Country(alpha2, error))?;
     let owner: Arc<dyn Any> = resource.clone();
     // SAFETY: forwarded from the caller.
     let identity =
@@ -130,7 +150,7 @@ pub unsafe fn attach<C: 'static>(
     // the CLC's environment is the OS's `country_ie_env`, ENVIRON_ANY.
     unsafe {
         controller.execute_clc(ClcInputs {
-            alpha2: inputs.country.alpha2(),
+            alpha2,
             environment: ClcEnvironment::Any,
             chip_capabilities,
             power_limits_node: false,
@@ -140,7 +160,7 @@ pub unsafe fn attach<C: 'static>(
             world_mtcl_configuration: 0,
         })
     }?;
-    let plan = controller.regulatory_plan(&inputs.country, &inputs.sar)?;
+    let plan = controller.regulatory_plan(&country, &inputs.sar)?;
     let firmware_domain_unused = controller.firmware_regulatory_domain();
     // SAFETY: the plan resolves the CLC's restrictions, the country and the
     // platform's SAR, and `resource` keeps them.
@@ -154,29 +174,35 @@ pub unsafe fn attach<C: 'static>(
         .capabilities()
         .and_then(|report| report.observed().mac())
         .ok_or(AttachError::NoAddress)?;
-    // SAFETY: the first interface of a fresh controller, as
-    // `mt7925_add_interface` gives it: BSS, OMAC and WMM 0, no band yet, and
-    // the broadcast WCID `MT792x_WTBL_RESERVED - 0`.
-    let interface = unsafe {
-        controller.register_interface(Context {
-            bss_index: 0,
-            omac_index: 0,
-            band_index: 0xff,
-            wmm_index: 0,
-            link_index: 0,
-            broadcast_wcid: 19,
-            address,
-        })
-    }?;
+    // `mt7925_add_interface`'s first interface: BSS, OMAC and WMM 0, no band
+    // yet, and the broadcast WCID `MT792x_WTBL_RESERVED - 0`.
+    let context = Context {
+        bss_index: 0,
+        omac_index: 0,
+        band_index: 0xff,
+        wmm_index: 0,
+        link_index: 0,
+        broadcast_wcid: 19,
+        address,
+    };
+    // SAFETY: the first interface of a fresh controller.
+    let interface = unsafe { controller.register_interface(context) }?;
     // SAFETY: the controller and interface are this requester's, after its
     // completed bootstrap and policy; `resource` keeps their permission.
     let client = unsafe { Client::new(controller, interface) }.map_err(AttachError::Client)?;
-    let managed = ManagedClient::new(client, inputs.country, Environment::Any)
+    let managed = ManagedClient::new(client, country.clone(), Environment::Any)
         .map_err(|error| AttachError::Policy(error.error))?;
     let link =
         ManagedLink::new(managed, inputs.pages).map_err(|error| AttachError::Link(error.error))?;
     Ok(Attached {
-        link,
+        station: Station::new(
+            link,
+            context,
+            country,
+            inputs.network,
+            inputs.entropy,
+            inputs.clock,
+        ),
         firmware_domain_unused,
     })
 }

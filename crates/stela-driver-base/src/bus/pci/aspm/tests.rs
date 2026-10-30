@@ -125,6 +125,19 @@ fn a_root_bus_endpoint_disables_its_own_link_control() {
 }
 
 #[test]
+fn aspm_control_reads_the_link_or_zero_without_one() {
+    let writes = Writes::default();
+    let mut endpoint = device(address(0, 8, 0), None, &writes);
+    assert_eq!(aspm_control(&endpoint), PCIE_ASPM);
+    endpoint.config.words[20] = 0xc000_a5a2;
+    assert_eq!(aspm_control(&endpoint), 2);
+    // A root-complex integrated endpoint has no link.
+    endpoint.config.words[16] = (1 | 9 << 4) << 16 | u32::from(CAPABILITY_PCIE);
+    assert_eq!(aspm_control(&endpoint), 0);
+    assert!(writes.borrow().is_empty());
+}
+
+#[test]
 fn both_capabilities_must_be_valid_before_any_register_is_changed() {
     let writes = Writes::default();
     let mut endpoint = device(address(0, 8, 0), None, &writes);

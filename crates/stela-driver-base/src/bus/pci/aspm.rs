@@ -219,6 +219,12 @@ fn link_control<C: ConfigSpace>(function: &Function<C>) -> Result<u16, BlockErro
     Ok(capability + PCIE_LINK_CONTROL)
 }
 
+/// The ASPM Control field of the function's PCIe Link Control: zero
+/// without a link, as `pcie_capability_read_word` reads a missing register.
+pub fn aspm_control<C: ConfigSpace>(function: &Function<C>) -> u16 {
+    link_control(function).map_or(0, |at| function.config.read16(at) & PCIE_ASPM)
+}
+
 fn upstream<C: ConfigSpace>(
     function: &Function<C>,
     functions: &[Function<C>],

@@ -11,7 +11,7 @@ use crate::{
         dma::{DomainAllocator, mapping::DmaDomain},
         mmio::owned::{CacheAttribute, Mapping, Protection},
         pci::{
-            Address, Bar, Function,
+            Address, Bar, ConfigSpace, Function,
             msix::MappedBar,
             owned::OwnedConfig,
             requester::{FunctionRole, StoppedRequester},
@@ -23,6 +23,7 @@ use crate::{
         Link, LinkError, Mac,
         aqtion::{self, Aqtion, MappedRegisters},
         tg3,
+        wifi::mediatek,
     },
     storage::nvme,
 };
@@ -68,6 +69,8 @@ pub(super) enum Kind {
     Ish,
     /// An Intel Wi-Fi function, which `iwl_pci_probe` identifies further.
     IntelWifi,
+    /// A MediaTek Wi-Fi function; only MT7925 attaches.
+    MediatekWifi,
     /// An Intel PCIe Bluetooth function, as `btintel_pcie_table` lists them.
     IntelBluetooth,
 }
@@ -88,11 +91,51 @@ impl Kind {
             Some(Self::Ish)
         } else if function.vendor == 0x8086 && function.class[..2] == [2, 0x80] {
             Some(Self::IntelWifi)
+        } else if function.vendor == 0x14c3 && function.class[..2] == [2, 0x80] {
+            Some(Self::MediatekWifi)
         } else if function.vendor == 0x8086 && intel_pcie::DEVICE_IDS.contains(&function.device) {
             Some(Self::IntelBluetooth)
         } else {
             None
         }
+    }
+}
+
+/// A PCI bridge the scan passed.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Bridge {
+    pub(super) address: Address,
+    pub(super) secondary: u8,
+    /// The ASPM Control field of its PCIe Link Control.
+    pub(super) aspm: u16,
+}
+
+/// The bridge whose secondary bus is `bus`: Linux's `bus->self`.
+fn upstream(bridges: &[Bridge], segment: u16, bus: u8) -> Option<&Bridge> {
+    bridges.iter().find(|bridge| {
+        bridge.address.segment == segment && bridge.secondary == bus && bridge.address.bus < bus
+    })
+}
+
+/// `mt76_pci_aspm_supported`: whether firmware enabled ASPM on the
+/// function's link, at either end.
+pub(super) fn aspm_supported<C: ConfigSpace>(function: &Function<C>, bridges: &[Bridge]) -> bool {
+    let address = function.address;
+    crate::bus::pci::aspm_control(function) != 0
+        || upstream(bridges, address.segment, address.bus).is_some_and(|parent| parent.aspm != 0)
+}
+
+fn mediatek_identity<C: ConfigSpace>(
+    function: &mut Function<C>,
+) -> mediatek::identity::PciIdentity {
+    let (vendor, device) = (function.vendor, function.device);
+    let config = function.config();
+    mediatek::identity::PciIdentity {
+        vendor,
+        device,
+        subsystem_vendor: config.read16(0x2c),
+        subsystem_device: config.read16(0x2e),
+        revision: config.read8(0x08),
     }
 }
 
@@ -241,6 +284,55 @@ pub type IntelWifi = wifi::intel::link::Wifi<
     wifi::intel::radio::bios::service::native::NativeBios,
 >;
 
+/// The owners an MT7925 station keeps: its claimed function and BAR0.
+pub type MediatekOwner = (Function<OwnedConfig>, Mapping);
+
+/// An MT7925 station over its owned function and BAR0.
+pub type MediatekWifi = mediatek::station::Wifi<MediatekOwner>;
+
+/// Attach a MediaTek Wi-Fi function: BAR0 holds its registers and remap
+/// windows.
+///
+/// # Safety
+/// As for [`tg3`]; `inputs` describes this function's own link and ACPI
+/// companion.
+#[allow(
+    clippy::result_large_err,
+    reason = "a failed attach hands back the owners that must outlive the device"
+)]
+pub(super) unsafe fn mediatek_wifi(
+    services: &dyn NativeServices,
+    address: Address,
+    inputs: mediatek::attach::Inputs,
+) -> Result<Located<mediatek::attach::Attached<MediatekOwner>>, Failure> {
+    let refused = |error: ServiceError| (Error::Native(error), None);
+    let Claimed {
+        mut function,
+        domain,
+        bars,
+    } = claim(services, address).map_err(refused)?;
+    let pci = mediatek_identity(&mut function);
+    let registers = map(services, address, &bars, 0).map_err(refused)?;
+    let (base, bytes) = registers
+        .bytes()
+        .and_then(|bytes| Ok((registers.address(0, bytes)?, bytes)))
+        .map_err(|error| refused(ServiceError::Mapping(error)))?;
+    // mt7925_pci_probe: memory decoding and bus mastering, polled.
+    function.enable_polled();
+    let owner = Arc::new((function, registers));
+    let kept = Box::new(owner.clone()) as Box<dyn Any>;
+    // SAFETY: the mount claimed the stopped function, mapped its BAR0
+    // uncached and supplied an isolating domain; `owner` keeps the function
+    // and mapping, and its interrupts are off.
+    match unsafe { mediatek::attach::attach(pci, base.cast(), bytes, owner, domain, inputs) } {
+        Ok(attached) => Ok(Located {
+            location: alloc::format!("{address}"),
+            link: attached,
+        }),
+        Err(error) => Err((Error::MediatekWifi(error), Some(kept))),
+    }
+}
+
 /// Attach an Intel Wi-Fi function: BAR0 holds its CSRs.
 ///
 /// # Safety
@@ -255,7 +347,6 @@ pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
     address: Address,
     inputs: wifi::intel::link::Inputs<B>,
 ) -> Result<Located<wifi::intel::link::Wifi<wifi::intel::boot::NativeBootIo, B>>, Failure> {
-    use crate::bus::pci::ConfigSpace;
     use wifi::intel::attach::{AttachError, Pci, attach};
     let refused = |error: ServiceError| (Error::Native(error), None);
     let Claimed {
@@ -307,7 +398,7 @@ pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
 pub(super) fn companion(
     session: &'static crate::platform::acpi::Session,
     address: Address,
-    bridges: &[(Address, u8)],
+    bridges: &[Bridge],
 ) -> Option<crate::platform::acpi::Handle<'static>> {
     use crate::platform::acpi::{Handle, Value};
     let integer = |handle: Handle<'static>, name: &str| -> Option<u64> {
@@ -324,11 +415,9 @@ pub(super) fn companion(
     };
     let mut chain = alloc::vec![(address, false)];
     let mut bus = address.bus;
-    while let Some(&(bridge, _)) = bridges.iter().find(|(bridge, secondary)| {
-        bridge.segment == address.segment && *secondary == bus && bridge.bus < bus
-    }) {
-        chain.push((bridge, true));
-        bus = bridge.bus;
+    while let Some(bridge) = upstream(bridges, address.segment, bus) {
+        chain.push((bridge.address, true));
+        bus = bridge.address.bus;
     }
     let devices = session.all_devices().ok()?;
     let mut roots = session.devices("PNP0A08").ok()?;

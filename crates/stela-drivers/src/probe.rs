@@ -40,7 +40,7 @@ pub use services::{NativeServices, ServiceError};
 /// A controller refusal keeps its original typed details for boot diagnostics.
 /// In particular, firmware names and integrity/target errors are never replaced
 /// by a generic unsupported-device message.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Error {
     Device(BlockError),
     Realtek(realtek::Error),
@@ -52,6 +52,7 @@ pub enum Error {
     Sfh(input::sfh::Error),
     Ish(input::ish::Error),
     IntelWifi(net::wifi::intel::attach::AttachError),
+    MediatekWifi(net::wifi::mediatek::attach::AttachError),
     IntelBluetooth(crate::bluetooth::intel_pcie::Error),
 }
 
@@ -67,6 +68,7 @@ impl fmt::Display for Error {
             Self::Sfh(error) => write!(f, "AMD SFH: {error:?}"),
             Self::Ish(error) => write!(f, "Intel ISH: {error:?}"),
             Self::IntelWifi(error) => write!(f, "iwlwifi: {error}"),
+            Self::MediatekWifi(error) => write!(f, "mt76: {error}"),
             Self::IntelBluetooth(error) => write!(f, "btintel_pcie: {error}"),
         }
     }
@@ -177,6 +179,7 @@ pub enum Adapter {
     Aqtion(Box<native::Located<net::aqtion::Aqtion>>),
     #[cfg(feature = "native-acpi")]
     IntelWifi(Box<native::Located<native::IntelWifi>>),
+    MediatekWifi(Box<native::Located<native::MediatekWifi>>),
 }
 
 impl Adapter {
@@ -193,6 +196,7 @@ impl Adapter {
             Self::Aqtion(_) => "atlantic",
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(_) => "iwlwifi",
+            Self::MediatekWifi(_) => "mt7925e",
             Self::UsbVendor(device) => device.driver(),
         }
     }
@@ -211,6 +215,7 @@ impl Adapter {
             Self::Aqtion(device) => &device.location,
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => &device.location,
+            Self::MediatekWifi(device) => &device.location,
         }
     }
 }
@@ -229,6 +234,7 @@ impl Link for Adapter {
             Self::Aqtion(device) => device.mac(),
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.mac(),
+            Self::MediatekWifi(device) => device.mac(),
         }
     }
     fn carrier(&mut self) -> bool {
@@ -244,6 +250,7 @@ impl Link for Adapter {
             Self::Aqtion(device) => device.carrier(),
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.carrier(),
+            Self::MediatekWifi(device) => device.carrier(),
         }
     }
     fn signals(&self) -> bool {
@@ -259,6 +266,7 @@ impl Link for Adapter {
             Self::Aqtion(device) => device.signals(),
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.signals(),
+            Self::MediatekWifi(device) => device.signals(),
         }
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
@@ -274,6 +282,7 @@ impl Link for Adapter {
             Self::Aqtion(device) => device.transmit(frame),
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.transmit(frame),
+            Self::MediatekWifi(device) => device.transmit(frame),
         }
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
@@ -289,6 +298,7 @@ impl Link for Adapter {
             Self::Aqtion(device) => device.receive(),
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.receive(),
+            Self::MediatekWifi(device) => device.receive(),
         }
     }
 }
@@ -329,7 +339,7 @@ fn unsupported(class: [u8; 3]) -> Option<&'static str> {
         [0x01, 0x08, _] => Some("non-NVMe non-volatile memory controller"),
         [0x01, ..] => Some("storage controller"),
         [0x02, 0x00, _] => Some("Ethernet controller"),
-        [0x02, 0x80, _] => Some("network controller (Wi-Fi is not attached yet)"),
+        [0x02, 0x80, _] => Some("Wi-Fi controller other than Intel's or MediaTek's"),
         [0x02, ..] => Some("network controller"),
         [0x04, 0x03, _] => Some("HD Audio controller (audio is not attached yet)"),
         [0x0c, 0x03, _] => {
@@ -514,7 +524,7 @@ unsafe fn intel_wifi(
             crate::net::wifi::regulatory::database::LoadError,
         >,
     >,
-    bridges: &[(Address, u8)],
+    bridges: &[native::Bridge],
 ) -> Result<Adapter, native::Failure> {
     use net::wifi::intel::attach::AttachError;
     let Some(Ok(database)) = regulatory else {
@@ -569,6 +579,64 @@ unsafe fn intel_wifi(
     }
 }
 
+/// Attach the MediaTek Wi-Fi function at `address` for `wifi.network`, its
+/// SAR tables read from its ACPI companion, once the regulatory database
+/// loaded. `aspm` is whether firmware enabled ASPM on its link.
+///
+/// # Safety
+/// As for [`intel_wifi`].
+#[allow(
+    clippy::result_large_err,
+    reason = "a failed attach hands back the owners that must outlive the device"
+)]
+unsafe fn mediatek_wifi(
+    services: &dyn NativeServices,
+    address: Address,
+    wifi: &WifiInputs<'_>,
+    regulatory: &Option<
+        Result<
+            crate::net::wifi::regulatory::database::Database,
+            crate::net::wifi::regulatory::database::LoadError,
+        >,
+    >,
+    bridges: &[native::Bridge],
+    aspm: bool,
+) -> Result<
+    native::Located<net::wifi::mediatek::attach::Attached<native::MediatekOwner>>,
+    native::Failure,
+> {
+    use net::wifi::mediatek::attach::AttachError;
+    let Some(Ok(database)) = regulatory else {
+        return Err((Error::MediatekWifi(AttachError::NoRegulatoryDatabase), None));
+    };
+    let entropy = services
+        .entropy()
+        .map_err(|error| (Error::Native(error), None))?;
+    #[cfg(feature = "native-acpi")]
+    let sar = net::wifi::mediatek::acpi::read(
+        services
+            .acpi()
+            .and_then(|session| native::companion(session, address, bridges)),
+    );
+    #[cfg(not(feature = "native-acpi"))]
+    let sar = {
+        let _ = bridges;
+        net::wifi::mediatek::acpi::Sar::default()
+    };
+    let inputs = net::wifi::mediatek::attach::Inputs {
+        firmware: wifi.firmware,
+        pages: services.pages(),
+        clock: wifi.clock,
+        aspm,
+        database: database.clone(),
+        network: wifi.network.clone(),
+        sar,
+        entropy,
+    };
+    // SAFETY: forwarded from the caller.
+    unsafe { native::mediatek_wifi(services, address, inputs) }
+}
+
 /// Enumerate and attach devices using an explicit exact firmware provider.
 /// A loader can observe consumer requirements while delegating the original
 /// lookup result, without reconstructing device identities outside drivers.
@@ -620,7 +688,11 @@ pub unsafe fn probe_with_provider(
             mehlow |= function.vendor == 0x8086 && native::MEHLOW.contains(&function.device);
             if function.class[..2] == [6, 4] {
                 use crate::bus::pci::ConfigSpace;
-                bridges.push((address, function.config().read8(0x19)));
+                bridges.push(native::Bridge {
+                    address,
+                    secondary: function.config().read8(0x19),
+                    aspm: crate::bus::pci::aspm_control(&function),
+                });
             }
             if function.class[..2] == [2, 0x80] {
                 if wifi.is_none() {
@@ -711,6 +783,46 @@ pub unsafe fn probe_with_provider(
                             intel_wifi(services, address, wifi, &devices.regulatory, &bridges)
                         } {
                             Ok(link) => devices.nics.push(link),
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.owners.extend(kept);
+                            }
+                        }
+                        continue;
+                    }
+                    native::Kind::MediatekWifi => {
+                        let Some(wifi) = &wifi_inputs else {
+                            continue;
+                        };
+                        let aspm = native::aspm_supported(&function, &bridges);
+                        // SAFETY: as for tg3 below; the companion is this
+                        // function's own.
+                        match unsafe {
+                            mediatek_wifi(
+                                services,
+                                address,
+                                wifi,
+                                &devices.regulatory,
+                                &bridges,
+                                aspm,
+                            )
+                        } {
+                            Ok(native::Located { location, link }) => {
+                                if link.firmware_domain_unused {
+                                    devices.warnings.push((
+                                        address,
+                                        Warning::Message(
+                                            "MT7925 firmware regulatory domain left unused; regulatory.db's country is programmed",
+                                        ),
+                                    ));
+                                }
+                                devices.nics.push(Adapter::MediatekWifi(Box::new(
+                                    native::Located {
+                                        location,
+                                        link: link.station,
+                                    },
+                                )));
+                            }
                             Err((error, kept)) => {
                                 devices.failures.push((address, error));
                                 devices.owners.extend(kept);
@@ -1032,7 +1144,7 @@ mod tests {
     fn unclaimed_host_classes_are_reported_and_others_ignored() {
         assert_eq!(
             unsupported([0x02, 0x80, 0x00]),
-            Some("network controller (Wi-Fi is not attached yet)")
+            Some("Wi-Fi controller other than Intel's or MediaTek's")
         );
         assert_eq!(
             unsupported([0x01, 0x04, 0x00]),
@@ -1146,9 +1258,8 @@ mod tests {
             devices.failures.push((address, error.into()));
             let (location, error) = devices.failures.last().unwrap();
             assert_eq!(*location, address);
-            assert_eq!(
-                *error,
-                Error::Realtek(realtek::Error::Firmware(original.clone()))
+            assert!(
+                matches!(error, Error::Realtek(realtek::Error::Firmware(kept)) if *kept == original)
             );
             assert_eq!(format!("{error}"), format!("{original}"));
             assert!(format!("{error}").contains(requirement.name));
