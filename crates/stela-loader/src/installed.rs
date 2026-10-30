@@ -487,6 +487,25 @@ impl<R: ReadAt> Disk<'_, R> {
         }))
     }
 
+    /// The machine's personalized Cryptex1 manifest.
+    fn cryptex1_manifest(&mut self, ecid: u64) -> Result<Option<Decoded>> {
+        let ticket =
+            preboot::cryptex1_ticket(self.container, &self.preboot, &self.set.volume_group, ecid)
+                .within(|| refuse!("the Cryptex1 manifest"))?;
+        Ok(ticket.map(|(path, bytes)| Decoded {
+            source: Source {
+                component: "Cryptex1 manifest".into(),
+                member: path,
+                container_sha256: sha256(&bytes),
+                payload_type: "im4m".into(),
+                description: "the personalized Cryptex1 manifest".into(),
+                decoded_bytes: bytes.len() as u64,
+                decoded_sha256: sha256(&bytes),
+            },
+            bytes,
+        }))
+    }
+
     /// `ProductVersion` and `ProductBuildVersion` of the volume group.
     fn system_version(&mut self) -> Result<(String, String)> {
         let group = &self.set.volume_group;
@@ -599,6 +618,11 @@ pub fn prepare<R: ReadAt>(
     let sep = disk.opaque(SEP_FIRMWARE_TYPE)?;
     // The evidence already required this object and checked its signature.
     let root_hash = disk.opaque(ROOT_HASH_TYPE)?;
+    let cryptex1_manifest = options
+        .ecid
+        .map(|ecid| disk.cryptex1_manifest(ecid))
+        .transpose()?
+        .flatten();
     let (product_version, product_build) = disk.system_version()?;
     let tree = DeviceTree::parse(&device_tree.bytes)?;
     let product_type = root_string(&tree, "model")?;
@@ -641,7 +665,7 @@ pub fn prepare<R: ReadAt>(
         static_trust_cache: trust_cache.input(),
         sep_firmware: sep.as_ref().map(Decoded::input),
         boot_manifest: boot_manifest.as_ref().map(Decoded::input),
-        cryptex1_manifest: None,
+        cryptex1_manifest: cryptex1_manifest.as_ref().map(Decoded::input),
         extra_trust_caches: Vec::new(),
         ramdisk: None,
         // The installed volumes hold none: the engine reads the board's flash.

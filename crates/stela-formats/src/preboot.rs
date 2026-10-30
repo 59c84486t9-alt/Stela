@@ -40,6 +40,8 @@ pub const SYSTEM_VERSION: &str = "System/Library/CoreServices/SystemVersion.plis
 /// [`SYSTEM_VERSION`] does not exist: an update of the Cryptex1 replaces it,
 /// so it names the version that runs.
 pub const CRYPTEX_SYSTEM_VERSION: &str = "cryptex1/current/SystemVersion.plist";
+/// Where the volume group keeps its active Cryptex1.
+const CRYPTEX_CURRENT: &str = "cryptex1/current";
 /// A SHA-384 in hexadecimal.
 const BOOT_HASH_CHARACTERS: usize = 96;
 const PEEK_BYTES: usize = 64;
@@ -337,6 +339,48 @@ pub fn local_policies<R: ReadAt>(
     Ok(policies)
 }
 
+/// The one of `names` that is the Cryptex1 ticket personalized for `ecid`,
+/// `apticket.<board>.<ECID>.im4m`.
+fn cryptex1_ticket_name<'a>(
+    mut names: impl Iterator<Item = &'a str>,
+    ecid: u64,
+) -> Option<&'a str> {
+    let suffix = format!(".{ecid:016X}.im4m");
+    names.find(|name| name.starts_with("apticket.") && name.ends_with(&suffix))
+}
+
+/// The machine's personalized Cryptex1 manifest and its path, from the volume
+/// group's `cryptex1/current`; `None` when the group has none.
+pub fn cryptex1_ticket<R: ReadAt>(
+    container: &mut Container<R>,
+    preboot: &Volume,
+    group: &str,
+    ecid: u64,
+) -> Result<Option<(String, Vec<u8>)>> {
+    let path = format!("{group}/{CRYPTEX_CURRENT}");
+    let device = &mut container.device;
+    let Ok(directory) = preboot.lookup(device, &path, true) else {
+        return Ok(None);
+    };
+    let entries = preboot.entries(device, directory.oid)?;
+    let regular = entries
+        .iter()
+        .filter(|entry| entry.kind == FileKind::Regular)
+        .map(|entry| entry.name.as_str());
+    let Some(name) = cryptex1_ticket_name(regular, ecid) else {
+        return Ok(None);
+    };
+    let path = format!("{path}/{name}");
+    let inode = preboot.lookup(device, &path, true)?;
+    if inode.size > LOCAL_POLICY_LIMIT {
+        return Err(PrebootError::Object(format!(
+            "{path} is larger than a manifest"
+        )));
+    }
+    let bytes = preboot.read(device, &inode)?;
+    Ok(Some((path, bytes)))
+}
+
 /// The name of the snapshot a sealed System volume roots from: iBoot builds
 /// it from the root hash, in uppercase hexadecimal (26A434 J473 0x3582c).
 /// `root_hash` is that hash in hexadecimal.
@@ -424,6 +468,21 @@ mod tests {
         );
         assert_eq!(active_text(&hash.as_bytes()[..94]), None);
         assert_eq!(active_text(&[0xff; 96]), None);
+    }
+
+    #[test]
+    fn the_cryptex1_ticket_is_the_one_personalized_for_the_machine() {
+        let names = [
+            "apticket.j473dev.im4m",
+            "apticket.j473dev.DA7FA23C25CEFC4E.im4m",
+            "apticket.j473dev.0000000000000001.im4m",
+            "os.dmg",
+        ];
+        assert_eq!(
+            cryptex1_ticket_name(names.into_iter(), 0xfedc_ba98_7654_3210),
+            Some("apticket.j473dev.DA7FA23C25CEFC4E.im4m")
+        );
+        assert_eq!(cryptex1_ticket_name(names.into_iter(), 2), None);
     }
 
     #[test]
