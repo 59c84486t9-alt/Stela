@@ -48,6 +48,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .host_ticks
             .map(|ticks| budget::Deadline::new(self.host.counter(), ticks));
         self.observe_parallel_source(SourcePhase::SliceEnter);
+        if let Some(hub) = &self.parallel {
+            // The loop's first schedule reads the mail posted meanwhile.
+            hub.set_outside(self.current, false);
+        }
         self.block_limit = if budget.blocks == 0 {
             u64::MAX
         } else {
@@ -62,7 +66,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 || deadline
                     .is_some_and(|deadline| deadline.remaining(self.host.counter()).is_none())
             {
-                self.observe_parallel_source(SourcePhase::SliceExit);
+                self.leave_run_loop();
                 return Stop::Budget;
             }
             let started = self.timing_start();
@@ -75,9 +79,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .and_then(|()| self.step())
                 .or_else(|stop| self.undefined_instead(stop))
             {
-                self.observe_parallel_source(SourcePhase::SliceExit);
+                self.leave_run_loop();
                 return stop;
             }
+        }
+    }
+
+    /// Leave the run loop: other PEs' broadcasts stop waiting for this one
+    /// until it enters again.
+    fn leave_run_loop(&mut self) {
+        self.observe_parallel_source(SourcePhase::SliceExit);
+        if let Some(hub) = &self.parallel {
+            hub.set_outside(self.current, true);
         }
     }
 

@@ -478,6 +478,13 @@ fn maintenance_posted_to_another_pe_completes_at_the_next_dsb() {
     machine.step().unwrap();
     assert!(machine.posted.is_empty());
     assert_eq!(machine.cpu.pc, super::super::tests::BASE + 4);
+    // A PE outside its run loop reads its mail before it runs again: the
+    // completion does not wait for it.
+    machine.post(Maintenance::Code(None));
+    hub.set_outside(1, true);
+    machine.complete_maintenance().unwrap();
+    assert!(machine.posted.is_empty());
+    assert!(hub.take(1).is_some());
 }
 
 #[test]

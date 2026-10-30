@@ -99,6 +99,10 @@ struct Inbox {
     /// A running core reads its mail at its next return to the engine,
     /// which [`Hub::interrupt`] brings forward to its next chained transfer.
     sleeping: AtomicBool,
+    /// Its machine left its run loop, for the host's service or a stop: it
+    /// runs no guest code until it reads its mail again, so a broadcast
+    /// need not wait for it, as for one that sleeps.
+    outside: AtomicBool,
     /// Stable native chaining allocation, kept even between PE owners.
     chain: Arc<chain_control::Storage>,
     /// Unique owner epoch; zero is free and u64::MAX is detaching.
@@ -223,6 +227,7 @@ impl Hub {
                     pending: AtomicBool::new(false),
                     live: AtomicBool::new(false),
                     sleeping: AtomicBool::new(false),
+                    outside: AtomicBool::new(false),
                     chain: chain_control::Storage::new(),
                     owner: AtomicU64::new(0),
                     parked: AtomicBool::new(false),
@@ -423,14 +428,16 @@ impl Hub {
     }
 
     /// Whether every PE in `posted` applied its maintenance, stopped
-    /// reading mail, or sleeps, which it reads before it runs again; the
-    /// others stay in `posted`, interrupted.
+    /// reading mail, or sleeps or is outside its run loop, from which it
+    /// reads its mail before it runs again; the others stay in `posted`,
+    /// interrupted.
     pub(super) fn applied(&self, posted: &mut Vec<(usize, u64)>) -> bool {
         posted.retain(|&(pe, serial)| {
             let inbox = &self.inboxes[pe];
             let done = inbox.applied.load(Ordering::Acquire) >= serial
                 || !inbox.live.load(Ordering::Acquire)
-                || inbox.sleeping.load(Ordering::SeqCst);
+                || inbox.sleeping.load(Ordering::SeqCst)
+                || inbox.outside.load(Ordering::SeqCst);
             if !done {
                 self.interrupt(pe);
             }
@@ -564,6 +571,13 @@ impl Hub {
 
     fn restart_others(&self) {
         self.stopped.store(false, Ordering::Release);
+    }
+
+    /// PE `pe`'s machine leaves its run loop (`true`) or enters it, before
+    /// it next reads its mail: ordered against a broadcast's look at it
+    /// ([`Self::applied`]) as `sleeping` is.
+    pub(super) fn set_outside(&self, pe: usize, outside: bool) {
+        self.inboxes[pe].outside.store(outside, Ordering::SeqCst);
     }
 
     fn set_parked(&self, pe: usize, parked: bool) {
