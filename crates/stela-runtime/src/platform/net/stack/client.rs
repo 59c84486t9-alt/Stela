@@ -121,6 +121,24 @@ impl HttpTransfer {
     }
 }
 
+/// One POST in flight ([`Stack::open_post`]).
+pub struct HttpPost {
+    transfer: HttpTransfer,
+    sent: usize,
+    reply: Zeroizing<Vec<u8>>,
+    response: Option<http::Response>,
+    deadline: u64,
+}
+impl HttpPost {
+    pub fn url(&self) -> &str {
+        self.transfer.url()
+    }
+    /// The body's length.
+    pub fn sent(&self) -> usize {
+        self.sent
+    }
+}
+
 impl<L: Link, C: Clock> Stack<L, C> {
     /// The missing native capability is explicit. A plain initial URL can still
     /// configure/transfer, but redirecting it to HTTPS never falls back to HTTP.
@@ -263,6 +281,64 @@ impl<L: Link, C: Clock> Stack<L, C> {
             self.close_connection(connection);
         }
     }
+    /// Starts a POST of `body` to `url` without waiting; [`Self::read_post`]
+    /// moves it along.
+    pub fn open_post(
+        &mut self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: &[u8],
+        security: Result<Arc<ClientConfig>, TlsUnavailable>,
+    ) -> Result<HttpPost, NetError> {
+        let deadline = self.now()?.saturating_add(POST_WAIT_US);
+        let transfer = self.open_http(
+            url,
+            HttpRequest::post(headers, content_type, body),
+            POST_BUFFER,
+            security,
+        )?;
+        Ok(HttpPost {
+            transfer,
+            sent: body.len(),
+            reply: Zeroizing::new(Vec::new()),
+            response: None,
+            deadline,
+        })
+    }
+
+    /// Without waiting: the response body once the whole response has
+    /// arrived, `None` while it is on its way. A response late past the
+    /// POST's deadline fails.
+    pub fn read_post(&mut self, post: &mut HttpPost) -> Result<Option<Vec<u8>>, NetError> {
+        let HttpPost {
+            transfer,
+            reply,
+            response,
+            ..
+        } = post;
+        if self.read_http(transfer, |bytes, closed| {
+            reply.extend_from_slice(bytes);
+            *response = http::response(reply, closed)?;
+            Ok(response.is_some())
+        })? {
+            return post
+                .response
+                .take()
+                .map(|response| Some(response.body))
+                .ok_or(NetError::Invalid("HTTP POST already answered"));
+        }
+        if self.now()? >= post.deadline {
+            return Err(NetError::Timeout("HTTP request"));
+        }
+        Ok(None)
+    }
+
+    pub fn close_post(&mut self, post: HttpPost) {
+        self.close_http(post.transfer);
+    }
+
+    /// One POST, waiting for its response body.
     pub fn post_url(
         &mut self,
         url: &str,
@@ -271,33 +347,20 @@ impl<L: Link, C: Clock> Stack<L, C> {
         body: &[u8],
         security: Result<Arc<ClientConfig>, TlsUnavailable>,
     ) -> Result<Vec<u8>, NetError> {
-        let deadline = self.now()?.saturating_add(POST_WAIT_US);
-        let mut transfer = self.open_http(
-            url,
-            HttpRequest::post(headers, content_type, body),
-            POST_BUFFER,
-            security,
-        )?;
-        let mut reply = Zeroizing::new(Vec::new());
-        let mut response = None;
-        let result = (|| {
-            loop {
-                match self.read_http(&mut transfer, |bytes, closed| {
-                    reply.extend_from_slice(bytes);
-                    response = http::response(&reply, closed)?;
-                    Ok(response.is_some())
-                }) {
-                    Ok(true) => break Ok(()),
-                    Ok(false) if self.now()? >= deadline => {
-                        break Err(NetError::Timeout("HTTP request"));
+        self.configure()?;
+        let mut post = self.open_post(url, headers, content_type, body, security)?;
+        let result = loop {
+            match self.read_post(&mut post) {
+                Ok(Some(body)) => break Ok(body),
+                Ok(None) => {
+                    if let Err(error) = self.wait_until(post.deadline) {
+                        break Err(error);
                     }
-                    Ok(false) => self.wait_until(deadline)?,
-                    Err(error) => break Err(error),
                 }
+                Err(error) => break Err(error),
             }
-        })();
-        self.close_http(transfer);
-        result?;
-        Ok(response.expect("completed response").body)
+        };
+        self.close_post(post);
+        result
     }
 }

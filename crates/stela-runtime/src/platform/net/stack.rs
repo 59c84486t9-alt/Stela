@@ -1,10 +1,10 @@
 //! The interface: smoltcp over a [`Link`], configured by DHCPv4 and IPv6
-//! autoconfiguration (or an authored fixture), with blocking DNS lookups and HTTP
-//! requests, and non-blocking [`Transfer`]s that several connections can
-//! run at once.
+//! autoconfiguration (or an authored fixture), with non-blocking
+//! [`Transfer`]s that resolve, connect and move bytes as they are driven,
+//! several at once, and blocking HTTP requests built on them.
 mod automatic;
 mod client;
-pub use client::{HttpRequest, HttpTransfer, TlsUnavailable};
+pub use client::{HttpPost, HttpRequest, HttpTransfer, TlsUnavailable};
 mod dad;
 mod rdnss;
 mod tls;
@@ -135,13 +135,68 @@ impl<L: Link> Device for Phy<L> {
     }
 }
 
-/// One TCP connection carrying one request and its response.
+/// One TCP connection carrying one request and its response. It opens
+/// without waiting, as a non-blocking `connect` does: its name resolves and
+/// its connection starts as the transfer is driven.
 pub struct Transfer {
-    socket: SocketHandle,
+    endpoint: Endpoint,
     request: Vec<u8>,
     sent: usize,
     /// When the transfer fails unless something arrives first.
     idle_at: u64,
+}
+
+#[cfg(test)]
+impl Transfer {
+    fn socket(&self) -> SocketHandle {
+        match self.endpoint {
+            Endpoint::Connected(socket) => socket,
+            Endpoint::Resolving(_) => panic!("the transfer is still resolving"),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<L: Link, C: Clock> Stack<L, C> {
+    /// `name`'s address, driving a lookup whose wait for a server or an
+    /// address family is already over.
+    fn resolve_now(&mut self, name: &str) -> Result<IpAddress, NetError> {
+        let mut lookup = Lookup {
+            name: String::from(name),
+            port: 80,
+            buffer: 0,
+            raw: false,
+            query: None,
+            ipv4_only: false,
+            deadline: 0,
+        };
+        loop {
+            if let Some(address) = self.resolve(&mut lookup)? {
+                return Ok(address);
+            }
+            self.poll()?;
+            self.wait_until(lookup.deadline)?;
+        }
+    }
+}
+
+enum Endpoint {
+    Resolving(Lookup),
+    Connected(SocketHandle),
+}
+
+/// A destination whose address is not known yet.
+struct Lookup {
+    name: String,
+    port: u16,
+    buffer: usize,
+    /// An opaque stream, which no idle time ends.
+    raw: bool,
+    query: Option<(dns::QueryHandle, DnsQueryType)>,
+    /// An IPv6 lookup failed, so only IPv4 is asked.
+    ipv4_only: bool,
+    /// When the address family, server or answer being waited for is late.
+    deadline: u64,
 }
 
 pub struct Stack<L: Link, C: Clock> {
@@ -403,105 +458,106 @@ impl<L: Link, C: Clock> Stack<L, C> {
         Ok(self.config.as_ref().unwrap())
     }
 
-    /// The first IPv4 address of `host`, or `host` itself as a literal.
-    /// An address found in the last [`RESOLVED_US`] is used again, and a
-    /// lookup that fails falls back to the last address the name had, so
-    /// one lost reply does not end a long download.
-    fn resolve(&mut self, host: &str) -> Result<IpAddress, NetError> {
-        if let Ok(address) = host.parse() {
-            return Ok(address);
+    /// Advances `lookup` without waiting: its address once known, or `None`
+    /// while it waits for an address family, a DNS server or the answer.
+    /// An address found in the last [`RESOLVED_US`] is used again; IPv6 is
+    /// asked first when it is ready, then IPv4; and a lookup that fails falls
+    /// back to the last address the name had, so one lost reply does not end
+    /// a long download.
+    fn resolve(&mut self, lookup: &mut Lookup) -> Result<Option<IpAddress>, NetError> {
+        if let Ok(address) = lookup.name.parse() {
+            return Ok(Some(address));
         }
         let now = self.now()?;
-        let known = self.resolved.iter().position(|(name, ..)| name == host);
-        if let Some(index) = known
+        let known = self
+            .resolved
+            .iter()
+            .position(|(name, ..)| *name == lookup.name);
+        if lookup.query.is_none()
+            && let Some(index) = known
             && self.address_usable(self.resolved[index].1)
             && now.wrapping_sub(self.resolved[index].2) < RESOLVED_US
         {
-            return Ok(self.resolved[index].1);
+            return Ok(Some(self.resolved[index].1));
         }
-        match (self.lookup(host), known) {
-            (Ok(address), Some(index)) => {
-                self.resolved[index] = (String::from(host), address, now);
-                Ok(address)
-            }
-            (Ok(address), None) => {
-                self.resolved.push((String::from(host), address, now));
-                Ok(address)
-            }
-            (Err(error @ NetError::Clock(_)), _) => Err(error),
-            (Err(error), Some(index)) => {
-                if self.address_usable(self.resolved[index].1) {
-                    Ok(self.resolved[index].1)
-                } else {
-                    Err(error)
+        let failure = match self.lookup(lookup, now) {
+            Ok(Some(address)) => {
+                match known {
+                    Some(index) => self.resolved[index] = (lookup.name.clone(), address, now),
+                    None => self.resolved.push((lookup.name.clone(), address, now)),
                 }
+                return Ok(Some(address));
             }
-            (Err(error), None) => Err(error),
+            Ok(None) => return Ok(None),
+            Err(error @ NetError::Clock(_)) => return Err(error),
+            Err(error) => error,
+        };
+        match known {
+            Some(index) if self.address_usable(self.resolved[index].1) => {
+                Ok(Some(self.resolved[index].1))
+            }
+            _ => Err(failure),
         }
     }
 
-    fn lookup(&mut self, host: &str) -> Result<IpAddress, NetError> {
-        if self.ipv6_ready() {
-            match self.lookup_type(host, DnsQueryType::Aaaa) {
-                Ok(address) => return Ok(address),
-                Err(error @ NetError::Clock(_)) => return Err(error),
-                Err(_) => {}
-            }
-        }
-        if self.config.is_some() {
-            self.lookup_type(host, DnsQueryType::A)
-        } else {
-            Err(NetError::Dns(alloc::format!(
-                "{host}: no reachable address family"
-            )))
-        }
-    }
-    fn lookup_type(&mut self, host: &str, kind: DnsQueryType) -> Result<IpAddress, NetError> {
-        let dns_deadline = self.now()?.saturating_add(DNS_WAIT_US);
-        while self.dns_servers.is_empty() {
-            self.poll()?;
-            if self.now()? >= dns_deadline {
-                return Err(NetError::Dns(String::from(
-                    "no DNS server from DHCPv4 or IPv6 router advertisements",
+    fn lookup(&mut self, lookup: &mut Lookup, now: u64) -> Result<Option<IpAddress>, NetError> {
+        let Some((query, kind)) = lookup.query else {
+            let kind = if !lookup.ipv4_only && self.ipv6_ready() {
+                DnsQueryType::Aaaa
+            } else if self.config.is_some() {
+                DnsQueryType::A
+            } else if now >= lookup.deadline {
+                return Err(NetError::Dns(alloc::format!(
+                    "{}: no reachable address family",
+                    lookup.name
                 )));
-            }
+            } else {
+                return Ok(None);
+            };
             if self.dns_servers.is_empty() {
-                self.wait_until(dns_deadline)?;
+                if now >= lookup.deadline {
+                    return Err(NetError::Dns(String::from(
+                        "no DNS server from DHCPv4 or IPv6 router advertisements",
+                    )));
+                }
+                return Ok(None);
             }
-        }
-        let query = self
-            .sockets
-            .get_mut::<dns::Socket>(self.dns)
-            .start_query(self.iface.context(), host, kind)
-            .map_err(|error| NetError::Dns(alloc::format!("{host}: {error:?}")))?;
-        let deadline = self.now()? + DNS_WAIT_US;
-        loop {
-            self.poll()?;
-            let now = self.now()?;
-            let socket = self.sockets.get_mut::<dns::Socket>(self.dns);
+            let query = self
+                .sockets
+                .get_mut::<dns::Socket>(self.dns)
+                .start_query(self.iface.context(), &lookup.name, kind)
+                .map_err(|error| NetError::Dns(alloc::format!("{}: {error:?}", lookup.name)))?;
+            lookup.query = Some((query, kind));
+            lookup.deadline = now.saturating_add(DNS_WAIT_US);
+            return Ok(None);
+        };
+        let socket = self.sockets.get_mut::<dns::Socket>(self.dns);
+        let failure =
             match socket.get_query_result(query) {
                 Ok(addresses) => {
-                    return addresses
-                        .iter()
-                        .copied()
-                        .next()
-                        .ok_or_else(|| NetError::Dns(alloc::format!("{host}: no address")));
+                    lookup.query = None;
+                    return addresses.iter().copied().next().map(Some).ok_or_else(|| {
+                        NetError::Dns(alloc::format!("{}: no address", lookup.name))
+                    });
                 }
-                Err(dns::GetQueryResultError::Pending) if now < deadline => {
-                    self.wait_until(deadline)?
-                }
+                Err(dns::GetQueryResultError::Pending) if now < lookup.deadline => return Ok(None),
                 Err(dns::GetQueryResultError::Pending) => {
                     socket.cancel_query(query);
-                    return Err(NetError::Timeout("DNS"));
+                    NetError::Timeout("DNS")
                 }
-                Err(error) => return Err(NetError::Dns(alloc::format!("{host}: {error:?}"))),
-            }
+                Err(error) => NetError::Dns(alloc::format!("{}: {error:?}", lookup.name)),
+            };
+        lookup.query = None;
+        if kind == DnsQueryType::Aaaa && self.config.is_some() {
+            lookup.ipv4_only = true;
+            return Ok(None);
         }
+        Err(failure)
     }
 
-    /// Connects to `host` (`name` or `name:port`, port 80 by default) and
-    /// queues `request`, configuring the interface by DHCP first if it has
-    /// no address. `buffer` bounds the receive window.
+    /// Opens a transfer to `host` (`name` or `name:port`, port 80 by
+    /// default) that sends `request` once connected, without waiting.
+    /// `buffer` bounds the receive window.
     pub fn open(
         &mut self,
         host: &str,
@@ -510,28 +566,74 @@ impl<L: Link, C: Clock> Stack<L, C> {
     ) -> Result<Transfer, NetError> {
         let mut request = Zeroizing::new(request);
         let (name, port) = automatic::authority(host)?;
-        if self.config.is_none() && !self.ipv6_ready() {
-            self.automatic()?;
+        self.start(name, port, core::mem::take(&mut *request), buffer, false)
+    }
+
+    fn start(
+        &mut self,
+        name: &str,
+        port: u16,
+        request: Vec<u8>,
+        buffer: usize,
+        raw: bool,
+    ) -> Result<Transfer, NetError> {
+        let mut transfer = Transfer {
+            endpoint: Endpoint::Resolving(Lookup {
+                name: String::from(name),
+                port,
+                buffer,
+                raw,
+                query: None,
+                ipv4_only: false,
+                deadline: 0,
+            }),
+            request,
+            sent: 0,
+            idle_at: u64::MAX,
+        };
+        let started = self.now().and_then(|now| {
+            if let Endpoint::Resolving(lookup) = &mut transfer.endpoint {
+                lookup.deadline = now.saturating_add(DNS_WAIT_US);
+            }
+            self.connect(&mut transfer)
+        });
+        if let Err(error) = started {
+            self.close(transfer);
+            return Err(error);
         }
-        let address = self.resolve(name)?;
+        Ok(transfer)
+    }
+
+    /// The transfer's socket once its address is known and its connection
+    /// has started, starting it if the address just became known.
+    fn connect(&mut self, transfer: &mut Transfer) -> Result<Option<SocketHandle>, NetError> {
+        let lookup = match &mut transfer.endpoint {
+            Endpoint::Connected(socket) => return Ok(Some(*socket)),
+            Endpoint::Resolving(lookup) => lookup,
+        };
+        let Some(address) = self.resolve(lookup)? else {
+            if !lookup.raw {
+                transfer.idle_at = lookup.deadline;
+            }
+            return Ok(None);
+        };
         let mut socket = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0; buffer]),
+            tcp::SocketBuffer::new(vec![0; lookup.buffer]),
             tcp::SocketBuffer::new(vec![0; SEND_BUFFER]),
         );
         socket.set_congestion_control(tcp::CongestionControl::Reno);
-        socket.set_timeout(Some(Duration::from_micros(IDLE_US)));
+        socket.set_timeout((!lookup.raw).then(|| Duration::from_micros(IDLE_US)));
         let local = self.next_port;
         self.next_port = local.checked_add(1).unwrap_or(FIRST_EPHEMERAL);
         socket
-            .connect(self.iface.context(), (address, port), local)
+            .connect(self.iface.context(), (address, lookup.port), local)
             .map_err(|_| NetError::Invalid("TCP connect"))?;
-        let idle_at = self.now()?.saturating_add(IDLE_US);
-        Ok(Transfer {
-            socket: self.sockets.add(socket),
-            request: core::mem::take(&mut *request),
-            sent: 0,
-            idle_at,
-        })
+        if !lookup.raw {
+            transfer.idle_at = self.now()?.saturating_add(IDLE_US);
+        }
+        let socket = self.sockets.add(socket);
+        transfer.endpoint = Endpoint::Connected(socket);
+        Ok(Some(socket))
     }
 
     /// Opens an unframed TCP stream. The caller supplies every application
@@ -542,17 +644,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         if port == 0 {
             return Err(NetError::Invalid("TCP destination port zero"));
         }
-        let destination = if host.parse::<Ipv6Addr>().is_ok() {
-            alloc::format!("[{host}]:{port}")
-        } else {
-            alloc::format!("{host}:{port}")
-        };
-        let mut transfer = self.open(&destination, Vec::new(), buffer)?;
-        self.sockets
-            .get_mut::<tcp::Socket>(transfer.socket)
-            .set_timeout(None);
-        transfer.idle_at = u64::MAX;
-        Ok(transfer)
+        self.start(host, port, Vec::new(), buffer, true)
     }
 
     /// Sends as much of one caller-kept raw payload as the stream accepts.
@@ -567,7 +659,10 @@ impl<L: Link, C: Clock> Stack<L, C> {
             return Ok(0);
         }
         let now = self.now()?;
-        let socket = self.sockets.get_mut::<tcp::Socket>(transfer.socket);
+        let Some(socket) = self.connect(transfer)? else {
+            return Ok(0);
+        };
+        let socket = self.sockets.get_mut::<tcp::Socket>(socket);
         if socket.can_send() {
             let sent = socket.send_slice(bytes).map_err(|_| NetError::Reset)?;
             if sent != 0 {
@@ -604,7 +699,10 @@ impl<L: Link, C: Clock> Stack<L, C> {
     ) -> Result<bool, NetError> {
         self.poll()?;
         let now = self.now()?;
-        let socket = self.sockets.get_mut::<tcp::Socket>(transfer.socket);
+        let Some(socket) = self.connect(transfer)? else {
+            return self.waiting(transfer, now);
+        };
+        let socket = self.sockets.get_mut::<tcp::Socket>(socket);
         if socket.can_send() && transfer.sent < transfer.request.len() {
             transfer.sent += socket
                 .send_slice(&transfer.request[transfer.sent..])
@@ -644,13 +742,35 @@ impl<L: Link, C: Clock> Stack<L, C> {
         Ok(false)
     }
 
-    /// Ends `transfer`, gracefully if it completed, and frees its socket.
+    /// Ends `transfer`, gracefully if it completed, and frees its socket or
+    /// its lookup.
     pub fn close(&mut self, mut transfer: Transfer) {
         transfer.request.zeroize();
-        self.sockets.get_mut::<tcp::Socket>(transfer.socket).abort();
-        // The RST leaves on this poll; its failure loses nothing.
-        let _ = self.poll();
-        self.sockets.remove(transfer.socket);
+        match transfer.endpoint {
+            Endpoint::Connected(socket) => {
+                self.sockets.get_mut::<tcp::Socket>(socket).abort();
+                // The RST leaves on this poll; its failure loses nothing.
+                let _ = self.poll();
+                self.sockets.remove(socket);
+            }
+            Endpoint::Resolving(Lookup {
+                query: Some((query, _)),
+                ..
+            }) => self
+                .sockets
+                .get_mut::<dns::Socket>(self.dns)
+                .cancel_query(query),
+            Endpoint::Resolving(_) => {}
+        }
+    }
+
+    /// For a blocking request: configures the interface automatically
+    /// first if it has no address.
+    fn configure(&mut self) -> Result<(), NetError> {
+        if self.config.is_none() && !self.ipv6_ready() {
+            self.automatic()?;
+        }
+        Ok(())
     }
 
     /// Reads `transfer` until `take` says its response is complete.
@@ -683,6 +803,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         content_type: &str,
         body: &[u8],
     ) -> Result<Vec<u8>, NetError> {
+        self.configure()?;
         let request = http::post(host, path, headers, content_type, body)?;
         let transfer = self.open(host, request, POST_BUFFER)?;
         let mut reply = Vec::new();
@@ -712,6 +833,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         end: u64,
         mut body: impl FnMut(&[u8]),
     ) -> Result<u64, NetError> {
+        self.configure()?;
         let request = http::get_range(host, path, start, end, None)?;
         let transfer = self.open(host, request, DOWNLOAD_BUFFER)?;
         let mut ranged = http::Ranged::new(start, end);

@@ -72,7 +72,7 @@ fn lost_clock_aborts_partial_output_and_never_reuses_the_stack() {
         Err(NetError::Clock(reason))
     );
     assert_eq!(
-        stack.sockets.get::<tcp::Socket>(transfer.socket).state(),
+        stack.sockets.get::<tcp::Socket>(transfer.socket()).state(),
         tcp::State::Closed
     );
     let mut called = false;
@@ -195,7 +195,7 @@ fn clock_loss_during_dns_never_selects_a_stale_cached_address() {
         .push((String::from("cdn.example"), SERVER_IP.into(), 0));
     clock.inner.0.set(RESOLVED_US + 1);
     assert_eq!(
-        stack.resolve("cdn.example"),
+        stack.resolve_now("cdn.example"),
         Err(NetError::Clock(ClockError::Native(
             stela_drivers::platform::work::WorkError::Closed
         )))

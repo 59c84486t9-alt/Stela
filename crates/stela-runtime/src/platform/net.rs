@@ -16,7 +16,7 @@ pub mod tls;
 
 pub use smoltcp::wire::Ipv4Address as Ipv4;
 pub use stack::{
-    Config, HttpRequest, HttpTransfer, SecureTransfer, Stack, TlsUnavailable, Transfer,
+    Config, HttpPost, HttpRequest, HttpTransfer, SecureTransfer, Stack, TlsUnavailable, Transfer,
 };
 
 /// Why a network operation failed.
