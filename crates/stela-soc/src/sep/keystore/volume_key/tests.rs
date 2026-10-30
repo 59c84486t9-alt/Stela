@@ -283,6 +283,44 @@ fn state_operations_check_their_key_and_report_what_is_not_kept() {
     }
 }
 
+#[test]
+fn loading_class_keys_unlocks_the_vek_and_reports_that_none_are_kept() {
+    let (mut keys, _) = keys(1);
+    let (system, _) = new_vek(&mut keys, &[], &[]);
+    let kek = new_kek(&mut keys, b"secret");
+    let (user, _) = new_vek(&mut keys, b"secret", &kek);
+    let load = |keys: &mut VolumeKeys, value: u64, blobs: [&[u8]; 3], notes: &mut Vec<String>| {
+        let request = Request::new()
+            .word(LOAD_CLASS_KEYS)
+            .lword(value)
+            .blob(blobs[0])
+            .blob(blobs[1])
+            .blob(blobs[2]);
+        send(keys, SET_PROTECTION, 0, request, notes)
+    };
+    let mut notes = Vec::new();
+    for (value, blobs) in [
+        (0, [&[][..], &[], &system]),
+        (SEALED_SYSTEM, [&[], &[], &system]),
+        (0, [b"secret", &kek, &user]),
+    ] {
+        let reply = load(&mut keys, value, blobs, &mut notes).unwrap();
+        assert_eq!(reply, 0u32.to_le_bytes());
+    }
+    assert_eq!(notes, [UNKEPT_CLASS_KEYS]);
+    // The wrong secret, a user VEK without its KEK, another machine's VEK
+    // or another u64 bit refuses.
+    for (value, blobs) in [
+        (0, [&b"wrong"[..], &kek, &user]),
+        (0, [&[], &[], &user]),
+        (1, [&[], &[], &system]),
+    ] {
+        assert!(load(&mut keys, value, blobs, &mut notes).is_err());
+    }
+    let (mut other, _) = self::keys(2);
+    assert!(load(&mut other, 0, [&[], &[], &system], &mut notes).is_err());
+}
+
 fn send_media(keys: &mut VolumeKeys, command: u8, request: Request) -> Result<Vec<u8>> {
     // Media requests start with u64 1, not a handle and parameters.
     let mut fields_request = Request::default().lword(1);

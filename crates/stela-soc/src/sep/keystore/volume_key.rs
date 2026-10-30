@@ -27,7 +27,14 @@
 //!   updated wrapped KEK record with 22 and the KEK second (0x4820924),
 //!   retains an unlock record's state with 15 and releases it with 11, the
 //!   KEK second (`apfs_keybag_aks_retain_unlock_record_for_volumes_group`
-//!   0x481fa6c, 0x481fb80).
+//!   0x481fa6c, 0x481fb80). It loads a volume's class keys with 18
+//!   (`apfs_keybag_load_class_keys` 0x481e864, call 0x481ea44): the secret
+//!   and its wrapped KEK (the volume keybag's tag 3 unlock record) first and
+//!   second, both empty for a system-enabled VEK, and the wrapped VEK (the
+//!   container keybag's tag 2) third. The u64 is 0, or bit 2 when the
+//!   volume is a group's Data volume whose System volume is sealed (bit 5,
+//!   `APFS_INCOMPAT_SEALED_VOLUME`, of its incompatible features, shifted
+//!   right by 3). The call passes no output.
 //! - GET_BLOB_STATE 0x48 (0x2d471f0): handle, parameters, wrapped VEK -> a
 //!   DER dictionary `_decode_fv_blob_state` (0x2d5f8ec) reads: `kt` type,
 //!   `kid` and `id` (16-byte octet strings), `f` flags, `kv` version, `sr`
@@ -49,7 +56,10 @@
 //! The keybag handle and parameters do not change these keys; they are not
 //! interpreted. Commits keep no record against replaying an older wrapped
 //! key and retained unlock records do not outlive the sepOS start; each
-//! checks its key and reports that once. Dropping a VEK's or an unlock
+//! checks its key and reports that once. Loading class keys opens the VEK
+//! as an unwrap does, which checks the secret and KEK, and keeps no class
+//! keys, as no command takes per-file keys; the sealed-System bit is not
+//! interpreted. It reports both once. Dropping a VEK's or an unlock
 //! record's state releases nothing, as none is held. Other protection
 //! operations, the remaining `fv` commands and other types refuse.
 //! [`media`] serves the container media keys under the same root and
@@ -82,7 +92,10 @@ const RELEASE_UNLOCK_RECORD: u32 = 11;
 const COMMIT: u32 = 5;
 const REMOVE_VEK_STATE: u32 = 6;
 const RETAIN_UNLOCK_RECORD: u32 = 15;
+const LOAD_CLASS_KEYS: u32 = 18;
 const COMMIT_KEK: u32 = 22;
+/// LOAD_CLASS_KEYS's u64: the volume group's System volume is sealed.
+const SEALED_SYSTEM: u64 = 1 << 2;
 /// The inline key's `cpx` flags: `CP_RAW_KEY_WRAPPEDKEY`.
 const SEP_WRAPPED: u32 = 1;
 /// Blob-state flags.
@@ -111,6 +124,7 @@ const UNINTERPRETED: &str = "SEP volume keys: keybag handle and parameters are n
 const UNRECORDED_COMMIT: &str =
     "SEP volume keys: commit keeps no anti-replay record of superseded wrapped keys";
 const UNRETAINED: &str = "SEP volume keys: retained unlock records do not outlive the sepOS start";
+const UNKEPT_CLASS_KEYS: &str = "SEP volume keys: loading class keys checks the VEK and keeps no      class keys, as no command takes per-file keys; the sealed-System bit is not interpreted";
 
 mod media;
 
@@ -256,6 +270,10 @@ impl VolumeKeys {
                     }
                     RELEASE_UNLOCK_RECORD if kek_only => {
                         kek_uuid(second)?;
+                    }
+                    LOAD_CLASS_KEYS if value & !SEALED_SYSTEM == 0 => {
+                        self.open_vek(third, first, second)?;
+                        self.report(UNKEPT_CLASS_KEYS, notes);
                     }
                     _ => {
                         notes(alloc::format!(
