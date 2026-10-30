@@ -3,6 +3,7 @@
 //! The platform supplies owned OSL services. There is no implicit identity map,
 //! interrupt routing, EC driver, scheduler, allocator, or permissive I/O fallback.
 //! See [`Services`] and `acpi/README.md` before installing a provider.
+mod io_window;
 pub mod resources;
 use alloc::{boxed::Box, ffi::CString, string::String, sync::Arc, vec::Vec};
 use core::{
@@ -12,6 +13,7 @@ use core::{
     ptr,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+pub use io_window::IoWindow;
 
 pub type Status = u32;
 pub type Interrupt = unsafe extern "C" fn(*mut c_void) -> u32;

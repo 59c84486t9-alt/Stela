@@ -53,7 +53,8 @@ impl fmt::Display for ServiceError {
 /// A mount that supplies the ACPI namespace also grants `probe` port I/O to
 /// the i8042 at ports 0x60 and 0x64 when the namespace lists one, with IRQ1
 /// and IRQ12 masked at every interrupt controller and no other user of
-/// those ports.
+/// those ports, and to the I/O window (BAR 4) of each Intel i801 SMBus host
+/// it claims, with no other user than the AML its arbitration hands it to.
 pub unsafe trait NativeServices {
     /// Claim the function at `address` as a stopped requester through an owned
     /// mapping of its configuration space.

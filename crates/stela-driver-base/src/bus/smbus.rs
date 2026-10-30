@@ -153,6 +153,9 @@ pub enum ErrorKind {
     /// The controller was busy before this driver started a transaction;
     /// another owner's operation is never killed to acquire the bus.
     Busy,
+    /// ACPI AML accessed the host's registers, so firmware owns the host from
+    /// then on, as Linux's i801 then inhibits its own access.
+    FirmwareOwned,
     StatusStuck,
     BufferModeRejected,
     /// Controller DEV_ERR: NACK, invalid command or communication timeout.

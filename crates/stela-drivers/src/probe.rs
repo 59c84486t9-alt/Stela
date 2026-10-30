@@ -34,6 +34,8 @@ pub mod native;
 #[cfg(any(test, feature = "native-acpi"))]
 mod platform;
 pub mod services;
+#[cfg(feature = "native-acpi")]
+pub mod smbus;
 use crate::net::wifi::network::Network;
 pub use services::{NativeServices, ServiceError};
 
@@ -118,6 +120,7 @@ pub enum PlatformError {
     EcDiscovery(crate::platform::ec::discovery::native::DiscoveryError),
     #[cfg(feature = "native-acpi")]
     Battery(crate::platform::battery::Error),
+    Smbus(crate::bus::smbus::Error),
     /// Finding a device or evaluating its method failed.
     #[cfg(feature = "native-acpi")]
     AcpiMethod(crate::platform::acpi::Error),
@@ -146,6 +149,7 @@ impl fmt::Display for PlatformError {
             Self::EcDiscovery(error) => write!(f, "embedded controller description: {error:?}"),
             #[cfg(feature = "native-acpi")]
             Self::Battery(error) => write!(f, "battery: {error:?}"),
+            Self::Smbus(error) => error.fmt(f),
             #[cfg(feature = "native-acpi")]
             Self::AcpiMethod(error) => write!(f, "ACPI method: {error:?}"),
         }
@@ -348,6 +352,9 @@ fn unsupported(class: [u8; 3]) -> Option<&'static str> {
             Some("USB host controller other than xHCI (taken from firmware, not driven)")
         }
         [0x0c, 0x0a, _] => Some("USB4/Thunderbolt host (not attached yet)"),
+        [0x0c, 0x05, _] => Some(
+            "SMBus host other than an Intel i801 under native ACPI (no Host Notify for touchpad companions)",
+        ),
         [0x08, 0x05, _] => Some("SD host controller without standard SDHCI interface"),
         [0x0d, 0x11, _] => Some("PCIe Bluetooth controller other than Intel's"),
         _ => None,
@@ -425,6 +432,9 @@ pub struct Devices {
     /// The batteries, AC adapter and lid the ACPI namespace lists.
     #[cfg(feature = "native-acpi")]
     pub power: Power,
+    /// Intel i801 SMBus hosts, shared with the touchpad companions on them.
+    #[cfg(feature = "native-acpi")]
+    pub smbus_hosts: Vec<smbus::Host>,
     /// ECAM windows that were not mapped, and so not scanned.
     pub unmapped: Vec<EcamWindow>,
     /// Whether the mount supplied [`NativeServices`]. Drivers that attach
@@ -752,6 +762,10 @@ pub unsafe fn probe_with_provider(
     let mut mehlow = false;
     // Each PCI bridge and its secondary bus, for ACPI companion lookups.
     let mut bridges = Vec::new();
+    // i801 SMBus hosts, attached under ACPI arbitration once the embedded
+    // controller is.
+    #[cfg(feature = "native-acpi")]
+    let mut smbus_functions = Vec::new();
     for window in &handoff.ecam {
         if !handoff.is_mapped(&window.range()) {
             devices.unmapped.push(*window);
@@ -785,6 +799,11 @@ pub unsafe fn probe_with_provider(
                 continue;
             }
             crate::working(&alloc::format!("PCI {address}"));
+            #[cfg(feature = "native-acpi")]
+            if smbus::matches(&function) {
+                smbus_functions.push(address);
+                continue;
+            }
             if let Some(kind) = usb::handoff::Kind::of(function.class) {
                 // SAFETY: the caller owns the machine and no driver has bound
                 // this controller yet, as Linux's early PCI fixup runs.
@@ -1226,6 +1245,15 @@ pub unsafe fn probe_with_provider(
                 PlatformError::Native(error),
             )),
         }
+        for address in core::mem::take(&mut smbus_functions) {
+            // SAFETY: the mount grants each i801's I/O window to probe.
+            match unsafe { smbus::attach(services, session, address, &bridges, handoff.clock) } {
+                Ok(host) => devices.smbus_hosts.push(host),
+                Err(error) => devices
+                    .platform_failures
+                    .push((alloc::format!("{address} SMBus"), error)),
+            }
+        }
         let usb_released = !devices
             .platform_failures
             .iter()
@@ -1233,6 +1261,13 @@ pub unsafe fn probe_with_provider(
         platform::attach_i8042(session, handoff.clock, usb_released, &mut devices);
         i2c::attach(services, session, handoff.clock, &mut devices);
         power::attach_power(session, &mut devices);
+    }
+    #[cfg(feature = "native-acpi")]
+    for address in smbus_functions {
+        devices.platform_failures.push((
+            alloc::format!("{address} SMBus"),
+            PlatformError::Native(ServiceError::Unavailable),
+        ));
     }
     devices
 }
@@ -1264,6 +1299,7 @@ mod tests {
             unsupported([0x08, 0x05, 0x02]),
             Some("SD host controller without standard SDHCI interface")
         );
+        assert!(unsupported([0x0c, 0x05, 0x00]).is_some_and(|why| why.contains("i801")));
         assert_eq!(unsupported([0x06, 0x04, 0x00]), None); // PCI bridge
         assert_eq!(unsupported([0x03, 0x00, 0x00]), None); // display: GPU inventory
     }

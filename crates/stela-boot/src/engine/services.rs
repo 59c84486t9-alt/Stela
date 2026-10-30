@@ -227,7 +227,8 @@ impl<'a> Services<'a> {
 // root reaches; a claimed function is stopped before `from_stopped_pci`
 // checks it. Every domain is the passthrough domain, which is what the
 // requesters have with the remapping units off. The ACPI namespace is
-// offered only with the i8042's interrupts masked.
+// offered only with the i8042's interrupts masked; ring 0 reaches the i8042's
+// and each claimed i801's ports, which nothing else here uses.
 unsafe impl NativeServices for Services<'_> {
     fn embedded_controller(
         &self,
