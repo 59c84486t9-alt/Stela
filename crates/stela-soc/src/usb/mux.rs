@@ -12,6 +12,9 @@ pub const MAX_FRAME: usize = 65536;
 const TX_MTU: usize = 3 * 16384;
 const MAX_STREAMS: usize = 8;
 const MAX_QUEUED: usize = 64;
+/// The transmit queue's bytes: several full segments, so the bus finds the
+/// next ready as it finishes one, as usbmuxd keeps a transfer per packet.
+const MAX_QUEUED_BYTES: usize = 4 * TX_MTU;
 const RX_WINDOW: usize = 65536;
 const MAGIC: u32 = 0xfeed_face;
 const VERSION: u32 = 0;
@@ -164,7 +167,7 @@ impl Mux {
     fn can_emit(&self, bytes: usize) -> bool {
         self.outgoing.len() < MAX_QUEUED
             && bytes <= MAX_FRAME
-            && self.queued_bytes + bytes <= MAX_FRAME
+            && self.queued_bytes + bytes <= MAX_QUEUED_BYTES
     }
     fn emit(&mut self, protocol: u32, payload: &[u8]) -> Result<()> {
         let header = self.header();
@@ -695,7 +698,7 @@ mod tests {
         }
         assert!(mux.open(62078).is_err());
         while mux.emit(CONTROL, b"log").is_ok() {}
-        assert!(mux.queued_bytes <= MAX_FRAME);
+        assert!(mux.queued_bytes <= MAX_QUEUED_BYTES);
         assert!(mux.outgoing.len() <= MAX_QUEUED);
     }
     #[test]
