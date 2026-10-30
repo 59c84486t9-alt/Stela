@@ -352,7 +352,7 @@ pub(super) fn emit_after(
         Operand::I8mm(ref operand) => i8mm::emit(code, operand, target),
         Operand::Sha1(ref operand) => sha1::emit(code, operand, target),
         Operand::Sha256(ref operand) => sha256::emit(code, operand, target),
-        Operand::Sha3(ref operand) => sha3::emit(code, operand),
+        Operand::Sha3(ref operand) => sha3::emit(code, operand, target),
         Operand::Sha512(ref operand) => sha512::emit(code, operand, target),
         Operand::Sm3(ref operand) => sm3::emit(code, operand),
         Operand::Sm4(ref operand) => sm4::emit(code, operand, target),

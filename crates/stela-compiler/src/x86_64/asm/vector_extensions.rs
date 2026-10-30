@@ -43,21 +43,23 @@ pub(crate) fn population_supported(lane_bytes: u8, target: TargetCpu) -> bool {
         && !target.data_independent_timing()
 }
 
-/// EVEX.128 ternary logic needs F and VL. The DIT profile keeps its recipe.
+/// EVEX.128 ternary logic and rotates need F and VL. The DIT profile keeps
+/// its recipe.
 pub(crate) fn merge_supported(target: TargetCpu) -> bool {
     target.supports(TargetCpu::Avx512f)
         && target.supports(TargetCpu::Avx512vl)
         && !target.data_independent_timing()
 }
 
-/// Select each bit from the new destination where mask is set, else from old.
-/// VPTERNLOGD indexes imm8 with destination:old:mask, so this table is 0xe4.
-/// k0 disables opmasking: byte/halfword predicates remain full bitwise masks.
-pub(crate) fn merge(
+/// VPTERNLOGD: each bit of `destination` becomes bit A:B:C of `table`, where
+/// A is the old `destination` bit, B the `second` bit and C the `third`.
+/// k0 disables opmasking.
+pub(crate) fn ternary(
     code: &mut Code,
     destination: u8,
-    old: u8,
-    mask: u8,
+    second: u8,
+    third: impl Into<Rm>,
+    table: u8,
     target: TargetCpu,
 ) -> bool {
     if !merge_supported(target) {
@@ -77,10 +79,56 @@ pub(crate) fn merge(
         },
         0x25,
         destination,
-        old,
-        Rm::Xmm(mask),
+        second,
+        third.into(),
     );
-    asm.data(&[0xe4]);
+    asm.data(&[table]);
+    true
+}
+
+/// Select each bit from the new destination where mask is set, else from old:
+/// table 0xe4 over destination:old:mask.
+pub(crate) fn merge(
+    code: &mut Code,
+    destination: u8,
+    old: u8,
+    mask: u8,
+    target: TargetCpu,
+) -> bool {
+    ternary(code, destination, old, Rm::Xmm(mask), 0xe4, target)
+}
+
+/// VPRORQ: rotate each quadword of `source` right by `rotation` into
+/// `destination`.
+pub(crate) fn rotate_qwords_right(
+    code: &mut Code,
+    destination: u8,
+    source: u8,
+    rotation: u8,
+    target: TargetCpu,
+) -> bool {
+    if !merge_supported(target) {
+        return false;
+    }
+    let mut asm = code.asm();
+    // EVEX.vvvv names the destination; ModRM.reg is the /0 extension.
+    asm.evex(
+        Evex {
+            map: Map::M0f,
+            pp: Pp::P66,
+            w: true,
+            length: 0,
+            mask: 0,
+            zeroing: false,
+            broadcast: false,
+            scale: 16,
+        },
+        0x72,
+        0,
+        destination,
+        Rm::Xmm(source),
+    );
+    asm.data(&[rotation % 64]);
     true
 }
 
