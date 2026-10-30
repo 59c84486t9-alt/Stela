@@ -50,6 +50,7 @@
 //! undoing an interrupted one. Every path takes `--dry-run`. A `stela.efi`
 //! whose mount interface (`stela_loader::mount_interface`) differs from this
 //! `stela`'s is refused.
+mod addresses;
 mod assets;
 mod bundle;
 mod command;
@@ -225,6 +226,11 @@ struct Request {
     no_wifi: bool,
     /// `--wifi`'s passphrase, once read or typed.
     wifi_passphrase: Option<String>,
+    ipv4: Option<stela_boot_core::options::StaticIpv4>,
+    ipv4_gateway: Option<std::net::Ipv4Addr>,
+    dns: Option<Vec<std::net::IpAddr>>,
+    automatic_ipv4: bool,
+    automatic_dns: bool,
 }
 
 #[derive(Args)]

@@ -354,6 +354,10 @@ pub struct Run {
     /// Requires system mode, such as --scenario system-kernel.
     #[arg(long, requires = "network_adapter", conflicts_with = "network_check")]
     network_self_check: bool,
+    /// Give the mount its LAN address by hand instead of from the peer's
+    /// DHCP: adds `--ipv4 10.0.2.15/24 --ipv4-gateway 10.0.2.2 --dns 10.0.2.2`.
+    #[arg(long, requires = "network_adapter")]
+    static_ipv4: bool,
     /// Give the guest its USB Ethernet adapter: a second `virtio-net-pci`
     /// on a LAN peer of its own (logged to `guest-network.log`), which the
     /// mount bridges to the guest's CDC-ECM adapter: adds `--guest-network`.
@@ -698,6 +702,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     storage::usb_options(&arguments, &mut options)?;
     if arguments.guest_network {
         options.push_str(" --guest-network");
+    }
+    if arguments.static_ipv4 {
+        options.push_str(" --ipv4 10.0.2.15/24 --ipv4-gateway 10.0.2.2 --dns 10.0.2.2");
     }
     if arguments.verify_on_read {
         options.push_str(" --verify-on-read");

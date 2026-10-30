@@ -54,6 +54,12 @@ pub enum Error {
     DuplicateWifiKey,
     WifiCountry,
     DuplicateWifiCountry,
+    Ipv4,
+    DuplicateIpv4,
+    Ipv4Gateway,
+    DuplicateIpv4Gateway,
+    Dns,
+    DuplicateDns,
     DuplicateAudioCheck,
     MissingAudioMode,
     MissingNetworkUrl,
@@ -110,6 +116,7 @@ pub enum Constraint {
     RestoreConfiguration,
     UnexpectedRestoreInputs,
     WifiDependency,
+    Ipv4Gateway,
     InstallSourceDependency,
     InstallConfiguration,
     UpdateDependency,
@@ -163,6 +170,12 @@ impl Error {
             Self::DuplicateWifiKey => "duplicate --wifi-key",
             Self::WifiCountry => "--wifi-country needs a two-letter country",
             Self::DuplicateWifiCountry => "duplicate --wifi-country",
+            Self::Ipv4 => "--ipv4 needs a host ADDRESS/PREFIX, such as 192.168.1.20/24",
+            Self::DuplicateIpv4 => "duplicate --ipv4",
+            Self::Ipv4Gateway => "--ipv4-gateway needs an IPv4 address",
+            Self::DuplicateIpv4Gateway => "duplicate --ipv4-gateway",
+            Self::Dns => "--dns needs 1 to 3 distinct server addresses separated by commas",
+            Self::DuplicateDns => "duplicate --dns",
             Self::DuplicateAudioCheck => "duplicate audio check",
             Self::MissingAudioMode => "missing audio check mode",
             Self::MissingNetworkUrl => "missing network check URL",
@@ -214,6 +227,7 @@ impl Constraint {
             }
             Self::UnexpectedRestoreInputs => "restore inputs require explicit --restore-study",
             Self::WifiDependency => "--wifi-key and --wifi-country configure a --wifi network",
+            Self::Ipv4Gateway => "--ipv4-gateway needs --ipv4 and another address of its subnet",
             Self::InstallSourceDependency => {
                 "--install-source names the partition of an --install medium"
             }

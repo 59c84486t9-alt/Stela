@@ -159,6 +159,9 @@ pub struct Stack<L: Link, C: Clock> {
     /// Names looked up, their first address and when it was found.
     resolved: Vec<(String, IpAddress, u64)>,
     dns_servers: Vec<IpAddress>,
+    /// DNS servers set by hand, which replace DHCP's and router
+    /// advertisements'.
+    fixed_dns: Option<Vec<IpAddress>>,
     conflicts: Vec<Ipv6Addr>,
     probe_nonce: u64,
 }
@@ -203,6 +206,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
             next_port: FIRST_EPHEMERAL + (seed % 8192) as u16,
             resolved: Vec::new(),
             dns_servers: Vec::new(),
+            fixed_dns: None,
             conflicts: Vec::new(),
             probe_nonce: seed,
         })
@@ -214,6 +218,28 @@ impl<L: Link, C: Clock> Stack<L, C> {
 
     pub fn config(&self) -> Option<&Config> {
         self.config.as_ref()
+    }
+
+    /// Gives the interface `address`/`prefix` and the default router
+    /// `router` by hand instead of by DHCP. IPv6 autoconfiguration goes on.
+    pub fn set_ipv4(
+        &mut self,
+        address: core::net::Ipv4Addr,
+        prefix: u8,
+        router: Option<core::net::Ipv4Addr>,
+    ) -> Result<(), NetError> {
+        self.set_config(Config {
+            address: Ipv4Cidr::new(address, prefix),
+            router,
+            dns: Vec::new(),
+        })
+    }
+
+    /// Resolves names with `servers` in place of DHCP's and router
+    /// advertisements'.
+    pub fn set_dns(&mut self, servers: &[core::net::IpAddr]) -> Result<(), NetError> {
+        self.fixed_dns = Some(servers.iter().map(|&server| server.into()).collect());
+        self.update_dns()
     }
 
     /// Configures the interface by hand instead of by DHCP.

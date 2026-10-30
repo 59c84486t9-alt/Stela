@@ -177,6 +177,30 @@ impl Wifi {
     }
 }
 
+/// The addresses `stela.efi`'s network uses instead of DHCP's.
+#[derive(Args)]
+struct Addressing {
+    /// Give the PC this IPv4 address and prefix length, such as
+    /// 192.168.1.20/24, instead of asking DHCP.
+    #[arg(long, value_name = "ADDRESS/PREFIX", value_parser = super::addresses::ipv4)]
+    ipv4: Option<stela_boot_core::options::StaticIpv4>,
+    /// The IPv4 default router: another address of --ipv4's subnet.
+    #[arg(long, value_name = "ADDRESS", requires = "ipv4")]
+    ipv4_gateway: Option<std::net::Ipv4Addr>,
+    /// Resolve names with these servers (up to 3, comma-separated, IPv4 or
+    /// IPv6) instead of the ones DHCP and the router announce.
+    #[arg(long, value_name = "SERVERS", value_parser = super::addresses::servers)]
+    dns: Option<super::addresses::Servers>,
+}
+
+impl Addressing {
+    fn apply(self, request: &mut Request) {
+        request.ipv4 = self.ipv4;
+        request.ipv4_gateway = self.ipv4_gateway;
+        request.dns = self.dns.map(|servers| servers.0);
+    }
+}
+
 /// An install's machine state.
 #[derive(Args)]
 struct Machine {
@@ -214,6 +238,8 @@ struct Create {
     image: Image,
     #[command(flatten)]
     wifi: Wifi,
+    #[command(flatten)]
+    addressing: Addressing,
     /// Where an install reads the macOS restore image: `offline` copies the
     /// whole IPSW (about 27 GB) onto the USB; TSS still needs network.
     /// `online` writes only its inventory, and `stela.efi` streams
@@ -334,6 +360,7 @@ impl Create {
         };
         self.image.apply(&mut request);
         self.wifi.apply(&mut request);
+        self.addressing.apply(&mut request);
         request
     }
 }
@@ -570,6 +597,14 @@ struct Configure {
     /// Join no Wi-Fi network, and remove the key file.
     #[arg(long, conflicts_with = "wifi")]
     no_wifi: bool,
+    #[command(flatten)]
+    addressing: Addressing,
+    /// Take the IPv4 address and router from DHCP again.
+    #[arg(long, conflicts_with = "ipv4")]
+    automatic_ipv4: bool,
+    /// Take the DNS servers from DHCP and the router again.
+    #[arg(long, conflicts_with = "dns")]
+    automatic_dns: bool,
     /// Show what would change, and change nothing.
     #[arg(long)]
     dry_run: bool,
@@ -586,10 +621,13 @@ impl Configure {
             profile: self.profile,
             no_profile: self.no_profile,
             no_wifi: self.no_wifi,
+            automatic_ipv4: self.automatic_ipv4,
+            automatic_dns: self.automatic_dns,
             dry_run: self.dry_run,
             ..self.usb.request(Action::Configure)
         };
         self.wifi.apply(&mut request);
+        self.addressing.apply(&mut request);
         request
     }
 }

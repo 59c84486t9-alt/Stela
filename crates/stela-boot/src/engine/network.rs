@@ -108,7 +108,12 @@ pub struct HostNetwork {
 impl HostNetwork {
     /// Try each native adapter until DHCPv4 or IPv6 SLAAC provides a usable
     /// address. A failed adapter keeps its diagnostic while the next is tried.
-    pub fn open(links: Links, clock: Clock, handoff: &crate::handoff::Handoff) -> Result<Self> {
+    pub fn open(
+        links: Links,
+        clock: Clock,
+        handoff: &crate::handoff::Handoff,
+        options: &stela_boot_core::options::System,
+    ) -> Result<Self> {
         let security = security::native(handoff);
         match &security {
             Ok(_) => output::arguments(format_args!(
@@ -139,6 +144,16 @@ impl HostNetwork {
                 u64::from_le_bytes(seed),
             )
             .map_err(|error| refuse!("host network stack: {error}", %error))?;
+            if let Some(ipv4) = options.ipv4 {
+                stack
+                    .set_ipv4(ipv4.address, ipv4.prefix, options.ipv4_gateway)
+                    .map_err(|error| refuse!("host network --ipv4 {ipv4}: {error}", %error))?;
+            }
+            if !options.dns.is_empty() {
+                stack
+                    .set_dns(&options.dns)
+                    .map_err(|error| refuse!("host network --dns: {error}", %error))?;
+            }
             match stack.automatic() {
                 Ok(config) => {
                     output::arguments(format_args!(

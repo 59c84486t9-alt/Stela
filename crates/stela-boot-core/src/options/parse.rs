@@ -143,6 +143,26 @@ impl ParseState<'_> {
                     return Err(Error::DuplicateWifiKey);
                 }
             }
+            IPV4 => {
+                let ipv4 = value().and_then(StaticIpv4::parse).ok_or(Error::Ipv4)?;
+                if options.ipv4.replace(ipv4).is_some() {
+                    return Err(Error::DuplicateIpv4);
+                }
+            }
+            IPV4_GATEWAY => {
+                let gateway = value()
+                    .and_then(|word| word.parse().ok())
+                    .ok_or(Error::Ipv4Gateway)?;
+                if options.ipv4_gateway.replace(gateway).is_some() {
+                    return Err(Error::DuplicateIpv4Gateway);
+                }
+            }
+            DNS => {
+                let servers = value().and_then(dns_servers).ok_or(Error::Dns)?;
+                if !core::mem::replace(&mut options.dns, servers).is_empty() {
+                    return Err(Error::DuplicateDns);
+                }
+            }
             WIFI_COUNTRY => {
                 let code = value().ok_or(Error::WifiCountry)?;
                 if code.len() != 2 || !code.bytes().all(|byte| byte.is_ascii_alphabetic()) {

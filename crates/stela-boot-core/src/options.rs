@@ -39,6 +39,11 @@ pub const WIFI_COUNTRY: &str = "--wifi-country";
 pub const DEFAULT_WIFI_KEY: &str = "\\EFI\\stela\\wifi.key";
 /// IEEE 802.11 SSIDs are 1 to 32 octets.
 const SSID_BYTES: core::ops::RangeInclusive<usize> = 1..=32;
+pub const IPV4: &str = "--ipv4";
+pub const IPV4_GATEWAY: &str = "--ipv4-gateway";
+pub const DNS: &str = "--dns";
+/// The most `--dns` servers, as glibc's resolver keeps (`MAXNS`).
+pub const MAX_DNS_SERVERS: usize = 3;
 
 /// The physical cores an explicit `--native-cores` may name.
 pub const MAX_NATIVE_CORES: usize = 64;
@@ -298,6 +303,14 @@ pub struct System {
     /// The ISO 3166-1 alpha-2 regulatory country, uppercase
     /// (`--wifi-country XX`).
     pub wifi_country: Option<String>,
+    /// The mount network's IPv4 address, set by hand instead of by DHCP
+    /// (`--ipv4 ADDRESS/PREFIX`).
+    pub ipv4: Option<StaticIpv4>,
+    /// Its default router (`--ipv4-gateway ADDRESS`).
+    pub ipv4_gateway: Option<core::net::Ipv4Addr>,
+    /// The DNS servers, in place of DHCP's and router advertisements'
+    /// (`--dns SERVER[,SERVER...]`).
+    pub dns: Vec<core::net::IpAddr>,
     /// Advertise and log the SEP services whose contracts are not recovered
     /// (`--sep-observe`), each request refused by name.
     pub sep_observe: bool,
@@ -367,6 +380,9 @@ impl Default for System {
             ssid: None,
             wifi_key: None,
             wifi_country: None,
+            ipv4: None,
+            ipv4_gateway: None,
+            dns: Vec::new(),
             sep_observe: false,
             breakpoints: Vec::new(),
             traces: Vec::new(),
@@ -374,6 +390,79 @@ impl Default for System {
             watches: Vec::new(),
             dumps: Vec::new(),
         }
+    }
+}
+
+/// A host address and its subnet's prefix length (`--ipv4`), written
+/// `ADDRESS/PREFIX`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaticIpv4 {
+    pub address: core::net::Ipv4Addr,
+    pub prefix: u8,
+}
+
+impl StaticIpv4 {
+    /// `ADDRESS/PREFIX` naming a unicast host of its subnet: a prefix of 1
+    /// to 32, and below /31 neither the subnet's network nor its broadcast
+    /// address.
+    pub fn parse(word: &str) -> Option<Self> {
+        let (address, prefix) = word.split_once('/')?;
+        let address: core::net::Ipv4Addr = address.parse().ok()?;
+        let prefix: u8 = prefix
+            .parse()
+            .ok()
+            .filter(|prefix| (1..=32).contains(prefix))?;
+        let ipv4 = Self { address, prefix };
+        let host = u32::from(address) & !ipv4.mask();
+        let usable = !address.is_unspecified()
+            && !address.is_multicast()
+            && !address.is_broadcast()
+            && (prefix >= 31 || (host != 0 && host != !ipv4.mask()));
+        usable.then_some(ipv4)
+    }
+    fn mask(self) -> u32 {
+        u32::MAX
+            .checked_shl(32 - u32::from(self.prefix))
+            .unwrap_or(0)
+    }
+    /// Whether `other` is another host of this subnet.
+    pub fn neighbors(self, other: core::net::Ipv4Addr) -> bool {
+        other != self.address
+            && u32::from(other) & self.mask() == u32::from(self.address) & self.mask()
+    }
+}
+
+impl fmt::Display for StaticIpv4 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.address, self.prefix)
+    }
+}
+
+/// A `--dns` word: 1 to [`MAX_DNS_SERVERS`] distinct addresses, IPv4 or
+/// IPv6, separated by commas.
+pub fn dns_servers(word: &str) -> Option<Vec<core::net::IpAddr>> {
+    let mut servers = Vec::new();
+    for server in word.split(',') {
+        let server: core::net::IpAddr = server.parse().ok()?;
+        if server.is_unspecified() || server.is_multicast() || servers.contains(&server) {
+            return None;
+        }
+        servers.push(server);
+    }
+    (servers.len() <= MAX_DNS_SERVERS).then_some(servers)
+}
+
+struct Servers<'a>(&'a [core::net::IpAddr]);
+
+impl fmt::Display for Servers<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, server) in self.0.iter().enumerate() {
+            if index != 0 {
+                f.write_str(",")?;
+            }
+            write!(f, "{server}")?;
+        }
+        Ok(())
     }
 }
 
@@ -604,6 +693,9 @@ impl fmt::Display for System {
                 .filter(|&path| path != DEFAULT_WIFI_KEY),
         )?;
         line.value(WIFI_COUNTRY, self.wifi_country.as_deref())?;
+        line.value(IPV4, self.ipv4)?;
+        line.value(IPV4_GATEWAY, self.ipv4_gateway)?;
+        line.value(DNS, (!self.dns.is_empty()).then(|| Servers(&self.dns)))?;
         line.flag("--tss", self.tss)?;
         line.flag("--input", self.input)?;
         line.flag("--idle-skip", self.idle_skip)?;

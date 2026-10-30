@@ -273,6 +273,11 @@ fn command(f: &Fixture, usb: &Path) -> Request {
         wifi_country: None,
         no_wifi: false,
         wifi_passphrase: None,
+        ipv4: None,
+        ipv4_gateway: None,
+        dns: None,
+        automatic_ipv4: false,
+        automatic_dns: false,
     }
 }
 
@@ -3141,6 +3146,52 @@ fn separate_state_partition_is_not_converted() {
         );
     }
 }
+#[test]
+fn static_addresses_apply_to_all_boot_choices_until_made_automatic() {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    let mut request = command(&f, &f.esp);
+    request.ipv4 = stela_boot_core::options::StaticIpv4::parse("192.168.1.20/24");
+    request.ipv4_gateway = Some("192.168.1.1".parse().unwrap());
+    request.dns = Some(vec!["1.1.1.1".parse().unwrap()]);
+    let report = setup(&environment(&f.host), request).unwrap();
+    assert!(
+        report.contains("192.168.1.20/24 via 192.168.1.1, not from DHCP"),
+        "{report}"
+    );
+    let options = || fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap();
+    assert!(
+        options().contains("--ipv4 192.168.1.20/24 --ipv4-gateway 192.168.1.1 --dns 1.1.1.1"),
+        "{}",
+        options()
+    );
+    // A router outside the subnet is refused and changes nothing.
+    assert!(
+        rerun(&f, |c| {
+            c.action = Action::Configure;
+            c.ipv4 = stela_boot_core::options::StaticIpv4::parse("10.0.0.5/24");
+            c.ipv4_gateway = Some("10.0.1.1".parse().unwrap());
+        })
+        .is_err()
+    );
+    assert!(
+        options().contains("--ipv4 192.168.1.20/24"),
+        "{}",
+        options()
+    );
+    rerun(&f, |c| {
+        c.action = Action::Configure;
+        c.automatic_ipv4 = true;
+        c.automatic_dns = true;
+    })
+    .unwrap();
+    assert!(
+        !options().contains("--ipv4") && !options().contains("--dns"),
+        "{}",
+        options()
+    );
+}
+
 #[test]
 fn wifi_configuration_applies_to_all_boot_choices() {
     let mut f = fixture(64 * GIB, false);
