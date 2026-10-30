@@ -220,6 +220,10 @@ impl Backend for MockBackend {
     fn invalidate_memory(&mut self, _: Memory, _: u64, _: u64) -> Result<()> {
         Ok(())
     }
+    /// Memory `n` is mapped at `1 << 63 | n << 32`.
+    fn mapped_address(&self, memory: Memory) -> Result<u64> {
+        Ok(1 << 63 | memory.0 << 32)
+    }
     fn copy_to_image(&mut self, _: Image, _: &BufferImageCopy, _: &[u8]) -> Result<()> {
         Ok(())
     }
@@ -404,6 +408,11 @@ pub(crate) const LIBRARY: LibraryId = LibraryId(0);
 
 /// A device of the first chip, holding [`LIBRARY`].
 pub(crate) fn device() -> TestDevice {
+    device_on(MockBackend::new())
+}
+
+/// A device of the first chip over `backend`, holding [`LIBRARY`].
+pub(crate) fn device_on(backend: MockBackend) -> TestDevice {
     let chip: &Chip = &CHIPS[0];
     let platform = chip.platform(crate::gpu::metal::nvidia::Attachment {
         link: PcieLink {
@@ -413,7 +422,7 @@ pub(crate) fn device() -> TestDevice {
         external: false,
         location_number: 0,
     });
-    let mut device = Device::new(MockBackend::new(), MockCompiler::default(), &platform).unwrap();
+    let mut device = Device::new(backend, MockCompiler::default(), &platform).unwrap();
     assert_eq!(device.new_library(fixture(false)), Ok(LIBRARY));
     device
 }

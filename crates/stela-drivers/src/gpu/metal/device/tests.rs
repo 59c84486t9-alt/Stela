@@ -25,7 +25,7 @@ use crate::gpu::metal::{
     },
     heap::HeapDescriptor,
     indirect::{IndirectCommandBufferDescriptor, RecordLayout},
-    nvidia::{CHIPS, Chip, PcieLink},
+    nvidia::{CHIPS, PcieLink},
     pipeline::{
         ColorAttachmentDescriptor, MAX_COLOR_ATTACHMENTS, RenderTargets, TessellationDescriptor,
     },
@@ -43,7 +43,7 @@ use crate::gpu::metal::{
 };
 use alloc::{string::String, vec::Vec};
 
-use super::fixture::{LIBRARY, MockBackend, MockCompiler, TestDevice, device};
+use super::fixture::{LIBRARY, MockBackend, MockCompiler, TestDevice, device, device_on};
 use crate::gpu::metal::library::tests::fixture;
 
 fn options(storage_mode: StorageMode) -> ResourceOptions {
@@ -1000,16 +1000,7 @@ fn render_pipelines_compile_their_functions_once() {
 fn managed_textures_keep_a_cpu_copy_without_host_image_copy() {
     let mut backend = MockBackend::new();
     backend.physical.as_mut().unwrap().features.host_image_copy = false;
-    let chip: &Chip = &CHIPS[0];
-    let platform = chip.platform(crate::gpu::metal::nvidia::Attachment {
-        link: PcieLink {
-            speed: 4,
-            width: 16,
-        },
-        external: false,
-        location_number: 0,
-    });
-    let mut device = Device::new(backend, MockCompiler::default(), &platform).unwrap();
+    let mut device = device_on(backend);
     let descriptor = TextureDescriptor {
         width: 8,
         height: 4,

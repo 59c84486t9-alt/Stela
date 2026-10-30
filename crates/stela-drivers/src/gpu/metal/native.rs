@@ -1007,6 +1007,10 @@ impl Backend for NativeBackend {
         unsafe { self.device.invalidate_mapped_memory_ranges(&[range]) }.map_err(failure)
     }
 
+    fn mapped_address(&self, memory: Memory) -> Result<u64> {
+        Ok(self.mapping(memory, 0, 0)?.pointer.as_ptr() as u64)
+    }
+
     fn copy_to_image(
         &mut self,
         image: Image,

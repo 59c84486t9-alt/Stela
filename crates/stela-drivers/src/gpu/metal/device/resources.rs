@@ -37,6 +37,14 @@ const TEXEL_BUFFER_ARRAYS: [HeapArray; 2] = [
     HeapArray::StorageTexelBuffers,
 ];
 
+/// `allocatedSize` and `heapOffset` of a buffer or texture: zero for those
+/// sharing another resource's memory or mapping sparse pages.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Placement {
+    pub allocated_size: u64,
+    pub heap_offset: u64,
+}
+
 /// Where a resource's memory came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Backing {
@@ -54,6 +62,22 @@ enum Backing {
     Buffer(BufferId),
     /// Maps pages of a sparse heap.
     Sparse(HeapId),
+}
+
+impl Backing {
+    fn placement(self) -> Placement {
+        match self {
+            Self::Owned(bytes) => Placement {
+                allocated_size: bytes,
+                heap_offset: 0,
+            },
+            Self::Heap { offset, size, .. } => Placement {
+                allocated_size: size,
+                heap_offset: offset,
+            },
+            Self::Buffer(_) | Self::Sparse(_) => Placement::default(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -173,7 +197,25 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         })
     }
 
-    /// The memory behind a buffer's `contents`, for the platform to map.
+    /// `contents`: where the CPU reaches the buffer, or zero for a private
+    /// buffer.
+    pub fn buffer_contents(&self, id: BufferId) -> Result<u64> {
+        let buffer = self.resources.buffers.get(id.0)?;
+        if buffer.options.storage_mode == StorageMode::Private {
+            return Ok(0);
+        }
+        Ok(self.backend.mapped_address(buffer.memory)? + buffer.memory_offset)
+    }
+
+    pub fn buffer_placement(&self, id: BufferId) -> Result<Placement> {
+        Ok(self.resources.buffers.get(id.0)?.backing.placement())
+    }
+
+    pub fn texture_placement(&self, id: TextureId) -> Result<Placement> {
+        Ok(self.resources.textures.get(id.0)?.backing.placement())
+    }
+
+    /// The mapped memory behind a buffer: its memory, offset and length.
     pub fn buffer_memory(&self, id: BufferId) -> Result<(Memory, u64, u64)> {
         let buffer = self.resources.buffers.get(id.0)?;
         ensure(

@@ -163,6 +163,9 @@ pub trait Backend {
     fn flush_memory(&mut self, memory: Memory, offset: u64, size: u64) -> Result<()>;
     /// `vkInvalidateMappedMemoryRanges` before CPU reads.
     fn invalidate_memory(&mut self, memory: Memory, offset: u64, size: u64) -> Result<()>;
+    /// Where mapped `memory` starts in the process, which the guest's
+    /// threads share with the backend.
+    fn mapped_address(&self, memory: Memory) -> Result<u64>;
     /// `vkCopyMemoryToImage` of tightly packed rows into one subresource
     /// region (`hostImageCopy`).
     fn copy_to_image(
