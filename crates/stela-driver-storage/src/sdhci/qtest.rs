@@ -2,7 +2,7 @@
 //! card image; no guest CPU or operating system is executed by this fixture.
 extern crate std;
 use super::*;
-use crate::bus::dma::RegionAllocator;
+use crate::bus::dma::TestRegion;
 use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
@@ -187,10 +187,7 @@ fn real_paused_qemu_sd_card_runs_native_initialization_pio_and_durable_io() {
         .borrow_mut()
         .read("readl", u64::from(base) + CAPABILITIES as u64);
     assert_eq!(actual_capabilities, 0x01206480);
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: PIO profile never lets QEMU DMA into this native fixture RAM.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let mut host = Host::new(
         Box::new(Port {
             wire: wire.clone(),

@@ -57,7 +57,7 @@ fn h_phy_adc_bias_sentinel_rlen_and_masks_use_calibration_values() {
 
 #[test]
 fn h_mac_saw_count_timer_masks_and_ephy_complete_before_dma() {
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     for saw in [0, 1, 1000, 0x3fff] {
         let time = Time::default();
         let model = Model::modern(&time);
@@ -121,10 +121,7 @@ fn h_mac_saw_count_timer_masks_and_ephy_complete_before_dma() {
                     .any(|(r, _, _)| matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW))
             );
         }
-        let mut backing = vec![0u64; 200_000];
-        let base = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives descriptor access and has no other accesses.
-        let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+        let mut dma = TestRegion::new(200_000 * 8);
         let mut rx = Ring::new(&mut dma, true).unwrap();
         let mut tx = Ring::new(&mut dma, true).unwrap();
         rx.initialize(true);

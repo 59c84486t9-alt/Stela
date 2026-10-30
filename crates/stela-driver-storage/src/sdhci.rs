@@ -1079,7 +1079,7 @@ fn generation_from(counter: &AtomicU64) -> Result<u64, BlockError> {
 #[cfg(test)]
 mod owned_tests {
     use super::{model::*, *};
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
 
     fn o2_slot(chip: &Rc<RefCell<O2Chip>>, kind: Kind, present: bool) -> Rc<RefCell<Hardware>> {
         let slot = Rc::new(RefCell::new(Hardware::new(kind, true)));
@@ -1116,11 +1116,7 @@ mod owned_tests {
     fn o2_owned_config_drives_pll_pio_empty_insertion_and_power_cycles() {
         for device in [0x8220, 0x8221, 0x8320, 0x8321] {
             for kind in [Kind::Sd, Kind::Mmc] {
-                let mut backing = vec![0u64; 128 * 1024];
-                let start = backing.as_mut_ptr() as u64;
-                // SAFETY: the controller owns every physical buffer in this fixture.
-                let mut dma =
-                    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                let mut dma = TestRegion::new(128 * 1024 * 8);
                 let chip = Rc::new(RefCell::new(O2Chip::new(device)));
                 let slot = o2_slot(&chip, kind, false);
                 let control = Controller::model(
@@ -1198,10 +1194,7 @@ mod owned_tests {
             assert!(control.borrow_mut().prepare().is_err());
             assert_eq!((chip.borrow().reads, chip.borrow().writes.len()), before);
         }
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: both slot engines keep disjoint DMA allocations even on PCI faults.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let chip = Rc::new(RefCell::new(O2Chip::new(0x8320)));
         let slot0 = o2_slot(&chip, Kind::Sd, true);
         let slot1 = o2_slot(&chip, Kind::Sd, true);
@@ -1243,10 +1236,7 @@ mod owned_tests {
 
     #[test]
     fn o2_first_slot_config_fault_refuses_second_constructor_before_mmio_or_allocation() {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: the failed first constructor cannot publish or recycle these buffers.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let chip = Rc::new(RefCell::new(O2Chip::new(0x8320)));
         let slot0 = o2_slot(&chip, Kind::Sd, true);
         let slot1 = o2_slot(&chip, Kind::Sd, true);
@@ -1286,10 +1276,7 @@ mod owned_tests {
     #[test]
     fn o2_failed_pll_or_card_detect_proof_cleans_force_active_and_refuses_publication() {
         for pll in [false, true] {
-            let mut backing = vec![0u64; 128 * 1024];
-            let start = backing.as_mut_ptr() as u64;
-            // SAFETY: failed clock proof cannot publish or recycle its payloads.
-            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let mut dma = TestRegion::new(128 * 1024 * 8);
             let chip = Rc::new(RefCell::new(O2Chip::new(0x8221)));
             let slot = o2_slot(&chip, Kind::Sd, false);
             let control = Controller::model(Box::new(O2ConfigPort(chip.clone())), 0x8221_1217);

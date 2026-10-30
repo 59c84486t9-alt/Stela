@@ -5,10 +5,7 @@ use super::*;
 fn generic_four_pin_mmc_hs_validates_width_at_hs_clock_and_selects_low_power_nibble() {
     for card_type in [1, 3] {
         for pio in [false, true] {
-            let mut backing = vec![0u64; 128 * 1024];
-            let start = backing.as_mut_ptr() as u64;
-            // SAFETY: backing outlives every controller/card and its DMA aliases.
-            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let mut dma = TestRegion::new(128 * 1024 * 8);
             let (mut host, model) = host(&mut dma, Kind::Mmc, true, pio);
             {
                 let mut hardware = model.borrow_mut();

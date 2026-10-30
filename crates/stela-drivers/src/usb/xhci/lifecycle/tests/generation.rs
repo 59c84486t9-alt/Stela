@@ -3,7 +3,7 @@
 //! issue identities for identical hardware slot numbers; trap all MMIO
 //! when an original topology owner is presented to the replacement generation.
 use super::super::*;
-use crate::bus::dma::RegionAllocator;
+use crate::bus::dma::{RegionAllocator, TestRegion};
 use alloc::collections::BTreeMap;
 
 // Match the PORTSC link handshake used by suspend's existing model.
@@ -153,10 +153,7 @@ fn trapped(controller: &Shared, operation: impl FnOnce()) {
 
 #[test]
 fn a_root_over_current_change_repowers_the_ports_like_port_event() {
-    let mut memory = vec![0u64; 512 * 1024];
-    let start = memory.as_mut_ptr() as u64;
-    // SAFETY: all hardware DMA allocations remain live through the host.
-    let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+    let mut dma = TestRegion::new(512 * 1024 * 8);
     let (mut host, _shared, hardware) = fixture(&mut dma, HIGH_SPEED);
     let firmware = crate::firmware::HandoffProvider::new(None);
     assert!(host.poll(&mut dma, &firmware).removed.is_empty());
@@ -172,10 +169,7 @@ fn a_root_over_current_change_repowers_the_ports_like_port_event() {
 
 #[test]
 fn a_dead_host_controller_disconnects_every_device_like_usb_hc_died() {
-    let mut memory = vec![0u64; 512 * 1024];
-    let start = memory.as_mut_ptr() as u64;
-    // SAFETY: all hardware DMA allocations remain live through the host.
-    let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+    let mut dma = TestRegion::new(512 * 1024 * 8);
     let (mut host, shared, _) = fixture(&mut dma, HIGH_SPEED);
     let firmware = crate::firmware::HandoffProvider::new(None);
     assert!(host.poll(&mut dma, &firmware).removed.is_empty());
@@ -446,10 +440,7 @@ fn acknowledged_nested_retirement_preserves_seals_and_current_until_physical_res
                 (1, hub::model::Node::hub(speed, 1)),
                 (0x11, leaf),
             ]);
-            let mut memory = vec![0u64; 1024 * 1024];
-            let start = memory.as_mut_ptr() as u64;
-            // SAFETY: every original context, ring and status buffer keeps RAM.
-            let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+            let mut dma = TestRegion::new(1024 * 1024 * 8);
             let (mut controller, hardware) = hub::tests::controller(&mut dma, context, nodes);
             let mut failures = Vec::new();
             let devices = controller.enumerate(&mut dma, &mut failures);

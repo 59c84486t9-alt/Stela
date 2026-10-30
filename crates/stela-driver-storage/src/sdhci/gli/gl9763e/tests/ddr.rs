@@ -4,10 +4,7 @@ use super::*;
 #[test]
 fn native_ddr52_uses_sampling_pads_power_class_and_changed_pio_or_adma_payloads() {
     for vcc180 in [false, true] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: the descriptor/payload ranges outlive every host/card alias.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut owner, card, state) = owner();
         initialize_owner(&mut owner).unwrap();
         {
@@ -58,10 +55,7 @@ fn native_ddr52_uses_sampling_pads_power_class_and_changed_pio_or_adma_payloads(
 #[test]
 fn native_ddr52_ignored_sampling_or_signal_change_powers_off_and_fences() {
     for voltage in [false, true] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: failed DDR transitions keep the complete original resource epoch.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut owner, card, state) = owner();
         initialize_owner(&mut owner).unwrap();
         {

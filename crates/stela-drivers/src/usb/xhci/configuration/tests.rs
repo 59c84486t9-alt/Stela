@@ -1,5 +1,5 @@
 use super::*;
-use crate::bus::dma::RegionAllocator;
+use crate::bus::dma::TestRegion;
 use crate::usb::xhci::model::*;
 
 #[test]
@@ -685,10 +685,7 @@ fn storage_modes(value: u8, superspeed: bool, bot: bool, uas: bool) -> Vec<u8> {
 
 #[test]
 fn storage_selector_uses_stream_policy_before_configuration_and_bot_fallback() {
-    let mut memory = vec![0u64; 128 * 1024];
-    let start = memory.as_mut_ptr() as u64;
-    // SAFETY: backing storage outlives the controller and its modeled DMA.
-    let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
     controller.max_primary_streams = 16;
     controller.slots[1].as_mut().unwrap().speed = SUPER_SPEED;
@@ -736,10 +733,7 @@ fn storage_selector_uses_stream_policy_before_configuration_and_bot_fallback() {
 #[test]
 fn storage_configuration_prefers_usable_uas_and_preserves_quirk_bot_fallback() {
     for superspeed in [false, true] {
-        let mut memory = vec![0u64; 128 * 1024];
-        let start = memory.as_mut_ptr() as u64;
-        // SAFETY: backing storage outlives the controller and its modeled DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut controller, _) = unconfigured_cancellation_controller(&mut dma);
         let speed = if superspeed { SUPER_SPEED } else { HIGH_SPEED };
         controller.slots[1].as_mut().unwrap().speed = speed;

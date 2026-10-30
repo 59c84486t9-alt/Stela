@@ -6,13 +6,7 @@ use super::*;
 fn ist_encoding_and_endpoint_intervals() {
     for ist in 0..16 {
         for exponent in 0..=12 {
-            let mut backing = vec![0u64; 32 * 1024];
-            let base = backing.as_mut_ptr() as u64;
-            let mut dma =
-            // SAFETY: Each IST/interval case owns a fresh stable backing vector
-            // through all command and transfer accesses. The model has no hardware or
-            // background worker that could outlive it.
-            unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+            let mut dma = TestRegion::new(32 * 1024 * 8);
             let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, true);
             c.iso_caps = Capabilities::new(0x110, ist, 1 << 11);
             let mut ep = endpoint(0x81, HIGH_SPEED);
@@ -53,13 +47,7 @@ fn ist_encoding_and_endpoint_intervals() {
 
 #[test]
 fn cfc_admission_and_asap_fallback() {
-    let mut backing = vec![0u64; 32 * 1024];
-    let base = backing.as_mut_ptr() as u64;
-    let mut dma =
-    // SAFETY: This CFC admission fixture owns the entire unresized RAM extent while
-    // both accepted and fallback schedules run synchronously; all DMA addresses point
-    // into that backing.
-    unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(32 * 1024 * 8);
     let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, false);
     c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
         .unwrap();

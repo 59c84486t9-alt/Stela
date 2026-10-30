@@ -17,12 +17,9 @@ fn mac_strings_parse_as_twelve_hex_digits() {
 
 #[test]
 fn poisoned_output_refuses_to_rewrite_the_active_dma_buffer() {
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     for halted in [false, true] {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives the controller/model and every DMA buffer.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let mut send = dma.allocate(FRAME_BYTES, FRAME_BYTES).unwrap();
         send.bytes_mut().fill(0xa5);
         let controller = super::super::xhci::model::controller_with_unresolved_td(
@@ -109,10 +106,7 @@ pub(super) fn cdc_device(controller: &Shared, ncm: Option<u8>) -> Device {
 
 #[test]
 fn native_cdc_binding_requires_its_own_addressed_generation() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing outlives both controllers and every class DMA object.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let configurations = [vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50]];
     let (first, hardware) =
         unconfigured_cancellation_controller_with_configurations(&mut dma, &configurations);
@@ -211,10 +205,7 @@ fn padded_ncm_full_frames_use_capacity_sized_non_crossing_real_tds() {
         (2048, 548, 2048, 4096, 4096),
         (32768, 31267, 32768, 65535, 65535),
     ] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives all modeled controller/class DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (controller, model) = unconfigured_cancellation_controller_with_configurations(
             &mut dma,
             &[vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50]],
@@ -279,10 +270,7 @@ fn padded_ncm_full_frames_use_capacity_sized_non_crossing_real_tds() {
 #[test]
 fn ncm_dma_failures_and_unrepresentable_full_frames_never_activate_data() {
     for failure in 0..5 {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives all modeled controller/class DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (controller, model) = unconfigured_cancellation_controller_with_configurations(
             &mut dma,
             &[vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50]],
@@ -368,10 +356,7 @@ fn ncm_dma_failures_and_unrepresentable_full_frames_never_activate_data() {
 fn cdc_short_bulk_out_is_an_error_and_never_sends_a_terminating_zlp() {
     use crate::net::Link;
     for ncm in [None, Some(1)] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives all modeled controller/class DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (controller, model) = unconfigured_cancellation_controller_with_configurations(
             &mut dma,
             &[vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50]],
@@ -415,10 +400,7 @@ fn ncm_binding_negotiates_before_alt_setting_and_moves_real_transfer_blocks() {
             })
         });
     for (capabilities, formats, in_max) in cases {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives all modeled controller/class DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (controller, model) = unconfigured_cancellation_controller_with_configurations(
             &mut dma,
             &[vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50]],
@@ -516,10 +498,7 @@ fn ncm_binding_negotiates_before_alt_setting_and_moves_real_transfer_blocks() {
 fn ncm_mode_changes_require_real_status_acknowledgements_before_data_activation() {
     for request in [0x8a, 0x84] {
         for stall in [false, true] {
-            let mut backing = vec![0u64; 128 * 1024];
-            let start = backing.as_mut_ptr() as u64;
-            // SAFETY: backing outlives all modeled controller/class DMA.
-            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let mut dma = TestRegion::new(128 * 1024 * 8);
             let (controller, model) = unconfigured_cancellation_controller_with_configurations(
                 &mut dma,
                 &[vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50]],
@@ -569,10 +548,7 @@ fn ncm_mode_changes_require_real_status_acknowledgements_before_data_activation(
 #[test]
 fn malformed_parameters_and_short_size_commands_abort_before_ncm_data_activation() {
     for failure in 0..3 {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives all modeled controller/class DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (controller, model) = unconfigured_cancellation_controller_with_configurations(
             &mut dma,
             &[vec![9, 2, 9, 0, 0, 42, 0, 0x80, 50]],

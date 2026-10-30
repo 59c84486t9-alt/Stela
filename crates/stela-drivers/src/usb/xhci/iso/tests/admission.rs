@@ -4,13 +4,7 @@ use super::*;
 
 #[test]
 fn descriptor_route_and_submission_preflight() {
-    let mut backing = vec![0u64; 32 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    let mut dma =
-    // SAFETY: This admission fixture keeps the exact unresized vector for all
-    // command, endpoint and payload allocations. Rejected descriptors and routes
-    // cannot start physical DMA or background work.
-    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(32 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, HIGH_SPEED, 32, true);
     let endpoint = endpoint(0x81, HIGH_SPEED);
     controller.slot(1).unwrap().attachment.tier = 1;

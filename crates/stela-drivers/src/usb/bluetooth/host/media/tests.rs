@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    bus::dma::RegionAllocator,
+    bus::dma::{RegionAllocator, TestRegion},
     usb::bluetooth::{State, mediatek::media::tests::binding},
 };
 #[test]
@@ -62,10 +62,7 @@ fn native_realtek_sco_without_iso_resumes_retired_schedule_after_long_pause() {
     idle_sco_output_schedule(true);
 }
 fn idle_sco_output_schedule(realtek: bool) {
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: exclusive synthetic RAM outlives model, rings and class owner.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let fixture = xhci::model::iso_class_fixture(&mut dma, xhci::HIGH_SPEED);
     let controller = fixture.controller();
     let binding = binding();
@@ -150,10 +147,7 @@ fn idle_sco_output_schedule(realtek: bool) {
 }
 #[test]
 fn mt7925_wideband_sco_paces_alternate_6_like_btusb_isoc_tx() {
-    let mut backing = vec![0u64; 64 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: exclusive synthetic RAM outlives the class owner.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(64 * 1024 * 8);
     let mut native = Native::new(Bindings::new(&binding()).unwrap(), &mut dma).unwrap();
     assert!(native.bindings.has_iso());
     let pair = native
@@ -182,10 +176,7 @@ fn native_realtek_alt6_queues_zero_services_and_payloads_with_bounded_receipts()
     }
 }
 fn queued_wideband_services(speed: u8) {
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: exclusive fixture memory outlives every native TD.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let fixture = xhci::model::iso_class_fixture(&mut dma, speed);
     let controller = fixture.controller();
     let mut device = binding().device().clone();

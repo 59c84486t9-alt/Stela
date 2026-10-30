@@ -1218,14 +1218,11 @@ fn start_with_policies(
 mod tests {
     use super::model::*;
     use super::*;
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
 
     #[test]
     fn quiet_drains_read_usbsts_only_every_64th_or_with_events_like_xhci_irq() {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives all modeled controller DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut controller, model) = cancellation_controller(&mut dma);
         let reads = || model.borrow().status_reads;
         let before = reads();
@@ -1264,10 +1261,7 @@ mod tests {
                 self.inner.write32(offset, value);
             }
         }
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives all modeled controller DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut controller, model) = cancellation_controller(&mut dma);
         let writes = Rc::new(RefCell::new(Vec::new()));
         let inner = core::mem::replace(&mut controller.registers, Box::new(Idle));
@@ -1303,10 +1297,7 @@ mod tests {
     /// and once taken until its waiter takes it, and only for that slot.
     #[test]
     fn a_slots_transfer_is_posted_from_the_ring_until_its_waiter_takes_it() {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives all modeled controller DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut controller, model) = cancellation_controller(&mut dma);
         let (one, two) = (SlotId::fixture(1), SlotId::fixture(2));
         assert!(!controller.posted_for(one));
@@ -1373,10 +1364,7 @@ mod tests {
 
     #[test]
     fn unacknowledged_command_blocks_later_commands_and_dma_mutation_even_after_late_completion() {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing remains exclusive/live through model and DMA use.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut controller, model) = cancellation_controller(&mut dma);
         let buffer = dma.allocate(512, 512).unwrap();
         controller.submit(1, 3, buffer.physical(), 512).unwrap();
@@ -1437,10 +1425,7 @@ mod tests {
 
     #[test]
     fn timed_out_commands_are_aborted_like_linux() {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusive live test DMA through controller/model use.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut c, model) = cancellation_controller(&mut dma);
         let stuck = |c: &mut Controller, reply| {
             {
@@ -1485,10 +1470,7 @@ mod tests {
 
     #[test]
     fn acknowledged_command_errors_stay_local_but_fatal_status_overrides_success() {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusive live test DMA through controller/model use.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut controller, model) = cancellation_controller(&mut dma);
         model.borrow_mut().fail = Some((ENABLE_SLOT, CONTEXT_STATE_ERROR));
         assert!(matches!(

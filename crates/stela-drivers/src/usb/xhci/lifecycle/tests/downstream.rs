@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Real command/context/port model checks; source-only cut, UNRUN.
 use super::super::*;
-use crate::bus::dma::RegionAllocator;
+use crate::bus::dma::TestRegion;
 use alloc::collections::BTreeMap;
 use hub::model::Node;
 
@@ -9,10 +9,7 @@ use hub::model::Node;
 fn exclusive_downstream_leaf_reset_preserves_its_parent_and_sibling() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         for context in [32, 64] {
-            let mut memory = vec![0u64; 512 * 1024];
-            let start = memory.as_mut_ptr() as u64;
-            // SAFETY: this exclusive backing outlives every model DMA owner.
-            let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+            let mut dma = TestRegion::new(512 * 1024 * 8);
             let nodes = BTreeMap::from([
                 (0, Node::hub(speed, 2)),
                 (1, Node::leaf(speed)),
@@ -76,10 +73,7 @@ fn exclusive_downstream_leaf_reset_preserves_its_parent_and_sibling() {
 #[test]
 fn downstream_reset_failure_never_addresses_a_replacement() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
-        let mut memory = vec![0u64; 512 * 1024];
-        let start = memory.as_mut_ptr() as u64;
-        // SAFETY: this backing remains live and exclusive throughout the model.
-        let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+        let mut dma = TestRegion::new(512 * 1024 * 8);
         let (mut controller, hardware) = hub::tests::controller(
             &mut dma,
             64,
@@ -117,10 +111,7 @@ fn downstream_reset_failure_never_addresses_a_replacement() {
 #[test]
 fn downstream_reset_reobserves_root_and_hub_power_before_endpoint_retirement() {
     for root_lost in [false, true] {
-        let mut memory = vec![0u64; 512 * 1024];
-        let start = memory.as_mut_ptr() as u64;
-        // SAFETY: all uncertain slot, ring and payload ownership remains live.
-        let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+        let mut dma = TestRegion::new(512 * 1024 * 8);
         let (mut controller, hardware) = hub::tests::controller(
             &mut dma,
             64,

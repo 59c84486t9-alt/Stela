@@ -114,13 +114,7 @@ fn retired_ticket_preserves_current_dma() {
 
 #[test]
 fn stale_request_list_identity() {
-    let mut backing = vec![0u64; 32 * 1024];
-    let base = backing.as_mut_ptr() as u64;
-    let mut dma =
-    // SAFETY: The stale-list fixture keeps both controller generations and payload
-    // allocations within this live stable vector. The independent peers run
-    // synchronously and no physical DMA source exists.
-    unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(32 * 1024 * 8);
     let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, true);
     c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
         .unwrap();
@@ -160,13 +154,7 @@ fn stale_request_list_identity() {
 
 #[test]
 fn stale_scheduled_identity() {
-    let mut backing = vec![0u64; 32 * 1024];
-    let base = backing.as_mut_ptr() as u64;
-    let mut dma =
-    // SAFETY: This stale-schedule fixture keeps both controller generations and
-    // their complete RAM allocations until every ticket check ends; the backing
-    // vector is never resized.
-    unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(32 * 1024 * 8);
     let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, true);
     c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
         .unwrap();

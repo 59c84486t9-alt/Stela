@@ -1,12 +1,9 @@
 use super::*;
-use crate::bus::dma::RegionAllocator;
+use crate::bus::dma::{RegionAllocator, TestRegion};
 use crate::usb::xhci::model::*;
 #[test]
 fn transaction_errors_soft_retry_in_place_like_linux() {
-    let mut memory = vec![0u64; 64 * 1024];
-    let start = memory.as_mut_ptr() as u64;
-    // SAFETY: fixture RAM remains held through every owner.
-    let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+    let mut dma = TestRegion::new(64 * 1024 * 8);
     let (mut c, peer) = cancellation_controller(&mut dma);
     let buffer = dma.allocate(64, 64).unwrap().physical();
     let run = |c: &mut Controller, errors: usize| {
@@ -170,10 +167,7 @@ fn expired_valid_budget_retires_late_td_and_never_credits_late_completion() {
     }
     for after_submit in [false, true] {
         for failing in [None, Some(STOP_ENDPOINT), Some(SET_DEQUEUE)] {
-            let mut memory = vec![0u64; 64 * 1024];
-            let start = memory.as_mut_ptr() as u64;
-            // SAFETY: native-layout fixture RAM outlives every owner.
-            let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+            let mut dma = TestRegion::new(64 * 1024 * 8);
             let (mut c, peer) = cancellation_controller(&mut dma);
             let mut buffer = dma.allocate(64, 64).unwrap();
             buffer.bytes_mut().fill(0xa5);
@@ -327,10 +321,7 @@ fn retired_device_ticket_is_pure_before_readiness_and_preserves_current_dma() {
 
 #[test]
 fn exact_ticket_rejects_foreign_retired_and_reused_addresses() {
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: one allocator supplies disjoint kept controller/data DMA.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut first, one) = cancellation_controller(&mut dma);
     let (mut second, two) = cancellation_controller(&mut dma);
     let buffer = dma.allocate(64, 64).unwrap();
@@ -360,10 +351,7 @@ fn exact_ticket_rejects_foreign_retired_and_reused_addresses() {
 
 #[test]
 fn out_of_order_polling_cannot_overwrite_an_unconsumed_ring_entry() {
-    let mut backing = vec![0u64; 64 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing outlives all descriptor/context accesses.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(64 * 1024 * 8);
     let (mut controller, model) = cancellation_controller(&mut dma);
     let buffer = dma.allocate(64, 64).unwrap();
     let held = controller
@@ -413,10 +401,7 @@ fn out_of_order_polling_cannot_overwrite_an_unconsumed_ring_entry() {
 
 #[test]
 fn caller_length_cannot_consume_or_change_the_submitted_completion() {
-    let mut backing = vec![0u64; 64 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: test allocations remain live until all completion checks finish.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(64 * 1024 * 8);
     let (mut controller, model) = cancellation_controller(&mut dma);
     let buffer = dma.allocate(64, 64).unwrap();
     let trb = controller.submit(1, 3, buffer.physical(), 64).unwrap();
@@ -439,10 +424,7 @@ fn malformed_and_error_events_keep_records_until_real_cancel_ack() {
         (28, 0, 0, false),
         (STALL, 0, 0, false),
     ] {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing includes model event ring and data.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut controller, model) = cancellation_controller(&mut dma);
         let buffer = dma.allocate(64, 64).unwrap();
         let ticket = controller
@@ -491,10 +473,7 @@ fn malformed_and_error_events_keep_records_until_real_cancel_ack() {
 
 #[test]
 fn dma_payload_and_success_residual_complete_once() {
-    let mut backing = vec![0u64; 64 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: one range contains every DMA allocation.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(64 * 1024 * 8);
     let (mut controller, model) = cancellation_controller(&mut dma);
     let mut buffer = dma.allocate(64, 64).unwrap();
     buffer.bytes_mut().fill(0xa5);
@@ -516,10 +495,7 @@ fn dma_payload_and_success_residual_complete_once() {
 
 #[test]
 fn ordinary_submit_cannot_publish_normal_trbs_on_ep0() {
-    let mut backing = vec![0u64; 64 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing kept throughout the refused submission.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(64 * 1024 * 8);
     let (mut controller, model) = cancellation_controller(&mut dma);
     let buffer = dma.allocate(64, 64).unwrap();
     let before = controller.slots[1].as_ref().unwrap().endpoints[1]
@@ -622,10 +598,7 @@ fn malformed_control_status_never_acknowledges_or_reuses_dma_without_cancel() {
         }
     }
     for fault in 0..4 {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusive DMA for underlying and fault model.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut controller, model) = cancellation_controller(&mut dma);
         let inner = core::mem::replace(&mut controller.registers, Box::new(Empty));
         controller.registers = Box::new(Corrupt {
@@ -647,10 +620,7 @@ fn malformed_control_status_never_acknowledges_or_reuses_dma_without_cancel() {
 
 #[test]
 fn incompatible_device_event_requires_slot_retirement() {
-    let mut backing = vec![0u64; 64 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: no allocation is released after uncertain slot ownership.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(64 * 1024 * 8);
     let (mut controller, model) = cancellation_controller(&mut dma);
     let buffer = dma.allocate(64, 64).unwrap();
     let ticket = controller
@@ -683,10 +653,7 @@ fn incompatible_device_event_requires_slot_retirement() {
 }
 #[test]
 fn readiness_fences_async_error_dma_until_acknowledged_retirement() {
-    let mut backing = vec![0u64; 64 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: model DMA is held through the failed readiness path.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(64 * 1024 * 8);
     let (mut controller, model) = cancellation_controller(&mut dma);
     let mut buffer = dma.allocate(64, 64).unwrap();
     buffer.bytes_mut().fill(0xa5);
@@ -714,10 +681,7 @@ fn readiness_fences_async_error_dma_until_acknowledged_retirement() {
 #[test]
 fn synchronous_error_retires_real_dma_before_class_recovery_readiness() {
     for fail_dequeue in [false, true] {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing stays allocated even when cancellation is uncertain.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut controller, model) = cancellation_controller(&mut dma);
         let mut buffer = dma.allocate(64, 64).unwrap();
         buffer.bytes_mut().fill(0xa5);
@@ -798,10 +762,7 @@ fn cancellation_observes_dma_completion_racing_stop_ack() {
     }
     for code in [0, SUCCESS, SHORT_PACKET, 26, 27, 28] {
         for stop_failure in [false, true] {
-            let mut backing = vec![0u64; 64 * 1024];
-            let start = backing.as_mut_ptr() as u64;
-            // SAFETY: controller, observed events and receive bytes keep DMA.
-            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let mut dma = TestRegion::new(64 * 1024 * 8);
             let (mut controller, model) = cancellation_controller(&mut dma);
             let mut buffer = dma.allocate(64, 64).unwrap();
             buffer.bytes_mut().fill(0xa5);
@@ -847,10 +808,7 @@ fn cancellation_observes_dma_completion_racing_stop_ack() {
 
 #[test]
 fn cancellation_preserves_an_unpolled_cached_completion_and_retires_siblings() {
-    let mut backing = vec![0u64; 64 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: all allocations remain held through endpoint-wide cancel.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(64 * 1024 * 8);
     let (mut controller, model) = cancellation_controller(&mut dma);
     let buffer = dma.allocate(128, 64).unwrap();
     model.borrow_mut().push_event(vec![1, 2, 3]);

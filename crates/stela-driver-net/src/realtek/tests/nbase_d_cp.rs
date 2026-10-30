@@ -174,7 +174,7 @@ fn nbase_d_cp_required_command_failures_abort_before_enable_or_dma() {
 
 #[test]
 fn nbase_d_cp_bp_mac_skips_ephy_table() {
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     for xid in [0x688, 0x689, 0x68a, 0x68b, 0x708, 0x681] {
         let revision = revision::detect(xid << 20).unwrap();
         let time = Time::default();
@@ -199,10 +199,7 @@ fn nbase_d_cp_bp_mac_skips_ephy_table() {
             assert!(!s.writes.iter().any(|(r, _, _)| *r == 0x7a));
             assert!(s.writes.contains(&(CSI_ADDRESS, 0x0002_f70c, 4)));
         }
-        let mut backing = vec![0u64; 200_000];
-        let base = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives both rings and has no other accesses.
-        let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+        let mut dma = TestRegion::new(200_000 * 8);
         let mut rx = Ring::new(&mut dma, true).unwrap();
         let mut tx = Ring::new(&mut dma, true).unwrap();
         rx.initialize(true);

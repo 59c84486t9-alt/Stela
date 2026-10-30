@@ -304,15 +304,12 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     use crate::usb::xhci::model::*;
 
     #[test]
     fn commands_finish_without_waiting_and_a_sync_command_settles_another() {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives controller/model/DMA access.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut controller, model) = cancellation_controller(&mut dma);
         model.borrow_mut().silence = Some(EVALUATE_CONTEXT);
         let address = controller

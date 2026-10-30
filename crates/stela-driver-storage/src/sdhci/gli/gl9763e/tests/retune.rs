@@ -35,10 +35,7 @@ fn fast_card(
 fn explicit_hs200_and_hs400_retune_complete_real_cmd21_then_changed_adma_io() {
     for mode in [0, 1, 3] {
         let hs400 = mode != 0;
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all original-controller descriptor/payload ranges remain live.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (_host, mut disk, card, _) = fast_card(&mut dma, mode);
         let before = card.borrow().tuning_commands;
         if hs400 {
@@ -70,10 +67,7 @@ fn explicit_hs200_and_hs400_retune_complete_real_cmd21_then_changed_adma_io() {
 #[test]
 fn retune_downgrade_tuning_restore_or_reset_failure_powers_off_and_fences_aliases() {
     for fault in 0..4 {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: failed controls keep every original owner and all DMA aliases.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (host, mut disk, card, state) = fast_card(&mut dma, 1);
         let mut alias = disk.clone();
         card.borrow_mut().mmc_retune_phase = Some(0);
@@ -108,10 +102,7 @@ fn retune_downgrade_tuning_restore_or_reset_failure_powers_off_and_fences_aliase
 #[test]
 fn retune_refuses_other_timings_without_switches_and_lost_permission_without_mmio() {
     for (mode, revoked) in [(2, false), (4, false), (1, true)] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: strobe/refused original epochs keep all model DMA memory.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (_host, mut disk, card, state) = fast_card(&mut dma, mode);
         if revoked {
             state.borrow_mut().config[..4].fill(0xff);

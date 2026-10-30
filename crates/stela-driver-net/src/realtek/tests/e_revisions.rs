@@ -50,12 +50,9 @@ fn e_phy_programs_exact_analogue_state_with_observable_unsupported_optional_clea
 
 #[test]
 fn e_mac_start_clears_inherited_jumbo() {
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     for version in [32, 33] {
-        let mut backing = vec![0u64; 200_000];
-        let base = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives all descriptor use and has no other accesses.
-        let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+        let mut dma = TestRegion::new(200_000 * 8);
         let mut rx = Ring::new(&mut dma, true).unwrap();
         let mut tx = Ring::new(&mut dma, true).unwrap();
         rx.initialize(true);

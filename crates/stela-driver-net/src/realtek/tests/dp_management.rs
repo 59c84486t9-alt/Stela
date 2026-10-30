@@ -111,7 +111,7 @@ fn dp_incomplete_notification_is_not_retried_even_if_it_later_completes() {
 
 #[test]
 fn dp_exact_mac_settings_preserve_ephy_bits_and_publish_only_after_management_ready() {
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     for version in [28, 31] {
         assert!(revision(version).implemented());
         assert!(revision(version).firmware.is_none());
@@ -169,10 +169,7 @@ fn dp_exact_mac_settings_preserve_ephy_bits_and_publish_only_after_management_re
             ) || (*r == COMMAND
                 && *v == u32::from(ENABLE))));
         }
-        let mut backing = vec![0u64; 200_000];
-        let base = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives descriptors and has no other accesses.
-        let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+        let mut dma = TestRegion::new(200_000 * 8);
         let mut rx = Ring::new(&mut dma, true).unwrap();
         let mut tx = Ring::new(&mut dma, true).unwrap();
         rx.initialize(true);

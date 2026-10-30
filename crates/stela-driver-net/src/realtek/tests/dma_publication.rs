@@ -5,11 +5,8 @@ use super::*;
 
 #[test]
 fn descriptor_publication_is_high_before_low_and_own_before_enable() {
-    use crate::bus::dma::RegionAllocator;
-    let mut backing = vec![0u64; 200_000];
-    let base = backing.as_mut_ptr() as u64;
-    // SAFETY: backing outlives all descriptor use and has no other accesses.
-    let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+    use crate::bus::dma::TestRegion;
+    let mut dma = TestRegion::new(200_000 * 8);
     let mut rx = Ring::new(&mut dma, true).unwrap();
     let mut tx = Ring::new(&mut dma, true).unwrap();
     rx.initialize(true);
@@ -33,12 +30,9 @@ fn descriptor_publication_is_high_before_low_and_own_before_enable() {
 
 #[test]
 fn mac34_station_replaces_stale_exgmac_before_dma_and_relocks_on_failure() {
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     for fault in [false, true] {
-        let mut backing = vec![0u64; 200_000];
-        let base = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives all descriptor use and has no other accesses.
-        let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+        let mut dma = TestRegion::new(200_000 * 8);
         let mut rx = Ring::new(&mut dma, true).unwrap();
         let mut tx = Ring::new(&mut dma, true).unwrap();
         rx.initialize(true);
@@ -93,16 +87,13 @@ fn mac34_station_replaces_stale_exgmac_before_dma_and_relocks_on_failure() {
 
 #[test]
 fn dma_enable_readback_rejects_failed_bus_reads_and_missing_enable_bits() {
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     for (command, expected) in [
         (u8::MAX, Err(BlockError::Device { status: 255 })),
         (0, Err(BlockError::Timeout)),
         (ENABLE, Ok(())),
     ] {
-        let mut backing = vec![0u64; 200_000];
-        let base = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives all descriptor use and has no other accesses.
-        let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+        let mut dma = TestRegion::new(200_000 * 8);
         let mut rx = Ring::new(&mut dma, true).unwrap();
         let mut tx = Ring::new(&mut dma, true).unwrap();
         rx.initialize(true);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Authored software-peer controls; no physical receiver descriptor is implied.
 use super::super::*;
-use crate::usb::xhci::model::{self, RegionAllocator};
+use crate::usb::xhci::model::{self, TestRegion};
 use alloc::{rc::Rc, vec};
 use core::cell::RefCell;
 
@@ -255,10 +255,7 @@ fn interface(bytes: &[u8], boot: bool) -> Interface {
 
 #[test]
 fn get_descriptor_dma_poll_and_control_use_only_selected_aliases() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing outlives every native DMA owner in this test.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (controller, hardware) = model::cancellation_controller(&mut dma);
     hardware
         .borrow_mut()
@@ -350,10 +347,7 @@ fn get_descriptor_dma_poll_and_control_use_only_selected_aliases() {
 #[test]
 fn malformed_ordinary_descriptors_refuse_before_hid_allocation_or_input_publication() {
     for bytes in malformed() {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives the native controller and DMA owners.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (controller, hardware) = model::cancellation_controller(&mut dma);
         hardware
             .borrow_mut()
@@ -420,10 +414,7 @@ fn malformed_ordinary_descriptors_refuse_before_hid_allocation_or_input_publicat
 #[test]
 fn boot_subclass_keeps_existing_fallback_and_original_rejected_bytes() {
     let bytes = [0xa9, 1, 9, 4, 0xa9, 0, 0x81, 0]; // prohibited Array aliases
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing remains live throughout native DMA and endpoint shutdown.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (controller, hardware) = model::cancellation_controller(&mut dma);
     hardware
         .borrow_mut()

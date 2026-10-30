@@ -40,7 +40,7 @@ fn nbase_8126_phy_uses_common_eee_only_and_advertises_observed_5g_capability() {
 
 #[test]
 fn nbase_8126_start_masks_clock_csi_and_legacy_dma_are_distinct() {
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     for xid in [0x649, 0x64a] {
         let time = Time::default();
         let model = Model::nbase(&time);
@@ -90,10 +90,7 @@ fn nbase_8126_start_masks_clock_csi_and_legacy_dma_are_distinct() {
             };
             assert!(at(0x8002_f890) < at(0x0002_f70c));
         }
-        let mut backing = vec![0u64; 200_000];
-        let base = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives both rings and has no other accesses.
-        let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+        let mut dma = TestRegion::new(200_000 * 8);
         let mut rx = Ring::new(&mut dma, true).unwrap();
         let mut tx = Ring::new(&mut dma, true).unwrap();
         rx.initialize(true);

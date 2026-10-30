@@ -186,16 +186,11 @@ mod tests {
         model::{CLOCK_TICKS_PER_US, Hardware, Port},
     };
     use super::*;
-    use crate::bus::dma::RegionAllocator;
-    use alloc::vec;
+    use crate::bus::dma::TestRegion;
 
     #[test]
     fn crc_and_failed_reset_keep_primary_failure() {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing and the model remain alive through every alias and
-        // refused operation, including uncertain native DMA retirement.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let hardware = Rc::new(RefCell::new(Hardware::new(Kind::Sd, true)));
         let mut host = SdhciHost::new(
             Box::new(Port(hardware.clone())),

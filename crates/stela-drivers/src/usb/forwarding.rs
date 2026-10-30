@@ -259,7 +259,7 @@ impl xhci::Host {
 mod tests {
     mod native;
     use super::*;
-    use crate::{bus::dma::RegionAllocator, usb::xhci::model};
+    use crate::{bus::dma::TestRegion, usb::xhci::model};
     use alloc::{rc::Rc, vec};
     use core::cell::RefCell;
 
@@ -288,10 +288,7 @@ mod tests {
 
     #[test]
     fn short_transfers_complete_in_both_directions() {
-        let mut memory = vec![0u64; 512 * 1024];
-        let start = memory.as_mut_ptr() as u64;
-        // SAFETY: this model exclusively owns backing RAM until all owners drop.
-        let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+        let mut dma = TestRegion::new(512 * 1024 * 8);
         let (mut owner, model) = owner(&mut dma);
         owner.configure(19, &mut dma).unwrap();
         assert_eq!(owner.configuration(), Some(19));
@@ -311,10 +308,7 @@ mod tests {
 
     #[test]
     fn changing_alternate_preserves_other_composite_interface_and_retires_old_requests() {
-        let mut memory = vec![0u64; 512 * 1024];
-        let start = memory.as_mut_ptr() as u64;
-        // SAFETY: exclusive fixture RAM outlives the native controller and DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+        let mut dma = TestRegion::new(512 * 1024 * 8);
         let (mut owner, model) = owner(&mut dma);
         owner.configure(19, &mut dma).unwrap();
         let retained = owner.submit(0x81, 0, 16, &[]).unwrap();
@@ -336,10 +330,7 @@ mod tests {
 
     #[test]
     fn failed_native_cancellation_keeps_request_buffer_and_fences_owner() {
-        let mut memory = vec![0u64; 512 * 1024];
-        let start = memory.as_mut_ptr() as u64;
-        // SAFETY: exclusive fixture RAM remains live even after failed cancel.
-        let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+        let mut dma = TestRegion::new(512 * 1024 * 8);
         let (mut owner, model) = owner(&mut dma);
         owner.configure(19, &mut dma).unwrap();
         let pending = owner.submit(0x81, 0, 16, &[]).unwrap();
@@ -361,10 +352,7 @@ mod tests {
 
     #[test]
     fn forwards_original_descriptors_and_class_entity_index_without_host_state_bypass() {
-        let mut memory = vec![0u64; 512 * 1024];
-        let start = memory.as_mut_ptr() as u64;
-        // SAFETY: controller's modeled physical RAM is exclusive and boot-lived.
-        let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+        let mut dma = TestRegion::new(512 * 1024 * 8);
         let (mut owner, model) = owner(&mut dma);
         let bytes = configuration();
         model.borrow_mut().descriptors.push((2, 0, bytes.clone()));
@@ -399,10 +387,7 @@ mod tests {
 
     #[test]
     fn endpoint_status_reaches_native_ep0_before_and_after_configuration() {
-        let mut memory = vec![0u64; 512 * 1024];
-        let start = memory.as_mut_ptr() as u64;
-        // SAFETY: exclusive fixture RAM outlives every controller transfer.
-        let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+        let mut dma = TestRegion::new(512 * 1024 * 8);
         let (mut owner, model) = owner(&mut dma);
         for configured in [false, true] {
             if configured {
@@ -465,10 +450,7 @@ mod tests {
     }
     #[test]
     fn single_alternate_stall_uses_real_endpoint_clear_requests() {
-        let mut memory = vec![0u64; 512 * 1024];
-        let start = memory.as_mut_ptr() as u64;
-        // SAFETY: exclusive fixture RAM remains live through all native ACKs.
-        let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+        let mut dma = TestRegion::new(512 * 1024 * 8);
         let mut bytes = configuration();
         bytes.truncate(32);
         bytes[2] = 32;

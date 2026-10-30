@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! xHCI isochronous DMA model and shared class lifecycle fixture.
 use super::*;
-use crate::bus::dma::RegionAllocator;
+use crate::bus::dma::{RegionAllocator, TestRegion};
 use alloc::collections::BTreeMap;
 extern crate std;
 

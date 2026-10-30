@@ -440,10 +440,7 @@ fn rtl8152b_binds_real_xhci_dma_moves_aggregates_wraps_and_quiesces() {
         .into_iter()
         .flat_map(|r| (0..4).map(move |s| (r, s)))
     {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives every controller/device/model DMA object.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
             &mut dma,
             &[vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50]],
@@ -559,10 +556,7 @@ fn rtl815x_firmware_uses_ep0_dma_wrapping_and_poison_guards() {
         let bytes = synthetic_upload(revision);
         let firmware = Firmware::parse(&bytes, Revision(revision)).unwrap();
         for fail in [false, true] {
-            let mut backing = vec![0u64; 128 * 1024];
-            let start = backing.as_mut_ptr() as u64;
-            // SAFETY: backing outlives all real control/ring DMA and model access.
-            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let mut dma = TestRegion::new(128 * 1024 * 8);
             let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
                 &mut dma,
                 &[vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50]],
@@ -609,10 +603,7 @@ fn rtl8153_missing_exact_firmware_never_creates_a_native_link() {
     for revision in [
         0x5c10, 0x5c20, 0x5c30, 0x6010, 0x6400, 0x7030, 0x7410, 0x7420,
     ] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing remains exclusive/live through all controller DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
             &mut dma,
             &[vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50]],
@@ -753,10 +744,7 @@ fn rtl8153_native_usb2_usb3_binding_uploads_exact_provider_and_keeps_owned_recei
             catalog,
             requests: RefCell::new(Vec::new()),
         };
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all DMA objects/model references die before this backing.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
             &mut dma,
             &[vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50]],

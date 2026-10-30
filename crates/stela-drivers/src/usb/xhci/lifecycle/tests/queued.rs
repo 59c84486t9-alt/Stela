@@ -3,16 +3,13 @@
 //! command/context/port model.
 use super::super::*;
 use crate::block::BlockDevice;
-use crate::bus::dma::RegionAllocator;
+use crate::bus::dma::TestRegion;
 use alloc::collections::BTreeMap;
 use hub::model::{Hardware, Node, RegistersModel};
 
 #[test]
 fn a_queued_reset_rebinds_the_class_on_a_fresh_generation_like_usb_queue_reset_device() {
-    let mut memory = vec![0u64; 512 * 1024];
-    let start = memory.as_mut_ptr() as u64;
-    // SAFETY: this backing outlives every original and fresh DMA owner.
-    let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+    let mut dma = TestRegion::new(512 * 1024 * 8);
     let nodes = BTreeMap::from([(0, Node::bot_disk(HIGH_SPEED))]);
     let hardware = Rc::new(RefCell::new(Hardware::new(64, nodes)));
     hardware.borrow_mut().root_status =

@@ -433,10 +433,7 @@ fn hci_interface_discovers_its_endpoints_and_commands_go_to_the_device() {
 fn bluetooth_binds_real_xhci_queues_moves_packets_and_stops_on_disconnect() {
     use crate::usb::bluetooth::{FirmwareStatus, Packet, State};
     for scenario in 0..3 {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: this boot-lifetime-style allocation outlives every model DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (controller, model) = unconfigured_cancellation_controller(&mut dma);
         let shared: Shared = Rc::new(RefCell::new(controller));
         let mut device = Device {

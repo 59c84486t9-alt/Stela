@@ -7,7 +7,7 @@ mod uac1;
 mod uac3;
 use crate::usb::audio::*;
 use crate::{
-    bus::dma::RegionAllocator,
+    bus::dma::TestRegion,
     usb::descriptor::{interfaces, setup},
 };
 use alloc::{collections::BTreeMap, vec::Vec};
@@ -228,10 +228,7 @@ impl Transport for Model {
     }
 }
 fn run(f: impl FnOnce(&mut AudioDevice<Model>)) {
-    let mut memory = vec![0u64; 80 * 1024];
-    let p = memory.as_mut_ptr() as u64;
-    // SAFETY: backing memory outlives this test's class, and only its allocator uses it.
-    let mut dma = unsafe { RegionAllocator::new(p..p + memory.len() as u64 * 8) };
+    let mut dma = TestRegion::new(80 * 1024 * 8);
     let mut a = AudioDevice::new(Model::new(), binding(), &mut dma).unwrap();
     f(&mut a);
 }

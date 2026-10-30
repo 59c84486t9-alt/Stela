@@ -1,5 +1,5 @@
 use super::*;
-use crate::bus::dma::RegionAllocator;
+use crate::bus::dma::TestRegion;
 use crate::usb::xhci::model::*;
 
 #[test]
@@ -96,10 +96,7 @@ fn hub_ports_past_fifteen_route_as_fifteen() {
 
 #[test]
 fn the_first_setup_waits_for_set_address_recovery() {
-    let mut backing = vec![0u64; 16 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing outlives the controller and all its DMA buffers.
-    let mut dma = unsafe { RegionAllocator::new(start..start + 128 * 1024) };
+    let mut dma = TestRegion::new(16 * 1024 * 8);
     let (mut controller, model) = address_controller(&mut dma, SUCCESS);
     let attachment = Attachment {
         root_port: 1,
@@ -126,10 +123,7 @@ fn the_first_setup_waits_for_set_address_recovery() {
 
 #[test]
 fn an_address_device_error_does_not_issue_a_setup() {
-    let mut backing = vec![0u64; 16 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing outlives the controller and all its DMA buffers.
-    let mut dma = unsafe { RegionAllocator::new(start..start + 128 * 1024) };
+    let mut dma = TestRegion::new(16 * 1024 * 8);
     let (mut controller, model) = address_controller(&mut dma, 4);
     let attachment = Attachment {
         root_port: 1,
@@ -161,10 +155,7 @@ fn an_address_device_error_does_not_issue_a_setup() {
 
 #[test]
 fn descriptor_failure_keeps_the_request_and_completion_code() {
-    let mut backing = vec![0u64; 16 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing outlives the controller and all its DMA buffers.
-    let mut dma = unsafe { RegionAllocator::new(start..start + 128 * 1024) };
+    let mut dma = TestRegion::new(16 * 1024 * 8);
     let (mut controller, model) = address_controller(&mut dma, SUCCESS);
     let attachment = Attachment {
         root_port: 1,
@@ -200,10 +191,7 @@ fn descriptor_failure_keeps_the_request_and_completion_code() {
 #[test]
 fn all_configuration_indices_travel_through_ep0_and_selection_uses_the_wire_value() {
     use configuration::tests::{device, ecm, vendor};
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing remains live and exclusive through all modeled DMA.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut controller, model) =
         unconfigured_cancellation_controller_with_configurations(&mut dma, &[]);
     let originals = vec![vendor(9), ecm(42), vendor(5)];
@@ -263,10 +251,7 @@ fn all_configuration_indices_travel_through_ep0_and_selection_uses_the_wire_valu
 fn descriptor_inventory_refuses_truncation_duplicate_values_and_silent_size_caps() {
     use configuration::tests::vendor;
     for scenario in 0..5 {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusive live test backing holds all rings and buffers.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
         let mut bytes = vendor(7);
         match scenario {
@@ -301,10 +286,7 @@ fn descriptor_inventory_refuses_truncation_duplicate_values_and_silent_size_caps
 #[test]
 fn configuration_inventory_has_an_explicit_aggregate_resource_limit() {
     use configuration::tests::vendor;
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: this exclusive allocation remains live for every DMA access.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
     for index in 0..17 {
         let mut bytes = vendor(index + 1);

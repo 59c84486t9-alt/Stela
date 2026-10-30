@@ -65,7 +65,7 @@ fn g_phy_mask_branches_and_post_reset_eee_cleanup_use_real_ocp_state() {
 
 #[test]
 fn g_mac_sequences_include_exact_8411b_rx_fix_before_any_descriptor_publication() {
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     for version in [40, 42, 44] {
         let time = Time::default();
         let model = Model::modern(&time);
@@ -120,10 +120,7 @@ fn g_mac_sequences_include_exact_8411b_rx_fix_before_any_descriptor_publication(
                 assert_eq!(s.ephy[0x19], 0x7fff);
             }
         }
-        let mut backing = vec![0u64; 200_000];
-        let base = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives descriptor use and has no competing access.
-        let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+        let mut dma = TestRegion::new(200_000 * 8);
         let mut rx = Ring::new(&mut dma, true).unwrap();
         let mut tx = Ring::new(&mut dma, true).unwrap();
         rx.initialize(true);

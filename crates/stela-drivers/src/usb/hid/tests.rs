@@ -67,7 +67,7 @@ fn a_boot_keyboard_with_report_ids_is_read_through_its_descriptor() {
 }
 use crate::usb::xhci::{
     self,
-    model::{self, RegionAllocator},
+    model::{self, TestRegion},
 };
 use alloc::{rc::Rc, vec};
 use core::cell::RefCell;
@@ -127,10 +127,7 @@ const LED_KEYBOARD: [u8; 55] = [
 
 #[test]
 fn leds_set_the_first_led_report_like_hidinput_led_worker() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: this allocation outlives all model/controller DMA references.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (controller, hardware) = model::cancellation_controller(&mut dma);
     hardware
         .borrow_mut()
@@ -159,10 +156,7 @@ fn leds_set_the_first_led_report_like_hidinput_led_worker() {
 
 #[test]
 fn output_reports_take_the_interrupt_out_endpoint_like_usbhid_output_report() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: this allocation outlives all model/controller DMA references.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (controller, hardware) = model::cancellation_controller(&mut dma);
     hardware
         .borrow_mut()
@@ -204,10 +198,7 @@ fn output_reports_take_the_interrupt_out_endpoint_like_usbhid_output_report() {
 
 #[test]
 fn real_descriptor_fetch_initialization_input_control_and_restart() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: this allocation outlives all model/controller DMA references.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (controller, hardware) = model::cancellation_controller(&mut dma);
     hardware
         .borrow_mut()
@@ -291,10 +282,7 @@ fn real_descriptor_fetch_initialization_input_control_and_restart() {
 
 #[test]
 fn unresolved_stop_keeps_ticket_buffer_first_error_and_refuses_control_or_restart() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing remains live until all users below have been dropped.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (controller, hardware) = model::cancellation_controller(&mut dma);
     hardware
         .borrow_mut()
@@ -333,10 +321,7 @@ fn unresolved_stop_keeps_ticket_buffer_first_error_and_refuses_control_or_restar
 fn a_refused_report_protocol_switch_keeps_the_interface_but_boot_fallback_fails() {
     let keyboard = super::tests::NUMBERED_KEYBOARD;
     for described in [true, false] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: live exclusive test allocation bounds every controller DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (controller, hardware) = model::cancellation_controller(&mut dma);
         if described {
             hardware
@@ -377,10 +362,7 @@ fn a_refused_report_protocol_switch_keeps_the_interface_but_boot_fallback_fails(
 #[test]
 fn malformed_reports_do_not_release_held_keys_and_boot_qemu_path_remains() {
     let keyboard = super::tests::NUMBERED_KEYBOARD;
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: live exclusive test allocation bounds every controller DMA.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (controller, hardware) = model::cancellation_controller(&mut dma);
     hardware
         .borrow_mut()
@@ -531,10 +513,7 @@ fn relative_and_absolute_pointer_reports_preserve_qemu_native_inputs() {
             0xc0,
             0xc0,
         ];
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: this exclusive model allocation outlives all DMA users.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (controller, hardware) = model::cancellation_controller(&mut dma);
         hardware
             .borrow_mut()
@@ -581,10 +560,7 @@ fn relative_and_absolute_pointer_reports_preserve_qemu_native_inputs() {
 #[test]
 fn boot_fallback_is_explicit_and_uses_standard_boot_bytes() {
     let descriptor = [0xfe, 0, 0];
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: this exclusive model allocation outlives all DMA users.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (controller, hardware) = model::cancellation_controller(&mut dma);
     hardware
         .borrow_mut()
@@ -626,10 +602,7 @@ fn boot_fallback_is_explicit_and_uses_standard_boot_bytes() {
 
 #[test]
 fn retired_identity_refuses_old_hid_control_poll_and_restart_without_dma_mutation() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: this exclusive model allocation outlives all DMA users.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (controller, hardware) = model::cancellation_controller(&mut dma);
     hardware
         .borrow_mut()
