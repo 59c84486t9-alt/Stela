@@ -16,6 +16,9 @@ linux-kernel = ["dep:cc", "dep:stela-c-build", "stela-driver-base/linux-kernel"]
 nvidia-port = ["dep:cc", "dep:stela-c-build"]
 # Native Xe command/page-table support; not an initialized Intel GPU driver.
 intel-port = ["linux-kernel"]
+# nouveau's hardware resource manager (NVKM), compiled unchanged; it reaches
+# no device until the kernel services it imports are supplied.
+nouveau-port = ["linux-kernel"]
 # Native AMD page-entry and BAR support; requires real mapping/GMC owners.
 amd-port = ["linux-kernel"]
 # Hosted AMD encoder build; its C runtime is not yet ported to UEFI.

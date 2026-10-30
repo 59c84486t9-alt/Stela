@@ -7,9 +7,15 @@ mod amd_commands;
 #[cfg(feature = "intel-port")]
 #[path = "build/intel.rs"]
 mod intel;
+#[cfg(feature = "nouveau-port")]
+#[path = "build/kbuild.rs"]
+mod kbuild;
 #[cfg(any(feature = "nvidia-port", feature = "linux-kernel"))]
 #[path = "build/native.rs"]
 mod native;
+#[cfg(feature = "nouveau-port")]
+#[path = "build/nouveau.rs"]
+mod nouveau;
 #[path = "build/nouveau_firmware.rs"]
 mod nouveau_firmware;
 #[cfg(feature = "nvidia-port")]
@@ -33,6 +39,8 @@ fn main() {
     nvidia::port();
     #[cfg(feature = "intel-port")]
     intel::port(&linux, &mut tests);
+    #[cfg(feature = "nouveau-port")]
+    nouveau::port(&linux);
     #[cfg(feature = "linux-kernel")]
     tests.write();
 }

@@ -121,6 +121,8 @@ pub struct Module {
 pub struct Linux {
     /// Kbuild's generated asm wrappers, in `asm/` and `uapi/asm/`.
     wrappers: PathBuf,
+    /// The kernel-API archive for Cargo's target.
+    pub archive: PathBuf,
     /// What hosted programs running Linux code link: the kernel-API and the
     /// host's platform services.
     pub hosted: Vec<PathBuf>,
@@ -166,6 +168,7 @@ impl Linux {
         }
         let mut linux = Self {
             wrappers,
+            archive: PathBuf::new(),
             hosted: Vec::new(),
         };
         let kernel = sources(&format!("{COMPAT}/kernel"));
@@ -202,7 +205,7 @@ impl Linux {
         linux.apply(&mut build, None, &[], None);
         let crc_objects = linux_crc::objects(&build, &crc_tables);
         build.objects(crc_objects);
-        linux_archive(&build, "stela-linux", &kernel, &upstream);
+        linux.archive = linux_archive(&build, "stela-linux", &kernel, &upstream);
         // A callable target-ABI fixture plus host helpers only. It links the
         // SAME production common archive/Rust heap as the unit binary;
         // never mix duplicate native/hosted common archives. The standalone
@@ -457,7 +460,18 @@ fn linux_archive(
     check_declarations(build, kernel);
     check_declarations(build, upstream);
     let mut upstream_build = build.clone();
-    upstream_build
+    upstream_warnings(&mut upstream_build);
+    upstream_build.files(upstream);
+    let objects = upstream_build.compile_intermediates();
+    let mut combined = build.clone();
+    combined.objects(&objects);
+    archive(&combined, name, kernel)
+}
+
+/// Linux's own warning profile for unchanged sources, in place of Stela's.
+#[cfg(feature = "linux-kernel")]
+pub fn upstream_warnings(build: &mut cc::Build) {
+    build
         .remove_flag("-Wconversion")
         .remove_flag("-Wsign-conversion")
         // Linux scripts/Makefile.warn disables these outside W=3. Unchanged
@@ -466,12 +480,27 @@ fn linux_archive(
         .flag("-Wno-unused-parameter")
         // Linux's top-level Makefile builds every file with -Wno-pointer-sign:
         // mutex.c passes its unsigned owner word to the long atomic helpers.
-        .flag("-Wno-pointer-sign")
-        .files(upstream);
-    let objects = upstream_build.compile_intermediates();
-    let mut combined = build.clone();
-    combined.objects(&objects);
-    archive(&combined, name, kernel)
+        .flag("-Wno-pointer-sign");
+    // The rest of scripts/Makefile.warn's default (no W=) clang profile.
+    for warning in [
+        "format-security",
+        "trigraphs",
+        "frame-address",
+        "address-of-packed-member",
+        "type-limits",
+        "unused-but-set-variable",
+        "unused-const-variable",
+        "initializer-overrides",
+        "pointer-to-enum-cast",
+        "tautological-constant-out-of-range-compare",
+        "unaligned-access",
+        "enum-compare-conditional",
+        "missing-field-initializers",
+        "shift-negative-value",
+        "enum-enum-conversion",
+    ] {
+        build.flag(format!("-Wno-{warning}"));
+    }
 }
 
 /// Every header in `compat` adds to Linux's: none stands in for one of

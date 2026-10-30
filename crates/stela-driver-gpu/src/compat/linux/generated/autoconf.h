@@ -30,6 +30,8 @@
 #define CONFIG_PAGE_SHIFT 12
 #define CONFIG_PGTABLE_LEVELS 4
 #define CONFIG_ILLEGAL_POINTER_VALUE 0xdead000000000000
+/* nouveau selects the I2C core for its buses and encoders. */
+#define CONFIG_I2C 1
 
 /* The drivers' parameter and scheduling defaults, as Linux's Kconfig sets them. */
 #define CONFIG_DRM_XE_FORCE_PROBE ""
@@ -49,3 +51,5 @@
 #define CONFIG_DRM_XE_PREEMPT_TIMEOUT 640000
 #define CONFIG_DRM_XE_PREEMPT_TIMEOUT_MAX 10000000
 #define CONFIG_DRM_XE_PREEMPT_TIMEOUT_MIN 1
+#define CONFIG_NOUVEAU_DEBUG 5
+#define CONFIG_NOUVEAU_DEBUG_DEFAULT 3
