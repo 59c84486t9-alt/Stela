@@ -3,7 +3,7 @@
 // Legacy identities: Copyright (C) 2003-2006 David Hollis;
 // 2005 Phil Chang; 2006 James Painter; 2002-2003 TiVo Inc.
 //! Exact ASIX donor USB/interface candidates; chip/PHY readiness is separate.
-use crate::usb::xhci::Interface;
+use crate::usb::descriptor::Interface;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::usb::ethernet) enum Identity {

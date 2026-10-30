@@ -30,10 +30,10 @@ pub use error::{ParseError, ParseErrorKind, Reader, UsageError};
 pub use touch::{TouchDiscard, TouchFrame, TouchPoll};
 pub use translate::{Translated, Translator};
 
-use super::xhci::{
-    Controller, DEVICE_TO_HOST, Device, Endpoint, GET_DESCRIPTOR, Interface, Plan,
-    RECIPIENT_INTERFACE, STALL, Shared, SlotId, TYPE_CLASS, setup,
+use super::descriptor::{
+    DEVICE_TO_HOST, Endpoint, GET_DESCRIPTOR, Interface, RECIPIENT_INTERFACE, TYPE_CLASS, setup,
 };
+use super::xhci::{Controller, Device, Plan, STALL, Shared, SlotId};
 use crate::{
     block::BlockError,
     bus::dma::{DmaAllocator, DmaBuffer},

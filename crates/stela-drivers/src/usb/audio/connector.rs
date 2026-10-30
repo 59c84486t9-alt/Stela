@@ -4,7 +4,6 @@
 //! Linux sound/usb/mixer.c::get_connector_value and audio-v2.h at
 //! cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See THIRD_PARTY.md.
 use super::{Binding, Control, Entity, Error, UAC2, control};
-use crate::usb::xhci;
 use alloc::vec::Vec;
 
 /// A terminal connector observation. Notifications invalidate this
@@ -40,7 +39,7 @@ impl ConnectorPlan {
         if plan.protocol != UAC2 {
             return Ok(plan);
         }
-        let interfaces = xhci::interfaces(configuration);
+        let interfaces = crate::usb::descriptor::interfaces(configuration);
         let interface = interfaces
             .iter()
             .find(|i| i.number == plan.interface && i.alternate == 0)

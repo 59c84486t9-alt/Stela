@@ -23,7 +23,7 @@ fn native_media_buffers_remain_unchanged_after_failed_stop_or_halted_dequeue() {
         device.id = controller.borrow().test_device_id(device.slot).unwrap();
         let binding = crate::usb::bluetooth::Binding::new(
             &device,
-            &xhci::interfaces(&device.configuration)[0],
+            &crate::usb::descriptor::interfaces(&device.configuration)[0],
         )
         .unwrap();
         let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
@@ -74,9 +74,11 @@ fn idle_sco_output_schedule(realtek: bool) {
         device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x71, 0x87]);
     }
     device.id = controller.borrow().test_device_id(device.slot).unwrap();
-    let binding =
-        crate::usb::bluetooth::Binding::new(&device, &xhci::interfaces(&device.configuration)[0])
-            .unwrap();
+    let binding = crate::usb::bluetooth::Binding::new(
+        &device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap();
     let bindings = if realtek {
         Bindings::realtek_sco(&binding)
     } else {
@@ -211,9 +213,11 @@ fn queued_wideband_services(speed: u8) {
         at += len;
     }
     device.id = controller.borrow().test_device_id(device.slot).unwrap();
-    let binding =
-        crate::usb::bluetooth::Binding::new(&device, &xhci::interfaces(&device.configuration)[0])
-            .unwrap();
+    let binding = crate::usb::bluetooth::Binding::new(
+        &device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap();
     let bindings = Bindings::realtek_sco(&binding).unwrap();
     let pair = bindings.wideband_sco(1, 60).unwrap().unwrap();
     assert_eq!(pair.alternate, 6);

@@ -5,7 +5,8 @@
 // SPDX-License-Identifier: GPL-2.0-only AND GPL-2.0-or-later
 // Protocol/SCSI references: Linux usb-storage, Matthew Dharm and contributors;
 // see THIRD_PARTY.md for the pinned sources, notices and implementation scope.
-use super::xhci::{Device, Endpoint, Interface, MAX_TD, Plan, STALL, Shared, setup};
+use super::descriptor::{Endpoint, Interface, setup};
+use super::xhci::{Device, MAX_TD, Plan, STALL, Shared};
 use crate::{
     block::{
         BlockDevice, BlockError, Command, Features, Finished, Identity, Sense, SenseCompletion,

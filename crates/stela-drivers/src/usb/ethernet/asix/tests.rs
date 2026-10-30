@@ -2,6 +2,7 @@ use super::{
     model::{Hardware, Io},
     *,
 };
+use crate::usb::descriptor::*;
 use crate::usb::ethernet;
 use crate::usb::xhci::{model, model::*, *};
 use alloc::rc::Rc;

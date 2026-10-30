@@ -294,8 +294,8 @@ impl<B: Io> Hci<B> {
                 .map_err(|failure| self.fail(ErrorKind::Usb(failure)));
         }
         // Linux btusb: HCI commands are class requests to the device, wIndex 0.
-        let request = super::xhci::setup(
-            super::xhci::TYPE_CLASS,
+        let request = super::descriptor::setup(
+            super::descriptor::TYPE_CLASS,
             HCI_COMMAND_REQUEST,
             0,
             0,

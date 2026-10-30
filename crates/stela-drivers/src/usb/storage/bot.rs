@@ -5,9 +5,8 @@
 // 2000 Stephen J. Gowdy; 2002 Alan Stern; 1999 Michael Gee.
 // Block-zero ordering: Linux sd.c, Drew Eckhardt 1992; Eric Youngdale
 // 1993-1995, 1999. Lifecycle uses Stela's shared xHCI permission.
-use super::super::xhci::{
-    DEVICE_TO_HOST, Device, Interface, Operation, RECIPIENT_INTERFACE, TYPE_CLASS,
-};
+use super::super::descriptor::{DEVICE_TO_HOST, Interface, RECIPIENT_INTERFACE, TYPE_CLASS};
+use super::super::xhci::{Device, Operation};
 use super::{Data, Endpoint, MAX_TD, Shared, scsi, setup};
 mod quirks;
 use crate::{
@@ -981,7 +980,7 @@ impl Bot<Native> {
             .attachment
             .as_ref()
             .ok_or_else(|| fail("BOT has no retained native attachment"))?;
-        let interfaces = super::super::xhci::interfaces(&old.configuration);
+        let interfaces = super::super::descriptor::interfaces(&old.configuration);
         if old.configuration.get(4) != Some(&1)
             || interfaces.is_empty()
             || interfaces.iter().any(|i| i.number != self.interface)
@@ -1013,7 +1012,7 @@ impl Bot<Native> {
                 .find(|bytes| bytes.get(5) == Some(&old.configuration_value()))
                 .cloned()
                 .ok_or_else(|| fail("USB reset lost the selected configuration"))?;
-            let setting = super::super::xhci::interfaces(&fresh.configuration)
+            let setting = super::super::descriptor::interfaces(&fresh.configuration)
                 .into_iter()
                 .find(|i| {
                     i.number == self.interface
@@ -1041,7 +1040,7 @@ impl Bot<Native> {
                         device.control(
                             setup(
                                 1,
-                                super::super::xhci::SET_INTERFACE,
+                                super::super::descriptor::SET_INTERFACE,
                                 u16::from(setting.alternate),
                                 u16::from(setting.number),
                                 0,

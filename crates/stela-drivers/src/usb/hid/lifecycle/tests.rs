@@ -213,7 +213,8 @@ fn same_controller_root_reuse_refuses_kept_hid_stop_without_touching_current_dma
                 let mut memory = vec![0u64; 512 * 1024];
                 let (shared, original, hardware, mut dma) =
                     model::reset_hid_fixture(&mut memory, speed, context, 1);
-                let interface = xhci::interfaces(&original.configuration).remove(0);
+                let interface =
+                    crate::usb::descriptor::interfaces(&original.configuration).remove(0);
                 let endpoint = interface.endpoints[0];
                 shared
                     .borrow_mut()
@@ -270,7 +271,7 @@ fn same_controller_root_reuse_refuses_kept_hid_stop_without_touching_current_dma
                         .iter()
                         .any(|(kind, slot, _)| *kind == 10 && *slot == original.slot)
                 );
-                let interface = xhci::interfaces(&fresh.configuration).remove(0);
+                let interface = crate::usb::descriptor::interfaces(&fresh.configuration).remove(0);
                 {
                     let mut c = shared.borrow_mut();
                     let mut access = c.device(fresh.id).unwrap();

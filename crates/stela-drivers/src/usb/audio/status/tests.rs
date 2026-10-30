@@ -76,7 +76,7 @@ fn peer_configuration(
         vendor_ethernet_tcr: None,
         vendor_ethernet_revision: None,
     };
-    let all = xhci::interfaces(raw);
+    let all = crate::usb::descriptor::interfaces(raw);
     let plan = Plan::parse(&all[0], &all, raw, xhci::HIGH_SPEED).unwrap();
     let owner = UsbAudio::attach(shared.clone(), &device, plan, dma).unwrap();
     (owner, model, shared)
@@ -315,7 +315,7 @@ fn stale_identity_refuses_before_cached_dequeue_or_any_mmio() {
 #[test]
 fn descriptor_selection_refuses_foreign_aliases_and_invalid_status_endpoint_profiles() {
     let raw = configuration();
-    let all = xhci::interfaces(&raw);
+    let all = crate::usb::descriptor::interfaces(&raw);
     let binding = Binding::parse(&all[0], &all, &raw, xhci::FULL_SPEED).unwrap();
     let good = StatusPlan::discover(&binding, &raw).unwrap().unwrap();
     assert_eq!(good.endpoint.address, 0x81);
@@ -345,8 +345,16 @@ fn descriptor_selection_refuses_foreign_aliases_and_invalid_status_endpoint_prof
     let mut none = crate::usb::audio::test_configuration();
     assert!(StatusPlan::discover(&binding, &none).unwrap().is_none());
     none[0] = 0; // not admitted by Binding::parse; no native permission minted
-    let all = xhci::interfaces(&none);
-    assert!(Binding::parse(&xhci::interfaces(&raw)[0], &all, &none, xhci::FULL_SPEED).is_err());
+    let all = crate::usb::descriptor::interfaces(&none);
+    assert!(
+        Binding::parse(
+            &crate::usb::descriptor::interfaces(&raw)[0],
+            &all,
+            &none,
+            xhci::FULL_SPEED
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -512,7 +520,7 @@ fn transfer_error_keeps_ticket_until_reset_dequeue_and_drop_ack() {
             .borrow()
             .setup
             .iter()
-            .any(|(request, _)| *request == xhci::setup(2, 1, 0, 0x81, 0))
+            .any(|(request, _)| *request == crate::usb::descriptor::setup(2, 1, 0, 0x81, 0))
     );
     assert_eq!(model.borrow().halt_transfer, None);
     // Replacement configuration must consume the dequeue
@@ -595,7 +603,7 @@ fn usb_halt_clear_failure_keeps_owner_and_never_acknowledges_drop() {
             .borrow()
             .setup
             .iter()
-            .any(|(request, _)| *request == xhci::setup(2, 1, 0, 0x81, 0))
+            .any(|(request, _)| *request == crate::usb::descriptor::setup(2, 1, 0, 0x81, 0))
     );
     assert_eq!(owner.start(), Err(Error::Poisoned));
     assert_eq!(owner.next_notice(), Err(Error::Poisoned));
@@ -648,7 +656,7 @@ fn unpolled_stall_is_cleared_on_device_before_acknowledged_restart() {
             .borrow()
             .setup
             .iter()
-            .any(|(request, _)| *request == xhci::setup(2, 1, 0, 0x81, 0))
+            .any(|(request, _)| *request == crate::usb::descriptor::setup(2, 1, 0, 0x81, 0))
     );
     assert!(owner.ticket.is_none() && owner.notices.is_empty());
     let producer = model.borrow().dequeues.last().copied().unwrap() & !0xf;

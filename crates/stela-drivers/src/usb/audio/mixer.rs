@@ -201,7 +201,7 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{block::BlockError, usb::xhci::setup};
+    use crate::{block::BlockError, usb::descriptor::setup};
     use alloc::{collections::BTreeMap, vec::Vec};
 
     fn graph_fixture(protocol: u8) -> Graph {

@@ -7,7 +7,8 @@
 //! Ordinary transfers use one bounded TD per endpoint. ISO requests queue bounded
 //! packet lists on the native controller's service-interval scheduler;
 //! primary streams inherit the native controller's explicit admission limits.
-use super::xhci::{self, Endpoint, Interface, Shared};
+use super::descriptor::{Endpoint, Interface};
+use super::xhci::{self, Shared};
 use crate::{
     block::BlockError,
     bus::dma::{DmaAllocator, DmaBuffer},
@@ -226,7 +227,16 @@ impl Device {
             .controller
             .borrow_mut()
             .device(self.physical.id)?
-            .control(xhci::setup(0, xhci::SET_CONFIGURATION, 0, 0, 0), &[]);
+            .control(
+                crate::usb::descriptor::setup(
+                    0,
+                    crate::usb::descriptor::SET_CONFIGURATION,
+                    0,
+                    0,
+                    0,
+                ),
+                &[],
+            );
         self.fenced = true;
         result?;
         self.configuration = 0;
@@ -316,13 +326,8 @@ mod tests {
         assert_eq!((done.status, done.actual), (Status::Cancelled, None));
         assert!(!owner.pipes.contains_key(&0x83));
         assert!(owner.pipes.contains_key(&0x81));
-        assert!(
-            model
-                .borrow()
-                .setup
-                .iter()
-                .any(|(setup, _)| *setup == xhci::setup(1, xhci::SET_INTERFACE, 2, 7, 0))
-        );
+        assert!(model.borrow().setup.iter().any(|(setup, _)| *setup
+            == crate::usb::descriptor::setup(1, crate::usb::descriptor::SET_INTERFACE, 2, 7, 0)));
         owner.configure(19, &mut dma).unwrap();
         let done = owner.poll(retained).unwrap().unwrap();
         assert_eq!(done.status, Status::Cancelled);
@@ -364,13 +369,17 @@ mod tests {
         let bytes = configuration();
         model.borrow_mut().descriptors.push((2, 0, bytes.clone()));
         let reply = owner
-            .control(xhci::setup(0x80, 6, 0x200, 0, 57), &[])
+            .control(crate::usb::descriptor::setup(0x80, 6, 0x200, 0, 57), &[])
             .unwrap();
         assert_eq!(reply, bytes);
         assert_eq!(owner.descriptors().configurations[0], bytes);
-        assert!(owner.control(xhci::setup(0, 9, 19, 0, 0), &[]).is_err());
+        assert!(
+            owner
+                .control(crate::usb::descriptor::setup(0, 9, 19, 0, 0), &[])
+                .is_err()
+        );
         owner.configure(19, &mut dma).unwrap();
-        let request = xhci::setup(0xa1, 0x81, 0x100, 0x2303, 2);
+        let request = crate::usb::descriptor::setup(0xa1, 0x81, 0x100, 0x2303, 2);
         model
             .borrow_mut()
             .control_replies
@@ -378,7 +387,10 @@ mod tests {
         assert_eq!(owner.control(request, &[]).unwrap(), vec![0x44, 0x55]);
         assert!(
             owner
-                .control(xhci::setup(0xa1, 0x81, 0x100, 0x2309, 2), &[])
+                .control(
+                    crate::usb::descriptor::setup(0xa1, 0x81, 0x100, 0x2309, 2),
+                    &[]
+                )
                 .is_err()
         );
         assert!(owner.submit(0x81, 1, 16, &[]).is_err());
@@ -399,7 +411,7 @@ mod tests {
             // USB 2.0 9.3.4 ignores the direction bit for a control endpoint.
             // EP0 exists in Address state without a configured data pipe.
             for endpoint in [0, 0x80] {
-                let request = xhci::setup(0x82, 0, 0, endpoint, 2);
+                let request = crate::usb::descriptor::setup(0x82, 0, 0, endpoint, 2);
                 model
                     .borrow_mut()
                     .control_replies
@@ -415,26 +427,35 @@ mod tests {
             for endpoint in [0x10, 0x70, 0x90, 0x100, 0x180, 0x83] {
                 assert!(
                     owner
-                        .control(xhci::setup(0x82, 0, 0, endpoint, 2), &[])
+                        .control(crate::usb::descriptor::setup(0x82, 0, 0, endpoint, 2), &[])
                         .is_err()
                 );
             }
             if !configured {
                 assert!(
                     owner
-                        .control(xhci::setup(0x82, 0, 0, 0x81, 2), &[])
+                        .control(crate::usb::descriptor::setup(0x82, 0, 0, 0x81, 2), &[])
                         .is_err()
                 );
             }
             // Admitting EP0 must not open raw standard state changes.
             assert!(
                 owner
-                    .control(xhci::setup(2, xhci::CLEAR_FEATURE, 0, 0, 0), &[])
+                    .control(
+                        crate::usb::descriptor::setup(
+                            2,
+                            crate::usb::descriptor::CLEAR_FEATURE,
+                            0,
+                            0,
+                            0
+                        ),
+                        &[]
+                    )
                     .is_err()
             );
             assert_eq!(model.borrow().setup.len(), before);
         }
-        let request = xhci::setup(0x82, 0, 0, 0x81, 2);
+        let request = crate::usb::descriptor::setup(0x82, 0, 0, 0x81, 2);
         model
             .borrow_mut()
             .control_replies
@@ -454,13 +475,18 @@ mod tests {
         bytes[4] = 1;
         let (mut owner, model) = owner_with_configuration(&mut dma, bytes);
         owner.configure(19, &mut dma).unwrap();
-        model.borrow_mut().stall_control = Some(xhci::SET_INTERFACE);
+        model.borrow_mut().stall_control = Some(crate::usb::descriptor::SET_INTERFACE);
         owner.set_interface(3, 0, &mut dma).unwrap();
         assert!(!owner.fenced());
         for endpoint in [0x81, 2] {
-            assert!(model.borrow().setup.iter().any(
-                |(request, _)| *request == xhci::setup(2, xhci::CLEAR_FEATURE, 0, endpoint, 0)
-            ));
+            assert!(model.borrow().setup.iter().any(|(request, _)| *request
+                == crate::usb::descriptor::setup(
+                    2,
+                    crate::usb::descriptor::CLEAR_FEATURE,
+                    0,
+                    endpoint,
+                    0
+                )));
         }
     }
 }

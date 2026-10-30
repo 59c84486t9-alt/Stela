@@ -137,7 +137,7 @@ impl Native {
     fn select(host: &mut Host, interface: u8, alternate: u8) -> Result<(), BlockError> {
         // Standard SET_INTERFACE completion, never just a local plan.
         host.control(
-            xhci::setup(1, 11, u16::from(alternate), u16::from(interface), 0),
+            crate::usb::descriptor::setup(1, 11, u16::from(alternate), u16::from(interface), 0),
             &[],
         )
     }

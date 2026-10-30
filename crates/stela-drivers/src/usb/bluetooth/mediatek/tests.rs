@@ -7,7 +7,7 @@ use crate::{
             Binding, FirmwareStatus, InitializationError, InitializationReport, Pipe, State,
             intel::PlatformInputs,
         },
-        xhci::{self, Device, FULL_SPEED},
+        xhci::{Device, FULL_SPEED},
     },
 };
 use alloc::{collections::VecDeque, rc::Rc, string::String};
@@ -309,7 +309,8 @@ fn fixture(chip: Chip, fault: Fault) -> (Hci<Model>, Catalog, Rc<RefCell<Trace>>
         revision: 0x100,
     };
     let trace = Rc::new(RefCell::new(Trace::default()));
-    let binding = Binding::new(&d, &xhci::interfaces(&d.configuration)[0]).unwrap();
+    let binding =
+        Binding::new(&d, &crate::usb::descriptor::interfaces(&d.configuration)[0]).unwrap();
     (
         Hci::from_io(binding, model(device, rom, fault, &trace)),
         catalog(usb, device, rom),

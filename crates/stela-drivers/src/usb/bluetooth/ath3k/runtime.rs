@@ -224,7 +224,7 @@ impl<B: Io> Engine<'_, B> {
         let raw = self
             .hci
             .io
-            .control_read(crate::usb::xhci::setup(0xc0, 9, 0, 0, 20))
+            .control_read(crate::usb::descriptor::setup(0xc0, 9, 0, 0, 20))
             .map_err(Error::Usb)?;
         let version = qca::Version::parse(&raw)
             .map_err(|_| Error::protocol("ATH3012 vendor version exact length", &raw))?;

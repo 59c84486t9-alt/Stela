@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Separate pure USB ownership plans from bindings requiring native observations.
 use super::{Binding, Control, Error, UAC3, uac3};
-use crate::usb::xhci::Interface;
+use crate::usb::descriptor::Interface;
 use alloc::vec::Vec;
 
 pub enum Plan {

@@ -5,10 +5,7 @@ use super::*;
 use crate::{
     block::BlockError,
     bus::dma::DmaBuffer,
-    usb::{
-        bluetooth::{Binding, Io, Packet, Pipe},
-        xhci,
-    },
+    usb::bluetooth::{Binding, Io, Packet, Pipe},
 };
 use alloc::{boxed::Box, collections::VecDeque, rc::Rc, vec, vec::Vec};
 use core::cell::{Cell, RefCell};
@@ -205,7 +202,11 @@ fn hci(project: super::super::Project, model: Model) -> Hci<Model> {
     device.descriptor[8..10].copy_from_slice(&report.before.usb.vendor.to_le_bytes());
     device.descriptor[10..12].copy_from_slice(&report.before.usb.product.to_le_bytes());
     device.descriptor[12..14].copy_from_slice(&report.before.usb.revision.to_le_bytes());
-    let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+    let binding = Binding::new(
+        &device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap();
     let mut hci = Hci::from_io(binding, model);
     hci.initialization = Some(Box::new(Ok(InitializationReport::Realtek(report))));
     hci

@@ -9,7 +9,7 @@
 //! descriptors alone decide clocks, alternates, channels and sample rates. UAC3
 //! BADD uses its owning standardized profile and endpoint/power controls.
 //! Full UAC3 resolves high-capability cluster replies before publication.
-use super::xhci::{Endpoint, Interface};
+use super::descriptor::{Endpoint, Interface};
 use crate::{audio::Direction, block::BlockError};
 
 mod badd;

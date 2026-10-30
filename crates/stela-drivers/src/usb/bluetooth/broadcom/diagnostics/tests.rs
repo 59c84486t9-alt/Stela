@@ -110,7 +110,11 @@ fn fixture(
     (device, catalog, replies)
 }
 fn binding(device: &xhci::Device) -> Binding {
-    Binding::new(device, &xhci::interfaces(&device.configuration)[0]).unwrap()
+    Binding::new(
+        device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap()
 }
 fn hci(sub: u16) -> Hci<Model> {
     let (device, _, _) = fixture(sub);

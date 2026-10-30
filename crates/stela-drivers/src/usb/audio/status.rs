@@ -6,7 +6,8 @@
 use super::{Binding, Entity, Error, Graph, UAC1, UAC2};
 use crate::{
     bus::dma::{DmaAllocator, DmaBuffer, RegionAllocator},
-    usb::xhci::{self, Endpoint, Shared, SlotId, TransferTicket},
+    usb::descriptor::Endpoint,
+    usb::xhci::{self, Shared, SlotId, TransferTicket},
 };
 use alloc::{collections::VecDeque, vec::Vec};
 
@@ -60,7 +61,7 @@ impl StatusPlan {
         if !matches!(binding.graph.protocol, UAC1 | UAC2) {
             return Ok(None);
         }
-        let interfaces = xhci::interfaces(configuration);
+        let interfaces = crate::usb::descriptor::interfaces(configuration);
         // Binding::parse already checked complete configuration/interface counts,
         // and associations before native attachment. Status endpoint aliases are
         // checked separately below (the binding only checked streaming DCIs).

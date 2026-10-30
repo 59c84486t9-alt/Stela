@@ -116,7 +116,7 @@ fn uac1_foreign_reserved_unknown_and_truncated_words_publish_no_prefix() {
 fn uac1_two_byte_endpoint_admission_uses_protocol_and_exclusive_dci() {
     for speed in [xhci::FULL_SPEED, xhci::HIGH_SPEED] {
         let raw = configuration(2);
-        let all = xhci::interfaces(&raw);
+        let all = crate::usb::descriptor::interfaces(&raw);
         let binding = Binding::parse(&all[0], &all, &raw, speed).unwrap();
         let plan = StatusPlan::discover(&binding, &raw).unwrap().unwrap();
         assert_eq!(plan.message_bytes(), 2);
@@ -233,7 +233,7 @@ fn uac1_unchanged_linux_irq_callback_oracle() {
         Some("linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8")
     );
     let raw = configuration(4);
-    let all = xhci::interfaces(&raw);
+    let all = crate::usb::descriptor::interfaces(&raw);
     let binding = Binding::parse(&all[0], &all, &raw, xhci::HIGH_SPEED).unwrap();
     let plan = StatusPlan::discover(&binding, &raw).unwrap().unwrap();
     let mut words = 0;

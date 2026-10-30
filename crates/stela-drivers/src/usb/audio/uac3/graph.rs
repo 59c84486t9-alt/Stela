@@ -4,7 +4,7 @@ use super::super::{Control, Entity, Error, Graph, PowerDomain, UAC3};
 use super::{Cluster, Reader};
 use crate::{
     bytes::{le16, le32},
-    usb::xhci::Interface,
+    usb::descriptor::Interface,
 };
 use alloc::vec::Vec;
 

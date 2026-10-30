@@ -8,7 +8,7 @@ mod uac3;
 use crate::usb::audio::*;
 use crate::{
     bus::dma::RegionAllocator,
-    usb::xhci::{interfaces, setup},
+    usb::descriptor::{interfaces, setup},
 };
 use alloc::{collections::BTreeMap, vec::Vec};
 

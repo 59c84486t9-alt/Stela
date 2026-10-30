@@ -5,7 +5,7 @@ use crate::{
     firmware::{Catalog, Provenance, Resource, Target},
     usb::{
         bluetooth::{Binding, Pipe},
-        xhci::{self, Device, FULL_SPEED},
+        xhci::{Device, FULL_SPEED},
     },
 };
 use alloc::{rc::Rc, vec};
@@ -265,7 +265,7 @@ impl Io for Model {
     }
 }
 fn transport(device: Device, script: Script) -> Hci<Model> {
-    let interface = xhci::interfaces(&device.configuration).remove(0);
+    let interface = crate::usb::descriptor::interfaces(&device.configuration).remove(0);
     let binding = Binding::new(&device, &interface).unwrap();
     Hci::from_io(
         binding,

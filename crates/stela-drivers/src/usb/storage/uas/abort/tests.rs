@@ -20,7 +20,7 @@ fn fixture(memory: &mut [u64], speed: u8, context: usize, streams: u16) -> Fixtu
         .unwrap()
         .set_configuration(1)
         .unwrap();
-    let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
+    let interface = crate::usb::descriptor::interfaces(&device.configuration).remove(0);
     let binding = Binding::new(&device, &interface).unwrap();
     let host = if speed == SUPER_SPEED && streams == 1 {
         let endpoints = binding.endpoints();

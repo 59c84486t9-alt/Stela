@@ -7,7 +7,8 @@ use crate::{
     audio::Direction,
     block::BlockError,
     bus::dma::{DmaAllocator, DmaBuffer, RegionAllocator},
-    usb::xhci::{Device, Endpoint, IsoStatus, IsoTransfer, Shared, SlotId},
+    usb::descriptor::Endpoint,
+    usb::xhci::{Device, IsoStatus, IsoTransfer, Shared, SlotId},
 };
 use alloc::vec::Vec;
 
@@ -290,7 +291,7 @@ pub(crate) mod tests {
                 vendor_ethernet_tcr: None,
                 vendor_ethernet_revision: None,
             };
-            let all = xhci::interfaces(&raw);
+            let all = crate::usb::descriptor::interfaces(&raw);
             let plan = Plan::parse(&all[0], &all, &raw, xhci::HIGH_SPEED).unwrap();
             controller.clock.ticks_per_microsecond = rate;
             controller.forbid_mmio();

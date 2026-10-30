@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! xHCI-backed physical HCI I/O. DMA storage lives for the rest of the boot,
 //! including when an unplugged/faulted controller cannot acknowledge a stop.
-use super::super::xhci::{Device, Endpoint, Shared, SlotId, TransferTicket};
+use super::super::descriptor::Endpoint;
+use super::super::xhci::{Device, Shared, SlotId, TransferTicket};
 use super::{ACL_READ, Binding, EVENT_READ, Hci, Io, Pipe};
 use crate::{
     Clock,
@@ -381,13 +382,16 @@ pub(crate) mod tests {
                 serial: None,
                 language: None,
             };
-            let binding =
-                Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+            let binding = Binding::new(
+                &device,
+                &crate::usb::descriptor::interfaces(&device.configuration)[0],
+            )
+            .unwrap();
             let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
             let before = backing.clone();
             assert!(
                 hci.io
-                    .control_read(xhci::setup(0xc0, 1, 48, 0, 64))
+                    .control_read(crate::usb::descriptor::setup(0xc0, 1, 48, 0, 64))
                     .is_err()
             );
             assert!(hci.io.control_pending);
@@ -411,7 +415,11 @@ pub(crate) mod tests {
         let (controller, _) = xhci::model::cancellation_controller(&mut dma);
         let controller = Rc::new(RefCell::new(controller));
         let device = firmware_device(controller.borrow().test_device_id(1).unwrap());
-        let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+        let binding = Binding::new(
+            &device,
+            &crate::usb::descriptor::interfaces(&device.configuration)[0],
+        )
+        .unwrap();
         let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
         assert_eq!(hci.io.receive(Pipe::Event).unwrap(), None);
         assert!(hci.io.events.queued.is_some());
@@ -463,8 +471,11 @@ pub(crate) mod tests {
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut controller, model) = xhci::model::cancellation_controller(&mut dma);
             let device = firmware_device(controller.test_device_id(1).unwrap());
-            let binding =
-                Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+            let binding = Binding::new(
+                &device,
+                &crate::usb::descriptor::interfaces(&device.configuration)[0],
+            )
+            .unwrap();
             controller.clock.ticks_per_microsecond = rate;
             let before = backing.clone();
             let commands = model.borrow().seen.clone();
@@ -493,7 +504,11 @@ pub(crate) mod tests {
         let (controller, model) = xhci::model::cancellation_controller(&mut dma);
         let controller = Rc::new(RefCell::new(controller));
         let device = firmware_device(controller.borrow().test_device_id(1).unwrap());
-        let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+        let binding = Binding::new(
+            &device,
+            &crate::usb::descriptor::interfaces(&device.configuration)[0],
+        )
+        .unwrap();
         let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
         let payload = vec![0xa5; 4096];
         hci.io.write_firmware(&payload, 3_000_000).unwrap();
@@ -525,7 +540,11 @@ pub(crate) mod tests {
         model.borrow_mut().fail = Some((STOP_ENDPOINT, CONTEXT_STATE_ERROR));
         let controller = Rc::new(RefCell::new(controller));
         let device = firmware_device(controller.borrow().test_device_id(1).unwrap());
-        let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+        let binding = Binding::new(
+            &device,
+            &crate::usb::descriptor::interfaces(&device.configuration)[0],
+        )
+        .unwrap();
         let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
         assert_eq!(
             hci.io.write_firmware(&[0xa5; 64], 3_000_000),

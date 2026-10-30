@@ -4,10 +4,7 @@ use super::*;
 use crate::{
     block::BlockError,
     bus::dma::DmaBuffer,
-    usb::{
-        bluetooth::{Binding, Io, Packet, Pipe},
-        xhci,
-    },
+    usb::bluetooth::{Binding, Io, Packet, Pipe},
 };
 use alloc::{boxed::Box, collections::VecDeque, rc::Rc, vec, vec::Vec};
 use core::cell::{Cell, RefCell};
@@ -191,7 +188,11 @@ fn hci(kind: super::super::Kind, model: Model, alt6: bool) -> Hci<Model> {
     let len = raw.len() as u16;
     raw[2..4].copy_from_slice(&len.to_le_bytes());
     device.configuration = raw;
-    let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+    let binding = Binding::new(
+        &device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap();
     let mut h = Hci::from_io(binding, model);
     h.initialization = Some(Box::new(Ok(InitializationReport::Qualcomm(report))));
     h

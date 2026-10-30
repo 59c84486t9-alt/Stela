@@ -7,7 +7,7 @@ use super::{CLASS, STREAMING_SUBCLASS, UAC1};
 use crate::{
     audio::Direction,
     bytes::le16,
-    usb::xhci::{Interface, setup},
+    usb::descriptor::{Interface, setup},
 };
 use alloc::vec::Vec;
 
@@ -424,7 +424,7 @@ pub(super) fn binding(
     while at < configuration.len() {
         let n = usize::from(configuration[at]);
         let d = &configuration[at..at + n]; // scope() validated all extents
-        if d[1] == crate::usb::xhci::INTERFACE_ASSOCIATION_DESCRIPTOR {
+        if d[1] == crate::usb::descriptor::INTERFACE_ASSOCIATION_DESCRIPTOR {
             let range = u16::from(d[2])..u16::from(d[2]) + u16::from(d[3]);
             if !range.contains(&u16::from(control.number))
                 && collection.iter().any(|id| range.contains(&u16::from(*id)))

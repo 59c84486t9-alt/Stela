@@ -26,7 +26,11 @@ fn device() -> xhci::Device {
     device
 }
 fn binding(device: &xhci::Device) -> Binding {
-    Binding::new(device, &xhci::interfaces(&device.configuration)[0]).unwrap()
+    Binding::new(
+        device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap()
 }
 fn initialize<B: Io>(hci: &mut Hci<B>) {
     let empty = crate::firmware::Catalog::from_handoff(vec![]).unwrap();

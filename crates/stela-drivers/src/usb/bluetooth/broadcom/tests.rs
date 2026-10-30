@@ -187,7 +187,11 @@ fn catalog(sub: u16, generic: bool, bytes: Vec<u8>) -> Catalog {
 }
 fn model(sub: u16) -> (Hci<Model>, Rc<RefCell<Trace>>) {
     let device = device(0x0a5c, 0x21e8, 0xff);
-    let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+    let binding = Binding::new(
+        &device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap();
     let mut steps = VecDeque::new();
     let mut add = |op, p: &[u8], reply: &[u8]| {
         steps.push_back(Step {
@@ -525,15 +529,21 @@ fn vendor_descriptor_admission_matches_source_and_requires_real_interface() {
         0x105b, 0x0bb4, 0x0489, 0x04ca, 0x0a5c, 0x0b05, 0x050d, 0x13d3, 0x413c, 0x0930,
     ] {
         let device = device(vendor, 0xabcd, 0xff);
-        let interface = &xhci::interfaces(&device.configuration)[0];
+        let interface = &crate::usb::descriptor::interfaces(&device.configuration)[0];
         assert!(is_vendor_interface(&device, interface));
         assert!(Binding::new(&device, interface).is_ok());
         assert!(is_candidate(&device));
     }
     let unknown = device(0x1234, 0x5678, 0xff);
-    assert!(Binding::new(&unknown, &xhci::interfaces(&unknown.configuration)[0]).is_err());
+    assert!(
+        Binding::new(
+            &unknown,
+            &crate::usb::descriptor::interfaces(&unknown.configuration)[0]
+        )
+        .is_err()
+    );
     let known = device(0x0a5c, 0x21e8, 0xff);
-    let mut fabricated = xhci::interfaces(&known.configuration)[0].clone();
+    let mut fabricated = crate::usb::descriptor::interfaces(&known.configuration)[0].clone();
     fabricated.endpoints[0].address = 0x8f;
     assert!(Binding::new(&known, &fabricated).is_err());
 }

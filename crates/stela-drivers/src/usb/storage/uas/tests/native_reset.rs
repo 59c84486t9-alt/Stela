@@ -9,7 +9,7 @@ fn native_root_reset_rebind_preserves_old_alias_quarantine_and_reprobes_geometry
         let mut memory = vec![0u64; 512 * 1024];
         let (controller, device, hardware, mut dma) =
             crate::usb::xhci::model::reset_fixture(&mut memory, speed, 32, 3);
-        let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
+        let interface = crate::usb::descriptor::interfaces(&device.configuration).remove(0);
         let binding = Binding::new(&device, &interface).unwrap();
         let mut failures = Vec::new();
         // SAFETY: This fixture pairs the current controller/device/binding
@@ -149,7 +149,7 @@ fn native_reset_identity_or_reconstruction_failure_quarantines_both_epochs() {
             32,
             3,
         );
-        let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
+        let interface = crate::usb::descriptor::interfaces(&device.configuration).remove(0);
         let mut failures = Vec::new();
         // SAFETY: The controller, device and binding name this fixture's
         // current attachment, with no competing UAS endpoint owner. memory

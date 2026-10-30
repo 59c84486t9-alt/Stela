@@ -2,7 +2,7 @@
 //! UAC2 entity controls and clock traversal adapted from Linux sound/usb/clock.c
 //! and mixer.c. Exact reply lengths are required; no timeout is success.
 use super::{Entity, Error, Graph};
-use crate::{block::BlockError, usb::xhci::setup};
+use crate::{block::BlockError, usb::descriptor::setup};
 use alloc::vec::Vec;
 
 pub trait Control {

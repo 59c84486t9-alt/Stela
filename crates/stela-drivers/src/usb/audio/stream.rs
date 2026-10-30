@@ -7,7 +7,7 @@ use super::{Binding, Completion, Error, Format, PacketStatus, ResolvedClock, Syn
 use crate::{
     audio::Direction,
     bus::dma::{DmaAllocator, DmaBuffer},
-    usb::xhci::Endpoint,
+    usb::descriptor::Endpoint,
 };
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -619,7 +619,7 @@ impl<T: Transport> AudioDevice<T> {
             ));
         }
         let reply = self.transport.control(
-            crate::usb::xhci::setup(
+            crate::usb::descriptor::setup(
                 0xa1,
                 1,
                 1 << 8,

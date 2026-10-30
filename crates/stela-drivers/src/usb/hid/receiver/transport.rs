@@ -82,7 +82,7 @@ pub(in crate::usb) fn attach_group(
         .filter(|(_, input)| input.interface < 3)
         .map(|(n, _)| n)
         .collect();
-    let actual_interfaces = crate::usb::xhci::interfaces(&device.configuration);
+    let actual_interfaces = crate::usb::descriptor::interfaces(&device.configuration);
     let mut vendor = None;
     let mut members = Vec::new();
     for index in &indices {

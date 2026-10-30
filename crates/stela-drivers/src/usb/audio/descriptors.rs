@@ -5,10 +5,11 @@ use super::{CLASS, CONTROL_SUBCLASS, Control, Error, STREAMING_SUBCLASS, UAC2};
 use crate::bytes::{le16, le32};
 use crate::{
     audio::Direction,
-    usb::xhci::{
-        ENDPOINT_DESCRIPTOR, Endpoint, FULL_SPEED, HIGH_SPEED, INTERFACE_ASSOCIATION_DESCRIPTOR,
-        INTERFACE_DESCRIPTOR, Interface, setup,
+    usb::descriptor::{
+        ENDPOINT_DESCRIPTOR, Endpoint, INTERFACE_ASSOCIATION_DESCRIPTOR, INTERFACE_DESCRIPTOR,
+        Interface, setup,
     },
+    usb::xhci::{FULL_SPEED, HIGH_SPEED},
 };
 use alloc::vec::Vec;
 

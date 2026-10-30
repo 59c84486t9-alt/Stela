@@ -455,7 +455,7 @@ fn native_fixture(
         quirks::Flags::from_device(&device).unwrap().write_cache(),
         write_cache
     );
-    let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
+    let interface = crate::usb::descriptor::interfaces(&device.configuration).remove(0);
     let endpoints = [true, false].map(|input| {
         *interface
             .endpoints

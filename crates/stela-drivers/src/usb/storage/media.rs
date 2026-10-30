@@ -482,8 +482,11 @@ mod tests {
             let mut memory = vec![0u64; 512 * 1024];
             let (controller, device, hardware, mut dma) =
                 xhci::model::reset_fixture(&mut memory, speed, 32, 3);
-            let binding =
-                uas::Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+            let binding = uas::Binding::new(
+                &device,
+                &crate::usb::descriptor::interfaces(&device.configuration)[0],
+            )
+            .unwrap();
             let mut failures = Vec::new();
             // SAFETY: the fixture grants this owner its one unconfigured interface.
             let (mut storage, mut disks) = unsafe {
@@ -535,8 +538,11 @@ mod tests {
         let mut memory = vec![0u64; 512 * 1024];
         let (controller, device, hardware, mut dma) =
             xhci::model::reset_fixture(&mut memory, xhci::HIGH_SPEED, 32, 3);
-        let binding =
-            uas::Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+        let binding = uas::Binding::new(
+            &device,
+            &crate::usb::descriptor::interfaces(&device.configuration)[0],
+        )
+        .unwrap();
         let mut failures = Vec::new();
         // SAFETY: exclusive fresh fixture interface; no endpoints configured.
         let (mut storage, mut disks) = unsafe {
