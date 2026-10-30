@@ -1,5 +1,6 @@
 //! USB devices behind the host's xHCI controllers ([`xhci`]), each
-//! interface bound to its class driver when the controller attaches: HID
+//! interface bound to its class driver when the controller attaches, and
+//! Bulk-Only storage on EHCI controllers' high-speed roots ([`ehci`]): HID
 //! keyboards and pointers ([`hid`]), Bulk-Only and UAS mass storage
 //! ([`storage`]), CDC ECM/NCM and vendor Ethernet adapters ([`cdc`],
 //! [`ethernet`]), Bluetooth HCI transports ([`bluetooth`]) and UAC2 audio

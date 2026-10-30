@@ -61,6 +61,7 @@ pub enum Error {
     MediatekWifi(net::wifi::mediatek::attach::AttachError),
     IntelBluetooth(crate::bluetooth::intel_pcie::Error),
     Bcm4377(crate::bluetooth::bcm4377::Error),
+    Ehci(usb::ehci::Error),
 }
 
 impl fmt::Display for Error {
@@ -78,6 +79,7 @@ impl fmt::Display for Error {
             Self::MediatekWifi(error) => write!(f, "mt76: {error}"),
             Self::IntelBluetooth(error) => write!(f, "btintel_pcie: {error}"),
             Self::Bcm4377(error) => write!(f, "hci_bcm4377: {error}"),
+            Self::Ehci(error) => write!(f, "EHCI: {error:?}"),
         }
     }
 }
@@ -356,8 +358,10 @@ fn unsupported(class: [u8; 3]) -> Option<&'static str> {
         [0x02, 0x80, _] => Some("Wi-Fi controller other than Intel's or MediaTek's"),
         [0x02, ..] => Some("network controller"),
         [0x04, 0x03, _] => Some("HD Audio controller (audio is not attached yet)"),
+        // EHCI attaches through the mount's native services.
+        [0x0c, 0x03, 0x20] => None,
         [0x0c, 0x03, _] => {
-            Some("USB host controller other than xHCI (taken from firmware, not driven)")
+            Some("UHCI or OHCI USB host controller (taken from firmware, not driven)")
         }
         [0x0c, 0x0a, _] => Some("USB4/Thunderbolt host (not attached yet)"),
         [0x0c, 0x05, _] => Some(
@@ -388,6 +392,8 @@ pub struct Devices {
     pub usb_devices: Vec<xhci::Device>,
     /// Explicitly polled USB topology owners, including empty controllers.
     pub usb_hosts: Vec<xhci::Host>,
+    /// Attached EHCI controllers, which their roots' storage transports share.
+    pub ehci_hosts: Vec<usb::ehci::host::Shared>,
     /// Native SDHCI socket owners, including empty/removable card sockets.
     pub sd_hosts: Vec<sdhci::Host>,
     /// Native Realtek socket owners, kept for empty/removable SD/MMC cards.
@@ -881,6 +887,46 @@ pub unsafe fn probe_with_provider(
                         broadcom_bluetooth.push(address);
                         continue;
                     }
+                    native::Kind::Ehci => {
+                        // SAFETY: as for tg3 below; the handoff above took
+                        // this controller and reset its companions, which
+                        // the scan reaches first as lower functions.
+                        match unsafe { native::ehci(services, address, handoff.clock) } {
+                            Ok((controller, domain)) => {
+                                // SAFETY: `domain` is the claimed controller's;
+                                // the CPU alone touches these storage buffers,
+                                // copying through the controller's own arena.
+                                let mut dma = unsafe {
+                                    crate::bus::dma::DomainAllocator::new(
+                                        services.pages(),
+                                        domain,
+                                        u64::from(u32::MAX),
+                                    )
+                                };
+                                let found = usb::ehci::host::enumerate(
+                                    &controller,
+                                    &alloc::format!("{address} EHCI"),
+                                    handoff.clock,
+                                    &mut dma,
+                                );
+                                devices.disks.extend(
+                                    found
+                                        .disks
+                                        .into_iter()
+                                        .map(|disk| Box::new(disk) as Box<dyn BlockDevice>),
+                                );
+                                devices.usb_storage.extend(found.storage);
+                                devices.usb_failures.extend(found.failures);
+                                devices.usb_unused.extend(found.unused);
+                                devices.ehci_hosts.push(controller);
+                            }
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.owners.extend(kept);
+                            }
+                        }
+                        continue;
+                    }
                     native::Kind::IntelWifi => {
                         let Some(wifi) = &wifi_inputs else {
                             continue;
@@ -1317,9 +1363,10 @@ mod tests {
             Some("RAID storage controller (Intel RST/VMD mode)")
         );
         assert_eq!(
-            unsupported([0x0c, 0x03, 0x20]),
-            Some("USB host controller other than xHCI (taken from firmware, not driven)")
+            unsupported([0x0c, 0x03, 0x10]),
+            Some("UHCI or OHCI USB host controller (taken from firmware, not driven)")
         );
+        assert_eq!(unsupported([0x0c, 0x03, 0x20]), None); // EHCI: native
         assert_eq!(
             unsupported([0x08, 0x05, 0x02]),
             Some("SD host controller without standard SDHCI interface")

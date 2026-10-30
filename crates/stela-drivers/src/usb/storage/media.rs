@@ -293,6 +293,7 @@ pub struct UsbStorage {
 #[derive(Clone)]
 pub(super) enum TransportOwner {
     Bot(Rc<RefCell<Owner<Bot<Native>>>>),
+    EhciBot(Rc<RefCell<Owner<Bot<EhciBulk>>>>),
     Uas(Rc<RefCell<Owner<uas::Host>>>),
 }
 impl UsbStorage {
@@ -300,6 +301,7 @@ impl UsbStorage {
     pub fn location(&self) -> String {
         match &self.owner {
             TransportOwner::Bot(owner) => owner.borrow().prefix.clone(),
+            TransportOwner::EhciBot(owner) => owner.borrow().prefix.clone(),
             TransportOwner::Uas(owner) => owner.borrow().prefix.clone(),
         }
     }
@@ -317,6 +319,14 @@ impl UsbStorage {
                     .into_iter()
                     .map(|disk| UsbDisk {
                         disk: UsbTransport::Bot(disk),
+                    })
+                    .collect()
+            }),
+            TransportOwner::EhciBot(owner) => scan_bot(owner.clone(), failures).map(|units| {
+                units
+                    .into_iter()
+                    .map(|disk| UsbDisk {
+                        disk: UsbTransport::EhciBot(disk),
                     })
                     .collect()
             }),
@@ -352,6 +362,7 @@ impl UsbStorage {
     fn requires_rebind(&self) -> bool {
         match &self.owner {
             TransportOwner::Bot(owner) => owner.borrow().transport.poisoned(),
+            TransportOwner::EhciBot(owner) => owner.borrow().transport.poisoned(),
             TransportOwner::Uas(owner) => owner.borrow().transport.requires_rebind(),
         }
     }
@@ -383,6 +394,19 @@ impl UsbStorage {
                 );
                 TransportOwner::Bot(Rc::new(RefCell::new(Owner::new(host, prefix, serial))))
             }
+            TransportOwner::EhciBot(old) => {
+                let mut old = old.borrow_mut();
+                old.invalidate();
+                let host =
+                    old.transport
+                        .reset_and_rebind_ehci()
+                        .map_err(|(operation, error)| {
+                            failures.push((operation, error.clone()));
+                            error
+                        })?;
+                let (prefix, serial) = (old.prefix.clone(), old.serial.clone());
+                TransportOwner::EhciBot(Rc::new(RefCell::new(Owner::new(host, prefix, serial))))
+            }
             TransportOwner::Uas(old) => {
                 let host = {
                     let mut old = old.borrow_mut();
@@ -407,6 +431,7 @@ impl UsbStorage {
         if result.is_err() {
             match &self.owner {
                 TransportOwner::Bot(owner) => owner.borrow_mut().transport.quarantine(),
+                TransportOwner::EhciBot(owner) => owner.borrow_mut().transport.quarantine(),
                 TransportOwner::Uas(owner) => owner.borrow_mut().transport.quarantine(),
             }
         }
@@ -420,6 +445,7 @@ impl UsbDisk {
         UsbStorage {
             owner: match &self.disk {
                 UsbTransport::Bot(disk) => TransportOwner::Bot(disk.bot.clone()),
+                UsbTransport::EhciBot(disk) => TransportOwner::EhciBot(disk.bot.clone()),
                 UsbTransport::Uas(disk) => TransportOwner::Uas(disk.bot.clone()),
             },
         }

@@ -14,6 +14,7 @@ extern crate std;
 mod admission_tests;
 mod configuration_tests;
 mod detach_tests;
+mod host_tests;
 mod periodic_tests;
 mod recovery_tests;
 mod suspend_tests;
@@ -25,6 +26,10 @@ const TOGGLE: u32 = 1 << 31;
 const DESCRIPTION: [u8; 32] = [
     9, 2, 32, 0, 1, 1, 0, 0x80, 50, 9, 4, 0, 0, 2, 8, 6, 0x50, 0, 7, 5, 0x81, 2, 0, 2, 0, 7, 5, 2,
     2, 0, 2, 0,
+];
+/// A USB 2.0 device descriptor with one configuration and no strings.
+const DEVICE: [u8; 18] = [
+    18, 1, 0, 2, 0, 0, 0, 64, 0x34, 0x12, 0x78, 0x56, 0, 1, 0, 0, 0, 1,
 ];
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Mode {
@@ -333,6 +338,8 @@ impl Shared {
                         .unwrap_or_else(|| vec![self.configurations[root]])
                 } else if setup[1] == 6 && setup[3] == 2 {
                     self.description.clone()
+                } else if setup[1] == 6 && setup[3] == 1 {
+                    DEVICE.to_vec()
                 } else {
                     vec![0x5a; usize::from(u16::from_le_bytes([setup[6], setup[7]]))]
                 };

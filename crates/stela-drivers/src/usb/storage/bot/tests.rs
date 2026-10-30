@@ -73,6 +73,8 @@ struct State {
 #[derive(Clone)]
 struct Model(Rc<RefCell<State>>);
 impl Io for Model {
+    /// The model has no device to isolate.
+    fn quarantine(&mut self) {}
     fn ready(&mut self) -> Result<(), BlockError> {
         if self.0.borrow().poisoned {
             Err(BlockError::Unsupported("model unacknowledged cancellation"))
@@ -133,9 +135,10 @@ impl Io for Model {
     fn bulk(
         &mut self,
         endpoint: Endpoint,
-        address: u64,
+        buffer: &mut DmaBuffer,
         length: usize,
     ) -> Result<usize, BlockError> {
+        let address = buffer.physical();
         let mut s = self.0.borrow_mut();
         s.transfers += 1;
         assert!(
@@ -1348,7 +1351,11 @@ fn late_discovery_transport_poison_discards_already_probed_units() {
         fn now_us(&self) -> u64 {
             self.0.now_us()
         }
-        fn bulk(&mut self, e: Endpoint, p: u64, n: usize) -> Result<usize, BlockError> {
+        fn quarantine(&mut self) {
+            self.0.quarantine();
+        }
+        fn bulk(&mut self, e: Endpoint, b: &mut DmaBuffer, n: usize) -> Result<usize, BlockError> {
+            let p = b.physical();
             if !e.is_in() && n == 31 {
                 let range = self.0.0.borrow().range.clone();
                 assert!(p >= range.start && p + 31 <= range.end);
@@ -1357,7 +1364,7 @@ fn late_discovery_transport_poison_discards_already_probed_units() {
                     self.0.0.borrow_mut().fault = Fault::Timeout;
                 }
             }
-            self.0.bulk(e, p, n)
+            self.0.bulk(e, b, n)
         }
     }
     let mut memory = vec![0u64; 32 * 1024];

@@ -12,6 +12,7 @@
 //! boundaries make this an incomplete EHCI-family implementation.
 mod descriptor;
 mod detach;
+pub mod host;
 mod native;
 mod periodic;
 mod recovery;
@@ -78,6 +79,12 @@ pub enum Error {
     Register,
     Exhausted,
     Clock,
+}
+impl Error {
+    /// A pure STALL: the endpoint halted with no other transaction error.
+    pub fn stalled(&self) -> bool {
+        matches!(self, Self::Device(token) if token & schedule::ERRORS == schedule::HALTED)
+    }
 }
 impl From<DmaError> for Error {
     fn from(value: DmaError) -> Self {
@@ -356,6 +363,25 @@ impl Controller {
         let expected = if periodic { PSS } else { ASS };
         self.wait(self.operational + STS, ASS | PSS, expected, TRANSITION_US)?;
         self.health()
+    }
+
+    /// The controller's root ports, numbered from one.
+    pub fn ports(&self) -> u8 {
+        self.ports.len() as u8
+    }
+    /// The lowest USB address no device here holds.
+    pub fn unused_address(&self) -> Option<u8> {
+        (1..=127).find(|address| {
+            !self
+                .ports
+                .iter()
+                .flatten()
+                .any(|device| device.address == *address)
+        })
+    }
+    /// Whether `id` still names a live device on a running controller.
+    pub fn validate(&self, id: &DeviceId) -> Result<(), Error> {
+        self.identity(id).map(drop)
     }
 
     /// Reset a powered root with no active TD. Another default-address owner

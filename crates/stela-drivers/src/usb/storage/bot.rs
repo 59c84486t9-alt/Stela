@@ -8,6 +8,7 @@
 use super::super::descriptor::{DEVICE_TO_HOST, Interface, RECIPIENT_INTERFACE, TYPE_CLASS};
 use super::super::xhci::{Device, Operation};
 use super::{Data, Endpoint, MAX_TD, Shared, scsi, setup};
+mod ehci;
 mod quirks;
 use crate::{
     block::{BlockError, Sense},
@@ -15,6 +16,7 @@ use crate::{
 };
 use alloc::vec::Vec;
 use core::ops::{Deref, DerefMut};
+pub(in crate::usb) use ehci::{EhciBulk, block as ehci_error};
 
 const RESET: u8 = 0xff;
 const GET_MAX_LUN: u8 = 0xfe;
@@ -41,8 +43,14 @@ pub(super) trait Io {
     fn ready(&mut self) -> Result<(), BlockError>;
     fn control(&mut self, request: [u8; 8]) -> Result<Vec<u8>, BlockError>;
     fn clear(&mut self, endpoint: Endpoint) -> Result<(), BlockError>;
-    fn bulk(&mut self, endpoint: Endpoint, buffer: u64, length: usize)
-    -> Result<usize, BlockError>;
+    fn bulk(
+        &mut self,
+        endpoint: Endpoint,
+        buffer: &mut DmaBuffer,
+        length: usize,
+    ) -> Result<usize, BlockError>;
+    /// Isolate the device after its transport was poisoned.
+    fn quarantine(&mut self);
     fn delay(&self, micros: u64);
     /// The transport's clock, in microseconds.
     fn now_us(&self) -> u64;
@@ -60,7 +68,7 @@ pub(super) trait Io {
     fn submit(
         &mut self,
         endpoint: Endpoint,
-        buffer: u64,
+        buffer: &mut DmaBuffer,
         length: usize,
     ) -> Result<Pending, BlockError> {
         Ok(Pending::Done(self.bulk(endpoint, buffer, length)))
@@ -160,15 +168,21 @@ impl Io for Native {
     fn bulk(
         &mut self,
         endpoint: Endpoint,
-        buffer: u64,
+        buffer: &mut DmaBuffer,
         length: usize,
     ) -> Result<usize, BlockError> {
         self.controller.borrow_mut().device(self.id)?.transfer(
             endpoint.dci(),
-            buffer,
+            buffer.physical(),
             length,
             COMMAND_US,
         )
+    }
+    fn quarantine(&mut self) {
+        let mut controller = self.controller.borrow_mut();
+        if let Ok(mut device) = controller.device(self.id) {
+            device.quarantine();
+        }
     }
     fn delay(&self, micros: u64) {
         let clock = self.controller.borrow().clock;
@@ -180,9 +194,10 @@ impl Io for Native {
     fn submit(
         &mut self,
         endpoint: Endpoint,
-        buffer: u64,
+        buffer: &mut DmaBuffer,
         length: usize,
     ) -> Result<Pending, BlockError> {
+        let buffer = buffer.physical();
         let mut controller = self.controller.borrow_mut();
         let deadline = controller
             .clock
@@ -460,6 +475,11 @@ impl<I: Io> Bot<I> {
     pub fn max_lun(&self) -> u8 {
         self.max_lun
     }
+    /// Poison the transport and isolate its device.
+    pub fn quarantine(&mut self) {
+        self.poisoned = true;
+        self.io.quarantine();
+    }
     pub fn poisoned(&self) -> bool {
         self.poisoned
     }
@@ -682,7 +702,7 @@ impl<I: Io> Bot<I> {
         self.wrapper.bytes_mut()[31] = 0;
         let pending = match self
             .io
-            .submit(self.endpoints[1], self.wrapper.physical(), cbw_length)
+            .submit(self.endpoints[1], &mut self.wrapper, cbw_length)
         {
             Ok(pending) => pending,
             Err(error) => return self.failed(error),
@@ -854,7 +874,7 @@ impl<I: Io> Bot<I> {
                 .copy_from_slice(&bytes[begun.moved..begun.moved + piece]);
         }
         let endpoint = self.endpoints[usize::from(!begun.is_in)];
-        match self.io.submit(endpoint, self.buffer.physical(), piece) {
+        match self.io.submit(endpoint, &mut self.buffer, piece) {
             Ok(pending) => Next::Stage(Stage::Data(pending, piece)),
             Err(error) => Next::Done(self.failed(error)),
         }
@@ -876,10 +896,7 @@ impl<I: Io> Bot<I> {
     }
 
     fn submit_status(&mut self) -> Next {
-        match self
-            .io
-            .submit(self.endpoints[0], self.wrapper.physical(), 13)
-        {
+        match self.io.submit(self.endpoints[0], &mut self.wrapper, 13) {
             Ok(pending) => Next::Stage(Stage::Status(pending)),
             Err(error) => Next::Done(self.failed(error)),
         }
@@ -950,13 +967,6 @@ impl Bot<Native> {
     }
     pub fn interface(&self) -> u8 {
         self.interface
-    }
-    pub fn quarantine(&mut self) {
-        self.poisoned = true;
-        let mut controller = self.io.controller.borrow_mut();
-        if let Ok(mut device) = controller.device(self.io.id) {
-            device.quarantine();
-        }
     }
     /// Reconstruct the attachment while keeping its two transport
     /// allocations. Root-leaf reset also reuses the controller's retired

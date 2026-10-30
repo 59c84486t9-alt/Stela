@@ -469,6 +469,8 @@ pub unsafe fn open(
     // The owners native attachments keep, and those of failed ones, stay
     // for the boot: their mappings and DMA domains outlive the devices.
     Vec::leak(core::mem::take(&mut devices.owners));
+    // EHCI controllers run for the boot; their roots' storage shares them.
+    Vec::leak(core::mem::take(&mut devices.ehci_hosts));
     for (address, error) in &devices.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }

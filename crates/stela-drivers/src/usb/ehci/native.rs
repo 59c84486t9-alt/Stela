@@ -17,7 +17,7 @@ pub struct NativeResources {
     pub pci: Function<OwnedConfig>,
     pub registers: Mapping,
     pub domain: Arc<dyn DmaDomain>,
-    pub memory: Arc<dyn PageSource>,
+    pub memory: &'static dyn PageSource,
     pub clock: Clock,
 }
 

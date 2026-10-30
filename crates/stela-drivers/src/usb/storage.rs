@@ -22,6 +22,7 @@ mod bot;
 mod scsi;
 pub mod uas;
 use bot::{Bot, Io, Native};
+pub(in crate::usb) use bot::{EhciBulk, ehci_error};
 pub const CLASS: u8 = 8;
 const SCSI: u8 = 6;
 const BULK_ONLY: u8 = 0x50;
@@ -298,6 +299,7 @@ pub struct UsbDisk {
 }
 enum UsbTransport {
     Bot(Disk<media::Owner<Bot<Native>>>),
+    EhciBot(Disk<media::Owner<Bot<EhciBulk>>>),
     Uas(Disk<media::Owner<uas::Host>>),
 }
 
@@ -353,6 +355,35 @@ pub(super) fn discover_retained(
     )));
     let mut storage = UsbStorage {
         owner: media::TransportOwner::Bot(owner),
+    };
+    let disks = storage.rescan(failures)?;
+    Ok((storage, disks))
+}
+
+/// A SCSI-transparent Bulk-Only interface.
+pub(in crate::usb) fn bulk_only(interface: &Interface) -> bool {
+    (interface.class, interface.subclass, interface.protocol) == (CLASS, SCSI, BULK_ONLY)
+}
+
+/// Discover block devices through a Bulk-Only interface of a configured
+/// high-speed EHCI device, kept for rescan as [`discover_retained`] keeps
+/// an xHCI one.
+pub(in crate::usb) fn discover_ehci(
+    io: EhciBulk,
+    interface: &Interface,
+    location: String,
+    serial: String,
+    dma: &mut dyn DmaAllocator,
+    failures: &mut Vec<(String, BlockError)>,
+) -> Result<(UsbStorage, Vec<UsbDisk>), BlockError> {
+    let bot = Bot::ehci(io, interface, dma)?;
+    let owner = Rc::new(RefCell::new(media::Owner::new(
+        bot,
+        format!("{location} interface {}", interface.number),
+        serial,
+    )));
+    let mut storage = UsbStorage {
+        owner: media::TransportOwner::EhciBot(owner),
     };
     let disks = storage.rescan(failures)?;
     Ok((storage, disks))
@@ -1168,6 +1199,7 @@ impl UsbDisk {
     pub fn command(&mut self, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
         match &mut self.disk {
             UsbTransport::Bot(disk) => disk.command(cdb, data),
+            UsbTransport::EhciBot(disk) => disk.command(cdb, data),
             UsbTransport::Uas(disk) => disk.command(cdb, data),
         }
     }
@@ -1176,66 +1208,77 @@ impl BlockDevice for UsbDisk {
     fn identity(&self) -> &Identity {
         match &self.disk {
             UsbTransport::Bot(disk) => disk.identity(),
+            UsbTransport::EhciBot(disk) => disk.identity(),
             UsbTransport::Uas(disk) => disk.identity(),
         }
     }
     fn signals(&self) -> bool {
         match &self.disk {
             UsbTransport::Bot(disk) => disk.signals(),
+            UsbTransport::EhciBot(disk) => disk.signals(),
             UsbTransport::Uas(disk) => disk.signals(),
         }
     }
     fn posted(&self) -> bool {
         match &self.disk {
             UsbTransport::Bot(disk) => disk.posted(),
+            UsbTransport::EhciBot(disk) => disk.posted(),
             UsbTransport::Uas(disk) => disk.posted(),
         }
     }
     fn read(&mut self, lba: u64, bytes: &mut [u8]) -> Result<(), BlockError> {
         match &mut self.disk {
             UsbTransport::Bot(disk) => disk.read(lba, bytes),
+            UsbTransport::EhciBot(disk) => disk.read(lba, bytes),
             UsbTransport::Uas(disk) => disk.read(lba, bytes),
         }
     }
     fn write(&mut self, lba: u64, bytes: &[u8]) -> Result<(), BlockError> {
         match &mut self.disk {
             UsbTransport::Bot(disk) => disk.write(lba, bytes),
+            UsbTransport::EhciBot(disk) => disk.write(lba, bytes),
             UsbTransport::Uas(disk) => disk.write(lba, bytes),
         }
     }
     fn write_fua(&mut self, lba: u64, bytes: &[u8]) -> Result<(), BlockError> {
         match &mut self.disk {
             UsbTransport::Bot(disk) => disk.write_fua(lba, bytes),
+            UsbTransport::EhciBot(disk) => disk.write_fua(lba, bytes),
             UsbTransport::Uas(disk) => disk.write_fua(lba, bytes),
         }
     }
     fn flush_cache(&mut self) -> Result<(), BlockError> {
         match &mut self.disk {
             UsbTransport::Bot(disk) => disk.flush_cache(),
+            UsbTransport::EhciBot(disk) => disk.flush_cache(),
             UsbTransport::Uas(disk) => disk.flush_cache(),
         }
     }
     fn depth(&self) -> usize {
         match &self.disk {
             UsbTransport::Bot(disk) => disk.depth(),
+            UsbTransport::EhciBot(disk) => disk.depth(),
             UsbTransport::Uas(disk) => disk.depth(),
         }
     }
     fn room(&self) -> bool {
         match &self.disk {
             UsbTransport::Bot(disk) => disk.room(),
+            UsbTransport::EhciBot(disk) => disk.room(),
             UsbTransport::Uas(disk) => disk.room(),
         }
     }
     fn start(&mut self, command: Command) -> Result<u32, BlockError> {
         match &mut self.disk {
             UsbTransport::Bot(disk) => disk.start(command),
+            UsbTransport::EhciBot(disk) => disk.start(command),
             UsbTransport::Uas(disk) => disk.start(command),
         }
     }
     fn finish(&mut self, tag: u32) -> Option<Finished> {
         match &mut self.disk {
             UsbTransport::Bot(disk) => disk.finish(tag),
+            UsbTransport::EhciBot(disk) => disk.finish(tag),
             UsbTransport::Uas(disk) => disk.finish(tag),
         }
     }
