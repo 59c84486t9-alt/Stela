@@ -353,16 +353,51 @@ pub fn local_policy_request(identity: &Identity, ecid: u64, args: &Value) -> Res
 }
 
 /// The Cryptex1 TSS request for a restore's `FirmwareUpdaterData` arguments,
-/// as idevicerestore's `restore_get_cryptex1_firmware_data` builds it: the
-/// identity's values for the device's `BuildIdentityTags`, the common tags
-/// of its `MessageArgInfo` (libtatsu copies `ApECID` and `ApProductionMode`;
-/// it names the chip `ApChipId`, which is not copied), then the device's
-/// `DeviceGeneratedRequest` unchanged, its cryptex nonce included. The
-/// device's ECID must be the signer's, so a ticket never names another
-/// machine.
+/// as idevicerestore's `restore_get_cryptex1_firmware_data` builds it.
+/// Parameters gather the device's `MessageArgInfo`, the identity's values
+/// for its `BuildIdentityTags`, `ApProductionMode` and `ApSecurityMode`
+/// (true when absent) and the identity's `ApChipID` and `ApBoardID`, then
+/// the `DeviceGeneratedRequest` over them. libtatsu's
+/// `tss_request_add_cryptex_tags` builds the request from them: the common
+/// tags (`ApECID`, `ApChipID`, `ApBoardID` and `ApSecurityDomain` as
+/// integers, which libplist parses from the manifest's hex strings, and
+/// `UniqueBuildID` as data), `@Cryptex1,Ticket`, both modes as Booleans and
+/// every parameter whose key starts with `Cryptex1`, the cryptex nonce
+/// among them. The device's ECID must be the signer's, so a ticket never
+/// names another machine.
 pub fn cryptex_request(identity: &Identity, ecid: u64, args: &Value) -> Result<Value> {
-    let info = args.required("MessageArgInfo")?;
-    if ecid == 0 || info.required("ApECID")?.bits()? != ecid {
+    let Value::Dict(info) = args.required("MessageArgInfo")? else {
+        return Err(Error::Invalid("MessageArgInfo dictionary"));
+    };
+    let mut parameters = info.clone();
+    for tag in args
+        .required("DeviceGeneratedTags")?
+        .required("BuildIdentityTags")?
+        .array()?
+    {
+        let tag = tag.string()?;
+        if let Some(value) = identity.value.get(tag) {
+            parameters.insert(tag.into(), value.clone());
+        }
+    }
+    for mode in ["ApProductionMode", "ApSecurityMode"] {
+        parameters
+            .entry(mode.into())
+            .or_insert(Value::Boolean(true));
+    }
+    for key in ["ApChipID", "ApBoardID"] {
+        if let Some(value) = identity.value.get(key) {
+            parameters.insert(key.into(), value.clone());
+        }
+    }
+    let Value::Dict(generated) = args.required("DeviceGeneratedRequest")? else {
+        return Err(Error::Invalid("DeviceGeneratedRequest dictionary"));
+    };
+    parameters.extend(generated.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let device = parameters
+        .get("ApECID")
+        .ok_or(Error::Invalid("cryptex request has no ECID"))?;
+    if ecid == 0 || device.bits()? != ecid {
         return Err(Error::Invalid(
             "cryptex request names another machine's ECID",
         ));
@@ -370,39 +405,51 @@ pub fn cryptex_request(identity: &Identity, ecid: u64, args: &Value) -> Result<V
     let mut request = Value::dict([
         ("@HostPlatformInfo", Value::from("mac")),
         ("@VersionInfo", Value::from(VERSION)),
+        ("@Cryptex1,Ticket", Value::Boolean(true)),
         ("ApECID", Value::Integer(ecid)),
     ]);
     let Value::Dict(fields) = &mut request else {
         unreachable!()
     };
-    if let Some(production) = info.get("ApProductionMode") {
-        fields.insert(
-            "ApProductionMode".into(),
-            Value::Boolean(production.boolean()?),
-        );
-    }
-    let tags = args
-        .required("DeviceGeneratedTags")?
-        .required("BuildIdentityTags")?
-        .array()?;
-    for tag in tags {
-        let tag = tag.string()?;
-        if let Some(value) = identity.value.get(tag) {
-            fields.insert(tag.into(), value.clone());
+    for key in ["ApChipID", "ApBoardID", "ApSecurityDomain"] {
+        if let Some(value) = parameters.get(key) {
+            fields.insert(key.into(), Value::Integer(integer(value)?));
         }
     }
-    let Value::Dict(generated) = args.required("DeviceGeneratedRequest")? else {
-        return Err(Error::Invalid("DeviceGeneratedRequest dictionary"));
-    };
-    if !generated.keys().any(|key| key.starts_with("Cryptex1,")) {
-        return Err(Error::Invalid("DeviceGeneratedRequest names no cryptex"));
+    if let Some(build) = parameters.get("UniqueBuildID") {
+        fields.insert("UniqueBuildID".into(), Value::Data(build.data()?.to_vec()));
     }
-    fields.extend(generated.iter().map(|(k, v)| (k.clone(), v.clone())));
+    for mode in ["ApSecurityMode", "ApProductionMode"] {
+        fields.insert(mode.into(), Value::Boolean(parameters[mode].boolean()?));
+    }
+    let mut cryptex = false;
+    for (key, value) in &parameters {
+        if key.starts_with("Cryptex1") {
+            fields.insert(key.clone(), value.clone());
+            cryptex = true;
+        }
+    }
+    if !cryptex {
+        return Err(Error::Invalid("cryptex request names no cryptex"));
+    }
     let id = guid(&plist::encode_xml(&request, plist::Limits::default())?);
     if let Value::Dict(fields) = &mut request {
         fields.insert("@UUID".into(), Value::String(id));
     }
     Ok(request)
+}
+
+/// An integer parameter as libplist's `plist_dict_get_uint` reads it: an
+/// integer's bits, or a manifest's hexadecimal or decimal string.
+fn integer(value: &Value) -> Result<u64> {
+    match value {
+        Value::String(text) => match text.strip_prefix("0x") {
+            Some(hex) => u64::from_str_radix(hex, 16),
+            None => text.parse(),
+        }
+        .map_err(|_| Error::Invalid("cryptex request integer string")),
+        other => other.bits(),
+    }
 }
 
 /// Ask Apple for the cryptex ticket the device's request names in its one

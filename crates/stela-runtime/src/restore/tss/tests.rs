@@ -441,22 +441,31 @@ fn the_cryptex_request_merges_identity_tags_common_tags_and_the_devices_request(
             "@UUID",
             "@VersionInfo",
             "ApBoardID",
+            "ApChipID",
             "ApECID",
             "ApProductionMode",
             "ApSecurityDomain",
+            "ApSecurityMode",
             "Cryptex1,ChipID",
             "Cryptex1,Nonce",
         ]
     );
     assert_eq!(request.required("ApECID").unwrap().uint().unwrap(), ecid);
-    // The device's own security domain string wins over the identity's.
+    // The device's security domain string is sent as libplist reads it.
     assert_eq!(
         request
             .required("ApSecurityDomain")
             .unwrap()
-            .string()
+            .uint()
             .unwrap(),
-        "0x01"
+        1
+    );
+    assert!(
+        request
+            .required("ApSecurityMode")
+            .unwrap()
+            .boolean()
+            .unwrap()
     );
     assert!(cryptex_request(store.identity(), ecid + 1, &cryptex_args(ecid)).is_err());
 }
