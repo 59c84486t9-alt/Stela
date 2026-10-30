@@ -52,7 +52,9 @@ pub const HEAP_SET: u32 = 0;
 /// The null descriptor every array reserves.
 pub const NULL_DESCRIPTOR: u32 = 0;
 
-/// Two descriptor indices packed as Metal's `MTLResourceID`.
+/// Two descriptor indices packed as Metal's `MTLResourceID`. A cube
+/// texture's sampled image is followed by its faces' 2D array, which texel
+/// reads fetch from.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct ResourceId(pub u64);
 

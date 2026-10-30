@@ -302,21 +302,35 @@ finished(const struct call *call)
 }
 
 static nir_deref_instr *
-texture_deref(const struct call *call, nir_def *level)
+bind_texture(const struct call *call, const struct glsl_type *type, bool faces, nir_def *level)
 {
    const struct stela_air_options *options = call->c->options;
-   const struct glsl_type *type = descriptor_type(call->texture);
    nir_deref_instr *deref = NULL;
    if (call->texture_id && options->bind_texture_id)
-      deref = options->bind_texture_id(call->b, call->texture_id, type, level,
+      deref = options->bind_texture_id(call->b, call->texture_id, type, faces, level,
                                        options->binding_data);
    else if (!call->texture_id && options->bind_texture)
-      deref = options->bind_texture(call->b, call->texture, type, level, options->binding_data);
+      deref = options->bind_texture(call->b, call->texture, type, faces, level,
+                                    options->binding_data);
    if (!deref || deref->type != type) {
       fail(call, "texture %u is unbound or bound to another type", call->texture->index);
       return NULL;
    }
    return deref;
+}
+
+static nir_deref_instr *
+texture_deref(const struct call *call, nir_def *level)
+{
+   return bind_texture(call, descriptor_type(call->texture), false, level);
+}
+
+/* A cube texture's faces: a 2D array whose layer is face + 6 * cube. */
+static nir_deref_instr *
+faces_deref(const struct call *call)
+{
+   return bind_texture(call, glsl_texture_type(GLSL_SAMPLER_DIM_2D, true, base_type(call->texture)),
+                       true, NULL);
 }
 
 static nir_deref_instr *
@@ -350,7 +364,8 @@ struct tex {
    nir_deref_instr *texture, *sampler;
    nir_def *coord, *comparator, *offset, *lod, *bias, *min_lod, *ddx, *ddy, *ms_index;
    unsigned component;
-   bool shadow;
+   /* faces reads a cube texture through faces_deref. */
+   bool shadow, faces;
 };
 
 static nir_def *
@@ -376,8 +391,8 @@ emit(const struct call *call, const struct tex *t)
          tex->src[n++] = nir_tex_src_for_ssa(sources[i].type, sources[i].def);
    }
    tex->op = t->op;
-   tex->sampler_dim = call->shape->dim;
-   tex->is_array = call->shape->array;
+   tex->sampler_dim = t->faces ? GLSL_SAMPLER_DIM_2D : call->shape->dim;
+   tex->is_array = t->faces || call->shape->array;
    tex->is_shadow = t->shadow;
    tex->is_new_style_shadow = t->shadow;
    tex->is_sparse = call->sparse;
@@ -605,9 +620,9 @@ read_texel(struct call *call, nir_def **result)
    if (!pair_type(call, false))
       return fail(call, "texture read has an unexpected result type");
    bool image = texture->access == STELA_AIR_TEXTURE_READ_WRITE;
-   if (shape->dim == GLSL_SAMPLER_DIM_CUBE && !image)
-      return fail(call, "reading a cube texture without read_write access");
-   nir_deref_instr *deref = image ? NULL : texture_deref(call, NULL);
+   /* Texel fetches take no cube, so a cube's are of its faces. */
+   bool faces = shape->dim == GLSL_SAMPLER_DIM_CUBE && !image;
+   nir_deref_instr *deref = image ? NULL : faces ? faces_deref(call) : texture_deref(call, NULL);
    if (!image && !deref)
       return false;
    if (texture->depth && !expect(call, 32, 1, "depth operand"))
@@ -637,8 +652,10 @@ read_texel(struct call *call, nir_def **result)
                               .image_dim = shape->dim, .image_array = shape->array,
                               .access = image_access(call, level), .dest_type = type);
    } else {
+      nir_def *coord = faces ? nir_trim_vector(b, image_coord(call, position, face, layer), 3) :
+                               layered(call, position, layer, false);
       struct tex t = {.op = sample ? nir_texop_txf_ms : nir_texop_txf, .texture = deref,
-                      .coord = layered(call, position, layer, false), .ms_index = sample};
+                      .coord = coord, .ms_index = sample, .faces = faces};
       if (shape->mipmapped && !(t.lod = uint_operand(call)))
          return false;
       if (!expect(call, 32, texture->access, "access operand") || !finished(call))

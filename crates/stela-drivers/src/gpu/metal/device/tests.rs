@@ -597,6 +597,30 @@ fn storage_textures_have_a_descriptor_per_level() {
 }
 
 #[test]
+fn sampled_cubes_are_followed_by_their_faces() {
+    let mut device = device();
+    let cube = TextureDescriptor {
+        texture_type: TextureType::Cube,
+        ..texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ)
+    };
+    let id = device.new_texture(&cube).unwrap();
+    let low = device.texture_resource_id(id).unwrap().low();
+    let sampled: Vec<_> = device
+        .backend()
+        .descriptors
+        .iter()
+        .filter(|(_, descriptor)| descriptor.array() == HeapArray::SampledImages)
+        .map(|(index, _)| *index)
+        .collect();
+    assert_eq!(sampled, [low, low + 1]);
+    assert_eq!(device.descriptors.in_use(HeapArray::SampledImages), 2);
+    let serial = submit(&mut device);
+    device.destroy_texture(id).unwrap();
+    complete(&mut device, serial);
+    assert_eq!(device.descriptors.in_use(HeapArray::SampledImages), 0);
+}
+
+#[test]
 fn texture_buffers_and_linear_textures_alias_their_buffer() {
     let mut device = device();
     let buffer = device

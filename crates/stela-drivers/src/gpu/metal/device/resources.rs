@@ -296,8 +296,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.release_memory(copy.memory, copy.allocated);
     }
 
-    /// Creates the sampled view and a storage view of each level, which a
-    /// storage image holds one of, with their descriptors. On failure nothing
+    /// Creates the sampled view, a cube's faces and a storage view of each
+    /// level, which a storage image holds one of, with their descriptors.
+    /// On failure nothing
     /// it created remains.
     fn shader_views(
         &mut self,
@@ -314,7 +315,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 ..*info
             })
         });
-        let infos: Vec<_> = views.sampled.into_iter().chain(levels).collect();
+        let infos: Vec<_> = views
+            .sampled
+            .into_iter()
+            .chain(views.faces)
+            .chain(levels)
+            .collect();
         let mut created = Vec::with_capacity(infos.len());
         let mut descriptors = Ok(ResourceId::NULL);
         for info in &infos {
@@ -327,8 +333,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             }
         }
         if descriptors.is_ok() {
-            let (sampled, storage) = created.split_at(usize::from(views.sampled.is_some()));
-            descriptors = self.view_descriptors(sampled.first().copied(), storage);
+            let sampled = usize::from(views.sampled.is_some()) + usize::from(views.faces.is_some());
+            let (sampled, storage) = created.split_at(sampled);
+            descriptors = self.view_descriptors(sampled, storage);
         }
         match descriptors {
             Ok(id) => Ok((id, created)),
@@ -341,17 +348,24 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         }
     }
 
-    /// Writes the descriptors of a sampled view and of consecutive storage
-    /// views, one per level.
+    /// Writes the descriptors of consecutive sampled views, a view and a
+    /// cube's faces, and of consecutive storage views, one per level.
     fn view_descriptors(
         &mut self,
-        sampled: Option<ImageView>,
+        sampled_views: &[ImageView],
         storage: &[ImageView],
     ) -> Result<ResourceId> {
-        let sampled = match sampled {
-            Some(view) => self.descriptor(Descriptor::SampledImage(view))?,
-            None => NULL_DESCRIPTOR,
+        let sampled_run = sampled_views.len() as u32;
+        let sampled = match sampled_run {
+            0 => NULL_DESCRIPTOR,
+            run => self
+                .descriptors
+                .allocate_run(HeapArray::SampledImages, run)?,
         };
+        for (index, view) in (sampled..).zip(sampled_views) {
+            self.backend
+                .write_descriptor(index, Descriptor::SampledImage(*view));
+        }
         if storage.is_empty() {
             return Ok(ResourceId::new(sampled, NULL_DESCRIPTOR));
         }
@@ -362,7 +376,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         {
             Ok(first) => first,
             Err(error) => {
-                self.release_id(ResourceId::new(sampled, NULL_DESCRIPTOR), TEXTURE_ARRAYS);
+                self.release_id(
+                    ResourceId::new(sampled, NULL_DESCRIPTOR),
+                    TEXTURE_ARRAYS,
+                    sampled_run,
+                );
                 return Err(error);
             }
         };
@@ -688,7 +706,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         } else {
             TEXEL_BUFFER_ARRAYS
         };
-        self.release_id(texture.id, arrays);
+        let low_length =
+            resource::sampled_descriptors(resource::view_type(texture.descriptor.texture_type));
+        self.release_id(texture.id, arrays, low_length);
         for view in texture
             .views
             .iter()
@@ -847,11 +867,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let ids = core::iter::once(sampler.id).chain(sampler.clamped.iter().map(|&(_, _, id)| id));
         for id in ids.collect::<Vec<_>>() {
             let low = ResourceId::new(id.low(), super::super::binding::NULL_DESCRIPTOR);
-            self.release_id(low, [HeapArray::Samplers; 2]);
+            self.release_id(low, [HeapArray::Samplers; 2], 1);
             if id.high() != id.low() {
                 self.release_id(
                     ResourceId::new(id.high(), super::super::binding::NULL_DESCRIPTOR),
                     [HeapArray::Samplers; 2],
+                    1,
                 );
             }
         }

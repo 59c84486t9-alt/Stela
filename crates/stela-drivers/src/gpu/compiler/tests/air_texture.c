@@ -396,6 +396,73 @@ array_arguments_bind_their_elements(void)
           strstr(error.detail, "array"));
 }
 
+/* Reads of a cube and of a cube array texture with read access. */
+static const char *cube_body =
+   "declare { <4 x float>, i8 } @air.read_texture_cube.v4f32(ptr addrspace(1), <2 x i32>, i32,"
+   " i32, i32)\n"
+   "declare { <4 x float>, i8 } @air.read_texture_cube_array.v4f32(ptr addrspace(1), <2 x i32>,"
+   " i32, i32, i32, i32)\n"
+   "define void @kernel(i32 %tid, ptr addrspace(1) %cube, ptr addrspace(1) %cubes,"
+   " ptr addrspace(1) %out) {\n"
+   "%r = call { <4 x float>, i8 } @air.read_texture_cube.v4f32(ptr addrspace(1) %cube,"
+   " <2 x i32> <i32 1, i32 2>, i32 3, i32 0, i32 1)\n"
+   "%a = call { <4 x float>, i8 } @air.read_texture_cube_array.v4f32(ptr addrspace(1) %cubes,"
+   " <2 x i32> <i32 1, i32 2>, i32 3, i32 2, i32 0, i32 1)\n"
+   "%x = extractvalue { <4 x float>, i8 } %r, 0\n"
+   "%y = extractvalue { <4 x float>, i8 } %a, 0\n"
+   "%s = fadd <4 x float> %x, %y\n"
+   "%e = extractelement <4 x float> %s, i32 0\n"
+   "store float %e, ptr addrspace(1) %out, align 4\n"
+   "ret void\n}\n";
+
+static const char *cube_metadata =
+   "!air.kernel = !{!2}\n"
+   "!air.version = !{!20}\n!air.language_version = !{!21}\n"
+   "!2 = !{ptr @kernel, !3, !4}\n!3 = !{}\n!4 = !{!5, !6, !7, !8}\n"
+   "!5 = !{i32 0, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n"
+   "!6 = !{i32 1, !\"air.texture\", !\"air.location_index\", i32 0, i32 1, !\"air.read\","
+   " !\"air.arg_type_name\", !\"texturecube<float, read>\", !\"air.arg_name\", !\"cube\"}\n"
+   "!7 = !{i32 2, !\"air.texture\", !\"air.location_index\", i32 1, i32 1, !\"air.read\","
+   " !\"air.arg_type_name\", !\"texturecube_array<float, read>\", !\"air.arg_name\", !\"cubes\"}\n"
+   "!8 = !{i32 3, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
+   " !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"out\"}\n"
+   "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n";
+
+/* Texel fetches take no cube: a cube's texels are its faces' layers. */
+static void
+cube_reads_fetch_their_faces(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = kernel(cube_body, cube_metadata, &error);
+   if (!shader)
+      fprintf(stderr, "cube reads: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "cube read kernel");
+   assert(count(shader).tex[nir_texop_txf] == 2);
+   nir_opt_constant_folding(shader);
+   unsigned layers[] = {3, 3 + 6 * 2}, n = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_tex)
+               continue;
+            nir_tex_instr *fetch = nir_instr_as_tex(instr);
+            assert(fetch->sampler_dim == GLSL_SAMPLER_DIM_2D && fetch->is_array &&
+                   fetch->coord_components == 3);
+            nir_variable *faces = source_variable(fetch, nir_tex_src_texture_deref);
+            assert(faces->data.binding == STELA_METAL_HEAP_SAMPLED_IMAGES &&
+                   glsl_get_sampler_dim(glsl_without_array(faces->type)) == GLSL_SAMPLER_DIM_2D);
+            nir_scalar layer = nir_scalar_resolved(fetch->src[nir_tex_instr_src_index(
+                                                      fetch, nir_tex_src_coord)].src.ssa, 2);
+            assert(nir_scalar_is_const(layer) && nir_scalar_as_uint(layer) == layers[n++]);
+         }
+      }
+   }
+   ralloc_free(shader);
+}
+
 /* kernel_body sampling with a constexpr sampler of Metal's default state,
  * as Apple's compiler emits one. */
 static const char *constexpr_global =
@@ -676,11 +743,12 @@ main(void)
    sparse_texels_report_their_residency();
    array_arguments_bind_their_elements();
    constexpr_samplers_bind_their_samplers();
+   cube_reads_fetch_their_faces();
    unsupported_texture_uses_are_refused();
    kernels_take_texture_atomics();
    glsl_type_singleton_decref();
    puts("AIR textures: sample/level/offset, write, read_write array read, size queries, "
         "implicit-derivative fragment sampling, depth compare, gather, storage levels, arrays, atomics, "
-        "constexpr samplers and refusals passed");
+        "constexpr samplers, cube reads and refusals passed");
    return 0;
 }

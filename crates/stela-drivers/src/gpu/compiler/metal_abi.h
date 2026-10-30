@@ -210,11 +210,12 @@ nir_def *stela_metal_bind_buffer(nir_builder *b, const struct stela_air_buffer *
 
 /* stela_air_bind_texture over the argument table and the heap: the heap
  * element the texture's MTLResourceID names, of the level for a storage
- * image, or the null descriptor for a level past the texture's. Refuses
- * indices past the table. */
+ * image, or the null descriptor for a level past the texture's; a cube's
+ * faces are the sampled image after its own. Refuses indices past the
+ * table. */
 nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air_texture *texture,
-                                          const struct glsl_type *type, nir_def *level,
-                                          void *stage);
+                                          const struct glsl_type *type, bool faces,
+                                          nir_def *level, void *stage);
 
 /* stela_air_texture_levels: the count the texture's MTLResourceID carries. */
 nir_def *stela_metal_texture_levels(nir_builder *b, const struct stela_air_texture *texture,
@@ -235,8 +236,8 @@ nir_def *stela_metal_resource_id(nir_builder *b, const struct stela_air_texture 
 /* stela_air_bind_texture_id and stela_air_bind_sampler_id: the heap element
  * a loaded MTLResourceID names, as for an argument table's. */
 nir_deref_instr *stela_metal_bind_texture_id(nir_builder *b, nir_def *id,
-                                             const struct glsl_type *type, nir_def *level,
-                                             void *stage);
+                                             const struct glsl_type *type, bool faces,
+                                             nir_def *level, void *stage);
 nir_deref_instr *stela_metal_bind_sampler_id(nir_builder *b, nir_def *id, bool integer,
                                              void *stage);
 

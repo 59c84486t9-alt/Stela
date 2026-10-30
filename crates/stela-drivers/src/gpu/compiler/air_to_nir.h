@@ -35,12 +35,14 @@ typedef bool (*stela_air_bind_ssbo)(const struct stela_air_buffer *buffer,
  * access, otherwise a texture type (nir_var_uniform). An image holds one mip
  * level: level is the 32-bit level an access names, which the callback must
  * keep within the texture, or NULL for the first. It is NULL for texture
- * types. Called at each use, where it must emit straight-line NIR at the
- * cursor. Returning NULL refuses compilation. */
+ * types. faces asks for a cube texture's faces as the sampled 2D array type
+ * gives, layer face + 6 * cube, which reads of its texels fetch. Called at
+ * each use, where it must emit straight-line NIR at the cursor. Returning
+ * NULL refuses compilation. */
 typedef nir_deref_instr *(*stela_air_bind_texture)(nir_builder *b,
                                                    const struct stela_air_texture *texture,
-                                                   const struct glsl_type *type, nir_def *level,
-                                                   void *data);
+                                                   const struct glsl_type *type, bool faces,
+                                                   nir_def *level, void *data);
 
 /* Resolve a sampler argument for a use with a texture whose texels are
  * integers (integer is the border color class), as bind_texture does, to a
@@ -54,8 +56,8 @@ typedef nir_deref_instr *(*stela_air_bind_sampler)(nir_builder *b,
  * The identifier is the application's; an invalid one is undefined, as in
  * Metal. */
 typedef nir_deref_instr *(*stela_air_bind_texture_id)(nir_builder *b, nir_def *id,
-                                                      const struct glsl_type *type, nir_def *level,
-                                                      void *data);
+                                                      const struct glsl_type *type, bool faces,
+                                                      nir_def *level, void *data);
 typedef nir_deref_instr *(*stela_air_bind_sampler_id)(nir_builder *b, nir_def *id, bool integer,
                                                       void *data);
 

@@ -199,7 +199,19 @@ pub enum CpuAccess {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ShaderViews {
     pub sampled: Option<ImageViewInfo>,
+    /// A sampled cube's faces as a 2D array, through which shaders read its
+    /// texels: texel fetches take no cube.
+    pub faces: Option<ImageViewInfo>,
     pub storage: Option<ImageViewInfo>,
+}
+
+/// The sampled descriptors of a view of `view_type`, consecutive in the
+/// heap: a cube's is followed by its faces'.
+pub const fn sampled_descriptors(view_type: ImageViewType) -> u32 {
+    match view_type {
+        ImageViewType::Cube | ImageViewType::CubeArray => 2,
+        _ => 1,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -609,18 +621,26 @@ fn shader_views(
     };
     let sampled = image_usage.contains(ImageUsage::SAMPLED);
     let storage = image_usage.contains(ImageUsage::STORAGE);
-    if components == IDENTITY {
+    let (sampled, storage) = if components == IDENTITY {
         let usage = image_usage & (ImageUsage::SAMPLED | ImageUsage::STORAGE);
         let shared = (!usage.is_empty()).then(|| view(usage, IDENTITY));
-        ShaderViews {
-            sampled: shared.filter(|_| sampled),
-            storage: shared.filter(|_| storage),
-        }
+        (shared.filter(|_| sampled), shared.filter(|_| storage))
     } else {
-        ShaderViews {
-            sampled: sampled.then(|| view(ImageUsage::SAMPLED, components)),
-            storage: storage.then(|| view(ImageUsage::STORAGE, IDENTITY)),
-        }
+        (
+            sampled.then(|| view(ImageUsage::SAMPLED, components)),
+            storage.then(|| view(ImageUsage::STORAGE, IDENTITY)),
+        )
+    };
+    let faces = sampled
+        .filter(|_| sampled_descriptors(view_type) == 2)
+        .map(|_| ImageViewInfo {
+            view_type: ImageViewType::D2Array,
+            ..view(ImageUsage::SAMPLED, components)
+        });
+    ShaderViews {
+        sampled,
+        faces,
+        storage,
     }
 }
 

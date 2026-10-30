@@ -125,16 +125,21 @@ static nir_def *table_id(nir_builder *b, const struct stela_metal_stage *stage, 
 }
 
 nir_deref_instr *stela_metal_bind_texture_id(nir_builder *b, nir_def *id,
-                                             const struct glsl_type *type, nir_def *level,
-                                             void *stage)
+                                             const struct glsl_type *type, bool faces,
+                                             nir_def *level, void *stage)
 {
    (void)stage;
    bool image = glsl_type_is_image(type);
    bool buffer = glsl_get_sampler_dim(type) == GLSL_SAMPLER_DIM_BUF;
+   if (faces && (image || buffer))
+      return NULL;
    enum stela_metal_heap_array array =
       image ? (buffer ? STELA_METAL_HEAP_STORAGE_TEXEL_BUFFERS : STELA_METAL_HEAP_STORAGE_IMAGES)
             : (buffer ? STELA_METAL_HEAP_UNIFORM_TEXEL_BUFFERS : STELA_METAL_HEAP_SAMPLED_IMAGES);
    nir_def *index = image ? storage_level(b, id, level) : id_half(b, id, false);
+   /* The null descriptor's successor is null too. */
+   if (faces)
+      index = nir_bcsel(b, nir_ieq_imm(b, index, 0), index, nir_iadd_imm(b, index, 1));
    return heap_element(b, index, array, type, image ? nir_var_image : nir_var_uniform);
 }
 
@@ -147,14 +152,14 @@ nir_deref_instr *stela_metal_bind_sampler_id(nir_builder *b, nir_def *id, bool i
 }
 
 nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air_texture *texture,
-                                          const struct glsl_type *type, nir_def *level,
-                                          void *stage)
+                                          const struct glsl_type *type, bool faces,
+                                          nir_def *level, void *stage)
 {
    if (texture->index >= STELA_METAL_TEXTURES)
       return NULL;
    return stela_metal_bind_texture_id(
-      b, table_id(b, stage, STELA_METAL_TABLE_TEXTURES + 8u * texture->index), type, level,
-      stage);
+      b, table_id(b, stage, STELA_METAL_TABLE_TEXTURES + 8u * texture->index), type, faces,
+      level, stage);
 }
 
 nir_def *stela_metal_texture_levels(nir_builder *b, const struct stela_air_texture *texture,

@@ -98,6 +98,15 @@ fn cube_arrays_become_cube_compatible_layered_images() {
         ),
         (ImageViewType::CubeArray, 12, 9)
     );
+    // Reads fetch from the faces.
+    assert_eq!(
+        plan.views.faces,
+        Some(ImageViewInfo {
+            view_type: ImageViewType::D2Array,
+            usage: ImageUsage::SAMPLED,
+            ..sampled
+        })
+    );
     assert_eq!(plan.views.storage, None);
 }
 
