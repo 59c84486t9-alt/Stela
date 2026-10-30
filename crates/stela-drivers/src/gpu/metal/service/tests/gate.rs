@@ -1,10 +1,10 @@
-use super::{Memory, service};
+use super::{Memory, Stream, commit, connect, service};
 use crate::gpu::metal::service::{
     GuestMemory,
     wire::{self, GateCall, NegotiateRequest, NegotiateResponse, Operation, Span, Status},
 };
 use core::mem::size_of;
-use stela_contracts::gate::{CallerFault, CallerMemory};
+use stela_contracts::gate::{CallerFault, CallerMemory, GateService};
 
 impl CallerMemory for Memory {
     fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<(), CallerFault> {
@@ -91,4 +91,18 @@ fn a_failed_gate_call_reports_its_status_and_reason() {
         service.serve(connection, 0x10, &mut memory),
         Err(CallerFault::Denied { address: 0x10 })
     );
+}
+
+#[test]
+fn the_gate_signals_completed_work_once() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    assert!(!GateService::signaled(&mut service));
+    commit(&mut service, connection, &Stream::default()).unwrap();
+    assert!(!GateService::signaled(&mut service));
+    let backend = service.device().backend();
+    let timeline = *backend.semaphores.keys().next().unwrap();
+    backend.semaphores.insert(timeline, 1);
+    assert!(GateService::signaled(&mut service));
+    assert!(!GateService::signaled(&mut service));
 }

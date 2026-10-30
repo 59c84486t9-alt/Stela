@@ -10,7 +10,7 @@ use super::{
 use crate::gpu::metal::{shader::Compiler, vulkan::backend::Backend};
 use alloc::{vec, vec::Vec};
 use core::num::NonZeroU64;
-use stela_contracts::gate::{CallerFault, CallerMemory};
+use stela_contracts::gate::{CallerFault, CallerMemory, GateService};
 
 /// Request and response records are fixed-width and small; variable data
 /// travels in spans the operation names.
@@ -109,5 +109,35 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             return Err(Fault::new(outcome.status, outcome.reason));
         }
         caller.write(call.response, &response)
+    }
+}
+
+impl<B: Backend, C: Compiler> GateService for Service<B, C> {
+    fn connect(&mut self) -> Result<NonZeroU64, &'static str> {
+        Service::connect(self).map_err(|fault| fault.reason)
+    }
+
+    fn disconnect(&mut self, connection: NonZeroU64) {
+        // The gate closes only connections it opened and holds.
+        let closed = Service::disconnect(self, connection);
+        debug_assert!(closed.is_ok());
+    }
+
+    fn serve(
+        &mut self,
+        connection: NonZeroU64,
+        record: u64,
+        caller: &mut dyn CallerMemory,
+    ) -> Result<(), CallerFault> {
+        Service::serve(self, connection, record, caller)
+    }
+
+    /// Command buffers completed, or the device was lost, since this last
+    /// answered true; either wakes the frontend's waiters.
+    fn signaled(&mut self) -> bool {
+        let reached = self.device.poll().unwrap_or(u64::MAX);
+        let signaled = reached > self.signaled;
+        self.signaled = self.signaled.max(reached);
+        signaled
     }
 }

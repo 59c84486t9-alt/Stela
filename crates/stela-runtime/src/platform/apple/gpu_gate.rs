@@ -22,7 +22,7 @@ use alloc::{boxed::Box, collections::BTreeMap};
 use core::num::NonZeroU64;
 use stela_contracts::{
     bus::AdvancePolicy,
-    gate::{CallerFault, CallerMemory},
+    gate::{CallerFault, CallerMemory, GateService},
     interrupt::{AicInput, Wire},
 };
 
@@ -56,23 +56,6 @@ const NOT_RAM: u64 = 2;
 const UNSUPPORTED: u64 = 3;
 
 const NAME: &str = "stela-gpu-gate";
-
-/// The native service the gate enters.
-pub trait GateService {
-    fn connect(&mut self) -> Result<NonZeroU64, &'static str>;
-    /// Releases what the connection holds; in-flight work completes.
-    fn disconnect(&mut self, connection: NonZeroU64);
-    /// Runs the call whose record is at `record` in `caller`, completing
-    /// the record; fails only when the record is out of reach.
-    fn serve(
-        &mut self,
-        connection: NonZeroU64,
-        record: u64,
-        caller: &mut dyn CallerMemory,
-    ) -> Result<(), CallerFault>;
-    /// Whether the GPU completed work since this last answered true.
-    fn signaled(&mut self) -> bool;
-}
 
 pub struct Gate {
     service: Box<dyn GateService>,

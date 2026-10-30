@@ -803,7 +803,7 @@ impl AppleDevices {
         &mut self,
         physical: u64,
         irq: AicInput,
-        service: Box<dyn gpu_gate::GateService>,
+        service: Box<dyn stela_contracts::gate::GateService>,
     ) -> Result<(), String> {
         if self.gpu_gate.is_some() {
             return Err("the board has one StelaGPU gate".into());
@@ -3727,7 +3727,7 @@ mod tests {
         use stela_contracts::gate::{CallerFault, CallerMemory};
         const GATE: u64 = 0x5_0000_0000;
         struct Service(Rc<RefCell<Vec<(u64, u64)>>>);
-        impl gpu_gate::GateService for Service {
+        impl stela_contracts::gate::GateService for Service {
             fn connect(&mut self) -> Result<NonZeroU64, &'static str> {
                 Ok(NonZeroU64::MIN)
             }

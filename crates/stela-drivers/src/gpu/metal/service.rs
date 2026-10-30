@@ -225,6 +225,9 @@ pub struct Service<B: Backend, C: Compiler> {
     epoch: DeviceEpoch,
     connections: BTreeMap<NonZeroU64, Connection>,
     next_connection: NonZeroU64,
+    /// The completed serial the gate last signaled; `u64::MAX` once it
+    /// signaled the device's loss.
+    signaled: u64,
 }
 
 impl<B: Backend, C: Compiler> Service<B, C> {
@@ -236,6 +239,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             epoch,
             connections: BTreeMap::new(),
             next_connection: NonZeroU64::MIN,
+            signaled: 0,
         }
     }
 
