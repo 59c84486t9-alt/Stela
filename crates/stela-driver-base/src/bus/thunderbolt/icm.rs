@@ -33,6 +33,11 @@ pub enum Family {
     Maple,
 }
 impl Family {
+    /// The ICM protocol `icm_probe` selects for this NHI identity, or None
+    /// when its firmware runs no connection manager.
+    pub fn of(vendor: u16, device: u16) -> Option<Self> {
+        Self::select(vendor, device).ok()
+    }
     fn select(vendor: u16, device: u16) -> Result<Self, Error> {
         if vendor != 0x8086 {
             return Err(Error::Unsupported);
@@ -289,6 +294,116 @@ impl DriverReady {
         })
     }
 }
+/// Where an ICM event places a device: a route string, or, in Alpine
+/// Ridge's FR events, the root link and depth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Location {
+    Route(u64),
+    Link { link: u8, depth: u8 },
+}
+impl core::fmt::Display for Location {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Route(route) => write!(f, "route {route:#x}"),
+            Self::Link { link, depth } => write!(f, "link {link} depth {depth}"),
+        }
+    }
+}
+
+/// A firmware event, as Linux's `icm_handle_notification` dispatches it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Notification {
+    /// `ICM_LINK_INFO_*`: whether the firmware approved the device's PCIe
+    /// tunnel, rejected it, or approved it from its boot ACL.
+    DeviceConnected {
+        location: Location,
+        approved: bool,
+        rejected: bool,
+        boot: bool,
+    },
+    DeviceDisconnected {
+        location: Location,
+    },
+    XDomainConnected,
+    XDomainDisconnected,
+    DpConfigChanged,
+    Rtd3Veto,
+    Other(u8),
+}
+impl Notification {
+    /// Decode an event in `family`'s layout: Alpine Ridge's
+    /// `icm_fr_event_device_*`, or the `icm_tr_event_device_*` that Titan
+    /// Ridge, Ice Lake and Maple Ridge send.
+    pub fn decode(family: Family, message: &Message) -> Result<Self, Error> {
+        if message.kind != PacketType::IcmEvent {
+            return Err(Error::WrongType);
+        }
+        let word = |index: usize| message.words.get(index).copied().ok_or(Error::Length);
+        let route = |high: usize| {
+            Ok::<_, Error>(Location::Route(
+                u64::from(word(high)?) << 32 | u64::from(word(high + 1)?),
+            ))
+        };
+        let link = |info: u32| Location::Link {
+            link: (info & 7) as u8,
+            depth: ((info >> 4) & 15) as u8,
+        };
+        let fr = family == Family::Alpine;
+        Ok(match message.code {
+            0x3 => {
+                let (location, info) = if fr {
+                    let info = word(5)? >> 16;
+                    (link(info), info)
+                } else {
+                    (route(5)?, word(7)? >> 16)
+                };
+                Self::DeviceConnected {
+                    location,
+                    approved: info & (1 << 8) != 0,
+                    rejected: info & (1 << 9) != 0,
+                    boot: info & (1 << 10) != 0,
+                }
+            }
+            0x4 => Self::DeviceDisconnected {
+                location: if fr { link(word(1)? >> 16) } else { route(1)? },
+            },
+            0x6 => Self::XDomainConnected,
+            0x7 => Self::XDomainDisconnected,
+            0x8 => Self::DpConfigChanged,
+            0xa => Self::Rtd3Veto,
+            code => Self::Other(code),
+        })
+    }
+}
+impl core::fmt::Display for Notification {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::DeviceConnected {
+                location,
+                approved,
+                rejected,
+                boot,
+            } => {
+                let state = match (approved, rejected, boot) {
+                    (_, true, _) => "rejected by the firmware",
+                    (true, _, true) => "approved from the boot ACL",
+                    (true, ..) => "approved",
+                    _ => "awaiting approval",
+                };
+                write!(f, "device connected at {location}, {state}")
+            }
+            Self::DeviceDisconnected { location } => {
+                write!(f, "device disconnected at {location}")
+            }
+            Self::XDomainConnected => f.write_str("host-to-host link connected"),
+            Self::XDomainDisconnected => f.write_str("host-to-host link disconnected"),
+            Self::DpConfigChanged => f.write_str("DisplayPort configuration changed"),
+            Self::Rtd3Veto => f.write_str("runtime D3 veto changed"),
+            Self::Other(code) => write!(f, "event {code:#x}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     DriverReady {
