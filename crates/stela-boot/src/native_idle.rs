@@ -37,7 +37,8 @@ struct Admission {
     flush_monitor: bool,
 }
 
-/// The declared processors by APIC ID, published once by [`install`].
+/// The declared processors by APIC ID, published once by [`install`] when
+/// any has states. Without one, a wait halts without asking which CPU it is.
 static PROCESSORS: AtomicPtr<Vec<Processor>> = AtomicPtr::new(ptr::null_mut());
 
 /// The line MONITOR arms. Nothing writes it, so only interrupts end a wait.
@@ -105,6 +106,9 @@ pub(crate) fn install(declaration: Option<Declaration>) {
             "HOST IDLE APIC {apic:#x}: _CST refused, {reason}; it halts\n"
         ));
     }
+    if processors.is_empty() {
+        return;
+    }
     processors.sort_by_key(|processor| processor.apic);
     let apic = apic_id();
     if let Ok(index) = processors.binary_search_by_key(&apic, |processor| processor.apic) {
@@ -149,15 +153,16 @@ fn describe(state: &Admitted) -> String {
 
 /// Wait for an interrupt and take it, in the deepest state this CPU
 /// admitted whose target residency fits `budget_us` microseconds until its
-/// next timer (None when none is due).
+/// next timer (None when none is due). The budget is read only when the CPU
+/// has states to choose between, as reading a timer can trap to a VMM.
 ///
 /// # Safety
 ///
 /// Interrupts are disabled, and this CPU's IDT takes the interrupt that
 /// ends the wait.
-pub(crate) unsafe fn wait(budget_us: Option<u64>) {
+pub(crate) unsafe fn wait(budget_us: impl FnOnce() -> Option<u64>) {
     let enter = admission().and_then(|admission| {
-        let state = processor::select(&admission.states, budget_us)?;
+        let state = processor::select(&admission.states, budget_us())?;
         Some((state.enter, admission.flush_monitor))
     });
     match enter {

@@ -443,12 +443,13 @@ unsafe impl Idle for NativeIdle {
                 .idle
                 .store(deadline.unwrap_or(NONE), Ordering::Relaxed);
             self.state.rearm(now)?;
-            let ticks = self.state.cpu.controller().read(apic::CURRENT);
+            let budget = || {
+                let ticks = self.state.cpu.controller().read(apic::CURRENT);
+                Some(u64::from(ticks) * 1_000_000 / self.state.apic_hz)
+            };
             // SAFETY: incoming IF was set, root owns IDT/LAPIC. The wait
             // ends on any interrupt, including one published before it.
-            unsafe {
-                crate::native_idle::wait(Some(u64::from(ticks) * 1_000_000 / self.state.apic_hz));
-            }
+            unsafe { crate::native_idle::wait(budget) };
             self.state.idle.store(NONE, Ordering::Relaxed);
             self.state.pending.swap(false, Ordering::AcqRel);
             self.state.rearm(self.state.cpu.sample()?)

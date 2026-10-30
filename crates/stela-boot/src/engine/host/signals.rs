@@ -61,7 +61,7 @@ pub(crate) fn sleep_for(micros: u64) {
     state.apic.write(apic::LVT_TIMER, u32::from(TIMER_VECTOR));
     state.apic.write(apic::INITIAL, ticks);
     // SAFETY: interrupts are disabled and the host IDT takes the timer.
-    unsafe { crate::native_idle::wait(Some(u64::from(ticks) * 1_000_000 / state.apic_hz)) };
+    unsafe { crate::native_idle::wait(|| Some(u64::from(ticks) * 1_000_000 / state.apic_hz)) };
     let slept = ticks - state.apic.read(apic::CURRENT);
     state.apic.write(apic::LVT_TIMER, lvt);
     // A count that ran out during the sleep fires at once.
