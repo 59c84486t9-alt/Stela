@@ -272,11 +272,9 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
                 if argument.mailbox.poll(&mut owner, &mut worker) {
                     continue;
                 }
-                // SAFETY: STI's interrupt shadow includes HLT: a pending 0x60 wakes
-                // this AP without a poll-to-sleep lost-notification window.
-                unsafe {
-                    asm!("sti", "hlt", "cli", options(nomem, nostack));
-                }
+                // SAFETY: interrupts are disabled and this AP's IDT takes its
+                // 0x60 doorbell, which ends the wait even when already pending.
+                unsafe { crate::native_idle::wait(None) };
             }
         }
         Err(reason) => {

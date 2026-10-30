@@ -1793,6 +1793,9 @@ fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -
         prepared_sci,
         work,
     );
+    crate::native_idle::install(
+        host_acpi.and_then(|acpi| acpi.processor_idle(crate::native_idle::capabilities())),
+    );
     Platform {
         acpi: host_acpi,
         mmio: native_mmio,

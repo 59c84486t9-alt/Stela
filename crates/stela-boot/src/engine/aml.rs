@@ -1178,6 +1178,35 @@ impl HostAcpi {
         }
     }
 
+    /// The firmware's processor idle declaration, once the processors are
+    /// told `capabilities`; `None`, reported, when AML refuses it.
+    pub(super) fn processor_idle(
+        &'static self,
+        capabilities: u32,
+    ) -> Option<stela_drivers::platform::acpi::processor::Declaration> {
+        // SAFETY: this permanent provider is held by the leaked Session.
+        let provider = unsafe { &*self.provider };
+        match provider
+            .executor
+            .call_owned(5_000_000, move || self.session.processor_idle(capabilities))
+        {
+            Ok(Ok(declaration)) => Some(declaration),
+            Ok(Err(error)) => {
+                output::arguments(format_args!(
+                    "UNSUPPORTED ACPI processor idle declaration: ACPICA status {:#x}\n",
+                    error.0
+                ));
+                None
+            }
+            Err(error) => {
+                output::arguments(format_args!(
+                    "ACPI processor idle continuation unavailable: {error}\n"
+                ));
+                None
+            }
+        }
+    }
+
     /// The loaded namespace. Its calls run in the loader root
     /// ([`super::storage::RestoreRoot`]), as the host drivers do.
     pub fn session(&'static self) -> &'static Session {
