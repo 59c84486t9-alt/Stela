@@ -1,6 +1,7 @@
 //! The opt-in requests to Apple's signing service (TSS): the personalized AP
-//! root tickets a restore installs, and the recoveryOS LocalPolicy, the one
-//! object restored verifies against Apple's fixed roots
+//! root tickets a restore installs, the Cryptex1 ticket the restore's
+//! cryptex updater asks for with its own nonce, and the recoveryOS
+//! LocalPolicy, the one object restored verifies against Apple's fixed roots
 //! (`docs/research/restore-trust.md`), so no Stela key can sign it.
 //!
 //! Wire: libtatsu `tss.c` (`tss_request_new`, `tss_parameters_add_from_manifest`,
@@ -9,7 +10,8 @@
 //! `tss_entry_apply_restore_request_rules`, `tss_request_add_local_policy_tags`,
 //! `tss_request_send`) and idevicerestore 4b3e847e `idevicerestore.c`
 //! (`get_tss_response`, `get_recoveryos_root_ticket_tss_response`,
-//! `get_recovery_os_local_policy_tss_response`, `lpol_file`). A request carries
+//! `get_recovery_os_local_policy_tss_response`, `lpol_file`) and `restore.c`
+//! (`restore_get_cryptex1_firmware_data`). A request carries
 //! the device's ECID, its chip, board and security domain, the build's
 //! component digests and the boot's nonces; nothing is sent without a
 //! [`Transport`], which the user enables explicitly. The answer is Apple's
@@ -40,16 +42,18 @@ pub const LOCAL_POLICY: [u8; 22] = [
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// One HTTP POST to the signing service with `headers` besides its
-/// content type, returning the response body.
+/// content type, without waiting: the response body once it has arrived,
+/// `None` while it is on its way. Asking again with the same body continues
+/// the exchange; another body abandons it.
 pub trait Transport {
-    fn post(
+    fn exchange(
         &mut self,
         host: &str,
         path: &str,
         headers: &[(&str, &str)],
         content_type: &str,
         body: &[u8],
-    ) -> Result<Vec<u8>>;
+    ) -> Result<Option<Vec<u8>>>;
 }
 
 /// The device the request personalizes for, and the way out to Apple.
@@ -350,9 +354,126 @@ pub fn local_policy_request(identity: &Identity, ecid: u64, args: &Value) -> Res
     Ok(request)
 }
 
+/// The Cryptex1 TSS request for a restore's `FirmwareUpdaterData` arguments,
+/// as idevicerestore's `restore_get_cryptex1_firmware_data` builds it.
+/// Parameters gather the device's `MessageArgInfo`, the identity's values
+/// for its `BuildIdentityTags`, `ApProductionMode` and `ApSecurityMode`
+/// (true when absent) and the identity's `ApChipID` and `ApBoardID`, then
+/// the `DeviceGeneratedRequest` over them. libtatsu's
+/// `tss_request_add_cryptex_tags` builds the request from them: the common
+/// tags (`ApECID`, `ApChipID`, `ApBoardID` and `ApSecurityDomain` as
+/// integers, which libplist parses from the manifest's hex strings, and
+/// `UniqueBuildID` as data), `@Cryptex1,Ticket`, both modes as Booleans and
+/// every parameter whose key starts with `Cryptex1`, the cryptex nonce
+/// among them. The device's ECID must be the signer's, so a ticket never
+/// names another machine.
+pub fn cryptex_request(identity: &Identity, ecid: u64, args: &Value) -> Result<Value> {
+    let Value::Dict(info) = args.required("MessageArgInfo")? else {
+        return Err(Error::Invalid("MessageArgInfo dictionary"));
+    };
+    let mut parameters = info.clone();
+    for tag in args
+        .required("DeviceGeneratedTags")?
+        .required("BuildIdentityTags")?
+        .array()?
+    {
+        let tag = tag.string()?;
+        if let Some(value) = identity.value.get(tag) {
+            parameters.insert(tag.into(), value.clone());
+        }
+    }
+    for mode in ["ApProductionMode", "ApSecurityMode"] {
+        parameters
+            .entry(mode.into())
+            .or_insert(Value::Boolean(true));
+    }
+    for key in ["ApChipID", "ApBoardID"] {
+        if let Some(value) = identity.value.get(key) {
+            parameters.insert(key.into(), value.clone());
+        }
+    }
+    let Value::Dict(generated) = args.required("DeviceGeneratedRequest")? else {
+        return Err(Error::Invalid("DeviceGeneratedRequest dictionary"));
+    };
+    parameters.extend(generated.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let device = parameters
+        .get("ApECID")
+        .ok_or(Error::Invalid("cryptex request has no ECID"))?;
+    if ecid == 0 || device.bits()? != ecid {
+        return Err(Error::Invalid(
+            "cryptex request names another machine's ECID",
+        ));
+    }
+    let mut request = Value::dict([
+        ("@HostPlatformInfo", Value::from("mac")),
+        ("@VersionInfo", Value::from(VERSION)),
+        ("@Cryptex1,Ticket", Value::Boolean(true)),
+        ("ApECID", Value::Integer(ecid)),
+    ]);
+    let Value::Dict(fields) = &mut request else {
+        unreachable!()
+    };
+    for key in ["ApChipID", "ApBoardID", "ApSecurityDomain"] {
+        if let Some(value) = parameters.get(key) {
+            fields.insert(key.into(), Value::Integer(integer(value)?));
+        }
+    }
+    if let Some(build) = parameters.get("UniqueBuildID") {
+        fields.insert("UniqueBuildID".into(), Value::Data(build.data()?.to_vec()));
+    }
+    for mode in ["ApSecurityMode", "ApProductionMode"] {
+        fields.insert(mode.into(), Value::Boolean(parameters[mode].boolean()?));
+    }
+    let mut cryptex = false;
+    for (key, value) in &parameters {
+        if key.starts_with("Cryptex1") {
+            fields.insert(key.clone(), value.clone());
+            cryptex = true;
+        }
+    }
+    if !cryptex {
+        return Err(Error::Invalid("cryptex request names no cryptex"));
+    }
+    let id = guid(&plist::encode_xml(&request, plist::Limits::default())?);
+    if let Value::Dict(fields) = &mut request {
+        fields.insert("@UUID".into(), Value::String(id));
+    }
+    Ok(request)
+}
+
+/// An integer parameter as libplist's `plist_dict_get_uint` reads it: an
+/// integer's bits, or a manifest's hexadecimal or decimal string.
+fn integer(value: &Value) -> Result<u64> {
+    match value {
+        Value::String(text) => match text.strip_prefix("0x") {
+            Some(hex) => u64::from_str_radix(hex, 16),
+            None => text.parse(),
+        }
+        .map_err(|_| Error::Invalid("cryptex request integer string")),
+        other => other.bits(),
+    }
+}
+
+/// Ask Apple for the cryptex ticket the device's request names in its one
+/// `ResponseTags` entry.
+pub fn request_cryptex_ticket(
+    signer: &mut Signer,
+    identity: &Identity,
+    args: &Value,
+    response_tag: &str,
+) -> Result<Vec<u8>> {
+    let request = cryptex_request(identity, signer.ecid, args)?;
+    answer(&post(signer, &request)?, response_tag)
+}
+
 /// Apple's ticket from a TSS response (`STATUS=0&MESSAGE=SUCCESS&REQUEST_STRING=<plist>`);
 /// any other status refuses with the server's message.
 pub fn ticket(response: &[u8]) -> Result<Vec<u8>> {
+    answer(response, "ApImg4Ticket")
+}
+
+/// The data under `key` in a successful TSS response.
+fn answer(response: &[u8], key: &str) -> Result<Vec<u8>> {
     if response.len() > MAX_RESPONSE_BYTES {
         return Err(Error::Limit("TSS response bytes"));
     }
@@ -375,7 +496,7 @@ pub fn ticket(response: &[u8]) -> Result<Vec<u8>> {
         .find("<?xml")
         .ok_or(Error::Invalid("TSS response has no plist"))?;
     let answer = plist::decode(&response[start..], plist::Limits::default())?;
-    Ok(answer.required("ApImg4Ticket")?.data()?.to_vec())
+    Ok(answer.required(key)?.data()?.to_vec())
 }
 
 /// Ask Apple for the recoveryOS policy ticket.
@@ -389,11 +510,17 @@ pub fn request_local_policy(
 }
 
 fn send(signer: &mut Signer, request: &Value) -> Result<Vec<u8>> {
+    ticket(&post(signer, request)?)
+}
+
+/// The service's response to `request`, or [`Error::Pending`] while it is
+/// on its way.
+fn post(signer: &mut Signer, request: &Value) -> Result<Vec<u8>> {
     let body = plist::encode_xml(request, plist::Limits::default())?;
-    let response = signer
+    signer
         .transport
-        .post(HOST, PATH, &HEADERS, CONTENT_TYPE, &body)?;
-    ticket(&response)
+        .exchange(HOST, PATH, &HEADERS, CONTENT_TYPE, &body)?
+        .ok_or(Error::Pending)
 }
 
 /// `Ap,VolumeUUID` as restored sends it, canonical 8-4-4-4-12 hex.

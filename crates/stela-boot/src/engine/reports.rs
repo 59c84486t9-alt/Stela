@@ -186,7 +186,7 @@ pub(super) struct ExitsSeen {
     pub(super) misses: [u64; 5],
     pub(super) forgets: [u64; 4],
     /// `Machine::device_registers`.
-    pub(super) registers: BTreeMap<u64, u64>,
+    pub(super) registers: BTreeMap<u64, DeviceRegister>,
 }
 
 /// The `ExitKind`s `Statistics::exit_kinds` counts.
@@ -196,8 +196,10 @@ impl ExitsSeen {
     /// Since the last heartbeat: the native runs the engine started (those
     /// that did not end in a counted exit ran out of their chain budget),
     /// the exits by `ExitKind`, and the instruction words that most often
-    /// left compiled code, so the engine's exit causes can be ranked.
-    pub(super) fn report<H: Host>(&mut self, machine: &Machine<H, parallel::Board>) {
+    /// left compiled code, so the engine's exit causes can be ranked, and
+    /// the device registers whose native faults cost the most, each with its
+    /// accesses and their handling time in microseconds.
+    pub(super) fn report<H: Host>(&mut self, machine: &Machine<H, parallel::Board>, tsc_hz: u64) {
         const SHOWN: usize = 24;
         const REGISTERS: usize = 16;
         let statistics = &machine.statistics;
@@ -270,22 +272,24 @@ impl ExitsSeen {
         let registers = machine.device_registers().clone();
         let mut top: Vec<_> = registers
             .iter()
-            .map(|(physical, &count)| {
+            .map(|(physical, register)| {
                 let last = self.registers.get(physical).copied().unwrap_or_default();
-                (count - last, *physical)
+                let ticks = register.ticks - last.ticks;
+                (ticks, register.accesses - last.accesses, *physical)
             })
-            .filter(|&(count, _)| count != 0)
+            .filter(|&(_, count, _)| count != 0)
             .collect();
         top.sort_unstable_by(|a, b| b.cmp(a));
-        let accesses: u64 = top.iter().map(|&(count, _)| count).sum();
-        let shown: u64 = top.iter().take(REGISTERS).map(|&(count, _)| count).sum();
+        let accesses: u64 = top.iter().map(|&(_, count, _)| count).sum();
+        let shown: u64 = top.iter().take(REGISTERS).map(|&(_, count, _)| count).sum();
         output::arguments(format_args!(
             "DEVICE REGISTERS accesses={accesses} registers={} shown={}%",
             top.len(),
             (shown * 100).checked_div(accesses).unwrap_or(100)
         ));
-        for (count, physical) in top.into_iter().take(REGISTERS) {
-            output::arguments(format_args!(" {physical:#x}:{count}"));
+        let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
+        for (ticks, count, physical) in top.into_iter().take(REGISTERS) {
+            output::arguments(format_args!(" {physical:#x}:{count}/{}us", micros(ticks)));
         }
         output::arguments(format_args!("\n"));
         *self = Self {

@@ -182,6 +182,14 @@ pub struct WatchHit {
     pub dropped: u64,
 }
 
+/// A device register's accesses ([`Machine::device_registers`]) and, under
+/// step timing, the profile-clock ticks of the native faults that reached it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeviceRegister {
+    pub accesses: u64,
+    pub ticks: u64,
+}
+
 /// A PE reaching a host trace point (`Machine::set_traces`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TraceHit {

@@ -518,8 +518,10 @@ impl<R: ReadAt> Answers<R> {
         global.wrap(&bytes, digest)
     }
     pub fn plan(&mut self, request: &Value) -> Result<Plan> {
-        self.plan_inner(request)
-            .map_err(|e| super::refuse(refuse!("restore plan: {e}", ?e), request))
+        self.plan_inner(request).map_err(|e| match e {
+            Error::Pending => e,
+            e => super::refuse(refuse!("restore plan: {e}", ?e), request),
+        })
     }
     fn plan_inner(&mut self, r: &Value) -> Result<Plan> {
         let kind = r.required("DataType")?.string()?;
@@ -872,21 +874,26 @@ impl<R: ReadAt> Answers<R> {
             ));
         }
         let request = args.required("DeviceGeneratedRequest")?;
-        // Explicit nonce or ECID requests cannot be answered with a non-nonce
-        // global. Keep all device-generated context in the caller's refusal.
-        if let Value::Dict(d) = request
-            && d.keys().any(|k| k.contains("Nonce") || k.contains("ECID"))
-        {
-            return Err(Error::Invalid(
-                "cryptex updater requires personalized ticket",
-            ));
-        }
         let response_tags = args
             .required("DeviceGeneratedTags")?
             .required("ResponseTags")?
             .array()?;
         if response_tags.len() != 1 || response_tags[0].string()? != "Cryptex1,Ticket" {
             return Err(Error::Invalid("unsupported cryptex response tags"));
+        }
+        // A request bound to the device's cryptex nonce or ECID takes Apple's
+        // ticket for exactly it; a non-nonce global cannot answer it.
+        if let Value::Dict(d) = request
+            && d.keys().any(|k| k.contains("Nonce") || k.contains("ECID"))
+        {
+            let signer = self.signer.as_mut().ok_or(Error::Invalid(
+                "a personalized cryptex ticket needs Apple's signing service (opt-in --tss)",
+            ))?;
+            let ticket = tss::request_cryptex_ticket(signer, identity, args, "Cryptex1,Ticket")?;
+            return Ok(Plan::Reply(Value::dict([(
+                "FirmwareResponseData",
+                Value::dict([("Cryptex1,Ticket", Value::Data(ticket))]),
+            )])));
         }
         let global = self.global(identity, &Value::dict([]), true)?;
         Ok(Plan::Reply(Value::dict([(

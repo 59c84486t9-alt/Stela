@@ -400,19 +400,23 @@ impl Host {
     }
     /// At most one packet per call. The caller supplies the monotonic guest
     /// 24 MHz counter and runs guest code between NAKs; this never does so.
-    pub fn advance(&mut self, peer: &mut impl BusPeer, now: u64) -> Result<()> {
+    /// Whether another call at the same `now` can move a packet: not once
+    /// every pending bulk transfer NAKed, none is pending, or the port waits
+    /// out its reset, so a caller with packets to spend stops there.
+    pub fn advance(&mut self, peer: &mut impl BusPeer, now: u64) -> Result<bool> {
         match self.state {
-            Enumerate::Detached => return Ok(()),
+            Enumerate::Detached => return Ok(false),
             Enumerate::Reset => {
                 peer.reset()?;
                 self.state = Enumerate::Recover(now.saturating_add(RESET_RECOVERY));
-                return Ok(());
+                return Ok(false);
             }
             Enumerate::Recover(deadline) => {
-                if now >= deadline {
+                let recovered = now >= deadline;
+                if recovered {
                     self.state = Enumerate::Device;
                 }
-                return Ok(());
+                return Ok(recovered);
             }
             Enumerate::Ready => return self.bulk_step(peer),
             _ => {}
@@ -442,7 +446,7 @@ impl Host {
             self.control = Some(Control::new(setup, now));
         }
         if !self.control.as_mut().unwrap().step(peer, now)? {
-            return Ok(());
+            return Ok(true);
         }
         let request = self.control.take().unwrap();
         let bytes = request.data;
@@ -539,7 +543,7 @@ impl Host {
             Enumerate::Configure => Enumerate::Ready,
             _ => unreachable!(),
         };
-        Ok(())
+        Ok(true)
     }
     fn record(&mut self, kind: u8, index: u8, bytes: Vec<u8>) {
         self.descriptors.push(Descriptor {
@@ -560,65 +564,74 @@ impl Host {
             Enumerate::Configure
         }
     }
-    fn bulk_step(&mut self, peer: &mut impl BusPeer) -> Result<()> {
-        let Some(position) = self
-            .bulk
-            .iter()
-            .position(|transfer| transfer.input == self.prefer_input)
-            .or_else(|| (!self.bulk.is_empty()).then_some(0))
-        else {
-            return Ok(());
-        };
-        let mut transfer = self.bulk.remove(position).unwrap();
-        self.prefer_input = !transfer.input;
-        let endpoints = self.endpoints.unwrap();
-        let (endpoint, token) = if transfer.input {
-            (endpoints.input, Token::In)
-        } else {
-            (endpoints.output, Token::Out)
-        };
-        let length = MAX_PACKET.min(transfer.length - transfer.done);
-        let mut packet = [0; MAX_PACKET];
-        if !transfer.input {
-            packet[..length].copy_from_slice(&transfer.data[transfer.done..transfer.done + length]);
-        }
-        let reply = match peer.packet(endpoint, token, &mut packet[..length]) {
-            Ok(reply) => reply,
-            Err(error) => {
-                self.bulk.insert(position, transfer);
-                return Err(error);
+    /// One packet of the first transfer in the preferred direction, or of
+    /// the other direction's first when that NAKs or none is pending: a NAK
+    /// takes the bus a token's time, not a packet's. Whether one moved.
+    fn bulk_step(&mut self, peer: &mut impl BusPeer) -> Result<bool> {
+        for input in [self.prefer_input, !self.prefer_input] {
+            let Some(position) = self
+                .bulk
+                .iter()
+                .position(|transfer| transfer.input == input)
+            else {
+                continue;
+            };
+            let mut transfer = self.bulk.remove(position).unwrap();
+            let endpoints = self.endpoints.unwrap();
+            let (endpoint, token) = if transfer.input {
+                (endpoints.input, Token::In)
+            } else {
+                (endpoints.output, Token::Out)
+            };
+            let length = MAX_PACKET.min(transfer.length - transfer.done);
+            let mut packet = [0; MAX_PACKET];
+            if !transfer.input {
+                packet[..length]
+                    .copy_from_slice(&transfer.data[transfer.done..transfer.done + length]);
             }
-        };
-        let status = match reply {
-            Reply::Nak => None,
-            Reply::Stall => Some(TransferStatus::Stall),
-            Reply::Ack(bytes) => {
-                if bytes > length || (!transfer.input && bytes != length) {
+            let reply = match peer.packet(endpoint, token, &mut packet[..length]) {
+                Ok(reply) => reply,
+                Err(error) => {
                     self.bulk.insert(position, transfer);
-                    return Err(refuse!(
-                        "USB peer returned an invalid bulk acknowledgement length"
-                    ));
+                    return Err(error);
                 }
-                if transfer.input {
-                    transfer.data.extend_from_slice(&packet[..bytes]);
+            };
+            let status = match reply {
+                Reply::Nak => {
+                    self.bulk.insert(position, transfer);
+                    continue;
                 }
-                transfer.done += bytes;
-                (bytes < MAX_PACKET
-                    || (transfer.done == transfer.length && (transfer.input || !transfer.zlp)))
-                    .then_some(TransferStatus::Complete)
+                Reply::Stall => Some(TransferStatus::Stall),
+                Reply::Ack(bytes) => {
+                    if bytes > length || (!transfer.input && bytes != length) {
+                        self.bulk.insert(position, transfer);
+                        return Err(refuse!(
+                            "USB peer returned an invalid bulk acknowledgement length"
+                        ));
+                    }
+                    if transfer.input {
+                        transfer.data.extend_from_slice(&packet[..bytes]);
+                    }
+                    transfer.done += bytes;
+                    (bytes < MAX_PACKET
+                        || (transfer.done == transfer.length && (transfer.input || !transfer.zlp)))
+                        .then_some(TransferStatus::Complete)
+                }
+            };
+            self.prefer_input = !transfer.input;
+            if let Some(status) = status {
+                self.completions.push_back(Completion {
+                    id: transfer.id,
+                    status,
+                    bytes: transfer.data,
+                    transferred: transfer.done,
+                });
+            } else {
+                self.bulk.insert(position, transfer);
             }
-        };
-        if let Some(status) = status {
-            self.completions.push_back(Completion {
-                id: transfer.id,
-                status,
-                bytes: transfer.data,
-                transferred: transfer.done,
-            });
-        } else {
-            self.bulk.insert(position, transfer);
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -764,5 +777,36 @@ mod tests {
         peer.nak = true;
         host.advance(&mut peer, 100 * REQUEST_TIMEOUT).unwrap();
         assert!(host.completion().is_none());
+    }
+    #[test]
+    fn a_naking_input_costs_the_output_no_packet() {
+        struct OutOnly(usize);
+        impl BusPeer for OutOnly {
+            fn reset(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn packet(&mut self, _: u8, token: Token, data: &mut [u8]) -> Result<Reply> {
+                if token == Token::In {
+                    return Ok(Reply::Nak);
+                }
+                self.0 += 1;
+                Ok(Reply::Ack(data.len()))
+            }
+        }
+        let mut host = Host::new();
+        host.state = Enumerate::Ready;
+        host.endpoints = mux_endpoints(&configuration(0x85, 9)).unwrap();
+        let mut peer = OutOnly(0);
+        host.submit_in(512).unwrap();
+        let id = host.submit_out(&[0; 1024], false).unwrap();
+        // The IN, preferred in turn, NAKs; each call still moves an OUT packet.
+        assert!(host.advance(&mut peer, 0).unwrap());
+        assert!(host.advance(&mut peer, 0).unwrap());
+        assert_eq!(peer.0, 2);
+        let done = host.completion().unwrap();
+        assert_eq!((done.id, done.transferred), (id, 1024));
+        // With only the NAKing IN pending, nothing moves.
+        assert!(!host.advance(&mut peer, 0).unwrap());
+        assert_eq!(peer.0, 2);
     }
 }

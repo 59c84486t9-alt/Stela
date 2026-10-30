@@ -11,32 +11,26 @@ impl<H: Host, D: Devices> Machine<H, D> {
         bytes: u8,
         now: u64,
     ) -> Result<u64, DeviceError> {
-        if self.devices.requires_canonical_read(
-            self.current,
-            physical,
-            DeviceReadShape::Scalar { bytes },
-        ) {
-            self.host.speculation_barrier();
-            let consumed =
-                self.serial_read_canonical(physical, DeviceReadShape::Scalar { bytes }, now);
-            let result = consumed.and_then(|consumed| {
-                consumed.settlement?;
-                Ok(consumed.values[0])
-            });
-            self.watch(physical, bytes, result.as_ref().ok().copied(), false);
-            return result;
-        }
         self.host.speculation_barrier();
-        if let Some(cpu) = self.devices.pc_sample_target(physical, bytes) {
-            let pc = self.processor_pc(cpu).ok_or_else(|| {
-                DeviceError::Refused(refuse!(
-                    "debug PC sample: PE {cpu} has no powered execution state",
-                    cpu
-                ))
-            })?;
-            self.devices.observe_pc_sample(physical, pc);
-        }
-        let result = self.devices.read(self.current, physical, bytes, now);
+        let result = match self.devices.read_scalar(self.current, physical, bytes, now) {
+            ScalarRead::Served(result) => result,
+            ScalarRead::Canonical => self
+                .serial_read_canonical(physical, DeviceReadShape::Scalar { bytes }, now)
+                .and_then(|consumed| {
+                    consumed.settlement?;
+                    Ok(consumed.values[0])
+                }),
+            ScalarRead::Sample(cpu) => {
+                let pc = self.processor_pc(cpu).ok_or_else(|| {
+                    DeviceError::Refused(refuse!(
+                        "debug PC sample: PE {cpu} has no powered execution state",
+                        cpu
+                    ))
+                })?;
+                self.devices.observe_pc_sample(physical, pc);
+                self.devices.read(self.current, physical, bytes, now)
+            }
+        };
         self.watch(physical, bytes, result.as_ref().ok().copied(), false);
         result
     }
@@ -51,12 +45,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
     ) -> Result<(), DeviceError> {
         let result = if self.serial_hold.is_some() {
             self.serial_write_canonical(physical, bytes, value, now)
-        } else if self.parallel.is_some()
-            && self
-                .devices
-                .requires_canonical_write(self.current, physical, bytes)
-        {
-            self.forward_write(physical, bytes, value)
+        } else if self.parallel.is_some() {
+            let current = self.current;
+            let (devices, processors) = self.processor_write_parts();
+            match devices.write_plain(current, physical, bytes, value, now, processors) {
+                Some(result) => result,
+                None => self.forward_write(physical, bytes, value),
+            }
         } else {
             let current = self.current;
             let (devices, processors) = self.processor_write_parts();

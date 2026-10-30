@@ -163,14 +163,14 @@ pub struct Synthetic {
     pub requests: Rc<RefCell<Vec<Vec<u8>>>>,
 }
 impl Transport for Synthetic {
-    fn post(
+    fn exchange(
         &mut self,
         host: &str,
         path: &str,
         headers: &[(&str, &str)],
         kind: &str,
         body: &[u8],
-    ) -> HostResult<Vec<u8>> {
+    ) -> HostResult<Option<Vec<u8>>> {
         assert_eq!((host, path), ("gs.apple.com", "/TSS/controller?action=2"));
         assert!(headers.contains(&("User-Agent", "InetURL/1.0")));
         assert!(kind.starts_with("text/xml"));
@@ -188,7 +188,7 @@ impl Transport for Synthetic {
             .unwrap();
         let mut response = b"STATUS=0&MESSAGE=SUCCESS&REQUEST_STRING=".to_vec();
         response.extend(xml);
-        Ok(response)
+        Ok(Some(response))
     }
 }
 

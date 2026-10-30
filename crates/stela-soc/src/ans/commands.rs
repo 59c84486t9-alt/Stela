@@ -43,8 +43,8 @@ pub(super) const fn tunnel_buffer(bytes: u32) -> u32 {
 /// later controller initialization (0x3db22b4) or format (0x3db5790).
 const DEVICE_TIME: u32 = 6;
 /// The CDW13 hints of a read or write: access frequency (3:0), priority
-/// tier (10:8) and passive I/O (12).
-const HINTS: u32 = 1 << 12 | 0x7 << 8 | 0xf;
+/// tier (10:8), a write's quick completion (11) and passive I/O (12).
+const HINTS: u32 = 1 << 12 | 1 << 11 | 0x7 << 8 | 0xf;
 const APPLE_DEBUG_SERVICE: u8 = 0xc2;
 
 /// The host clocks one device-time tunnel carries (0x3df6e50..0x3df6e78),
@@ -733,8 +733,8 @@ impl Ans {
         // CDW13 carries hints the controller may ignore, from
         // `AppleNVMeRequest`'s read and write builders (0x3deb7d4, 0x3deb8f4):
         // bits 3:0 NVMe's Dataset Management access frequency, bits 10:8
-        // the request's priority tier and bit 12 passive I/O. The writes'
-        // bit 11 has no established meaning and refuses.
+        // the request's priority tier, bit 11 a write's quick completion
+        // (`bufattr_quickcomplete`) and bit 12 passive I/O.
         let unit = cmd.long(56);
         if controls & !(FORCE_UNIT_ACCESS | 0xffff) != 0
             || cmd.word(52) & !HINTS != 0

@@ -478,6 +478,13 @@ fn maintenance_posted_to_another_pe_completes_at_the_next_dsb() {
     machine.step().unwrap();
     assert!(machine.posted.is_empty());
     assert_eq!(machine.cpu.pc, super::super::tests::BASE + 4);
+    // A PE outside its run loop reads its mail before it runs again: the
+    // completion does not wait for it.
+    machine.post(Maintenance::Code(None));
+    hub.set_outside(1, true);
+    machine.complete_maintenance().unwrap();
+    assert!(machine.posted.is_empty());
+    assert!(hub.take(1).is_some());
 }
 
 #[test]
@@ -827,4 +834,72 @@ fn a_pe_without_a_machine_waits_for_its_first_start() {
     let mut halts = 0;
     assert_eq!(hub.first_start(1, || halts += 1), 0x1000);
     assert_eq!(halts, 0);
+}
+
+#[test]
+fn a_shared_board_classifies_and_serves_a_scalar_access_in_one_call() {
+    use super::super::tests::board;
+    use stela_contracts::identity::Identity;
+    const CANONICAL: u64 = 0x10;
+    const SAMPLER: u64 = 0x20;
+    #[derive(Default)]
+    struct Classified {
+        reads: usize,
+        writes: usize,
+    }
+    impl Devices for Classified {
+        fn pc_sample_target(&self, physical: u64, _: u8) -> Option<usize> {
+            (physical == SAMPLER).then_some(1)
+        }
+        fn requires_canonical_read(&self, _: usize, physical: u64, _: DeviceReadShape) -> bool {
+            physical == CANONICAL
+        }
+        fn requires_canonical_write(&self, _: usize, physical: u64, _: u8) -> bool {
+            physical == CANONICAL
+        }
+        fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+            self.reads += 1;
+            Ok(7)
+        }
+        fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+            self.writes += 1;
+            Ok(())
+        }
+        fn lines(&mut self, _: usize, _: u64) -> Lines {
+            Lines::default()
+        }
+    }
+    let (hub, _) = hub(2);
+    let mut worker = SharedDevices::new(Classified::default(), hub).worker();
+    assert_eq!(worker.read_scalar(1, 0x30, 4, 0), ScalarRead::Served(Ok(7)));
+    assert_eq!(
+        worker.read_scalar(1, CANONICAL, 4, 0),
+        ScalarRead::Canonical
+    );
+    assert_eq!(worker.read_scalar(1, SAMPLER, 4, 0), ScalarRead::Sample(1));
+    let identities = vec![Identity {
+        midr: 0x611f_0320,
+        mpidr: 0x8000_0000,
+        clock: None,
+        caches: None,
+    }];
+    let mut machine = board(&[], worker, identities);
+    let (devices, processors) = machine.processor_write_parts();
+    assert!(
+        devices
+            .write_plain(0, CANONICAL, 4, 1, 0, processors)
+            .is_none()
+    );
+    let (devices, processors) = machine.processor_write_parts();
+    assert_eq!(
+        devices.write_plain(0, 0x30, 4, 1, 0, processors),
+        Some(Ok(()))
+    );
+    // Only the plain accesses reached the registers.
+    assert_eq!(
+        machine
+            .devices
+            .with(|devices| (devices.reads, devices.writes)),
+        (1, 1)
+    );
 }

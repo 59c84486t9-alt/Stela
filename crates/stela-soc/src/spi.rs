@@ -21,7 +21,7 @@
 //! SHIFTCFG, and only while an external GPIO drives the chip select, since
 //! the internal CS output is then disconnected from the attached device.
 use crate::Result;
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::vec::Vec;
 use stela_contracts::Refusal;
 use stela_contracts::refuse;
 use {
@@ -83,6 +83,48 @@ fn configuration_bit(offset: u64) -> u8 {
     }
 }
 
+/// A byte FIFO of [`FIFO_DEPTH`]: a copy of its value, not of the heap,
+/// is what a refused transfer restores.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Fifo {
+    bytes: [u8; FIFO_DEPTH],
+    start: usize,
+    len: usize,
+}
+
+impl Fifo {
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    fn front(&self) -> Option<u8> {
+        (self.len != 0).then(|| self.bytes[self.start])
+    }
+    fn pop_front(&mut self) -> Option<u8> {
+        let byte = self.front()?;
+        self.start = (self.start + 1) % FIFO_DEPTH;
+        self.len -= 1;
+        Some(byte)
+    }
+    /// Callers check for room first.
+    fn push_back(&mut self, byte: u8) {
+        assert!(self.len < FIFO_DEPTH, "SPI FIFO overflow");
+        self.bytes[(self.start + self.len) % FIFO_DEPTH] = byte;
+        self.len += 1;
+    }
+    fn push_front(&mut self, byte: u8) {
+        assert!(self.len < FIFO_DEPTH, "SPI FIFO overflow");
+        self.start = (self.start + FIFO_DEPTH - 1) % FIFO_DEPTH;
+        self.bytes[self.start] = byte;
+        self.len += 1;
+    }
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 pub struct Spi {
     nor: Nor,
     irq: AicInput,
@@ -96,8 +138,8 @@ pub struct Spi {
     status: u32,
     tx_count: u32,
     rx_count: u32,
-    tx: VecDeque<u8>,
-    rx: VecDeque<u8>,
+    tx: Fifo,
+    rx: Fifo,
     /// External CS wiring disables the internal PIN output's connection.
     external_cs: bool,
     lifecycle: LifecycleState,
@@ -118,8 +160,8 @@ impl Spi {
             status: 0,
             tx_count: 0,
             rx_count: 0,
-            tx: VecDeque::new(),
-            rx: VecDeque::new(),
+            tx: Fifo::default(),
+            rx: Fifo::default(),
             external_cs,
             lifecycle: LifecycleState {
                 powered: true,
@@ -197,13 +239,8 @@ impl Spi {
     }
     fn pump(&mut self) -> Result<()> {
         let checkpoint = self.nor.checkpoint();
-        let (tx, rx, tx_count, rx_count, status) = (
-            self.tx.clone(),
-            self.rx.clone(),
-            self.tx_count,
-            self.rx_count,
-            self.status,
-        );
+        let (tx, rx, tx_count, rx_count, status) =
+            (self.tx, self.rx, self.tx_count, self.rx_count, self.status);
         if let Err(error) = self.pump_inner() {
             self.nor.restore(checkpoint);
             self.tx = tx;
@@ -229,7 +266,7 @@ impl Spi {
                 break;
             }
             let byte = if self.tx_count != 0 {
-                let Some(&byte) = self.tx.front() else {
+                let Some(byte) = self.tx.front() else {
                     break;
                 };
                 byte
@@ -342,7 +379,7 @@ impl MmioDevice for Spi {
                     | if self.rx.is_empty() { 1 << 20 } else { 0 }
             }
             RXDATA => {
-                let byte = *self
+                let byte = self
                     .rx
                     .front()
                     .ok_or_else(|| error(refuse!("SPI RX FIFO underflow")))?;
@@ -383,8 +420,8 @@ impl MmioDevice for Spi {
             self.config,
             self.divider,
             self.delay,
-            self.tx.clone(),
-            self.rx.clone(),
+            self.tx,
+            self.rx,
             self.configuration,
         );
         match offset {
@@ -502,6 +539,30 @@ mod tests {
     }
 
     #[test]
+    fn the_fifo_keeps_order_across_its_wrap_and_a_copy_restores_it() {
+        let mut fifo = Fifo::default();
+        for byte in 0..FIFO_DEPTH as u8 {
+            fifo.push_back(byte);
+        }
+        assert_eq!(fifo.len(), FIFO_DEPTH);
+        let full = fifo;
+        for byte in 0..10 {
+            assert_eq!(fifo.pop_front(), Some(byte));
+        }
+        // The next pushes wrap past the end of the storage.
+        for byte in 100..109 {
+            fifo.push_back(byte);
+        }
+        fifo.push_front(9);
+        let order: alloc::vec::Vec<_> = core::iter::from_fn(|| fifo.pop_front()).collect();
+        let expected: alloc::vec::Vec<u8> = (9..FIFO_DEPTH as u8).chain(100..109).collect();
+        assert_eq!(order, expected);
+        assert!(fifo.is_empty() && fifo.front().is_none());
+        fifo = full;
+        assert_eq!((fifo.len(), fifo.front()), (FIFO_DEPTH, Some(0)));
+    }
+
+    #[test]
     fn kept_pauses_preserve_queued_shifts_and_pending_interrupts() {
         let irq = AicInput::new(0, 749);
         let mut spi = Spi::new(Image::fresh(), irq, false);
@@ -523,7 +584,7 @@ mod tests {
         write(&mut spi, TXCNT, 1, &mut Access::new(0, 0, &mut latch));
         write(&mut spi, TXDATA, 0x06, &mut Access::new(0, 0, &mut latch));
         write(&mut spi, CTRL, RUN, &mut Access::new(0, 0, &mut latch));
-        assert_eq!((spi.tx_count, spi.tx.front()), (1, Some(&0x06)));
+        assert_eq!((spi.tx_count, spi.tx.front()), (1, Some(0x06)));
         assert_eq!(spi.status, 0);
         spi.advance(&mut Access::new(0, 0, &mut latch)).unwrap();
         assert_eq!(spi.tx_count, 1);
@@ -702,7 +763,7 @@ mod tests {
         write(&mut spi, TXDATA, 0x5a, &mut a);
         assert!(spi.write(CTRL, Width::Word, 1, &mut a).is_err());
         assert_eq!((spi.control, spi.tx_count), (0, 1));
-        assert_eq!(spi.tx.front(), Some(&0x5a));
+        assert_eq!(spi.tx.front(), Some(0x5a));
         write(&mut spi, CTRL, TX_RESET, &mut a);
         write(&mut spi, TXDATA, 0x06, &mut a);
         write(&mut spi, CTRL, RUN, &mut a);

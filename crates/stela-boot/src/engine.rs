@@ -64,6 +64,7 @@ use stela_compiler::TargetCpu;
 use stela_contracts::Chip;
 use stela_engine::machine::Cpu;
 use stela_engine::machine::CpuProfile;
+use stela_engine::machine::DeviceRegister;
 use stela_engine::machine::Event;
 use stela_engine::machine::Host;
 use stela_engine::machine::Machine;

@@ -45,6 +45,8 @@ impl Phase {
 pub const EXIT_SLOTS: usize = FAULT_SLOTS + 5;
 /// [`StepTiming::exits`]' first native-fault slot.
 const FAULT_SLOTS: usize = 13;
+/// The slot of native faults that reached a device ([`fault_slot`]).
+pub const DEVICE_FAULT_SLOT: usize = FAULT_SLOTS + 1;
 
 /// A native fault's slot in [`StepTiming::exits`], by cause: the guest's
 /// translation, a device, a native check, a watched or tag-checked page,
@@ -54,7 +56,7 @@ pub fn fault_slot(cause: &super::FaultCause) -> usize {
     FAULT_SLOTS
         + match cause {
             FaultCause::Guest(_) => 0,
-            FaultCause::Device { .. } => 1,
+            FaultCause::Device { .. } => DEVICE_FAULT_SLOT - FAULT_SLOTS,
             FaultCause::NonCanonical | FaultCause::InvalidOpcode => 2,
             FaultCause::Watched | FaultCause::TagChecked => 3,
             FaultCause::Translation(_) => 4,
@@ -217,6 +219,30 @@ mod tests {
             }
         );
         assert_eq!(machine.host.counter_reads - reads, 5);
+    }
+
+    #[test]
+    fn a_device_faults_ticks_go_to_the_register_it_reached() {
+        const REGISTER: u64 = 0x2_3520_0018;
+        let mut machine = super::super::tests::machine(&[]);
+        machine.set_step_timing(true);
+        machine.count_device_access(REGISTER);
+        machine.host.now = 30;
+        machine.timing_exit(DEVICE_FAULT_SLOT, 10);
+        // Another exit's ticks are not the register's, even after an
+        // access it did not fault for.
+        machine.count_device_access(REGISTER);
+        machine.host.now = 100;
+        machine.timing_exit(FAULT_SLOTS, 40);
+        machine.host.now = 120;
+        machine.timing_exit(DEVICE_FAULT_SLOT, 110);
+        assert_eq!(
+            machine.device_registers()[&REGISTER],
+            super::super::DeviceRegister {
+                accesses: 2,
+                ticks: 20
+            }
+        );
     }
 
     #[test]

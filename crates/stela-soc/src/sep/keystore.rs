@@ -48,9 +48,9 @@
 //! This SEP parses both header versions, so it reports version 2, and it
 //! records the environment, which nothing consumes yet. The command-specific
 //! keybag codecs validate the recovered AP layouts, then explicitly refuse
-//! their unresolved security semantics. Keybags, class and per-file keys need
-//! the keystore lifecycle in docs/research/sep-requirements.md, and no
-//! success is invented for them. The failure answer is the status
+//! their unresolved security semantics. Keybags need the keystore
+//! lifecycle in docs/research/sep-requirements.md, and no success is
+//! invented for them; [`volume_key`] serves volume, class and per-file keys. The failure answer is the status
 //! [`FAILURE`], Stela's choice of generic failure: the AP sign-extends
 //! 0xff to -1, then maps it to IOReturn 0xe00002bc (0x2d3a324, table
 //! 0x725990). No sepOS-specific authorization error is invented.

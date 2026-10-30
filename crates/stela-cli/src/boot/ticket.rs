@@ -18,18 +18,18 @@ use stela_runtime::restore::{
 /// How long one signing request may take.
 const TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Apple's signing service over HTTP.
+/// Apple's signing service over HTTP; the command waits for each answer.
 struct Apple(Client);
 
 impl tss::Transport for Apple {
-    fn post(
+    fn exchange(
         &mut self,
         host: &str,
         path: &str,
         headers: &[(&str, &str)],
         content_type: &str,
         body: &[u8],
-    ) -> restore::Result<Vec<u8>> {
+    ) -> restore::Result<Option<Vec<u8>>> {
         let failed = |error: reqwest::Error| {
             restore::Error::Transport(refuse!("TSS request: {error}", %error))
         };
@@ -49,7 +49,7 @@ impl tss::Transport for Apple {
                 as_u16 = status.as_u16()
             )));
         }
-        Ok(response.bytes().map_err(failed)?.to_vec())
+        Ok(Some(response.bytes().map_err(failed)?.to_vec()))
     }
 }
 

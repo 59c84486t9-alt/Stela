@@ -478,14 +478,17 @@ fn a_name_keeps_its_address_and_falls_back_to_it_when_a_lookup_fails() {
     let clock = TestClock::default();
     // No DNS server is configured, so every lookup fails.
     let mut s = stack(Lan::new(100, clock.clone()), clock);
-    assert!(matches!(s.resolve("cdn.example"), Err(NetError::Dns(_))));
+    assert!(matches!(
+        s.resolve_now("cdn.example"),
+        Err(NetError::Dns(_))
+    ));
     let now = s.now().unwrap();
     s.resolved
         .push((String::from("cdn.example"), SERVER_IP.into(), now));
-    assert_eq!(s.resolve("cdn.example"), Ok(SERVER_IP.into()));
+    assert_eq!(s.resolve_now("cdn.example"), Ok(SERVER_IP.into()));
     s.resolved[0].2 = now.wrapping_sub(RESOLVED_US);
-    assert_eq!(s.resolve("cdn.example"), Ok(SERVER_IP.into()));
-    assert_eq!(s.resolve("10.0.2.2"), Ok(SERVER_IP.into()));
+    assert_eq!(s.resolve_now("cdn.example"), Ok(SERVER_IP.into()));
+    assert_eq!(s.resolve_now("10.0.2.2"), Ok(SERVER_IP.into()));
 }
 
 #[test]
@@ -514,4 +517,34 @@ fn raw_stream_keeps_partial_dynamic_writes_and_opaque_replies() {
     assert_eq!(sent, payload.len());
     assert_eq!(received, payload);
     s.close(transfer);
+}
+
+#[test]
+fn a_named_transfer_opens_without_waiting_and_resolves_as_it_is_driven() {
+    let clock = TestClock::default();
+    let mut stack = Stack::new(Lan::ipv6(8192, clock.clone()), clock.clone(), 7).unwrap();
+    stack.automatic().unwrap();
+    let request = http::get_range("restore.test", "/source", 0, 9, None).unwrap();
+    let before = clock.0.get();
+    let mut transfer = stack.open("restore.test", request, 1024).unwrap();
+    // The DNS query is out, and nothing waited for its answer.
+    assert!(clock.0.get() - before < 1_000);
+    assert!(matches!(transfer.endpoint, Endpoint::Resolving(_)));
+    let mut ranged = http::Ranged::new(0, 9);
+    let mut bytes = Vec::new();
+    let mut done = false;
+    for _ in 0..10_000 {
+        done = stack
+            .read(&mut transfer, |chunk, closed| {
+                ranged.feed(chunk, closed, &mut |b: &[u8]| bytes.extend_from_slice(b))
+            })
+            .unwrap();
+        if done {
+            break;
+        }
+    }
+    assert!(done);
+    assert_eq!(bytes, (0..10).map(pattern).collect::<Vec<_>>());
+    assert_eq!(stack.phy.link.dns_queries, vec![28]);
+    stack.close(transfer);
 }

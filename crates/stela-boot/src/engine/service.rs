@@ -88,9 +88,11 @@ impl Service {
         }
     }
 
-    /// One service: its quick parts first, then the restore's read ahead
-    /// and verification, which a waiting PE leaves to a later service once
-    /// an interrupt comes for it (`boot` serves them whole).
+    /// One service: its quick parts first, the restore's copy of what it
+    /// read ahead to the guest among them, then the restore's read ahead,
+    /// verification and answers and another copy, which a waiting PE leaves
+    /// to a later service once an interrupt comes for it (`boot` serves them
+    /// whole).
     fn serve(&mut self, boot: bool) {
         let Self {
             devices,
@@ -142,19 +144,22 @@ impl Service {
         lap.part(Part::Nor);
         let interrupted = || !boot && host::interrupted();
         if let Some(experiment) = restore {
-            // The source is read, and the guest's requests answered,
-            // outside the devices' lock, which every PE's device accesses
-            // take.
+            // What was read ahead goes to the guest first: a service is
+            // usually due because the guest's window opened, and the read
+            // ahead can take milliseconds. The source is then read, and the
+            // guest's requests answered, outside the devices' lock, which
+            // every PE's device accesses take, and the answers and new
+            // chunks copied in turn.
             experiment.pump();
+            devices.serve(|devices| experiment.poll(devices));
+            lap.part(Part::Restore);
             if !interrupted() {
                 experiment.prefetch();
                 experiment.work();
-            }
-            lap.part(Part::Read);
-            if !interrupted() {
+                lap.part(Part::Read);
                 devices.serve(|devices| experiment.poll(devices));
+                lap.part(Part::Restore);
             }
-            lap.part(Part::Restore);
         }
         if now.wrapping_sub(*reported) >= REPORT_SECONDS * *tsc_hz {
             if let Some(line) = restore

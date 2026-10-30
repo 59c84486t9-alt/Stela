@@ -521,19 +521,23 @@ fn writes_reads_compare_fua_flush_and_namespace_range() {
     let mut refused = Rig::new();
     refused.io_queues();
     assert!(refused.submit(1, 0, 0, 1, 0, [2, 0, 0, 0, 0, 0]).is_err());
-    // Apple's priority tier and passive bit are hints too; the writes'
-    // bit 11 refuses.
+    // Apple's priority tier, a write's quick completion and the passive
+    // bit are hints too; the bits above them refuse.
     let mut hinted = Rig::new();
     hinted.io_queues();
     hinted
         .submit(1, 0, 2, 1, DATA, [3, 0, 0, 1 << 12 | 3 << 8 | 2, 0, 0])
         .unwrap();
     hinted.retire(1, 0);
+    hinted
+        .submit(1, 1, 1, 1, DATA, [3, 0, 0, 1 << 11 | 2, 0, 0])
+        .unwrap();
+    hinted.retire(1, 1);
     let mut refused = Rig::new();
     refused.io_queues();
     assert!(
         refused
-            .submit(1, 0, 1, 1, DATA, [3, 0, 0, 1 << 11, 0, 0])
+            .submit(1, 0, 1, 1, DATA, [3, 0, 0, 1 << 13, 0, 0])
             .is_err()
     );
     rig.submit(1, 8, 2, 1, DATA, [32, 0, 0, 0, 0, 0]).unwrap();
