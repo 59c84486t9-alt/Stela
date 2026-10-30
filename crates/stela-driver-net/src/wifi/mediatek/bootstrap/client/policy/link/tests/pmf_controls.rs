@@ -141,7 +141,7 @@ fn an_sae_exchange_associates_like_ieee80211_mgd_assoc() {
     // An SAE request cannot authenticate with open system.
     assert!(link.join(handle, join.clone(), profile()).is_err());
     let session = link
-        .begin_external_authentication(handle, profile(), 2_000_000)
+        .begin_external_authentication(handle, profile(), None, 2_000_000)
         .unwrap();
     // ieee80211_mgd_assoc refuses while authentication is unfinished.
     assert!(

@@ -19,6 +19,7 @@ pub use csa::ChannelSwitchStep;
 mod local;
 pub mod management;
 mod modern;
+mod multi_link;
 mod packet;
 mod pmf;
 mod six_ghz;
@@ -69,6 +70,7 @@ use crate::{
             },
             mcu::{
                 client::{self as wire, Profile},
+                device::Context,
                 key::Context as KeyContext,
                 runtime::Command,
             },
@@ -279,6 +281,9 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     mlme_receipt: Option<Receipt>,
     /// The bound 6 GHz transport until its peer retires after drain.
     six_ghz: Option<six_ghz::Bound>,
+    /// The interface's own registration while an AP MLD association's
+    /// setup link holds its slots.
+    single_link: Option<Context>,
 }
 /// On uncertain/live Drop keep the entire controller, station, real key
 /// material history and resources. No new owner may reset their PN.
@@ -371,6 +376,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 authentication_end: None,
                 mlme_receipt: None,
                 six_ghz: None,
+                single_link: None,
             })),
         })
     }

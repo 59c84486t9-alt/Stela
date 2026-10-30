@@ -177,7 +177,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.pmf_authentication = None;
         s.authentication_deadline = None;
         s.six_ghz = None;
-        Ok(())
+        Self::unbind_links(s)
     }
 
     /// Interface disable ACKs then WFDMA disable/idle observation. This

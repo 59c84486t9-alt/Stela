@@ -507,7 +507,7 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
             )
         } else {
             self.link
-                .begin_external_authentication(handle, profile, SAE_BUDGET_US)
+                .begin_external_authentication(handle, profile, None, SAE_BUDGET_US)
         }
         .map_err(|error| format!("{error}"))?;
         let derivation = Derivation::for_rsnxe(connection::find(&bss.elements, 244));

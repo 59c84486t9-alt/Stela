@@ -4,7 +4,7 @@
 //! A 6 GHz session goes through its held transport, under this client's own
 //! board and OS permission.
 use super::*;
-use station::{external::Session, wire::six_ghz::Selection};
+use station::{external::Session, multi_link::Affiliation, wire::six_ghz::Selection};
 
 impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
     /// The scan BSS `handle` when `profile` may authenticate with it: seen in
@@ -54,6 +54,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         &mut self,
         handle: BssHandle,
         profile: Profile,
+        multi_link: Option<Affiliation>,
         now: u64,
         budget: u64,
     ) -> Result<Arc<Session>, PolicyError> {
@@ -69,7 +70,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         };
         let result = self
             .client
-            .begin_external_authentication(profile, ssid, now, budget, &mut check)
+            .begin_external_authentication(profile, ssid, multi_link, now, budget, &mut check)
             .map_err(PolicyError::Client);
         if self.client.phase() != Phase::Idle {
             self.peer = Some(profile.channel);

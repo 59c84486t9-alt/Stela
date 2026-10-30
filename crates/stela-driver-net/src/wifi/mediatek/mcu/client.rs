@@ -496,6 +496,10 @@ impl Profile {
     pub fn bss_request(self, enable: bool) -> Result<Vec<u8>, Error> {
         self.bss_request_inner(enable, None, None)
     }
+    /// The BSS of one link of a station MLD before its association.
+    pub fn link_bss_request(self, enable: bool, link: &MldLink) -> Result<Vec<u8>, Error> {
+        self.bss_request_inner(enable, None, Some(link))
+    }
     fn bss_request_inner(
         self,
         enable: bool,
