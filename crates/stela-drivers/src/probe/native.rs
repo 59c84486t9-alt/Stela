@@ -31,6 +31,8 @@ use crate::{
 use alloc::{boxed::Box, rc::Rc, string::String, sync::Arc, vec::Vec};
 use core::{any::Any, cell::RefCell};
 
+pub mod hda;
+
 /// A Broadcom Tigon3 adapter over owned BAR0 and APE mappings.
 pub type Tg3 = tg3::Packet<tg3::io::Mmio<OwnedConfig>, Clock>;
 
@@ -79,6 +81,8 @@ pub(super) enum Kind {
     Bcm4377,
     /// An EHCI host controller (class 0c0320).
     Ehci,
+    /// An HD Audio controller the bounded identity table admits.
+    Hda,
 }
 
 impl Kind {
@@ -108,6 +112,8 @@ impl Kind {
             Some(Self::Bcm4377)
         } else if function.class == ehci::CLASS {
             Some(Self::Ehci)
+        } else if crate::audio::hda::pci::identify(function).is_ok() {
+            Some(Self::Hda)
         } else {
             None
         }

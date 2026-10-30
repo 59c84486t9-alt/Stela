@@ -62,6 +62,8 @@ pub enum Error {
     IntelBluetooth(crate::bluetooth::intel_pcie::Error),
     Bcm4377(crate::bluetooth::bcm4377::Error),
     Ehci(usb::ehci::Error),
+    HdaPci(crate::audio::hda::pci::AttachError),
+    Hda(crate::audio::Error),
 }
 
 impl fmt::Display for Error {
@@ -80,6 +82,8 @@ impl fmt::Display for Error {
             Self::IntelBluetooth(error) => write!(f, "btintel_pcie: {error}"),
             Self::Bcm4377(error) => write!(f, "hci_bcm4377: {error}"),
             Self::Ehci(error) => write!(f, "EHCI: {error:?}"),
+            Self::HdaPci(error) => write!(f, "HD Audio PCI: {error:?}"),
+            Self::Hda(error) => write!(f, "HD Audio: {error:?}"),
         }
     }
 }
@@ -357,7 +361,8 @@ fn unsupported(class: [u8; 3]) -> Option<&'static str> {
         [0x02, 0x00, _] => Some("Ethernet controller"),
         [0x02, 0x80, _] => Some("Wi-Fi controller other than Intel's or MediaTek's"),
         [0x02, ..] => Some("network controller"),
-        [0x04, 0x03, _] => Some("HD Audio controller (audio is not attached yet)"),
+        // Admitted identities attach through the mount's native services.
+        [0x04, 0x03, _] => Some("HD Audio controller outside the supported identities"),
         // EHCI attaches through the mount's native services.
         [0x0c, 0x03, 0x20] => None,
         [0x0c, 0x03, _] => {
@@ -394,6 +399,8 @@ pub struct Devices {
     pub usb_hosts: Vec<xhci::Host>,
     /// Attached EHCI controllers, which their roots' storage transports share.
     pub ehci_hosts: Vec<usb::ehci::host::Shared>,
+    /// HD Audio controllers and their bound codecs.
+    pub hda_hosts: Vec<native::hda::Host>,
     /// Native SDHCI socket owners, including empty/removable card sockets.
     pub sd_hosts: Vec<sdhci::Host>,
     /// Native Realtek socket owners, kept for empty/removable SD/MMC cards.
@@ -920,6 +927,18 @@ pub unsafe fn probe_with_provider(
                                 devices.usb_unused.extend(found.unused);
                                 devices.ehci_hosts.push(controller);
                             }
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.owners.extend(kept);
+                            }
+                        }
+                        continue;
+                    }
+                    native::Kind::Hda => {
+                        // SAFETY: as for tg3 below; only conventional
+                        // controllers, which no firmware agent drives, match.
+                        match unsafe { native::hda::attach(services, address, handoff.clock) } {
+                            Ok(host) => devices.hda_hosts.push(host),
                             Err((error, kept)) => {
                                 devices.failures.push((address, error));
                                 devices.owners.extend(kept);

@@ -471,6 +471,36 @@ pub unsafe fn open(
     Vec::leak(core::mem::take(&mut devices.owners));
     // EHCI controllers run for the boot; their roots' storage shares them.
     Vec::leak(core::mem::take(&mut devices.ehci_hosts));
+    for host in &devices.hda_hosts {
+        let location = &host.location;
+        for codec in &host.codecs {
+            let graph = &codec.graph;
+            match &codec.setup {
+                Ok(setup) => output::arguments(format_args!(
+                    "HOST HD AUDIO {location} codec {}: {:08x} revision {:08x}, {setup}\n",
+                    graph.address, graph.vendor_id, graph.revision_id
+                )),
+                Err(error) => output::arguments(format_args!(
+                    "HOST HD AUDIO {location} codec {}: {:08x} setup failed: {error:?}\n",
+                    graph.address, graph.vendor_id
+                )),
+            }
+        }
+        for failure in &host.codec_failures {
+            output::arguments(format_args!(
+                "HOST HD AUDIO {location} codec {} failed discovery attempt {}: {:?}\n",
+                failure.address, failure.attempt, failure.error
+            ));
+        }
+        if let Some(error) = &host.discovery_error {
+            output::arguments(format_args!(
+                "HOST HD AUDIO {location}: no usable codec ({error:?})\n"
+            ));
+        }
+    }
+    // HD Audio controllers stay attached for the boot; no guest audio device
+    // consumes them yet.
+    Vec::leak(core::mem::take(&mut devices.hda_hosts));
     for (address, error) in &devices.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
