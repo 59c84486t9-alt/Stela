@@ -411,7 +411,6 @@ pub fn tsc_hz() -> u64 {
 }
 
 /// How [`tsc_hz`] found the rate.
-#[cfg(feature = "diagnostics")]
 pub fn tsc_source() -> TscSource {
     tsc_hz();
     match TSC_SOURCE.load(Ordering::Relaxed) {

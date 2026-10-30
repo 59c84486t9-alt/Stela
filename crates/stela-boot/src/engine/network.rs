@@ -108,8 +108,16 @@ pub struct HostNetwork {
 impl HostNetwork {
     /// Try each native adapter until DHCPv4 or IPv6 SLAAC provides a usable
     /// address. A failed adapter keeps its diagnostic while the next is tried.
-    pub fn open(links: Links, clock: Clock) -> Result<Self> {
-        let security = security::native();
+    pub fn open(links: Links, clock: Clock, handoff: &crate::handoff::Handoff) -> Result<Self> {
+        let security = security::native(handoff);
+        match &security {
+            Ok(_) => output::arguments(format_args!(
+                "NETWORK TLS certificate time: the firmware RTC carried forward on the invariant TSC\n"
+            )),
+            Err(unavailable) => {
+                output::arguments(format_args!("NETWORK TLS unavailable: {unavailable}\n"))
+            }
+        }
         let mut failures = Vec::new();
         for device in links.devices {
             let location = String::from(device.location());

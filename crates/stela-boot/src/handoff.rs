@@ -45,6 +45,8 @@ pub struct Handoff {
     pub log_partition: Option<[u8; 16]>,
     /// TSC ticks per second, measured against the firmware's Stall.
     pub tsc_hz: u64,
+    /// How `tsc_hz` was found, which bounds its error.
+    pub tsc_source: crate::firmware::TscSource,
     /// IA32_APIC_BASE as the firmware left it.
     pub apic_base: u64,
     /// Immutable copied UEFI processor identities and per-physical-core raw
@@ -54,10 +56,9 @@ pub struct Handoff {
     /// Sealed owned UEFI/ACPI resource inventory and empty MMIO aperture.
     /// Zero when capture is unavailable; this alone grants no device owner.
     pub native_mmio: Region,
-    /// The firmware's real-time clock as Unix seconds, read at TSC
-    /// `wall_tsc`; `None` when the firmware has no valid time.
-    pub wall_seconds: Option<u64>,
-    pub wall_tsc: u64,
+    /// The firmware's real-time clock at boot; `None` when the firmware has
+    /// no valid time.
+    pub wall: Option<RtcReading>,
     /// Free host RAM after boot services, in 2 MiB-aligned ranges.
     pub guest: [Region; MAX_GUEST_RANGES],
     pub guest_count: usize,
@@ -84,4 +85,22 @@ pub struct Handoff {
     pub(crate) native_task_allocations: crate::native_smp::resources::TaskAllocations,
     /// Original loader table allocations; root is only their copied descriptor.
     pub(crate) native_loader_tables: crate::paging::loader::LoaderTables,
+}
+
+/// A read of the firmware's real-time clock: its time as UTC and its
+/// resolution in counts per second, read between TSC values `tsc_before`
+/// and `tsc_after`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RtcReading {
+    pub utc: stela_boot_core::firmware_time::Timestamp,
+    pub resolution: u32,
+    pub tsc_before: u64,
+    pub tsc_after: u64,
+}
+
+impl RtcReading {
+    /// The Unix seconds at TSC `tsc`, carried forward at `tsc_hz`.
+    pub fn unix_seconds_at(&self, tsc: u64, tsc_hz: u64) -> u64 {
+        self.utc.seconds + tsc.saturating_sub(self.tsc_after) / tsc_hz
+    }
 }

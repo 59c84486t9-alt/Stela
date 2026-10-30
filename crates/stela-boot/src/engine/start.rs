@@ -1081,9 +1081,9 @@ fn place_devices(
             programmed,
             reset,
             now,
-            wall: handoff.wall_seconds.map(|seconds| WallClock {
+            wall: handoff.wall.map(|wall| WallClock {
                 // The firmware's time, carried forward to the counter's `now`.
-                unix_seconds: seconds + (host::rdtsc() - handoff.wall_tsc) / handoff.tsc_hz,
+                unix_seconds: wall.unix_seconds_at(host::rdtsc(), handoff.tsc_hz),
                 counter: now,
             }),
             backing: placement.backing,
@@ -2056,7 +2056,7 @@ fn start_devices(
             // needs it, so the mount still boots and logs how far it gets.
             let network = wants_network.then(|| {
                 crate::status::begin("Getting a network address");
-                network::HostNetwork::open(links, host_clock)
+                network::HostNetwork::open(links, host_clock, handoff)
                     .inspect(|network| crate::status::done(network.describe()))
                     .map(|network| network::Shared(Rc::new(RefCell::new(network))))
                     .inspect_err(|error| {

@@ -658,10 +658,7 @@ fn load(
             "UNSUPPORTED host TSC is not invariant: guest time and every timeout follow the cores' clock changes\n"
         ));
     }
-    let wall_tsc = rdtsc();
-    let wall_seconds = uefi::runtime::get_time()
-        .ok()
-        .and_then(|time| unix_seconds(&time));
+    let wall = read_rtc();
     let power = host_power();
     let random_seed = match crate::entropy::retain_seed() {
         Ok((region, source)) => {
@@ -800,12 +797,12 @@ fn load(
             history_bytes,
             log_partition: log.map(|guid| guid.0),
             tsc_hz,
+            tsc_source: crate::firmware::tsc_source(),
             apic_base,
             native_processors,
             native_resources,
             native_mmio: native_mmio_region,
-            wall_seconds,
-            wall_tsc,
+            wall,
             guest,
             guest_count: count,
             installed,
@@ -858,32 +855,40 @@ pub(crate) fn host_power() -> Option<pc::power::HostPower> {
     }
 }
 
-/// UEFI `Time` as Unix seconds. A specified `TimeZone` is the local time's
-/// offset from UTC in minutes (UEFI 2.7 and later: UTC = local − zone); an
-/// unspecified zone is taken as UTC, as QEMU and Macs keep their RTC.
-fn unix_seconds(time: &uefi::runtime::Time) -> Option<u64> {
-    let (year, month, day) = (
-        i64::from(time.year()),
-        i64::from(time.month()),
-        i64::from(time.day()),
-    );
-    if !(1970..=9999).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    // Days from the civil date (Howard Hinnant's days_from_civil).
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    let mut seconds = days * 86_400
-        + i64::from(time.hour()) * 3600
-        + i64::from(time.minute()) * 60
-        + i64::from(time.second());
-    if let Some(zone) = time.time_zone() {
-        seconds -= i64::from(zone) * 60;
-    }
-    u64::try_from(seconds).ok()
+/// The firmware's real-time clock, read between two TSC values. An
+/// unspecified time zone is read as UTC, as Linux reads the RTC and as QEMU
+/// and Macs keep it; a time the firmware cannot give is reported.
+fn read_rtc() -> Option<crate::handoff::RtcReading> {
+    use stela_boot_core::firmware_time::{self, UnspecifiedZone};
+    let tsc_before = rdtsc();
+    let read = uefi::runtime::get_time_and_caps();
+    let tsc_after = rdtsc();
+    let (time, capabilities) = read
+        .inspect_err(|error| {
+            output::arguments(format_args!(
+                "HOST RTC unavailable: GetTime failed: {:?}\n",
+                error.status()
+            ))
+        })
+        .ok()?;
+    let fields = firmware_time::Time {
+        year: time.year(),
+        month: time.month(),
+        day: time.day(),
+        hour: time.hour(),
+        minute: time.minute(),
+        second: time.second(),
+        nanosecond: time.nanosecond(),
+        timezone_minutes: time.time_zone().unwrap_or(firmware_time::UNSPECIFIED_ZONE),
+        daylight: time.daylight().bits(),
+    };
+    let utc = firmware_time::utc(fields, UnspecifiedZone::RtcIsUtc)
+        .inspect_err(|error| output::arguments(format_args!("HOST RTC unusable: {error}\n")))
+        .ok()?;
+    Some(crate::handoff::RtcReading {
+        utc,
+        resolution: capabilities.resolution,
+        tsc_before,
+        tsc_after,
+    })
 }

@@ -713,11 +713,11 @@ impl Experiment {
         answers
             .stage_system_image_keys()
             .map_err(|error| refuse!("system image keys: {error}", %error))?;
-        if let Some(seconds) = handoff.wall_seconds {
+        if let Some(wall) = handoff.wall {
             // The firmware's time at the handoff, carried forward on the TSC.
-            let (tsc, hz) = (handoff.wall_tsc, handoff.tsc_hz);
+            let hz = handoff.tsc_hz;
             answers.clock = Some(Box::new(move || {
-                seconds + (super::host::rdtsc() - tsc) / hz
+                wall.unix_seconds_at(super::host::rdtsc(), hz)
             }));
         }
         let driver = Driver::new(answers, route)
