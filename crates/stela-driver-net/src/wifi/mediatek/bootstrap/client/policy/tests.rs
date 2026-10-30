@@ -23,12 +23,36 @@ pub(super) fn setup_modern_radio(
     split: bool,
     channel: Channel,
 ) -> (Client<Bar, Q, NativeGuard>, Model) {
+    setup_modern_bands(split, channel, None)
+}
+/// A modern client whose board also programs 6 GHz channel 1 with `flags`.
+pub(crate) fn setup_six(flags: u32) -> (Client<Bar, Q, NativeGuard>, Model) {
+    setup_modern_bands(false, CHANNEL, Some(flags))
+}
+/// The US rules of `country()` and its 6 GHz band.
+pub(crate) fn six_country() -> Country {
+    country_of(&[
+        (2_400_000, 2_500_000, 80_000, 3000, 0),
+        (5_150_000, 5_350_000, 80_000, 3000, 0),
+        (5_925_000, 7_125_000, 160_000, 2400, 0),
+    ])
+}
+fn setup_modern_bands(
+    split: bool,
+    channel: Channel,
+    six: Option<u32>,
+) -> (Client<Bar, Q, NativeGuard>, Model) {
     let mut f = NativeFixture::new(Chip::Mt7925);
+    if six.is_some() {
+        f.model.lock().unwrap().capability_payload = Some(
+            crate::wifi::mediatek::mailbox::clc::remaining::tests::caps(Chip::Mt7925, [true; 3]),
+        );
+    }
     f.install().unwrap();
     f.boot(Chip::Mt7925);
     f.policy_channel_power(
         Chip::Mt7925,
-        [true, true, false],
+        [true, true, six.is_some()],
         [
             vec![domain::Channel {
                 hardware_value: 1,
@@ -40,7 +64,12 @@ pub(super) fn setup_modern_radio(
                     flags: WIDE,
                 })
                 .to_vec(),
-            vec![],
+            six.map(|flags| domain::Channel {
+                hardware_value: 1,
+                flags: WIDE | flags,
+            })
+            .into_iter()
+            .collect(),
         ],
         |band, n| {
             wifi::mediatek::mcu::power::Limits::uniform(if split && band == Band::Ghz5 {

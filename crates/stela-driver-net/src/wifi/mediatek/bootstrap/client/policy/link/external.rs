@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
 //! OS-facing SAE transport over the sole owning link and its bounded notices.
 use super::*;
-use station::external::Session;
+use station::{external::Session, wire::six_ghz::Selection};
 
 impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q, C, S> {
     /// Begin against a scan BSS. Authentication observations and
@@ -18,6 +18,24 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         let result = state
             .client
             .begin_external_authentication(bss, profile, now, budget);
+        Self::reconcile(state);
+        Ok(result?)
+    }
+    /// Begin a 6 GHz SAE exchange against a scan BSS with the OS's
+    /// `selection`, its RSNE and RSNXE. Transmission, reception, association
+    /// and cancellation then go through the session as on any other band.
+    pub fn begin_six_ghz_external_authentication(
+        &mut self,
+        bss: BssHandle,
+        selection: Selection,
+        profile: Profile,
+        budget: u64,
+    ) -> Result<Arc<Session>, LinkControlError> {
+        let now = self.now();
+        let state = self.state_mut();
+        let result = state
+            .client
+            .begin_six_ghz_external_authentication(bss, selection, profile, now, budget);
         Self::reconcile(state);
         Ok(result?)
     }

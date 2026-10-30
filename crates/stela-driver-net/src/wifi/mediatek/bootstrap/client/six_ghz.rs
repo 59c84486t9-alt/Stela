@@ -177,6 +177,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         .map_err(Error::Regulatory)?
     }
+    /// The 6 GHz SAE session the held transport serves while it is bound.
+    pub fn six_ghz_session(&self) -> Option<&Arc<Session>> {
+        self.state().six_ghz.as_ref().map(|six| &six.session)
+    }
     fn six_prepared_time(
         clock: crate::Clock,
         now: u64,
@@ -497,4 +501,4 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
 
 mod radio;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

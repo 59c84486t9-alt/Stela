@@ -9,7 +9,7 @@
 
 use super::*;
 use core::sync::atomic::{AtomicBool, Ordering};
-use reg::database::Country;
+use reg::{channel, database::Country};
 use station::phy::{Mode, Width};
 use triomphe::Arc as Shared;
 use wifi::{Band, Channel, regulatory as reg};
@@ -411,6 +411,20 @@ impl reg::HardwareLease for HardwareGuard<'_> {
                 && (c.flags & (1 << 9) == 0 || self.1 == Environment::Indoor)
         })
     }
+    /// The SAE frames go at 20 MHz OFDM on the primary, which takes HE on
+    /// 6 GHz, to an AP whose power type a client may use there
+    /// (`cfg80211_6ghz_power_type_valid`).
+    fn allows_six_ghz_authentication(
+        &mut self,
+        op: &reg::SixGhzAuthenticationOperation<'_>,
+    ) -> bool {
+        self.0.get(op.session().channel()).is_some_and(|c| {
+            c.flags & (channel::DISABLED | channel::NO_20MHZ | channel::NO_HE) == 0
+                && (c.flags & channel::INDOOR_ONLY == 0 || self.1 == Environment::Indoor)
+                && c.max_half_dbm.is_some()
+                && reg::PowerType::usable(op.profile().raw_ap_power_type, c.flags)
+        })
+    }
     fn allows_association(&mut self, op: &reg::AssociationOperation<'_>) -> bool {
         self.0.association(op, self.1)
     }
@@ -515,6 +529,19 @@ impl reg::OsLease for OsGuard<'_> {
         self.0.protection.selected()
             && op.join().request.pmf().is_some()
             && self.0.tx(op.join().channel, false)
+    }
+    /// The OS selected the SAE network the exchange authenticates against;
+    /// the country decides reception and transmission on its channel.
+    fn allows_six_ghz_authentication(
+        &mut self,
+        op: &reg::SixGhzAuthenticationOperation<'_>,
+    ) -> bool {
+        let channel = op.session().channel();
+        self.0.protection.selected()
+            && match op.purpose() {
+                reg::SixGhzAuthenticationUse::Receive(_) => self.0.receive(channel),
+                _ => self.0.tx(channel, false),
+            }
     }
     fn allows_association(&mut self, op: &reg::AssociationOperation<'_>) -> bool {
         self.0.association(op)
@@ -745,7 +772,26 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             revoked: self.revoked,
             peer: self.peer,
         };
+        let six = self
+            .client
+            .six_ghz_session()
+            .filter(|_| self.client.phase() == Phase::Joining)
+            .cloned();
         let events = match self.client.phase() {
+            // A 6 GHz exchange is serviced only under its held transport.
+            Phase::Joining if let Some(session) = six => {
+                // SAFETY: permission and client are private disjoint fields of
+                // this same exclusive owning attachment.
+                unsafe {
+                    self.client.poll_six_ghz_external_authentication(
+                        &mut self.authority,
+                        &session,
+                        now,
+                        source,
+                        &mut check,
+                    )
+                }
+            }
             Phase::Joining if self.protected() => {
                 // SAFETY: permission and client are private disjoint fields of
                 // this same exclusive owning attachment.

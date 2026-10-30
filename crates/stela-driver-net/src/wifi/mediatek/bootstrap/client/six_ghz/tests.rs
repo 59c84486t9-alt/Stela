@@ -14,7 +14,7 @@ use crate::wifi::{Band, Channel};
 use alloc::rc::Rc;
 use core::cell::Cell;
 
-const SIX: Channel = Channel {
+pub(crate) const SIX: Channel = Channel {
     band: Band::Ghz6,
     number: 1,
     frequency_mhz: 5955,
@@ -144,7 +144,7 @@ fn six_setup() -> (Client<Bar, Q, NativeGuard>, Model) {
 }
 
 /// A 20 MHz HE access point on 6 GHz channel 1 offering SAE H2E.
-fn beacon_elements() -> Vec<u8> {
+pub(crate) fn beacon_elements() -> Vec<u8> {
     let mut out = vec![0, 1, b'x'];
     out.extend_from_slice(&[1, 8, 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c]);
     out.extend_from_slice(&[5, 4, 0, 2, 0, 0]);
@@ -202,7 +202,7 @@ fn observe_with(
     observed
 }
 
-fn six_profile() -> Profile {
+pub(crate) fn six_profile() -> Profile {
     let mut profile = profile();
     profile.channel = SIX;
     profile
