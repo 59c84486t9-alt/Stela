@@ -55,8 +55,7 @@
 //! writable one (m1n1 `load_macos_sptm`: "Required by SPTM in this order").
 //! Public XNU 11215 `arm_init_sptm.c` keeps the AuxKC read-only region
 //! "right below the device tree/trustcache so that it can be covered by
-//! CTRR". The bundle programs the run from its first region through
-//! `SPTM-rx`.
+//! CTRR". The bundle programs the run from `TXM-ro` through `SPTM-rx`.
 //!
 //! On the M4 and later iBoot also locks the cores' per-cluster CTRR-C/D and
 //! CTXR-A..D copies, and CTRR-A/B's controls, before SPTM starts

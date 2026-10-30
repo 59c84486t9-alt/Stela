@@ -45,22 +45,39 @@ fn ordered_region_fixture(optional_images: bool) -> Vec<Region> {
 }
 
 #[test]
-fn sptm_order_accepts_optional_images_and_an_arbitrary_prefix() -> Result<()> {
+fn sptm_order_accepts_optional_images_at_any_address_and_a_trailing_payload() -> Result<()> {
     for optional_images in [false, true] {
         let mut regions = ordered_region_fixture(optional_images);
         validate_sptm_region_order(&regions)?;
-        // A kept manifest precedes the first constrained image. SPTM
-        // constrains adjacency, not the first image's absolute address.
+        // SPTM constrains adjacency, not the first image's absolute address.
         for region in &mut regions {
             region.guest_pa += 7 * PAGE;
         }
-        let mut prefix = regions[0].clone();
-        prefix.name = "BootManifest".into();
-        prefix.guest_pa -= PAGE;
-        regions.insert(0, prefix);
+        let last = regions.last().unwrap();
+        let mut trailing = last.clone();
+        trailing.name = "BootManifest".into();
+        trailing.guest_pa = last.guest_pa + last.memory_bytes;
+        regions.push(trailing);
         validate_sptm_region_order(&regions)?;
     }
     Ok(())
+}
+
+#[test]
+fn sptm_order_rejects_a_payload_in_the_physical_slide() {
+    let mut regions = ordered_region_fixture(false);
+    for region in &mut regions {
+        region.guest_pa += PAGE;
+    }
+    let mut prefix = regions[0].clone();
+    prefix.name = "BootManifest".into();
+    prefix.guest_pa -= PAGE;
+    regions.insert(0, prefix);
+    let error = validate_sptm_region_order(&regions)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("BootManifest"), "{error}");
+    assert!(error.contains("physical slide"), "{error}");
 }
 
 #[test]
@@ -760,8 +777,8 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     assert_eq!(
         (REVISION, prepared_digest(&bundle)?),
         (
-            30,
-            "6bf7a18074e0effa2b858063098ba3f5d98d651eadeb15fcd5eb16b760d8b87c".to_owned()
+            31,
+            "b35ee1dea9358b5e1031fd5a3887b791e4e46daa697e429901b2de21574321f2".to_owned()
         )
     );
     let original = bundle
@@ -840,8 +857,8 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     assert_eq!(names, expected);
     // The M1 to M3 hand off no core lock registers.
     assert!(manifest.core_locks.is_none());
-    // The original input manifest is held byte for byte in the
-    // read-only boot run, with an exact (not page-rounded) guest length.
+    // The original input manifest is held byte for byte, with an exact
+    // (not page-rounded) guest length.
     let manifest_region = manifest
         .regions
         .iter()
@@ -879,10 +896,12 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
             .value,
         im4m::sha384(original_manifest),
     );
-    let protected = manifest.read_only_region.as_ref().unwrap();
-    assert!(manifest_region.guest_pa >= protected.base);
+    // Above SPTM's physical slide, which XNU allocates from, and below
+    // topOfKernelData.
+    assert_eq!(manifest.regions[0].name, "TXM-ro");
     assert!(
-        manifest_region.guest_pa + manifest_region.memory_bytes <= protected.base + protected.bytes
+        manifest_region.guest_pa + manifest_region.memory_bytes
+            <= manifest.boot_args.top_of_kernel_data
     );
     // Regions are page-aligned, ascending and non-overlapping.
     for pair in manifest.regions.windows(2) {
@@ -913,7 +932,7 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     );
     // CTRR-A covers the read-only run, ending where SPTM's data starts.
     let ctrr = manifest.read_only_region.clone().unwrap();
-    assert_eq!(ctrr.base, manifest.regions[0].guest_pa);
+    assert_eq!(ctrr.base, region("TXM-ro").guest_pa);
     assert_eq!(ctrr.base + ctrr.bytes, region("SPTM-rw").guest_pa);
 
     let file = |name: &str| &bundle.files.iter().find(|(n, _)| n == name).unwrap().1;
@@ -1009,7 +1028,9 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
         args.device_tree_length as usize,
         file(DEVICE_TREE_FILE).len()
     );
-    assert_eq!(args.top_of_kernel_data, region("BootArgs").guest_pa + PAGE);
+    let last = manifest.regions.last().unwrap();
+    assert_eq!(last.name, "BootManifest");
+    assert_eq!(args.top_of_kernel_data, last.guest_pa + last.memory_bytes);
     assert_eq!(args.command_line, "-v");
 
     // Every patch addresses its prepared bytes in its file.

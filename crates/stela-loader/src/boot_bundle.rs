@@ -55,7 +55,7 @@ use patches::*;
 
 /// The revision of the content [`prepare`] writes within its schema; a
 /// bundle of another revision is prepared again (`stela setup update stela`).
-pub const REVISION: u32 = 30;
+pub const REVISION: u32 = 31;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -210,8 +210,6 @@ const TXM_SPLITS: &[Split] = &[
 /// The physical order SPTM requires (m1n1: "Required by SPTM in this order"),
 /// as `(image, split)` or a standalone region name.
 const REGION_ORDER: &[&str] = &[
-    // Outside SPTM's contiguous image sequence, inside the CTRR-A run.
-    "BootManifest",
     "TXM-ro",
     "TXM-rx",
     "TXM-bx",
@@ -234,6 +232,9 @@ const REGION_ORDER: &[&str] = &[
     "RAMDisk",
     "SEPFW",
     "BootArgs",
+    // A range SPTM does not name: after its image sequence, and below
+    // topOfKernelData, under which XNU allocates nothing.
+    "BootManifest",
 ];
 
 /// Independent handoff contract: SPTM's validate_region_order table, raw
@@ -293,6 +294,23 @@ fn validate_sptm_region_order(regions: &[Region]) -> Result<()> {
             );
         }
         previous = Some((name, end));
+    }
+    // SPTM hands XNU physBase up to TXM-ro as free memory (`PHYS_SLIDE`,
+    // registered at raw 0xc7da0), so nothing loaded may lie below TXM-ro.
+    let first = SPTM_REGION_ORDER[0].0;
+    let Some(sequence) = regions.iter().find(|region| region.name == first) else {
+        return Ok(());
+    };
+    for region in regions {
+        require!(
+            region.guest_pa >= sequence.guest_pa,
+            "SPTM region order: {name} at {start:#x} lies below {first} at {sequence_start:#x}, \
+             in the physical slide SPTM gives XNU as free memory",
+            name = region.name,
+            start = region.guest_pa,
+            first,
+            sequence_start = sequence.guest_pa
+        );
     }
     Ok(())
 }
@@ -664,7 +682,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
             lock_regs::ctrr_a(
                 controller,
                 options.dram_base,
-                load_base,
+                region("TXM-ro")?.guest_pa,
                 sptm_rx.guest_pa + page_round(sptm_rx.memory_bytes),
             )
         })
@@ -689,14 +707,6 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         .transpose()?;
     if let Some(object) = &shaped.boot_manifest_object {
         let manifest = region("BootManifest")?;
-        let protected = read_only_region.as_ref().ok_or(refuse!(
-            "boot manifest publication requires a read-only boot region"
-        ))?;
-        require!(
-            manifest.guest_pa >= protected.base
-                && manifest.guest_pa + manifest.memory_bytes <= protected.base + protected.bytes,
-            "boot manifest lies outside the read-only boot region"
-        );
         shaped
             .security
             .extend(object.place(&mut shaped.tree, manifest.guest_pa)?);
