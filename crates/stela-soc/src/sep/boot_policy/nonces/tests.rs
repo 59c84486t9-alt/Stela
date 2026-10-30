@@ -9,6 +9,12 @@ use alloc::{rc::Rc, vec, vec::Vec};
 use core::cell::Cell;
 use stela_contracts::refuse;
 
+const BEGIN: u32 = RECOVERY.begin;
+const END: u32 = RECOVERY.end;
+const RESET: u32 = RECOVERY.reset;
+const PROPOSED_DIGEST: u32 = RECOVERY.proposed;
+const BLESSED_DIGEST: u32 = RECOVERY.blessed;
+
 struct Buffers {
     input: Vec<u8>,
     read: usize,
@@ -36,7 +42,8 @@ impl Payload for Buffers {
 }
 
 fn command(op: u32) -> Buffers {
-    let length = if matches!(op, BEGIN | END | RESET) {
+    let mutations = [BEGIN, END, RESET, LOCAL.begin, LOCAL.end, LOCAL.reset];
+    let length = if mutations.contains(&op) {
         MUTATION_BYTES
     } else {
         HEADER_BYTES
@@ -93,7 +100,7 @@ fn success<B: Backend>(policy: &mut BootPolicy, store: &mut Nonces<B>, op: u32) 
 
 #[test]
 #[ignore = "oracle: STELA_TEST_BOOTPOLICY_TEXT"]
-fn original_recovery_nonce_builders_select_the_recovered_commands_and_buffer_sizes() {
+fn original_nonce_builders_select_the_recovered_commands_and_buffer_sizes() {
     use sha2::{Digest, Sha256};
     let text = std::fs::read(std::env::var("STELA_TEST_BOOTPOLICY_TEXT").unwrap()).unwrap();
     assert_eq!(text.len(), 291_536);
@@ -114,6 +121,11 @@ fn original_recovery_nonce_builders_select_the_recovered_commands_and_buffer_siz
         (0xcae0, RESET),
         (0xec7c, PROPOSED_DIGEST),
         (0xe1b4, BLESSED_DIGEST),
+        (0x43d8, LOCAL.begin),
+        (0x55dc, LOCAL.end),
+        (0x59d8, LOCAL.reset),
+        (0xe754, LOCAL.proposed),
+        (0xe3c8, LOCAL.blessed),
     ] {
         movz(at, 0, command);
     }
@@ -151,6 +163,23 @@ fn recovered_recovery_commands_bind_the_durable_nonce_and_exact_reply_lengths() 
     success(&mut policy, &mut reopened, RESET);
     assert_eq!(reopened.policy_nonce(PolicyNonce::Recovery), Ok(None));
     assert!(ask(&mut policy, &mut reopened, &mut command(BLESSED_DIGEST)).is_err());
+}
+
+#[test]
+fn the_local_nonce_keeps_its_own_lifecycle() {
+    let mut policy = BootPolicy::default();
+    let mut store = store();
+    success(&mut policy, &mut store, LOCAL.begin);
+    let proposed = success(&mut policy, &mut store, LOCAL.proposed);
+    assert!(ask(&mut policy, &mut store, &mut command(PROPOSED_DIGEST)).is_err());
+    // Each nonce has its own proposal, and a commit of one stales the other.
+    success(&mut policy, &mut store, BEGIN);
+    success(&mut policy, &mut store, LOCAL.end);
+    assert_eq!(store.policy_nonce(PolicyNonce::Recovery), Ok(None));
+    assert_eq!(success(&mut policy, &mut store, LOCAL.blessed), proposed);
+    assert!(ask(&mut policy, &mut store, &mut command(END)).is_err());
+    success(&mut policy, &mut store, LOCAL.reset);
+    assert_eq!(store.policy_nonce(PolicyNonce::MacOs), Ok(None));
 }
 
 #[test]

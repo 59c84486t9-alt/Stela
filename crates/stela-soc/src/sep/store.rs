@@ -21,6 +21,7 @@ use zeroize::Zeroizing;
 const MAGIC: &[u8; 8] = b"STSEPN02";
 const PURPOSE: &[u8] = b"sepos/nonce-store/v1";
 const SYSTEM_KEY_PURPOSE: &[u8] = b"keystore/system-key-root/v1";
+const POLICY_KEY_PURPOSE: &[u8] = b"bootpolicy/local-policy-signing/v1";
 const MAC_BYTES: usize = 32;
 const HEADER_BYTES: usize = 18;
 pub const NONCE_BYTES: usize = 20;
@@ -108,6 +109,7 @@ pub struct Nonces<B: Backend> {
     backend: B,
     key: Zeroizing<[u8; MAC_BYTES]>,
     system_key_root: Zeroizing<[u8; MAC_BYTES]>,
+    policy_key_seed: Zeroizing<[u8; MAC_BYTES]>,
     state: Option<State>,
 }
 
@@ -120,6 +122,7 @@ impl<B: Backend> Nonces<B> {
         }
         let key = roots.uid(PURPOSE)?;
         let system_key_root = roots.uid(SYSTEM_KEY_PURPOSE)?;
+        let policy_key_seed = roots.uid(POLICY_KEY_PURPOSE)?;
         let state = State {
             generation: 1,
             slots: BTreeMap::new(),
@@ -139,6 +142,7 @@ impl<B: Backend> Nonces<B> {
             backend,
             key,
             system_key_root,
+            policy_key_seed,
             state: Some(state),
         })
     }
@@ -146,6 +150,7 @@ impl<B: Backend> Nonces<B> {
     pub fn open(roots: &Roots, mut backend: B) -> Result<Self> {
         let key = roots.uid(PURPOSE)?;
         let system_key_root = roots.uid(SYSTEM_KEY_PURPOSE)?;
+        let policy_key_seed = roots.uid(POLICY_KEY_PURPOSE)?;
         let head = backend.load()?.ok_or(refuse!(
             "SEP nonce store is missing; explicit provisioning required"
         ))?;
@@ -154,6 +159,7 @@ impl<B: Backend> Nonces<B> {
             backend,
             key,
             system_key_root,
+            policy_key_seed,
             state: Some(state),
         })
     }
@@ -170,6 +176,13 @@ impl<B: Backend> Nonces<B> {
     pub(super) fn system_key_root(&self) -> Result<Zeroizing<[u8; MAC_BYTES]>> {
         self.state()?;
         Ok(self.system_key_root.clone())
+    }
+
+    /// The seed of the machine's LocalPolicy signing key, kept as the system
+    /// key root is: from the roots, never in the banks or the guest's reach.
+    pub(super) fn policy_key_seed(&self) -> Result<Zeroizing<[u8; MAC_BYTES]>> {
+        self.state()?;
+        Ok(self.policy_key_seed.clone())
     }
 
     /// The currently authenticated durable revision. A pending policy update

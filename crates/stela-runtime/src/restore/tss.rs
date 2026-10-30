@@ -35,10 +35,7 @@ pub const HEADERS: [(&str, &str); 2] =
 const VERSION: &str = "libauthinstall-1104.0.9";
 /// The bare policy IM4P the ticket's `lpol` entry covers (idevicerestore
 /// `lpol_file`): type `lpol`, version `1.0`, a one-byte zero payload.
-pub const LOCAL_POLICY: [u8; 22] = [
-    0x30, 0x14, 0x16, 0x04, 0x49, 0x4d, 0x34, 0x50, 0x16, 0x04, 0x6c, 0x70, 0x6f, 0x6c, 0x16, 0x03,
-    0x31, 0x2e, 0x30, 0x04, 0x01, 0x00,
-];
+pub const LOCAL_POLICY: [u8; 22] = stela_formats::local_policy::PAYLOAD;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// One HTTP POST to the signing service with `headers` besides its

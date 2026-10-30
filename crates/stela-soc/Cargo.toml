@@ -29,6 +29,7 @@ hmac = { version = "0.12", default-features = false }
 zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
 # Stela-owned SEP system identity keys; constant-time no_std curve arithmetic.
 p256 = { version = "0.13.2", default-features = false, features = ["arithmetic", "ecdsa"] }
+p384 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa"] }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]

@@ -12,40 +12,37 @@
 //!   `..._get_proposed_recoveryos_policy_nonce_digest`, `..._end` and
 //!   `..._reset`, and the stored policy's `ronh` is exactly the 48-byte
 //!   SHA-384 of the proposed nonce (restore-trust §5, B 0x1cab4..0x1cb08).
-//! - The **macOS default** LocalPolicy (`generate_default_local_policy`) is
-//!   SEP-signed with Stela's own key. [`PolicyKeys`] derives that key from the
-//!   machine's [`Roots`] and both signs a policy (at restore) and verifies one
-//!   (at installed boot), so only this machine's SEP admits its own policy.
-//!   Its `lpnh` is the SHA-384 of the macOS policy nonce, on the same
-//!   lifecycle.
+//! - The **macOS default** LocalPolicy (`generate_default_local_policy`) and
+//!   its paired recoveryOS policy are SEP-signed with Stela's own key.
+//!   [`PolicyKey`] derives it from the machine's roots and signs the
+//!   [`local_policy`](stela_formats::local_policy) file; Stela's boot verifies
+//!   with the public key alone, so no other machine's policy passes. Their
+//!   `lpnh` is the SHA-384 of the macOS policy nonce, on the same lifecycle.
 //!
 //! The raw nonces are durable in the anti-replay store ([`super::store`]); the
 //! proposed, not-yet-committed nonce of an in-progress update lives here in
 //! RAM and is discarded by `reset` or a power cycle. These are the recovered
 //! nonce lifecycle used by the native trust policy. The recovered empty-body
-//! recoveryOS commands bind it through `boot_policy::nonces`; authenticated
-//! owner-bearing bodies and macOS policy signing remain unbound to the wire.
-//! `--sep-observe` can keep their requests without inventing authorization.
+//! local and recoveryOS commands bind it through `boot_policy::nonces`, and
+//! `boot_policy::local_policy` signs on the wire; authenticated owner-bearing
+//! bodies remain unbound. `--sep-observe` can keep their requests without
+//! inventing authorization.
 use super::{
     Entropy,
     store::{Backend, Nonces, POLICY_NONCE_BYTES, PolicyNonce},
 };
 use crate::Result;
-#[cfg(test)]
-use crate::sep::keys::Roots;
-#[cfg(test)]
-use hmac::{Hmac, Mac};
+use alloc::vec::Vec;
+use p384::ecdsa::{DerSignature, SigningKey, VerifyingKey, signature::Signer};
 use sha2::{Digest, Sha384};
+use stela_contracts::refuse;
+use stela_formats::local_policy::Policy;
 use zeroize::Zeroizing;
 
 /// The LocalPolicy digest size: `ronh`, `lpnh` and `nsih` are each SHA-384.
 pub const DIGEST_BYTES: usize = 48;
-/// The key-derivation purpose for the macOS LocalPolicy signing key.
-#[cfg(test)]
-const SIGNING_PURPOSE: &[u8] = b"bootpolicy/local-policy-signing/v1";
-/// The domain that separates a LocalPolicy signature from other MACs.
-#[cfg(test)]
-const SIGNATURE_DOMAIN: &[u8] = b"Stela SEP LocalPolicy v1\0";
+/// The domain of the LocalPolicy signing key's scalar.
+const SCALAR_DOMAIN: &[u8] = b"Stela SEP LocalPolicy key v1\0";
 
 /// An in-progress policy-nonce update: the proposed nonce awaiting `end`.
 pub struct Update {
@@ -94,47 +91,46 @@ pub fn committed_digest<B: Backend>(
         .map(|nonce| Sha384::digest(nonce).into()))
 }
 
-/// The machine's LocalPolicy signing key: a per-machine SEP secret only this
-/// SEP holds. Signing uses an HMAC-SHA384 over the policy's authenticated
-/// body, so a policy signed on one machine is rejected on another, exactly as
-/// a real SEP-signed LocalPolicy is. This is Stela's own signing scheme, not a
-/// claim to reproduce Apple's SEP key or its Image4 signature.
-#[cfg(test)]
-pub struct PolicyKeys {
-    key: Zeroizing<[u8; 32]>,
-}
-#[cfg(test)]
-impl PolicyKeys {
-    pub fn derive(roots: &Roots) -> Result<Self> {
-        Ok(Self {
-            key: roots.uid(SIGNING_PURPOSE)?,
-        })
+/// The machine's LocalPolicy signing key: ECDSA P-384, a secret of this SEP
+/// derived from its roots through [`Nonces::policy_key_seed`]. A policy
+/// signed on one machine fails on another. This is Stela's own key, not a
+/// claim to reproduce Apple's SEP key.
+pub struct PolicyKey(SigningKey);
+
+impl PolicyKey {
+    pub fn derive(seed: &[u8; 32]) -> Result<Self> {
+        // A digest out of the scalar range is astronomically unlikely, and
+        // the counter steps past one.
+        for counter in 0..=u8::MAX {
+            let scalar = Zeroizing::new(<[u8; DIGEST_BYTES]>::from(
+                Sha384::new()
+                    .chain_update(SCALAR_DOMAIN)
+                    .chain_update([counter])
+                    .chain_update(seed)
+                    .finalize(),
+            ));
+            if let Ok(key) = SigningKey::from_slice(&*scalar) {
+                return Ok(Self(key));
+            }
+        }
+        Err(refuse!("no LocalPolicy signing key derives from the seed"))
     }
 
-    /// The signature over a macOS LocalPolicy's authenticated body (the bytes
-    /// the host presents as the policy's signed content).
-    pub fn sign(&self, body: &[u8]) -> [u8; DIGEST_BYTES] {
-        self.authenticator(body).finalize().into_bytes().into()
+    /// What Stela's boot verifies a policy with.
+    pub fn public(&self) -> &VerifyingKey {
+        self.0.verifying_key()
     }
 
-    /// Whether `signature` is this machine's SEP signature over `body`. A
-    /// different machine, body or signature is rejected.
-    pub fn verify(&self, body: &[u8], signature: &[u8]) -> bool {
-        self.authenticator(body).verify_slice(signature).is_ok()
-    }
-
-    fn authenticator(&self, body: &[u8]) -> Hmac<Sha384> {
-        let mut mac = Hmac::<Sha384>::new_from_slice(&*self.key).expect("HMAC accepts any key");
-        mac.update(SIGNATURE_DOMAIN);
-        mac.update(&(body.len() as u64).to_be_bytes());
-        mac.update(body);
-        mac
+    /// The signed policy file.
+    pub fn sign(&self, policy: &Policy) -> Vec<u8> {
+        let signature: DerSignature = self.0.sign(&policy.signed());
+        policy.file(signature.as_bytes())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::Volatile;
+    use super::super::{keys::Roots, store::Volatile};
     use super::*;
     use alloc::boxed::Box;
 
@@ -195,27 +191,26 @@ mod tests {
     }
 
     #[test]
-    fn the_macos_policy_signature_is_machine_bound() {
-        let keys = PolicyKeys::derive(&roots()).unwrap();
-        let body = b"lpol-authenticated-body";
-        let signature = keys.sign(body);
-        assert!(keys.verify(body, &signature));
-        assert!(!keys.verify(b"other body", &signature));
-        assert!(!keys.verify(body, &[0; DIGEST_BYTES]));
-        assert!(!keys.verify(body, &signature[..DIGEST_BYTES - 1]));
-        assert!(!keys.verify(body, &[0; DIGEST_BYTES + 1]));
-        for byte in 0..DIGEST_BYTES {
-            let mut changed = signature;
-            changed[byte] ^= 1;
-            assert!(!keys.verify(body, &changed));
-        }
-        // A different machine's SEP rejects this machine's policy.
-        let other = PolicyKeys::derive(&Roots::provisioned([9; 32], [8; 32], 0xbeef_0001).unwrap())
-            .unwrap();
-        assert!(!other.verify(body, &signature));
-        // A different ECID is a different machine too.
-        let moved = PolicyKeys::derive(&Roots::provisioned([7; 32], [8; 32], 0xbeef_0002).unwrap())
-            .unwrap();
-        assert!(!moved.verify(body, &signature));
+    fn a_policy_verifies_only_under_its_own_machines_key() {
+        use stela_formats::local_policy::{self, Security};
+        let policy = Policy {
+            volume_group: [1; 16],
+            next_stage: [2; DIGEST_BYTES],
+            nonce: [3; DIGEST_BYTES],
+            splat: None,
+            paired: None,
+            security: Security::Full,
+        };
+        let key = PolicyKey::derive(&[7; 32]).unwrap();
+        let file = key.sign(&policy);
+        assert_eq!(local_policy::verify(&file, key.public()), Ok(policy));
+        // The same seed derives the same key, and another seed another.
+        let same = PolicyKey::derive(&[7; 32]).unwrap();
+        assert_eq!(same.public(), key.public());
+        let other = PolicyKey::derive(&[8; 32]).unwrap();
+        assert_eq!(
+            local_policy::verify(&file, other.public()),
+            Err(local_policy::Error::Signature)
+        );
     }
 }

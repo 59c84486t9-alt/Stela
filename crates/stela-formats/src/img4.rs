@@ -9,6 +9,8 @@
 //! This only splits the parts and names the payload type; decoding and
 //! signature checks belong elsewhere.
 
+use crate::der::{IA5_STRING, SEQUENCE, encode};
+
 /// The parts of an Image4 file, each its complete DER encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Parts<'a> {
@@ -35,8 +37,6 @@ impl core::fmt::Display for Img4Error {
 
 impl core::error::Error for Img4Error {}
 
-const SEQUENCE: u8 = 0x30;
-const IA5_STRING: u8 = 0x16;
 const CONTEXT_0: u8 = 0xa0;
 const CONTEXT_1: u8 = 0xa1;
 
@@ -240,22 +240,6 @@ fn encoded_bytes(contents: usize) -> usize {
         length => 1 + (8 - (length as u64).leading_zeros() as usize / 8),
     };
     1 + length_bytes + contents
-}
-
-/// A DER length and contents after `tag`.
-fn encode(tag: u8, contents: &[u8]) -> alloc::vec::Vec<u8> {
-    let mut out = alloc::vec![tag];
-    match contents.len() {
-        length @ 0..0x80 => out.push(length as u8),
-        length => {
-            let digits = (length as u64).to_be_bytes();
-            let skip = digits.iter().take_while(|&&b| b == 0).count();
-            out.push(0x80 | (8 - skip) as u8);
-            out.extend_from_slice(&digits[skip..]);
-        }
-    }
-    out.extend_from_slice(contents);
-    out
 }
 
 /// An `IMG4` of a payload and the manifest that signs it, as iBoot forwards
