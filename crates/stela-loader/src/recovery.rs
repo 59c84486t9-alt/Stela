@@ -624,6 +624,7 @@ pub fn prepare<R: ReadAt>(
         root_hash: Some(RootHash {
             volume: SealedVolume::BaseSystem,
             im4p: root_hash.as_ref().map(Decoded::input),
+            snapshot: None,
         }),
     };
     let directory = set.directory();

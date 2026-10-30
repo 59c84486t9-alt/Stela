@@ -337,26 +337,43 @@ pub fn local_policies<R: ReadAt>(
     Ok(policies)
 }
 
-/// The seal of the file system the volume group's System volume roots from
-/// (`apfs_root_to_xid`); `None` when it is not sealed.
-pub fn system_seal<R: ReadAt>(container: &mut Container<R>, group: &str) -> Result<Option<Seal>> {
-    let systems: Vec<Volume> = container
+/// The volume group's one System volume.
+fn system_volume<R: ReadAt>(container: &mut Container<R>, group: &str) -> Result<Volume> {
+    let mut systems: Vec<Volume> = container
         .volumes()?
         .into_iter()
         .filter(|v| {
             v.role == APFS_VOL_ROLE_SYSTEM && uuid_text(&v.volume_group).eq_ignore_ascii_case(group)
         })
         .collect();
-    match &systems[..] {
-        [system] => Ok(system.root_seal(&mut container.device)?),
-        [] => Err(PrebootError::System(format!(
+    match systems.len() {
+        1 => Ok(systems.remove(0)),
+        0 => Err(PrebootError::System(format!(
             "volume group {group} has no System volume"
         ))),
-        _ => Err(PrebootError::System(format!(
-            "volume group {group} has {} System volumes",
-            systems.len()
+        count => Err(PrebootError::System(format!(
+            "volume group {group} has {count} System volumes"
         ))),
     }
+}
+
+/// The seal of the file system the volume group's System volume roots from
+/// (`apfs_root_to_xid`); `None` when it is not sealed.
+pub fn system_seal<R: ReadAt>(container: &mut Container<R>, group: &str) -> Result<Option<Seal>> {
+    let system = system_volume(container, group)?;
+    Ok(system.root_seal(&mut container.device)?)
+}
+
+/// The name of the snapshot the volume group's System volume roots from;
+/// `None` when it roots from its live file system.
+pub fn system_snapshot<R: ReadAt>(
+    container: &mut Container<R>,
+    group: &str,
+) -> Result<Option<String>> {
+    let system = system_volume(container, group)?;
+    Ok(system
+        .root_snapshot(&mut container.device)?
+        .map(|snapshot| snapshot.name))
 }
 
 /// The `IM4M` an `IMG4` object carries, read without its payload; `None`
@@ -447,6 +464,10 @@ mod tests {
         // The fixture has a Preboot volume only.
         assert!(matches!(
             system_seal(&mut container, &set.volume_group),
+            Err(PrebootError::System(_))
+        ));
+        assert!(matches!(
+            system_snapshot(&mut container, &set.volume_group),
             Err(PrebootError::System(_))
         ));
         Ok(())

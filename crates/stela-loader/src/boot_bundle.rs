@@ -138,10 +138,11 @@ impl Inputs<'_> {
     }
 }
 
-/// A sealed root volume and its root-hash `IM4P`.
+/// A sealed root volume, its root-hash `IM4P` and the snapshot it roots from.
 pub struct RootHash<'a> {
     pub volume: SealedVolume,
     pub im4p: Option<Input<'a>>,
+    pub snapshot: Option<String>,
 }
 
 pub struct Bundle {

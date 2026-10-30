@@ -219,6 +219,10 @@ impl Shaped {
                 manifest,
             )?;
             self.record(applied);
+            if let Some(snapshot) = &root_hash.snapshot {
+                let applied = boot_policy::apply_root_snapshot(&mut self.tree, snapshot)?;
+                self.record(applied);
+            }
         }
         if let Some(environment) = options.osenvironment {
             let applied = boot_policy::apply_environment(&mut self.tree, environment)?;

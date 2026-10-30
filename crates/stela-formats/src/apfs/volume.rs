@@ -695,21 +695,28 @@ impl Volume {
         Ok(snapshots)
     }
 
-    /// The seal of the file system the volume roots from: the snapshot
-    /// `apfs_root_to_xid` names, or the live volume when it is zero. `None`
-    /// when that file system is not sealed.
-    pub fn root_seal<R: ReadAt>(&self, device: &mut Device<R>) -> Result<Option<Seal>> {
+    /// The snapshot the volume roots from, which `apfs_root_to_xid` names;
+    /// `None` when it is zero and the volume roots from its live file system.
+    pub fn root_snapshot<R: ReadAt>(&self, device: &mut Device<R>) -> Result<Option<Snapshot>> {
         if self.root_to_xid == 0 {
-            return self.seal(device);
+            return Ok(None);
         }
-        let snapshot = self
-            .snapshots(device)?
+        self.snapshots(device)?
             .into_iter()
             .find(|snapshot| snapshot.xid == self.root_to_xid)
+            .map(Some)
             .ok_or(ApfsError::Malformed(
                 "no snapshot has the volume's root_to_xid",
-            ))?;
-        self.snapshot(device, &snapshot)?.seal(device)
+            ))
+    }
+
+    /// The seal of the file system the volume roots from. `None` when that
+    /// file system is not sealed.
+    pub fn root_seal<R: ReadAt>(&self, device: &mut Device<R>) -> Result<Option<Seal>> {
+        match self.root_snapshot(device)? {
+            Some(snapshot) => self.snapshot(device, &snapshot)?.seal(device),
+            None => self.seal(device),
+        }
     }
 
     /// The volume as it was when `snapshot` was taken. The superblock it
@@ -834,6 +841,7 @@ mod tests {
         };
         assert!(volume.sealed);
         assert_eq!(volume.root_to_xid, 0);
+        assert_eq!(volume.root_snapshot(&mut container.device)?, None);
         let seal = volume.root_seal(&mut container.device)?.expect("a seal");
         assert_eq!(u32::from_le_bytes(record[8..12].try_into().unwrap()), 1);
         assert_eq!(seal.hash, Hash::Sha256);

@@ -149,6 +149,19 @@ fn a_development_chip_leaves_its_unit_fuses_and_epoch_unresolved() -> Result<()>
 }
 
 #[test]
+fn a_root_snapshot_is_named_in_chosen_as_a_string() -> Result<()> {
+    let mut tree = tree();
+    let (decisions, unresolved) = apply_root_snapshot(&mut tree, "com.apple.os.update-9A91")?;
+    assert!(unresolved.is_empty());
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(
+        tree.property(CHOSEN, "root-snapshot-name").unwrap().value,
+        b"com.apple.os.update-9A91\0"
+    );
+    Ok(())
+}
+
+#[test]
 fn a_base_system_root_needs_a_file_image_boot_argument() {
     let image = "rp0=file:///usr/standalone/firmware/arm64eBaseSystem.dmg";
     assert!(require_image_boot(&format!("-v {image}")).is_ok());

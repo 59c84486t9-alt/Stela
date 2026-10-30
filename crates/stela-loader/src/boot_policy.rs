@@ -476,6 +476,29 @@ impl SealedVolume {
     }
 }
 
+/// Name the snapshot the root volume mounts from, as iBoot does for an
+/// installed boot (0x35608): the 26A434 kernel's
+/// `fs_lookup_root_snapshot_name` reads it, and a non-virtual sealed root
+/// without it panics in `apfs_vfsop_mount`.
+pub fn apply_root_snapshot(
+    tree: &mut DeviceTree,
+    snapshot: &str,
+) -> Result<(Vec<Decision>, Vec<String>)> {
+    let mut writer = Writer {
+        tree,
+        decisions: vec![],
+    };
+    let mut name = snapshot.as_bytes().to_vec();
+    name.push(0);
+    writer.set(
+        CHOSEN,
+        "root-snapshot-name",
+        name,
+        "the snapshot the System volume's apfs_root_to_xid names",
+    )?;
+    Ok((writer.decisions, vec![]))
+}
+
 /// Forward `volume`'s root hash: the payload of its root-hash `IM4P`, once
 /// the boot manifest is shown to sign that `IM4P`, as iBoot authenticates
 /// the image before forwarding its record.

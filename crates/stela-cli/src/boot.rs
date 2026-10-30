@@ -880,6 +880,7 @@ impl Prepare {
             root_hash: root_hash.as_ref().map(|(volume, decoded)| RootHash {
                 volume: *volume,
                 im4p: decoded.as_ref().map(input),
+                snapshot: None,
             }),
             board_firmware: board_firmware
                 .iter()

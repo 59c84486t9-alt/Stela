@@ -80,6 +80,8 @@ pub struct Evidence {
     pub root_hash: Option<String>,
     /// The seal root of its System volume's root file system.
     pub system_seal: Option<String>,
+    /// The snapshot that file system is.
+    pub root_snapshot: Option<String>,
     /// What named the directory: a LocalPolicy, `boot/active`, the
     /// `--boot-hash`, or nothing (evidence alone).
     pub named_by: Option<String>,
@@ -143,6 +145,7 @@ fn evaluate<R: ReadAt>(
         manifest_sha384: None,
         root_hash: None,
         system_seal: None,
+        root_snapshot: None,
         named_by: None,
         problems: Vec::new(),
     };
@@ -241,6 +244,10 @@ fn evaluate<R: ReadAt>(
             .push("its System volume's root file system is not sealed".into()),
         Err(error) => evidence.problems.push(format!("{error}")),
     }
+    // The seal above reports a System volume that does not read.
+    evidence.root_snapshot = preboot::system_snapshot(container, &set.volume_group)
+        .ok()
+        .flatten();
     Ok(evidence)
 }
 
@@ -649,6 +656,7 @@ pub fn prepare<R: ReadAt>(
         root_hash: Some(RootHash {
             volume: SealedVolume::System,
             im4p: root_hash.as_ref().map(Decoded::input),
+            snapshot: evidence.root_snapshot.clone(),
         }),
     };
     let mut options = options.placed_at(inputs.dram_base()?);
