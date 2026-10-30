@@ -141,6 +141,11 @@ struct Endpoint {
     events: u32,
     active: Option<Transfer>,
     not_ready: bool,
+    /// The transfer stopped at a TRB software did not own the hardware
+    /// for: the core fetches it again only after Update or Start Transfer
+    /// (DWC3 databook "Update Transfer"), so software may write the TRB's
+    /// words in any order before it issues the command.
+    parked: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -532,6 +537,7 @@ impl Dwc3 {
     fn release(&mut self) {
         for ep in &mut self.endpoints {
             ep.active = None;
+            ep.parked = false;
             ep.resource = false;
             ep.stalled = false;
             ep.not_ready = false;
@@ -831,6 +837,7 @@ impl Dwc3 {
                 } else {
                     ep.active = Some(Transfer::at(address));
                     ep.not_ready = false;
+                    ep.parked = false;
                     result |= 1 << 16;
                 }
             }
@@ -840,9 +847,11 @@ impl Dwc3 {
                 } else if command == 8 {
                     ep.active = None;
                     ep.not_ready = false;
+                    ep.parked = false;
                 } else {
                     result |= 1 << 16;
                     ep.not_ready = false;
+                    ep.parked = false;
                 }
             }
             9 => {
@@ -1002,6 +1011,9 @@ impl Dwc3 {
         let Some(mut transfer) = ep.active else {
             return self.not_ready(n, token, data.len(), false);
         };
+        if ep.parked {
+            return Ok(Reply::Nak);
+        }
         if token == Token::Setup && self.endpoints[1].active.is_some() {
             return Err(refuse!("DWC3 superseding control SETUP is not modeled"));
         }
@@ -1012,6 +1024,7 @@ impl Dwc3 {
         transfer.trb = address;
         if u32::from_le_bytes(trb[12..16].try_into().unwrap()) & HWO == 0 {
             self.endpoints[n].active = Some(transfer);
+            self.endpoints[n].parked = true;
             return self.not_ready(n, token, data.len(), true);
         }
         let buffer = u64::from_le_bytes(trb[..8].try_into().unwrap());

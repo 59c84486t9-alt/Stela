@@ -1123,6 +1123,54 @@ fn start_configuration_preserves_ep0_resources_and_short_events_have_no_fake_str
     );
 }
 #[test]
+fn a_parked_transfer_ignores_a_trb_software_writes_until_update_transfer() {
+    let (mut dwc, mut dart, mut ram, mut latch) = setup();
+    let mut access = Access::new(0, 0, &mut latch);
+    configure(&mut dwc, 3, 0, &mut access);
+    assert!(ram.write(TRB, &[0; 16]));
+    start(&mut dwc, 3, TRB, &mut access);
+    assert!(ram.write(PAYLOAD, &[0x5a; 4]));
+    fn packet(
+        dwc: &mut Dwc3,
+        dart: &mut Dart,
+        ram: &mut Ram,
+        access: &mut Access<'_>,
+    ) -> Result<(Reply, u8)> {
+        let mut port = Port {
+            iommu: dart,
+            stream: SID,
+            memory: ram,
+            access,
+        };
+        let mut bytes = [0; 512];
+        dwc.peer(&mut port)
+            .packet(0x81, Token::In, &mut bytes)
+            .map(|reply| (reply, bytes[0]))
+    }
+    assert_eq!(
+        packet(&mut dwc, &mut dart, &mut ram, &mut access),
+        Ok((Reply::Nak, 0))
+    );
+    // Software writes the control word, with HWO, before the buffer.
+    assert!(ram.write(TRB + 8, &[4, 0, 0, 0]));
+    assert!(ram.write(TRB + 12, &(HWO | LST | 1 << 4).to_le_bytes()));
+    assert_eq!(
+        packet(&mut dwc, &mut dart, &mut ram, &mut access),
+        Ok((Reply::Nak, 0))
+    );
+    ram.put_u64(TRB, PAYLOAD);
+    write(
+        &mut dwc,
+        DEP + 3 * STRIDE + 12,
+        CMDACT | 7 | 1 << 16,
+        &mut access,
+    );
+    assert_eq!(
+        packet(&mut dwc, &mut dart, &mut ram, &mut access),
+        Ok((Reply::Ack(4), 0x5a))
+    );
+}
+#[test]
 fn unowned_trb_reports_active_not_ready_once_and_update_rearms_it() {
     let (mut dwc, mut dart, mut ram, mut latch) = setup();
     let mut access = Access::new(0, 0, &mut latch);
