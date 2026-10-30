@@ -447,6 +447,18 @@ mod half {
         Divide,
     }
 
+    /// The sum `p` * 2^-48 as an f64 that rounds like it: sign and magnitude, with
+    /// any bits past 53 significant ones jammed into a sticky bit far below
+    /// every binary16 rounding position.
+    fn lattice(sum: i128) -> f64 {
+        let magnitude = sum.unsigned_abs();
+        let excess = (128 - magnitude.leading_zeros()).saturating_sub(53);
+        let kept = magnitude >> excess;
+        let sticky = u128::from(kept << excess != magnitude);
+        let value = (kept | sticky) as f64 * power(excess as i32 - 48);
+        if sum < 0 { -value } else { value }
+    }
+
     fn power(exponent: i32) -> f64 {
         f64::from_bits(((exponent + 1023) as u64) << 52)
     }
@@ -513,6 +525,67 @@ mod half {
             (rounded / power(-24)) as u16
         };
         (sign | bits, status)
+    }
+
+    /// The magnitude of the finite `bits` in units of 2^-24.
+    fn units(bits: u16) -> i128 {
+        let magnitude = bits & !SIGN;
+        if magnitude & EXPONENT == 0 {
+            i128::from(magnitude)
+        } else {
+            i128::from(magnitude & 0x3ff | 0x400) << ((magnitude >> 10) - 1)
+        }
+    }
+
+    /// One lane of `left` * `right` + `addend`, each sign changed first as the
+    /// form says and the exact sum rounded once. Infinity times zero is
+    /// invalid even with a NaN addend; otherwise the result of NaN operands is
+    /// the first NaN of `left`, `right` and `addend`, quiet with its sign
+    /// unchanged.
+    pub(super) fn fused(
+        [left, addend, right]: [u16; 3],
+        [negate_product, negate_addend]: [bool; 2],
+        rounding: u32,
+    ) -> (u16, u32) {
+        let invalid = (INDEFINITE, INVALID);
+        let (x, y) = (value(left), value(right));
+        if !nan(left) && !nan(right) && (x == 0.0 && y.is_infinite() || x.is_infinite() && y == 0.0)
+        {
+            return invalid;
+        }
+        if let Some(&first) = [left, right, addend].iter().find(|&&bits| nan(bits)) {
+            let status = [left, right, addend]
+                .iter()
+                .any(|&bits| nan(bits) && bits & QUIET == 0);
+            return (first | QUIET, if status { INVALID } else { 0 });
+        }
+        let sign = |negative: bool| if negative { SIGN } else { 0 };
+        let product_sign = (left ^ right) & SIGN ^ sign(negate_product);
+        let addend = addend ^ sign(negate_addend);
+        let c = value(addend);
+        if x.is_infinite() || y.is_infinite() {
+            if c.is_infinite() && addend & SIGN != product_sign {
+                return invalid;
+            }
+            return (product_sign | EXPONENT, 0);
+        }
+        if c.is_infinite() {
+            return (addend, 0);
+        }
+        let signed = |magnitude: i128, sign: u16| if sign != 0 { -magnitude } else { magnitude };
+        let product = units(left) * units(right);
+        let shifted = units(addend) << 24;
+        let sum = signed(product, product_sign) + signed(shifted, addend & SIGN);
+        if sum == 0 {
+            let alike = product == 0 && shifted == 0 && product_sign == addend & SIGN;
+            let negative = if alike {
+                product_sign != 0
+            } else {
+                rounding == 1
+            };
+            return (sign(negative), 0);
+        }
+        round(lattice(sum), rounding)
     }
 
     /// One lane: the result bits and the MXCSR status it raises.
@@ -590,31 +663,33 @@ struct Control {
     opmask: u64,
 }
 
-/// FP16 lanes of `bytes` from `left` and `right` under `instruction`'s
-/// writemask, with MXCSR status; `None` when an unmasked exception would
-/// trap.
+/// The Half at byte `at` of `value`.
+fn half_word(value: &[u8; 64], at: usize) -> u16 {
+    u16::from_le_bytes([value[at], value[at + 1]])
+}
+
+/// FP16 lanes of `bytes`, each from `lane` given its byte offset, under
+/// `instruction`'s writemask with MXCSR status; `None` when an unmasked
+/// exception would trap.
 fn half_lanes(
     instruction: Instruction,
-    operation: half::Operation,
     destination: &[u8; 64],
-    [left, right]: [&[u8; 64]; 2],
+    lane: impl Fn(usize) -> (u16, u32),
     control: &mut Control,
 ) -> Option<[u8; 64]> {
     let mut result = [0; 64];
-    let rounding = control.mxcsr >> 13 & 3;
     let mut status = 0;
-    for lane in 0..instruction.bytes / 2 {
-        let at = 2 * lane;
-        let active = instruction.opmask == 0 || control.opmask >> lane & 1 != 0;
+    for index in 0..instruction.bytes / 2 {
+        let at = 2 * index;
+        let active = instruction.opmask == 0 || control.opmask >> index & 1 != 0;
         let bits = if active {
-            let word = |value: &[u8; 64]| u16::from_le_bytes([value[at], value[at + 1]]);
-            let (bits, raised) = half::arithmetic(operation, word(left), word(right), rounding);
+            let (bits, raised) = lane(at);
             status |= raised;
             bits
         } else if instruction.zeroing {
             0
         } else {
-            u16::from_le_bytes([destination[at], destination[at + 1]])
+            half_word(destination, at)
         };
         result[at..at + 2].copy_from_slice(&bits.to_le_bytes());
     }
@@ -637,6 +712,25 @@ fn apply(
 ) -> Option<[u8; 64]> {
     let bytes = instruction.bytes;
     if instruction.evex {
+        let rounding = control.mxcsr >> 13 & 3;
+        if instruction.map == 6 {
+            let signs = match (instruction.opcode, instruction.pp, instruction.w) {
+                (0x98, 1, false) => [false, false],
+                (0x9a, 1, false) => [false, true],
+                (0x9c, 1, false) => [true, false],
+                (0x9e, 1, false) => [true, true],
+                _ => return None,
+            };
+            let lane = |at| {
+                let word = |value| half_word(value, at);
+                half::fused(
+                    [word(&destination), word(&first), word(&second)],
+                    signs,
+                    rounding,
+                )
+            };
+            return half_lanes(instruction, &destination, lane, control);
+        }
         let operation = match (
             instruction.map,
             instruction.opcode,
@@ -649,13 +743,11 @@ fn apply(
             (5, 0x5e, 0, false) => half::Operation::Divide,
             _ => return None,
         };
-        return half_lanes(
-            instruction,
-            operation,
-            &destination,
-            [&first, &second],
-            control,
-        );
+        let lane = |at| {
+            let (left, right) = (half_word(&first, at), half_word(&second, at));
+            half::arithmetic(operation, left, right, rounding)
+        };
+        return half_lanes(instruction, &destination, lane, control);
     }
     let vex = instruction;
     let wide = bytes == 32;
@@ -857,6 +949,20 @@ mod tests {
                     ));
                 }
             }
+            for opcode in [0x98, 0x9a, 0x9c, 0x9e] {
+                for (opmask, zeroing) in [(0, false), (1, true), (1, false)] {
+                    forms.push((
+                        fp16,
+                        Instruction {
+                            evex: true,
+                            map: 6,
+                            opmask,
+                            zeroing,
+                            ..vex(opcode, 1, bytes, 2)
+                        },
+                    ));
+                }
+            }
         }
         forms.extend([
             (sha512, vex(0xcb, 3, 32, 2)),
@@ -930,8 +1036,8 @@ mod tests {
                 )
                 .unwrap();
                 native.run(&mut state, &mut ExecutionContext::default());
-                // Intel SDE 10.13.1 raises only IE and ZE for VADDPH, VSUBPH
-                // and VMULPH, and adds only PE for VDIVPH (no OE or UE), so
+                // Intel SDE 10.13.1 raises only IE and ZE for VADDPH, VSUBPH,
+                // VMULPH and VF*132PH, and adds only PE for VDIVPH (no OE or UE), so
                 // the rest of their status rests on IEEE 754 and
                 // `half_rounding_status_and_special_values`.
                 let emulated = half::INVALID | half::DIVIDE_BY_ZERO;
@@ -1081,5 +1187,36 @@ mod tests {
         // Denormal operands raise nothing; an exact denormal result does not
         // underflow.
         assert_eq!(add(0x0001, 0x0001, 0), (0x0002, 0));
+        // (1 + 2^-10)^2 - 1 keeps the tie at 2^-20 that a rounded product loses.
+        assert_eq!(
+            fused([0x3c01, 0xbc00, 0x3c01], [false, false], 0),
+            (0x1800, INEXACT)
+        );
+        assert_eq!(
+            fused([0x3c01, 0xbc00, 0x3c01], [false, false], 2),
+            (0x1801, INEXACT)
+        );
+        // The smallest product and the largest addend still round exactly:
+        // 65504 + 2^-48 is inexact, and rounds up only toward +infinity.
+        assert_eq!(fused([1, 0x7bff, 1], [false, false], 0), (0x7bff, INEXACT));
+        assert_eq!(
+            fused([1, 0x7bff, 1], [false, false], 2),
+            (0x7c00, OVERFLOW | INEXACT)
+        );
+        // x * 1 - x is -0 only when rounding down; zeros of one sign keep it.
+        assert_eq!(
+            fused([0x3c00, 0x3c00, 0x3c00], [false, true], 1),
+            (0x8000, 0)
+        );
+        assert_eq!(
+            fused([0x8000, 0x8000, 0x3c00], [false, false], 0),
+            (0x8000, 0)
+        );
+        // Infinity times zero is invalid, as is infinities of opposite sign.
+        assert_eq!(fused([0, 0, 0x7c00], [false, false], 0), (0xfe00, INVALID));
+        assert_eq!(
+            fused([0x7c00, 0x7c00, 0x3c00], [false, true], 0),
+            (0xfe00, INVALID)
+        );
     }
 }

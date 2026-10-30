@@ -1,7 +1,7 @@
 //! Half-precision lane unpacking, rounding and packing for normal values.
 use super::numerical::jump;
-use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::{Alu, Asm, Code, Gpr, Mem, Rm, ShiftOp, Size};
+use crate::x86_64::asm::{BitTest, vector_extensions};
 use crate::x86_64::simd::encode::guest;
 use alloc::vec::Vec;
 mod kernel;
@@ -9,7 +9,10 @@ use super::numerical::{Condition, RESULT_MINIMUM_EXPONENT, branch, resolve, test
 use super::{Host, packed};
 use crate::{
     GuestAddress, GuestState, TargetCpu,
-    aarch64::floating::{FPCR_AH, FPCR_NEP, FPCR_ROUNDING_SHIFT, Format, INEXACT},
+    aarch64::{
+        floating::{FPCR_AH, FPCR_NEP, FPCR_ROUNDING_SHIFT, Format, INEXACT},
+        simd::arithmetic::Shape,
+    },
     block::ExitKind,
 };
 
@@ -216,6 +219,52 @@ pub(super) fn commit_inexact(code: &mut Code) {
         guest(core::mem::offset_of!(GuestState, fpsr) as u32),
         INEXACT_LANES,
     );
+}
+
+/// One writemasked AVX512-FP16 operation on LEFT under guards that keep every
+/// input normal. A normal result of normal inputs is independent of FZ16, AH
+/// and DN, and other status or a result below exponent 2 takes the exact
+/// helper, so x86's tininess rule never decides a guest result.
+pub(super) fn run_native(
+    code: &mut Code,
+    shape: Shape,
+    helper: &mut Vec<usize>,
+    operation: impl FnOnce(&mut Code),
+) {
+    vector_extensions::half_writemask(code, shape.lane_count(Format::Half) as u8);
+    super::numerical::environment(code);
+    operation(code);
+    super::numerical::restore_environment(code);
+    helper.push(super::numerical::reject_other_status(code));
+    super::numerical::prepare_half_result_range(code);
+    super::numerical::vector_exponent_range(code, Format::Half, shape, LEFT);
+    helper.push(branch(code, Condition::NotZero));
+    super::numerical::commit_inexact(code);
+}
+
+/// Write the [`run_native`] result to `destination`, NEP-merged with
+/// ORIGINAL_LEFT under `merge`, ahead of the numerical completion exit at `pc`
+/// that `helper` branches to.
+pub(super) fn finish_native(
+    code: &mut Code,
+    destination: u8,
+    merge: bool,
+    helper: Vec<usize>,
+    pc: GuestAddress,
+) {
+    if merge {
+        code.asm().movd_from_xmm(Gpr::Rax, LEFT);
+        merge_scalar(code);
+    }
+    super::commit(code, destination, LEFT);
+    let done = jump(code);
+    let helper_start = code.len();
+    crate::x86_64::block::direct_exit(code, pc, ExitKind::FloatingPoint);
+    let end = code.len();
+    for patch in helper {
+        resolve(code, patch, helper_start);
+    }
+    resolve(code, done, end);
 }
 
 /// Original Vn is XMM7. Scalar-pair callers skip NEP merging entirely.

@@ -16,12 +16,13 @@ const SUFFIX: u32 = 0x9100_0529; // ADD X9,X9,#1
 const POISON: u64 = 0x7c01; // inactive signaling NaN
 
 fn targets() -> Vec<TargetCpu> {
-    let host = TargetCpu::detect();
+    let host = stela_compiler::x86_64::modeled::host();
     [
         TargetCpu::Baseline,
         TargetCpu::Baseline.with_fma(),
         TargetCpu::Baseline.with_f16c(),
         TargetCpu::Baseline.with_fma().with_f16c(),
+        TargetCpu::X86_64_V4.with_avx512fp16(),
     ]
     .into_iter()
     .filter(|target| host.supports(*target))
@@ -51,7 +52,14 @@ fn forms() -> Vec<u32> {
     forms
 }
 
-fn compile(word: u32, target: TargetCpu) -> (Operand, Mapping) {
+/// A compiled block and whether its recipe needs [`exact_lane`]'s exponent
+/// span bound, which keeps the integer-free path's Double operations exact.
+struct Block {
+    mapping: Mapping,
+    bounded_span: bool,
+}
+
+fn compile(word: u32, target: TargetCpu) -> (Operand, Block) {
     let operand = decode(word).unwrap().unwrap();
     let source: Vec<_> = [PREFIX, word, SUFFIX]
         .into_iter()
@@ -65,7 +73,15 @@ fn compile(word: u32, target: TargetCpu) -> (Operand, Mapping) {
     .unwrap()
     .compile()
     .unwrap();
-    (operand, Mapping::new(&block.native.x86_64_code).unwrap())
+    let mapping = Mapping::new(&block.native.x86_64_code).unwrap();
+    let bounded_span = !target.supports(TargetCpu::X86_64_V4.with_avx512fp16());
+    (
+        operand,
+        Block {
+            mapping,
+            bounded_span,
+        },
+    )
 }
 
 fn input(operand: &Operand, values: [u64; 3], fpcr: u32) -> GuestState {
@@ -102,10 +118,15 @@ fn exponent(bits: u64) -> i32 {
 // P=(mL*mR) << (EL+ER-2), A=mA << (EA+23). At most81 bits are needed.
 // This reference uses only integer arithmetic, independently of APFloat and the
 // emitter's Double operations/packing. None denotes outside the native domain.
-fn exact_lane(operation: FusedOperation, fpcr: u32, a: u64, n: u64, m: u64) -> Option<(u64, u32)> {
+fn exact_lane(
+    operation: FusedOperation,
+    fpcr: u32,
+    [a, n, m]: [u64; 3],
+    bounded_span: bool,
+) -> Option<(u64, u32)> {
     let [ea, en, em] = [a, n, m].map(exponent);
     if [ea, en, em].into_iter().any(|e| !(1..31).contains(&e))
-        || !(-31..=40).contains(&(en + em - ea - 15))
+        || bounded_span && !(-31..=40).contains(&(en + em - ea - 15))
     {
         return None;
     }
@@ -126,7 +147,9 @@ fn exact_lane(operation: FusedOperation, fpcr: u32, a: u64, n: u64, m: u64) -> O
     let magnitude = exact.unsigned_abs();
     let leading = 127 - magnitude.leading_zeros();
     let mut result_exponent = leading as i32 - 33;
-    if !(2..=30).contains(&result_exponent) {
+    // Only the widened path needs exponent 2 ahead of its rounding.
+    let minimum = if bounded_span { 2 } else { 1 };
+    if !(minimum..=30).contains(&result_exponent) {
         return None;
     }
     let shift = leading - 10;
@@ -155,7 +178,7 @@ fn exact_lane(operation: FusedOperation, fpcr: u32, a: u64, n: u64, m: u64) -> O
     ))
 }
 
-fn reference(state: &GuestState, operand: &Operand) -> Option<GuestState> {
+fn reference(state: &GuestState, operand: &Operand, bounded_span: bool) -> Option<GuestState> {
     if state.fpcr & FPCR_EXCEPTION_ENABLE_MASK != 0 {
         return None;
     }
@@ -174,7 +197,8 @@ fn reference(state: &GuestState, operand: &Operand) -> Option<GuestState> {
             16,
             operand.right_lane.map_or(lane, u32::from),
         );
-        let (bits, exceptions) = exact_lane(operand.operation, state.fpcr, a, n, m)?;
+        let (bits, exceptions) =
+            exact_lane(operand.operation, state.fpcr, [a, n, m], bounded_span)?;
         // The separate complete architectural model must agree too.
         let model = fused::evaluate(Format::Half, operand.operation, state.fpcr, a, n, m).unwrap();
         assert_eq!((model.bits, model.exceptions), (bits, exceptions));
@@ -201,9 +225,9 @@ fn set_mxcsr(value: u32) {
     }
 }
 
-fn check(mapping: &Mapping, operand: &Operand, mut state: GuestState, caller: u32) -> bool {
+fn check(block: &Block, operand: &Operand, mut state: GuestState, caller: u32) -> bool {
     let input = state.clone();
-    let fast = reference(&state, operand);
+    let fast = reference(&state, operand, block.bounded_span);
     let native = fast.is_some();
     let mut expected = fast.unwrap_or_else(|| state.clone());
     expected.x[8] += 1;
@@ -214,7 +238,7 @@ fn check(mapping: &Mapping, operand: &Operand, mut state: GuestState, caller: u3
     set_mxcsr(caller);
     // SAFETY: this host's owned RX image contains three non-memory instructions
     // under the one-pointer block ABI; source/destination snapshots are private.
-    let exit = unsafe { mapping.call_block(&mut state) };
+    let exit = unsafe { block.mapping.call_block(&mut state) };
     let actual_csr = mxcsr();
     set_mxcsr(saved);
     assert_eq!(actual_csr, caller, "MXCSR {operand:?}");
@@ -318,7 +342,7 @@ fn half_fma_forms_aliases_rounding_controls_and_host_environment() {
 
 #[test]
 fn half_fma_all_normal_exponents_and_exact_span_edges() {
-    for target in [TargetCpu::Baseline, TargetCpu::detect()] {
+    for target in [TargetCpu::Baseline, *targets().last().unwrap()] {
         let (operand, mapping) = compile(0x1fc2_0c20, target); // FMADD H0,H1,H2,H3
         for ea in 1..31 {
             for en in 1..31 {
@@ -406,7 +430,7 @@ fn half_fma_last_lane_rollback_and_enabled_exceptions_preserve_state() {
                     operand.right_lane.map_or(0, u32::from),
                 );
                 assert_eq!(
-                    exact_lane(operand.operation, state.fpcr, a, n, m)
+                    exact_lane(operand.operation, state.fpcr, [a, n, m], true)
                         .unwrap()
                         .1,
                     INEXACT

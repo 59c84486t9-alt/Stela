@@ -290,6 +290,28 @@ pub(crate) fn half_arithmetic(code: &mut Code, opcode: HalfOpcode, destination: 
     );
 }
 
+/// VFMADD132PH, VFMSUB132PH, VFNMADD132PH or VFNMSUB132PH, by the map 6 opcode
+/// they share with FMA3: `left` * `right` +/- `addend` into `left`, rounded once
+/// under MXCSR.RC, in the [`half_writemask`] lanes as [`half_arithmetic`] does.
+pub(crate) fn half_fused(code: &mut Code, opcode: u8, left: u8, addend: u8, right: u8) {
+    code.asm().evex(
+        Evex {
+            map: Map::M6,
+            pp: Pp::P66,
+            w: false,
+            length: 0,
+            mask: HALF_WRITEMASK,
+            zeroing: true,
+            broadcast: false,
+            scale: 16,
+        },
+        opcode,
+        left,
+        addend,
+        Rm::Xmm(right),
+    );
+}
+
 /// VPDPWUUD (AVX-VNNI-INT16): add to each dword of `sum` the two products of
 /// its unsigned words in `left` and `right`, wrapping. The DIT profile keeps
 /// its reviewed recipe.
@@ -1209,6 +1231,8 @@ mod tests {
         half_arithmetic(&mut code, HalfOpcode::Add, 0, 1);
         half_arithmetic(&mut code, HalfOpcode::Subtract, 9, 10);
         half_arithmetic(&mut code, HalfOpcode::Multiply, 2, 3);
+        half_fused(&mut code, 0x98, 0, 6, 1);
+        half_fused(&mut code, 0x9c, 9, 10, 11);
         assert_eq!(
             code,
             [
@@ -1217,6 +1241,8 @@ mod tests {
                 &[0x62, 0xf5, 0x7c, 0x89, 0x58, 0xc1], // vaddph xmm0{k1}{z},xmm0,xmm1
                 &[0x62, 0x55, 0x34, 0x89, 0x5c, 0xca], // vsubph xmm9{k1}{z},xmm9,xmm10
                 &[0x62, 0xf5, 0x6c, 0x89, 0x59, 0xd3], // vmulph xmm2{k1}{z},xmm2,xmm3
+                &[0x62, 0xf6, 0x4d, 0x89, 0x98, 0xc1], // vfmadd132ph xmm0{k1}{z},xmm6,xmm1
+                &[0x62, 0x56, 0x2d, 0x89, 0x9c, 0xcb], // vfnmadd132ph xmm9{k1}{z},xmm10,xmm11
             ]
             .concat()
         );

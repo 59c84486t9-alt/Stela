@@ -9,10 +9,8 @@ mod product;
 
 use super::super::super::isa::ShiftOpcode;
 use super::super::numerical::{
-    ArithmeticOpcode, Condition, branch, commit_inexact, emit_opcode_to, environment, jump,
-    prepare_half_result_range, prepare_vector_input_range, read_numerical_right,
-    read_numerical_vector, reject_other_status, resolve, restore_environment, test_control,
-    vector_exponent_range,
+    ArithmeticOpcode, Condition, branch, emit_opcode_to, prepare_vector_input_range,
+    read_numerical_right, read_numerical_vector, test_control, vector_exponent_range,
 };
 use super::super::{Host, commit, half as lanes, packed, packed_imm, read_vector};
 use crate::{
@@ -21,7 +19,6 @@ use crate::{
         floating::{BinaryOperation, FPCR_EXCEPTION_ENABLE_MASK, Format},
         simd::arithmetic::{Inputs, Operand, Shape},
     },
-    block::ExitKind,
 };
 
 const LEFT_ODD: u8 = 6;
@@ -149,10 +146,7 @@ fn native_sign(code: &mut Code, operation: BinaryOperation, lanes: u8) {
     packed(code, opcode, lanes::LEFT, NATIVE_SIGN);
 }
 
-/// One writemasked AVX512-FP16 operation under the same input guards as the
-/// lane recipe. A normal result of normal inputs is independent of FZ16, AH
-/// and DN, and other status or a result below exponent 2 takes the exact
-/// helper, so x86's tininess rule never decides a guest result.
+/// One AVX512-FP16 operation under the same input guards as the lane recipe.
 pub(in crate::x86_64) fn emit_native(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     let mut helper = vec![branch(code, Condition::NotZero)];
@@ -162,35 +156,22 @@ pub(in crate::x86_64) fn emit_native(code: &mut Code, operand: &Operand, pc: Gue
         vector_exponent_range(code, Format::Half, operand.shape, source);
         helper.push(branch(code, Condition::NotZero));
     }
-    let lane_count = operand.shape.lane_count(Format::Half) as u8;
-    vector_extensions::half_writemask(code, lane_count);
-    environment(code);
-    vector_extensions::half_arithmetic(
+    lanes::run_native(code, operand.shape, &mut helper, |code| {
+        vector_extensions::half_arithmetic(
+            code,
+            native_opcode(operand.operation),
+            lanes::LEFT,
+            lanes::RIGHT,
+        );
+    });
+    native_sign(
         code,
-        native_opcode(operand.operation),
-        lanes::LEFT,
-        lanes::RIGHT,
+        operand.operation,
+        operand.shape.lane_count(Format::Half) as u8,
     );
-    restore_environment(code);
-    helper.push(reject_other_status(code));
-    prepare_half_result_range(code);
-    vector_exponent_range(code, Format::Half, operand.shape, lanes::LEFT);
-    helper.push(branch(code, Condition::NotZero));
-    commit_inexact(code);
-    native_sign(code, operand.operation, lane_count);
-    if operand.shape == Shape::Scalar && !matches!(operand.inputs, Inputs::PairwiseScalar { .. }) {
-        code.asm().movd_from_xmm(Gpr::Rax, lanes::LEFT);
-        lanes::merge_scalar(code);
-    }
-    commit(code, operand.destination, lanes::LEFT);
-    let done = jump(code);
-    let helper_start = code.len();
-    crate::x86_64::block::direct_exit(code, pc, ExitKind::FloatingPoint);
-    let end = code.len();
-    for patch in helper {
-        resolve(code, patch, helper_start);
-    }
-    resolve(code, done, end);
+    let merge =
+        operand.shape == Shape::Scalar && !matches!(operand.inputs, Inputs::PairwiseScalar { .. });
+    lanes::finish_native(code, operand.destination, merge, helper, pc);
 }
 
 pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
