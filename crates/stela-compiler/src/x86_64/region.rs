@@ -127,6 +127,9 @@ struct Emitter<'a> {
     /// The engine recovers dirty values from host registers at a fault
     /// ([`crate::block::FaultRecovery`]), so accesses need not settle.
     fault_table: bool,
+    /// A value took an occupied pool slot: a larger pool could have kept
+    /// the value it evicted.
+    full: bool,
 }
 
 impl Emitter<'_> {
@@ -1239,6 +1242,7 @@ fn emit_prefix_selected<'a>(
         range_checks,
         checks,
         fault_table,
+        full: false,
     };
     for instruction in instructions.iter().take(consumed) {
         emitter.instruction(instruction)?;

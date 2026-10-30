@@ -245,6 +245,7 @@ impl LegacyPlan {
             // No loads.
             checks: super::super::MemoryChecks::DEFAULT,
             fault_table: false,
+            full: false,
         };
         for (guest, index) in (0..GPR_SLOTS)
             .filter(|&guest| used & (1 << guest) != 0)

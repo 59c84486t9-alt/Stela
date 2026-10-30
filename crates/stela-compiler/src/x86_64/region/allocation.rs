@@ -262,6 +262,7 @@ impl Emitter<'_> {
                     })
                     .expect("dedicated operand scratch leaves an allocation slot")
             });
+        self.full |= self.resident[index].is_some();
         self.spill_value(index, false);
         self.resident[index] = Some(Resident {
             guest: value.slot(),
@@ -430,6 +431,7 @@ pub(super) fn emitter<'a>(
         // No loads.
         checks: super::super::MemoryChecks::DEFAULT,
         fault_table: false,
+        full: false,
     }
 }
 
@@ -517,10 +519,16 @@ pub(super) fn prefix(
         emitter.output.stats.native_instructions = count;
         // A callee pool is useful only when its complete emitted recipe wins.
         // Ties keep the earlier, smaller pool and its cheaper native ABI setup.
+        let full = emitter.full;
         if best.as_ref().is_none_or(|best| {
             (emitter.output.code.len(), count) < (best.code.len(), best.stats.native_instructions)
         }) {
             best = Some(emitter.output);
+        }
+        // A pool that never filled allocates every value as a larger one
+        // would, which only adds a callee save and restore per slot.
+        if !full {
+            break;
         }
     }
     Ok(best)
