@@ -114,6 +114,19 @@ records! {
     /// No data.
     pub struct Empty {}
 
+    /// The call a gate doorbell names, in the calling thread's memory:
+    /// an operation with its request and response records, which the gate
+    /// completes in place with the call's `Status` and, when `reason`
+    /// holds it, why it failed as UTF-8 of `reason_length` bytes.
+    pub struct GateCall {
+        pub operation: u32,
+        pub status: u32,
+        pub request: Span,
+        pub response: Span,
+        pub reason: Span,
+        pub reason_length: u64,
+    }
+
     /// `Negotiate`: the versions the frontend speaks.
     pub struct NegotiateRequest {
         pub major: u32,

@@ -1,12 +1,14 @@
 //! The Metal service: the boundary the guest frontend crosses into the
 //! device.
 //!
-//! `StelaGPU.bundle` reaches native code through the process call gate with
-//! one entry, [`Service::call`]: a connection, an [`Operation`] and its
-//! fixed-width request and response records ([`wire`]). Variable data
-//! (names, library bytes, texel data, command streams) stays in guest memory
-//! as [`Span`]s that the gate resolves through [`GuestMemory`]; the service
-//! never dereferences a guest address itself. Each connection names device
+//! `StelaGPU.bundle` reaches native code through the process call gate,
+//! whose doorbell names a [`GateCall`](wire::GateCall) that
+//! [`Service::serve`] completes in the caller's memory, with one entry,
+//! [`Service::call`]: a connection, an [`Operation`] and its fixed-width
+//! request and response records ([`wire`]). Variable data (names, library
+//! bytes, texel data, command streams) stays in guest memory as [`Span`]s
+//! that the gate copies through [`GuestMemory`]; the service never
+//! dereferences a guest address itself. Each connection names device
 //! objects by its own generation-checked handles ([`identity`]), so a handle
 //! of another connection, of a destroyed object or of another kind of object
 //! is refused, and closing a connection releases what it still holds, newest
@@ -31,6 +33,7 @@ use identity::{DeviceEpoch, ObjectHandle, ObjectTable};
 use wire::{Fault, Handle, NegotiateRequest, NegotiateResponse, Operation, Record, Span, Status};
 
 mod commands;
+mod gate;
 pub mod identity;
 mod indirect;
 mod libraries;
@@ -80,9 +83,10 @@ const MAX_OBJECTS: NonZeroU32 = NonZeroU32::new(1 << 20).unwrap();
 
 /// Guest memory the call gate resolves for one call: spans of the calling
 /// task's address space, checked against its mappings. An empty span is no
-/// bytes wherever it points.
+/// bytes wherever it points. A read is a copy, so the task's other threads
+/// cannot change what the service validated.
 pub trait GuestMemory {
-    fn read(&self, span: Span) -> Result<&[u8], Fault>;
+    fn read(&mut self, span: Span) -> Result<Vec<u8>, Fault>;
     fn write(&mut self, span: Span, bytes: &[u8]) -> Result<(), Fault>;
     /// Where the backend, which shares the task's address space, reaches a
     /// span the task maps: memory a buffer is made over

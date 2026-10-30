@@ -41,7 +41,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let request: NewRenderPipelineRequest = call.request()?;
         let flags = flags(request.flags)?;
         let connection = call.connection;
-        let memory = &*call.memory;
+        let memory = &mut *call.memory;
         let pipeline = RenderPipelineRequest {
             vertex_function: self.object(connection, request.vertex_function)?,
             fragment_function: self.optional(connection, request.fragment_function)?,
@@ -58,12 +58,12 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             tessellation: tessellation(&request.tessellation)?,
             vertex_linked_functions: self.linked(
                 connection,
-                memory,
+                &mut *memory,
                 &request.vertex_linked_functions,
             )?,
             fragment_linked_functions: self.linked(
                 connection,
-                memory,
+                &mut *memory,
                 &request.fragment_linked_functions,
             )?,
             support_indirect_command_buffers: flags
@@ -77,7 +77,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let request: NewMeshPipelineRequest = call.request()?;
         let flags = flags(request.flags)?;
         let connection = call.connection;
-        let memory = &*call.memory;
+        let memory = &mut *call.memory;
         let threads = |max_total_threads, multiple| StageThreads {
             max_total_threads,
             multiple_of_width: flags.contains(multiple),
@@ -99,17 +99,17 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             payload_memory_length: request.payload_memory_length,
             object_linked_functions: self.linked(
                 connection,
-                memory,
+                &mut *memory,
                 &request.object_linked_functions,
             )?,
             mesh_linked_functions: self.linked(
                 connection,
-                memory,
+                &mut *memory,
                 &request.mesh_linked_functions,
             )?,
             fragment_linked_functions: self.linked(
                 connection,
-                memory,
+                &mut *memory,
                 &request.fragment_linked_functions,
             )?,
         };
@@ -130,7 +130,11 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 .contains(PipelineFlags::DESCRIBED_INPUT)
                 .then(|| stage_input(&request))
                 .transpose()?,
-            linked_functions: self.linked(connection, &*call.memory, &request.linked_functions)?,
+            linked_functions: self.linked(
+                connection,
+                &mut *call.memory,
+                &request.linked_functions,
+            )?,
             support_indirect_command_buffers: flags
                 .contains(PipelineFlags::INDIRECT_COMMAND_BUFFERS),
         };
@@ -190,7 +194,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let request: SetFunctionsRequest = call.request()?;
         let table = self.object::<BufferId>(call.connection, request.table)?;
         let handles: Vec<Option<FunctionHandle>> =
-            wire::read_array::<u64>(call.memory.read(request.handles)?)?
+            wire::read_array::<u64>(&call.memory.read(request.handles)?)?
                 .into_iter()
                 .map(|value| (value != 0).then_some(FunctionHandle(value)))
                 .collect();
@@ -239,20 +243,26 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     fn linked(
         &self,
         connection: NonZeroU64,
-        memory: &dyn GuestMemory,
+        memory: &mut dyn GuestMemory,
         record: &LinkedFunctionsRecord,
     ) -> Result<LinkedFunctions, Fault> {
-        let objects = |span| -> Result<Vec<u64>, Fault> { wire::read_array(memory.read(span)?) };
-        let functions = |span| {
-            objects(span)?
+        let mut objects =
+            |span| -> Result<Vec<u64>, Fault> { wire::read_array(&memory.read(span)?) };
+        let (functions, private_functions, libraries) = (
+            objects(record.functions)?,
+            objects(record.private_functions)?,
+            objects(record.libraries)?,
+        );
+        let functions_of = |handles: Vec<u64>| {
+            handles
                 .into_iter()
                 .map(|handle| self.object::<FunctionId>(connection, handle))
                 .collect::<Result<Vec<_>, Fault>>()
         };
         Ok(LinkedFunctions {
-            functions: functions(record.functions)?,
-            private_functions: functions(record.private_functions)?,
-            libraries: objects(record.libraries)?
+            functions: functions_of(functions)?,
+            private_functions: functions_of(private_functions)?,
+            libraries: libraries
                 .into_iter()
                 .map(|handle| self.object::<LibraryId>(connection, handle))
                 .collect::<Result<_, _>>()?,

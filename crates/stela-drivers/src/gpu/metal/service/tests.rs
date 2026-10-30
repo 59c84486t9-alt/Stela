@@ -32,6 +32,7 @@ use alloc::{vec, vec::Vec};
 use core::num::NonZeroU64;
 
 mod commands;
+mod gate;
 mod indirect;
 mod pipelines;
 mod queue;
@@ -87,8 +88,8 @@ impl Memory {
 }
 
 impl GuestMemory for Memory {
-    fn read(&self, span: Span) -> Result<&[u8], Fault> {
-        Ok(&self.bytes[self.range(span)?])
+    fn read(&mut self, span: Span) -> Result<Vec<u8>, Fault> {
+        Ok(self.bytes[self.range(span)?].to_vec())
     }
 
     fn write(&mut self, span: Span, bytes: &[u8]) -> Result<(), Fault> {

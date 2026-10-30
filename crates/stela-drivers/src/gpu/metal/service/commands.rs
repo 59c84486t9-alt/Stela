@@ -106,7 +106,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let CommitRequest { commands: span } = call.request()?;
         let connection = call.connection;
         let mut commands = self.device.new_command_buffer();
-        let mut stream = Stream::new(call.memory.read(span)?, CommandCode::from_raw);
+        let stream_bytes = call.memory.read(span)?;
+        let mut stream = Stream::new(&stream_bytes, CommandCode::from_raw);
         let replayed = stream.try_for_each(|entry| {
             let (code, payload) = entry?;
             self.replay(connection, &mut commands, code, payload)

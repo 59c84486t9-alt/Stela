@@ -68,7 +68,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
 
 pub(super) fn argument_layout(call: &mut Call) -> Result<(), Fault> {
     let request: ArgumentLayoutRequest = call.request()?;
-    let arguments = wire::read_array::<ArgumentRecord>(call.memory.read(request.arguments)?)?
+    let arguments = wire::read_array::<ArgumentRecord>(&call.memory.read(request.arguments)?)?
         .into_iter()
         .map(|record| {
             Ok(ArgumentDescriptor {

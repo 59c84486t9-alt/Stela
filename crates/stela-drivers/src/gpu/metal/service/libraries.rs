@@ -21,7 +21,7 @@ use alloc::{string::String, vec::Vec};
 impl<B: Backend, C: Compiler> Service<B, C> {
     pub(super) fn new_library(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: NewLibraryRequest = call.request()?;
-        let data = call.memory.read(request.data)?.to_vec();
+        let data = call.memory.read(request.data)?;
         let library = self.device.new_library(data)?;
         let handle = self.hold(call.connection, Object::Library(library))?;
         call.reply(&handle)
@@ -41,22 +41,22 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     pub(super) fn new_function(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: NewFunctionRequest = call.request()?;
         let library = self.object::<LibraryId>(call.connection, request.library)?;
-        let memory = &*call.memory;
-        let name = text(memory.read(request.name)?)?;
-        let values = wire::read_array::<ConstantRecord>(memory.read(request.constants)?)?
+        let memory = &mut *call.memory;
+        let name = text(&memory.read(request.name)?)?;
+        let values = wire::read_array::<ConstantRecord>(&memory.read(request.constants)?)?
             .into_iter()
             .map(|record| {
                 let key = if record.name.length == 0 {
                     let index = u32::try_from(record.index).map_err(|_| Fault::MALFORMED)?;
                     ConstantKey::Index(index)
                 } else {
-                    ConstantKey::Name(text(memory.read(record.name)?)?)
+                    ConstantKey::Name(text(&memory.read(record.name)?)?)
                 };
                 Ok(ConstantValue {
                     key,
                     data_type: DataType::from_raw(record.data_type)
                         .ok_or(Fault::malformed("function constant data type"))?,
-                    value: memory.read(record.value)?.to_vec(),
+                    value: memory.read(record.value)?,
                 })
             })
             .collect::<Result<Vec<_>, Fault>>()?;

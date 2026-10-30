@@ -95,14 +95,14 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let texture = self.object::<TextureId>(call.connection, request.texture)?;
         let bytes = call.memory.read(request.bytes)?;
         self.device
-            .replace_region(texture, &region(&request.region), bytes, strides(&request))?;
+            .replace_region(texture, &region(&request.region), &bytes, strides(&request))?;
         call.reply(&Empty {})
     }
 
     pub(super) fn get_bytes(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: TextureBytesRequest = call.request()?;
         let texture = self.object::<TextureId>(call.connection, request.texture)?;
-        let mut bytes = call.memory.read(request.bytes)?.to_vec();
+        let mut bytes = call.memory.read(request.bytes)?;
         self.device.get_bytes(
             texture,
             &region(&request.region),

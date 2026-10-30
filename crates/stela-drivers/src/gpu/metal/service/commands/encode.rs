@@ -36,7 +36,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let EncodeIndirectRequest { buffer, commands } = call.request()?;
         let connection = call.connection;
         let id = self.object::<IndirectCommandBufferId>(connection, buffer)?;
-        let mut stream = Stream::new(call.memory.read(commands)?, EncodeCode::from_raw);
+        let commands = call.memory.read(commands)?;
+        let mut stream = Stream::new(&commands, EncodeCode::from_raw);
         stream.try_for_each(|entry| {
             let (code, payload) = entry?;
             let (IndirectTarget { command }, payload) = payload.split()?;
