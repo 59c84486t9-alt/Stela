@@ -173,7 +173,7 @@ impl Authenticator {
         self.message_3_with(rsn, &[])
     }
 
-    fn message_3_with(&mut self, rsn: &[u8], extra: &[u8]) -> Vec<u8> {
+    pub(crate) fn message_3_with(&mut self, rsn: &[u8], extra: &[u8]) -> Vec<u8> {
         let mut elements = rsn.to_vec();
         let length = self.suites.group.key_length();
         elements.extend_from_slice(&gtk_kde(

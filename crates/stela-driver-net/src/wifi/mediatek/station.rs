@@ -9,7 +9,8 @@
 //! connection scans again after wpa_supplicant's delays.
 use super::{
     bootstrap::client::{
-        BssHandle, Event, LinkControlError, LinkEvent, ManagedLink, Phase, management::Session,
+        self, BssHandle, Event, LinkControlError, LinkEvent, ManagedLink, Phase, PolicyError,
+        management::Session,
     },
     mcu::{client::Profile, device::Context},
     regd,
@@ -60,6 +61,15 @@ const PEER_WCID: u16 = 1;
 /// WLAN_REASON_DEAUTH_LEAVING, which `wpa_supplicant_timeout` sends.
 const LEAVING: u16 = 3;
 
+/// Whether the link refused a key only until its queued frames drain.
+fn deferred(error: &LinkControlError) -> bool {
+    matches!(
+        error,
+        LinkControlError::Backpressure
+            | LinkControlError::Policy(PolicyError::Client(client::Error::NeedsDrain))
+    )
+}
+
 /// wpa_supplicant's `wpas_auth_failed` delay after `failures` consecutive
 /// failed connections.
 fn failure_delay_us(failures: u32) -> u64 {
@@ -98,6 +108,10 @@ enum State {
         deadline: u64,
         /// Message 3 failed its MIC: the passphrase may be wrong.
         mic_failed: bool,
+        /// The pairwise key message 3 installed.
+        ptk: Option<KeyIdentity>,
+        /// Message 3's IGTK until the link has drained the frames before it.
+        integrity: Option<IntegrityKey>,
         /// The protected-management transport of the IGTK message 3 gave.
         management: Option<Arc<Session>>,
     },
@@ -217,6 +231,9 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
                 }
                 _ => {}
             }
+        }
+        if let Err(message) = self.complete() {
+            self.failed(now, message);
         }
         self.advance(now);
     }
@@ -480,6 +497,8 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
                     bssid: candidate.bssid,
                     deadline: now + HANDSHAKE_TIMEOUT_US,
                     mic_failed: false,
+                    ptk: None,
+                    integrity: None,
                     management: None,
                 }
             }
@@ -527,7 +546,7 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
     }
 
     /// Send a handshake step's reply, then install its keys as
-    /// wpa_supplicant does after message 4, and open the port.
+    /// wpa_supplicant does after message 4.
     fn apply(&mut self, step: Step, bssid: Mac, ptk: Option<KeyIdentity>) -> Result<(), String> {
         if let Some(reply) = step.reply {
             let mut frame = Vec::with_capacity(14 + reply.len());
@@ -539,62 +558,96 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
                 .send_control(&frame, ptk)
                 .map_err(|error| format!("{error}"))?;
         }
-        let epoch = self
-            .link
-            .station()
-            .association_epoch()
-            .ok_or_else(|| String::from("MT7925: the association ended"))?;
-        let mut pairwise = ptk;
-        if let Some(key) = step.pairwise {
-            pairwise = Some(
+        let pairwise = step
+            .pairwise
+            .map(|key| {
                 self.link
                     .install_key(true, key.index, &key.material, key.receive)
-                    .map_err(|error| format!("{error}"))?,
-            );
-        }
+            })
+            .transpose()
+            .map_err(|error| format!("{error}"))?;
         if let Some(key) = step.group {
             self.link
                 .install_key(false, key.index, &key.material, key.receive)
                 .map_err(|error| format!("{error}"))?;
         }
-        match (&mut self.state, step.integrity) {
-            (State::Handshake { management, .. }, Some(key)) => {
-                // SAFETY: this association's authenticated handshake gave
-                // the IGTK, and the link is polled with the device's
-                // interrupts masked, so no earlier key user remains.
-                let session = unsafe {
-                    self.link
-                        .install_management_key(epoch, key.index, &key.material, key.receive)
-                }
-                .map_err(|error| format!("{error}"))?;
-                *management = Some(session);
+        match &mut self.state {
+            State::Handshake { ptk, integrity, .. } => {
+                *ptk = pairwise.or(*ptk);
+                *integrity = step.integrity.or(integrity.take());
             }
-            (State::Connected { .. }, Some(key)) => self.rotate(key)?,
+            State::Connected { ptk, .. } => {
+                *ptk = pairwise.unwrap_or(*ptk);
+                if let Some(key) = step.integrity {
+                    self.rotate(key)?;
+                }
+            }
             _ => {}
         }
-        if let (State::Handshake { .. }, Some(ptk)) = (&self.state, pairwise) {
-            self.link
-                .authorize_port(epoch)
-                .map_err(|error| format!("{error}"))?;
-            let State::Handshake {
-                supplicant,
-                management,
-                ..
-            } = core::mem::replace(&mut self.state, State::Scanning)
-            else {
-                unreachable!("matched above")
-            };
-            self.state = State::Connected {
-                supplicant,
-                bssid,
-                ptk,
-                management,
-                integrity: None,
-            };
-            self.failures = 0;
-        } else if let (State::Connected { ptk, .. }, Some(new)) = (&mut self.state, pairwise) {
-            *ptk = new;
+        self.complete()
+    }
+
+    /// Install message 3's IGTK once the link drained the frames before it,
+    /// message 4 among them, then open the port.
+    fn complete(&mut self) -> Result<(), String> {
+        let State::Handshake {
+            ptk: Some(ptk),
+            integrity,
+            management,
+            ..
+        } = &mut self.state
+        else {
+            return Ok(());
+        };
+        let (ptk, pending, protected) = (*ptk, integrity.take(), management.is_some());
+        let epoch = self
+            .link
+            .station()
+            .association_epoch()
+            .ok_or_else(|| String::from("MT7925: the association ended"))?;
+        let installed = match pending {
+            // SAFETY: this association's authenticated handshake gave the
+            // IGTK, and the link is polled with the device's interrupts
+            // masked, so no earlier key user remains.
+            Some(key) => match unsafe {
+                self.link
+                    .install_management_key(epoch, key.index, &key.material, key.receive)
+            } {
+                Ok(session) => Some(session),
+                Err(error) if deferred(&error) => {
+                    if let State::Handshake { integrity, .. } = &mut self.state {
+                        *integrity = Some(key);
+                    }
+                    return Ok(());
+                }
+                Err(error) => return Err(format!("{error}")),
+            },
+            None => None,
+        };
+        if installed.is_none() && !protected && self.link.station().requires_protected_management()
+        {
+            return Ok(());
         }
+        self.link
+            .authorize_port(epoch)
+            .map_err(|error| format!("{error}"))?;
+        let State::Handshake {
+            supplicant,
+            bssid,
+            management,
+            ..
+        } = core::mem::replace(&mut self.state, State::Scanning)
+        else {
+            unreachable!("matched above")
+        };
+        self.state = State::Connected {
+            supplicant,
+            bssid,
+            ptk,
+            management: installed.or(management),
+            integrity: None,
+        };
+        self.failures = 0;
         Ok(())
     }
 
@@ -618,7 +671,7 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
                 .rotate_management_key(session, key.index, &key.material, key.receive)
         } {
             Ok(session) => *management = Some(session),
-            Err(LinkControlError::Backpressure) => *integrity = Some(key),
+            Err(error) if deferred(&error) => *integrity = Some(key),
             Err(error) => return Err(format!("{error}")),
         }
         Ok(())
