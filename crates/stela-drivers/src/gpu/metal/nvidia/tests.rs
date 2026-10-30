@@ -258,7 +258,7 @@ fn missing_families_name_the_layer_that_lacks_them() {
     let names: alloc::vec::Vec<_> = capabilities
         .gaps()
         .iter()
-        .map(|gap| gap.capability)
+        .map(|gap| gap.capability.as_str())
         .collect();
     let mut unique = names.clone();
     unique.sort_unstable();

@@ -22,6 +22,8 @@ use super::{
 };
 use alloc::{string::String, vec::Vec};
 
+pub mod block;
+
 option_set! {
     /// Shader constructs the AIR → NIR → vendor compiler path lowers with
     /// complete semantics. The compiler reports its own set.
@@ -111,22 +113,23 @@ pub struct Platform {
 }
 
 /// One capability this device does not provide and the layer that lacks it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Gap {
-    pub capability: &'static str,
+    pub capability: String,
     pub cause: Cause,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Cause {
-    /// The Vulkan driver does not report the feature, limit or format.
-    Driver,
-    /// The shader compiler does not lower the required constructs.
-    Compiler,
-    /// This Metal implementation has no path for the API.
-    Api,
-    /// The capability presupposes an Apple GPU architecture.
-    AppleArchitecture,
+raw_enum! {
+    pub enum Cause: u32 {
+        /// The Vulkan driver does not report the feature, limit or format.
+        Driver = 0,
+        /// The shader compiler does not lower the required constructs.
+        Compiler = 1,
+        /// This Metal implementation has no path for the API.
+        Api = 2,
+        /// The capability presupposes an Apple GPU architecture.
+        AppleArchitecture = 3,
+    }
 }
 
 option_set! {
@@ -589,7 +592,10 @@ impl Derivation<'_> {
 
     fn gap(&mut self, capability: &'static str, cause: Cause) {
         if !self.gaps.iter().any(|gap| gap.capability == capability) {
-            self.gaps.push(Gap { capability, cause });
+            self.gaps.push(Gap {
+                capability: String::from(capability),
+                cause,
+            });
         }
     }
 
