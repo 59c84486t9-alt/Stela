@@ -10,10 +10,11 @@ pub struct BareHost<'a> {
     pub(super) _pinned: core::marker::PhantomData<*mut ()>,
 }
 
-/// The parts of the code arena, reclaimed for new code oldest first: the
-/// code of the most recent seven eighths of the run is kept, and only the
-/// oldest eighth's blocks compile again when they next run.
-pub(super) const CODE_UNITS: u64 = 8;
+/// The parts of the code arena, reclaimed oldest first for new code or
+/// for memory: a reclaim costs only the oldest thirty-second's blocks, and
+/// low memory finds an older part to release while the arena is a part
+/// full rather than discarding every block.
+pub(super) const CODE_UNITS: u64 = 32;
 
 pub(super) fn code_unit_bytes(state: &State) -> u64 {
     state.code_bytes / CODE_UNITS / 16 * 16
@@ -268,6 +269,20 @@ impl Host for BareHost<'_> {
         state.installed_ranges[state.code_unit as usize].clear();
         state.code_used = state.code_unit * unit;
         let start = (state.code_virtual + state.code_used) as usize;
+        Some(start..start + unit as usize)
+    }
+
+    fn release_oldest_code(&mut self) -> Option<core::ops::Range<usize>> {
+        let state = state();
+        // The ring fills parts in turn: the first holding code after the
+        // one being filled is the oldest.
+        let part = (1..CODE_UNITS)
+            .map(|step| (state.code_unit + step) % CODE_UNITS)
+            .find(|&part| !state.installed_ranges[part as usize].is_empty())?;
+        state.installed_immutable.clear();
+        state.installed_ranges[part as usize].clear();
+        let unit = code_unit_bytes(state);
+        let start = (state.code_virtual + part * unit) as usize;
         Some(start..start + unit as usize)
     }
 

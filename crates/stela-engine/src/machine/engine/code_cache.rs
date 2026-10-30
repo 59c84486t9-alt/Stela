@@ -194,30 +194,31 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Release local code owners under pressure before allocating compilation
-    /// input and recovery metadata. A ring may return an unused part: advancing
-    /// it alone does not release any template or source witness.
+    /// input and recovery metadata: the oldest arena part's blocks, or every
+    /// block when the part new code fills holds them all.
     ///
     /// Memory another machine or the shared store holds stays low however
     /// much this one releases, so within one stretch of pressure a machine
     /// reclaims again only once it holds as many blocks as it did at its
-    /// last reclaim: its growth stays bounded, and it does not discard all
-    /// it has before every block it installs.
+    /// last reclaim: its growth stays bounded, and it does not release code
+    /// before every block it installs. A machine holding fewer than
+    /// [`MEMORY_RELEASE_BLOCKS`] keeps them: what they free would not
+    /// relieve the heap.
     pub(super) fn reclaim_for_memory(&mut self) {
         if !self.host.memory_low() {
             self.reclaimed_at = None;
             return;
         }
         let live = self.blocks.len() - self.free_blocks.len();
-        if self.reclaimed_at.is_some_and(|held| live < held) {
+        if live < self.memory_release_blocks.max(1)
+            || self.reclaimed_at.is_some_and(|held| live < held)
+        {
             return;
         }
         self.reclaimed_at = Some(live);
-        while !self.blocks.is_empty() && self.host.memory_low() {
-            let retained = self.fault_recovery.len();
-            self.reclaim_code();
-            if !self.blocks.is_empty() && self.fault_recovery.len() == retained {
-                self.discard_code(Discard::Memory);
-            }
+        match self.host.release_oldest_code() {
+            Some(range) => self.evict_code(range),
+            None => self.discard_code(Discard::Memory),
         }
     }
 

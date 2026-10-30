@@ -164,6 +164,14 @@ impl Host for FakeHost {
         };
         Some(range.start * NATIVE_CODE_STRIDE..range.end * NATIVE_CODE_STRIDE)
     }
+    fn release_oldest_code(&mut self) -> Option<core::ops::Range<usize>> {
+        self.ring?;
+        if self.parts.len() < 2 {
+            return None;
+        }
+        let range = self.parts.remove(0);
+        Some(range.start * NATIVE_CODE_STRIDE..range.end * NATIVE_CODE_STRIDE)
+    }
     fn patch(&mut self, code: NativeCode, bytes: &[u8]) {
         self.patches.push((code.0, bytes.to_vec()));
     }
@@ -420,13 +428,16 @@ pub(super) fn board_on<D: Devices>(
         fixed: vec![(registers::encodings::DCZID_EL0, 4)],
         processors,
     };
-    Machine::new(
+    let mut machine = Machine::new(
         Cpu::of(chip, BASE, Pstate::reset(1)),
         host,
         devices,
         profile,
         TargetCpu::Baseline,
-    )
+    );
+    // A few blocks stand for a machine's code under memory pressure.
+    machine.memory_release_blocks = 1;
+    machine
 }
 
 /// Devices whose registers read their own PA's low 32 bits with the
@@ -1954,6 +1965,40 @@ fn pressure_reclaims_metadata_when_the_next_arena_part_is_empty() {
     assert!(machine.fetch_block(base + 2 * FETCH_PAGE, false).is_ok());
     assert_eq!(machine.fault_recovery.len(), 1);
     assert_eq!(machine.index.len(), 1);
+}
+
+#[test]
+fn a_machine_with_few_blocks_keeps_them_under_memory_pressure() {
+    const RET: u32 = 0xd65f_03c0;
+    let mut machine = machine(&vec![RET; 2 * FETCH_PAGE as usize / 4 + 1]);
+    machine.memory_release_blocks = 2;
+    let base = machine.cpu.pc;
+    assert!(machine.fetch_block(base, false).is_ok());
+    machine.host.memory_low = true;
+    // One block frees too little to relieve the heap: it stays.
+    assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
+    assert_eq!(machine.index.len(), 2);
+    assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
+}
+
+#[test]
+fn pressure_releases_the_oldest_arena_part_and_keeps_newer_code() {
+    const RET: u32 = 0xd65f_03c0;
+    let mut machine = machine(&vec![RET; 4 * FETCH_PAGE as usize / 4 + 1]);
+    machine.host.ring = Some(2);
+    let base = machine.cpu.pc;
+    let page = |n: u64| base + n * FETCH_PAGE;
+    // Two parts: the first holds pages 0 and 1, the second page 2.
+    for n in 0..3 {
+        assert!(machine.fetch_block(page(n), false).is_ok());
+    }
+    machine.host.memory_low = true;
+    assert!(machine.fetch_block(page(3), false).is_ok());
+    let mut left: Vec<u64> = machine.index.keys().map(|&(pc, ..)| pc).collect();
+    left.sort_unstable();
+    assert_eq!(left, [page(2), page(3)]);
+    assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
+    assert_eq!(machine.fault_recovery.len(), 2);
 }
 
 #[test]

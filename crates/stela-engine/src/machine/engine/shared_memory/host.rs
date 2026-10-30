@@ -306,6 +306,10 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
         self.native_entry();
         self.local.reclaim_code()
     }
+    fn release_oldest_code(&mut self) -> Option<core::ops::Range<usize>> {
+        self.native_entry();
+        self.local.release_oldest_code()
+    }
     fn memory_low(&self) -> bool {
         self.local.memory_low()
     }

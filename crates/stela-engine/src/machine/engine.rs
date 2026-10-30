@@ -167,6 +167,10 @@ const JUMP_CACHE: usize = 4096;
 /// anyway). Each run that reaches it costs an exit to the engine, which
 /// at 256 caused frequent exits in measured workloads.
 const CHAIN_LIMIT: u64 = 4096;
+/// The fewest blocks a machine releases for low memory: fewer hold too
+/// little metadata to relieve it, and releasing them only compiles them
+/// again (`Machine::memory_release_blocks`).
+const MEMORY_RELEASE_BLOCKS: usize = 4096;
 /// The distinct refusals of one device register and direction reported.
 const DEVICE_REFUSALS_REPORTED: usize = 16;
 /// ISS CV=1 and COND=0b1110, as reported for trapped AArch64 instructions.
@@ -609,6 +613,9 @@ pub struct Machine<H: Host, D: Devices> {
     /// The blocks this machine held when it last reclaimed code for memory,
     /// while memory has stayed low since (`reclaim_for_memory`).
     reclaimed_at: Option<usize>,
+    /// The fewest live blocks it releases for low memory
+    /// ([`MEMORY_RELEASE_BLOCKS`]).
+    memory_release_blocks: usize,
     /// The fault recovery tables of the blocks that have entries, by block
     /// index: where their regions keep guest GPRs out of the frame across a
     /// faultable access, which a native fault applies first. Kept apart
@@ -863,6 +870,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             blocks: table::Table::new(),
             free_blocks: Vec::new(),
             reclaimed_at: None,
+            memory_release_blocks: MEMORY_RELEASE_BLOCKS,
             fault_recovery: BTreeMap::new(),
             native_patches: BTreeMap::new(),
             native_failure: None,

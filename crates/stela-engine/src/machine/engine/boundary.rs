@@ -129,6 +129,13 @@ pub trait Host {
     fn reclaim_code(&mut self) -> Option<core::ops::Range<usize>> {
         None
     }
+    /// Free the oldest part of the code arena that holds code, other than
+    /// the part new code fills, and return the host addresses it held: low
+    /// memory releases the oldest blocks' metadata and keeps the newer
+    /// code. `None` when no other part holds code.
+    fn release_oldest_code(&mut self) -> Option<core::ops::Range<usize>> {
+        None
+    }
     /// Whether the memory the engine's own data takes runs low. Installed
     /// blocks' metadata is most of it, so the engine then reclaims code as
     /// when the code arena fills.
