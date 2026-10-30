@@ -1,9 +1,9 @@
 //! SVE single/double binary arithmetic on normal values, staged per
 //! instruction: the core vector forms ([`emit_core`]) and the immediate,
 //! indexed and reverse forms with FABD and FMULX ([`emit_operand_forms`]).
-//! Half precision and exceptional values use software completion. With DAZ
-//! clear, a normal output with only inexact status implies no denormal
-//! operand.
+//! Half precision runs on AVX512-FP16 and otherwise uses software completion,
+//! as exceptional values do. With DAZ clear, a normal output with only inexact
+//! status implies no S/D denormal operand; Half checks its operands.
 use crate::x86_64::asm::Gpr::{Rax, Rcx};
 use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 
@@ -16,6 +16,7 @@ use crate::{
         sve::floating::arithmetic::{Inputs, Kind, Operand, ResultShape, Source},
     },
     x86_64::{
+        asm::vector_extensions,
         isa::SimdOpcode as Host,
         scalable::{
             load_z_chunk,
@@ -23,8 +24,9 @@ use crate::{
             read_predicate_mask,
         },
         simd::numerical::{
-            ArithmeticOpcode, emit_opcode_to, prepare_vector_input_range,
-            prepare_vector_result_range, rounding_control, vector_exponent_range,
+            ArithmeticOpcode, emit_opcode_to, prepare_half_result_range,
+            prepare_vector_input_range, prepare_vector_result_range, rounding_control,
+            vector_exponent_range,
         },
         sve::floating::classify::guard_active_exception_enables,
     },
@@ -40,10 +42,10 @@ const OLD_DESTINATION: u8 = 7;
 const OUTPUT_SLOT: usize = 0;
 const REPEAT_LOW_DWORD: u8 = 0;
 const REPEAT_SELECTED_DWORD: u8 = 0x55;
+const HALF_LANES_PER_CHUNK: u8 = 8;
+const HALF_LANES_PER_QWORD: u8 = 4;
 const SINGLE_LANES_PER_CHUNK: u8 = 4;
 const DOUBLE_LANES_PER_CHUNK: u8 = 2;
-const SINGLE_SIGN_SHIFT: u8 = 31;
-const DOUBLE_SIGN_SHIFT: u8 = 63;
 const BENIGN_LEFT_EXPONENT_INCREMENT: u32 = 1;
 const MXCSR_INEXACT: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
@@ -54,19 +56,27 @@ fn reject(code: &mut Code, failures: &mut Vec<usize>) {
 }
 
 /// Broadcast `bits` to every lane of `destination`.
-fn broadcast_bits(code: &mut Code, format: Format, bits: u64, destination: u8, target: TargetCpu) {
+pub(super) fn broadcast_bits(
+    code: &mut Code,
+    format: Format,
+    bits: u64,
+    destination: u8,
+    target: TargetCpu,
+) {
     match format {
+        Format::Half => {
+            code.asm().mov_imm32(Rax, bits as u32 * 0x1_0001);
+        }
         Format::Single => {
             code.asm().mov_imm32(Rax, bits as u32);
         }
         Format::Double => {
             code.asm().mov_imm64(Rax, bits);
         }
-        Format::Half => unreachable!("Half remains whole-instruction completion"),
     }
     code.asm()
         .simd(Host::MoveGprQword, destination, Rax, target);
-    if format == Format::Single {
+    if format != Format::Double {
         code.asm().simd_imm(
             Host::ShuffleDword,
             destination,
@@ -107,12 +117,56 @@ fn arithmetic_opcode(operation: BinaryOperation) -> ArithmeticOpcode {
     }
 }
 
-/// The lanes element-sized for `format`, or `None` for Half.
-fn element(format: Format) -> Option<ElementSize> {
+/// The lanes element-sized for `format`, or `None` for Half without its host
+/// instructions.
+pub(super) fn element(format: Format, target: TargetCpu) -> Option<ElementSize> {
     match format {
         Format::Single => Some(ElementSize::Word),
         Format::Double => Some(ElementSize::Doubleword),
-        Format::Half => None,
+        Format::Half => vector_extensions::half_supported(target).then_some(ElementSize::Halfword),
+    }
+}
+
+/// Repeat lane `index` of the Half lanes in `register`.
+pub(super) fn repeat_half_lane(code: &mut Code, register: u8, index: u8, target: TargetCpu) {
+    debug_assert!(index < HALF_LANES_PER_CHUNK);
+    let (shuffle, unpack, lane) = if index < HALF_LANES_PER_QWORD {
+        (Host::ShuffleLowWord, Host::UnpackLowQword, index)
+    } else {
+        (
+            Host::ShuffleHighWord,
+            Host::UnpackHighQword,
+            index - HALF_LANES_PER_QWORD,
+        )
+    };
+    code.asm().simd_imm(
+        shuffle,
+        register,
+        Rm::Xmm(register),
+        lane * REPEAT_SELECTED_DWORD,
+        target,
+    );
+    unpack.register(code, register, register, target);
+}
+
+/// The result range constant for `format`.
+pub(super) fn prepare_result_range(code: &mut Code, format: Format) {
+    if format == Format::Half {
+        prepare_half_result_range(code);
+    } else {
+        prepare_vector_result_range(code);
+    }
+}
+
+/// `operation` on LEFT and RIGHT, in every lane: the caller replaced inactive
+/// ones with benign values.
+fn binary(code: &mut Code, format: Format, operation: BinaryOperation) {
+    let opcode = arithmetic_opcode(operation);
+    if format == Format::Half {
+        vector_extensions::half_writemask(code, HALF_LANES_PER_CHUNK);
+        vector_extensions::half_arithmetic(code, opcode.into(), LEFT, RIGHT);
+    } else {
+        emit_opcode_to(code, format, Shape::Vector128, opcode, LEFT, RIGHT);
     }
 }
 
@@ -227,7 +281,7 @@ pub(crate) fn emit_core(
     pc: GuestAddress,
     target: TargetCpu,
 ) -> Result<bool, CompileError> {
-    let Some(element) = element(operand.format) else {
+    let Some(element) = element(operand.format, target) else {
         return Ok(false);
     };
     let Some((operation, left, right)) = core_inputs(operand) else {
@@ -256,15 +310,8 @@ pub(crate) fn emit_core(
             vector_exponent_range(code, operand.format, Shape::Vector128, input);
             reject(code, &mut failures);
         }
-        emit_opcode_to(
-            code,
-            operand.format,
-            Shape::Vector128,
-            arithmetic_opcode(operation),
-            LEFT,
-            RIGHT,
-        );
-        prepare_vector_result_range(code);
+        binary(code, operand.format, operation);
+        prepare_result_range(code, operand.format);
         vector_exponent_range(code, operand.format, Shape::Vector128, LEFT);
         reject(code, &mut failures);
         merge_inactive(code, operand, chunk, length, target);
@@ -332,7 +379,9 @@ fn load_source(
         Source::ImmediateBits(bits) => broadcast_bits(code, format, bits, destination, target),
         Source::Indexed { register, index } => {
             load_z_chunk(code, register, chunk, destination, length, target);
-            if format == Format::Single {
+            if format == Format::Half {
+                repeat_half_lane(code, destination, index, target);
+            } else if format == Format::Single {
                 debug_assert!(index < SINGLE_LANES_PER_CHUNK);
                 code.asm().simd_imm(
                     Host::ShuffleDword,
@@ -357,18 +406,7 @@ fn load_source(
 /// FPAbs transforms the rounded subtraction result. Active NaNs fail the result
 /// exponent guard before this finite-only sign clear, preserving AH NaN policy.
 fn absolute_result(code: &mut Code, format: Format, target: TargetCpu) {
-    let sign_shift = if format == Format::Single {
-        SINGLE_SIGN_SHIFT
-    } else {
-        DOUBLE_SIGN_SHIFT
-    };
-    let magnitude = if format == Format::Single {
-        u64::from(u32::MAX)
-    } else {
-        u64::MAX
-    } >> 1;
-    debug_assert_eq!(magnitude, (1_u64 << sign_shift) - 1);
-    broadcast_bits(code, format, magnitude, MASK_SCRATCH, target);
+    broadcast_bits(code, format, format.sign_mask() - 1, MASK_SCRATCH, target);
     Host::And.register(code, LEFT, MASK_SCRATCH, target);
 }
 
@@ -384,7 +422,7 @@ pub(in crate::x86_64) fn emit_operand_forms(
     pc: GuestAddress,
     target: TargetCpu,
 ) -> Result<bool, CompileError> {
-    let Some(element) = element(operand.format) else {
+    let Some(element) = element(operand.format, target) else {
         return Ok(false);
     };
     let Some((operation, left, right)) = operand_form_inputs(operand) else {
@@ -399,7 +437,7 @@ pub(in crate::x86_64) fn emit_operand_forms(
     rounding_control(code);
     numerical::install_mxcsr(code, &frame);
     prepare_vector_input_range(code, operand.format);
-    prepare_vector_result_range(code);
+    prepare_result_range(code, operand.format);
     let mut failures = Vec::new();
     for chunk in 0..length.chunks() {
         active_lanes(code, operand, element, chunk, length, features, target);
@@ -410,14 +448,16 @@ pub(in crate::x86_64) fn emit_operand_forms(
             benign_inactive(code, operand.format, LEFT, target);
             benign_inactive(code, operand.format, RIGHT, target);
         }
-        emit_opcode_to(
-            code,
-            operand.format,
-            Shape::Vector128,
-            arithmetic_opcode(operation),
-            LEFT,
-            RIGHT,
-        );
+        if operand.format == Format::Half {
+            // S/D rely on DE; Half operands must be normal before FZ16 can matter.
+            prepare_vector_input_range(code, Format::Half);
+            for input in [LEFT, RIGHT] {
+                vector_exponent_range(code, Format::Half, Shape::Vector128, input);
+                reject(code, &mut failures);
+            }
+            prepare_result_range(code, Format::Half);
+        }
+        binary(code, operand.format, operation);
         vector_exponent_range(code, operand.format, Shape::Vector128, LEFT);
         reject(code, &mut failures);
         if operation == BinaryOperation::AbsoluteDifference {

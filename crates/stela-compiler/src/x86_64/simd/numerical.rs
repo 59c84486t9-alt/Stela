@@ -90,6 +90,17 @@ pub(in crate::x86_64) enum ArithmeticOpcode {
     Divide = 0x5e,
 }
 
+impl From<ArithmeticOpcode> for crate::x86_64::asm::vector_extensions::HalfOpcode {
+    fn from(opcode: ArithmeticOpcode) -> Self {
+        match opcode {
+            ArithmeticOpcode::Add => Self::Add,
+            ArithmeticOpcode::Subtract => Self::Subtract,
+            ArithmeticOpcode::Multiply => Self::Multiply,
+            ArithmeticOpcode::Divide => Self::Divide,
+        }
+    }
+}
+
 impl ArithmeticOpcode {
     const fn float_op(self) -> FloatOp {
         match self {
@@ -1151,7 +1162,7 @@ pub(super) fn prepare_vector_input_range_below(code: &mut Code, format: Format, 
 }
 
 /// [`prepare_vector_result_range`] for Half's word lanes.
-pub(super) fn prepare_half_result_range(code: &mut Code) {
+pub(in crate::x86_64) fn prepare_half_result_range(code: &mut Code) {
     packed(
         code,
         Host::EqualDword,
