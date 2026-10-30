@@ -1,5 +1,6 @@
 //! SME integer outer products.
 use crate::x86_64::asm::BitTest;
+use crate::x86_64::asm::vector_extensions::ByteDot;
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, Size};
 use crate::x86_64::simd::encode::stack;
 use crate::{
@@ -108,10 +109,18 @@ fn patch_relative(code: &mut Code, immediate: usize, destination: usize) {
     code.patch(immediate, displacement.to_le_bytes());
 }
 
+/// Stage `vector`'s chunks on the stack, zeroing elements inactive in
+/// `predicate`, and flipping each byte's sign bit with the [`ByteDot::bias`]
+/// in register `flip`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument selects one independent staging property"
+)]
 fn stage_vector(
     code: &mut Code,
     vector: u8,
     predicate: Option<u8>,
+    flip: Option<u8>,
     source: ElementSize,
     offset: usize,
     length: VectorLength,
@@ -130,6 +139,9 @@ fn stage_vector(
                 target,
             );
             Host::And.register(code, RESULT, TEMP, target);
+        }
+        if let Some(bias) = flip {
+            ByteDot::flip(code, RESULT, bias);
         }
         stack_chunk(
             code,
@@ -277,21 +289,35 @@ pub(crate) fn emit_outer(
         }
         _ => operand.accumulator_size,
     };
+    // VNNI multiplies a broadcast row of N by each column chunk of M. A
+    // biased recipe flips M as it is staged and corrects each row once.
+    let dot = match operand.kind {
+        OuterKind::Multiply {
+            signed_n, signed_m, ..
+        } if source_size == ElementSize::Byte => ByteDot::new([signed_n, signed_m], target),
+        _ => None,
+    };
+    let biased = dot.is_some_and(ByteDot::biased);
     code.asm().reserve_stack(stack_bytes);
     stage_vector(
         code,
         operand.vector_n,
         multiply.then_some(operand.predicate_n),
+        None,
         source_size,
         0,
         length,
         target,
     );
+    if biased {
+        ByteDot::bias(code, SAVED);
+    }
     if let Some(vector_m) = operand.vector_m {
         stage_vector(
             code,
             vector_m,
             multiply.then_some(operand.predicate_m),
+            biased.then_some(SAVED),
             source_size,
             length.bytes(),
             length,
@@ -350,8 +376,17 @@ pub(crate) fn emit_outer(
             },
             target,
         );
-        if let OuterKind::Multiply { signed_n, .. } = operand.kind
+        if let Some(dot) = dot
+            && biased
+        {
+            // XMM5 holds the negated correction for every chunk of the row.
+            Host::Xor.register(code, HIGH, HIGH, target);
+            dot.correction(code, HIGH, ROW, SAVED);
+            Host::Xor.register(code, WORK, WORK, target);
+            Host::SubDword.register(code, WORK, HIGH, target);
+        } else if let OuterKind::Multiply { signed_n, .. } = operand.kind
             && source_size == ElementSize::Byte
+            && dot.is_none()
         {
             extend_row_bytes(code, signed_n, target);
         }
@@ -373,7 +408,15 @@ pub(crate) fn emit_outer(
                 signed_n,
                 signed_m,
             } => {
-                if source_size == ElementSize::Byte {
+                if let Some(dot) = dot {
+                    stack_chunk(code, SCRATCH, length.bytes() + offset, false, target);
+                    if biased {
+                        Host::MoveAligned.register(code, RESULT, WORK, target);
+                    } else {
+                        Host::Xor.register(code, RESULT, RESULT, target);
+                    }
+                    dot.accumulate(code, RESULT, [ROW, SCRATCH], 1);
+                } else if source_size == ElementSize::Byte {
                     stack_chunk(code, RESULT, length.bytes() + offset, false, target);
                     byte_dot(code, signed_m, target);
                 } else {

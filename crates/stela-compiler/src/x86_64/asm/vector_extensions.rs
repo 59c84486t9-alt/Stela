@@ -128,60 +128,73 @@ pub(crate) fn byte_dot_supported(target: TargetCpu) -> bool {
         && !target.data_independent_timing()
 }
 
-/// Set each dword of `sum` to the wrapping sum of the four products of the
-/// bytes in that dword of each `[left, right]` pair, each operand's bytes
-/// signed as `signed` says (SDOT, UDOT, USDOT, SUDOT and the matrix forms).
-/// Callers add the old destination afterwards, so a chain of accumulations
-/// waits on one PADDD rather than on the multiply. AVX-VNNI-INT8 has every
-/// signedness. VPDPBUSD multiplies unsigned by signed bytes; for equal
-/// signedness it flips the sign bit of one operand in place,
-/// (a ^ 0x80) - 0x80 = a, and subtracts the 128-fold byte sum of the other,
-/// collected in `scratch[1]` with the 0x80 bytes in `scratch[0]`.
-pub(crate) fn byte_dot(
-    code: &mut Code,
-    sum: u8,
-    pairs: &[[u8; 2]],
+/// The host instruction behind a [`ByteDot`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DotForm {
+    /// AVX-VNNI-INT8: VPDPBUUD, VPDPBSUD or VPDPBSSD.
+    Int8,
+    /// AVX-VNNI's VEX VPDPBUSD.
+    Vex,
+    /// AVX-512 VNNI's EVEX.128 VPDPBUSD.
+    Evex,
+}
+
+/// A byte dot product recipe: each dword gains the wrapping sum of the four
+/// products of its bytes in a left and a right operand, each signed as the
+/// recipe's signedness says. VPDPBUSD multiplies unsigned by signed bytes, so
+/// equal signedness without AVX-VNNI-INT8 is [`Self::biased`]: one operand's
+/// sign bits are flipped, (x ^ 0x80) - 0x80 = x, and a correction from the
+/// other operand's byte sum is subtracted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ByteDot {
     signed: [bool; 2],
-    scratch: [u8; 2],
-    target: TargetCpu,
-) -> bool {
-    if !byte_dot_supported(target) {
-        return false;
-    }
-    if target.supports(TargetCpu::AvxVnniInt8) {
-        // VEX.pp names the signedness: VPDPBUUD, VPDPBSUD (signed first
-        // source), VPDPBSSD.
-        let pp = match signed {
-            [false, false] => Pp::None,
-            [true, true] => Pp::Pf2,
-            _ => Pp::Pf3,
-        };
-        code.asm()
-            .simd(Host::Xor, sum, Rm::Xmm(sum), TargetCpu::Baseline);
-        for &[left, right] in pairs {
-            let [first, second] = if signed == [false, true] {
-                [right, left]
-            } else {
-                [left, right]
-            };
-            code.asm().vex(
-                Vex {
-                    map: Map::M0f38,
-                    pp,
-                    w: false,
-                    l: false,
-                },
-                0x50,
-                sum,
-                first,
-                Rm::Xmm(second),
-            );
+    form: DotForm,
+}
+
+impl ByteDot {
+    /// The recipe for `signed` operands on `target`, if it has one.
+    pub(crate) fn new(signed: [bool; 2], target: TargetCpu) -> Option<Self> {
+        if !byte_dot_supported(target) {
+            return None;
         }
-        return true;
+        let form = if target.supports(TargetCpu::AvxVnniInt8) {
+            DotForm::Int8
+        } else if target.supports(TargetCpu::AvxVnni) {
+            DotForm::Vex
+        } else {
+            DotForm::Evex
+        };
+        Some(Self { signed, form })
     }
-    // VPDPBUSD: VEX.vvvv or EVEX.vvvv names the unsigned bytes.
-    let unsigned_by_signed = |code: &mut Code, into: u8, unsigned: u8, signed: u8| {
-        if target.supports(TargetCpu::AvxVnni) {
+
+    /// Whether one operand is flipped and the result corrected.
+    pub(crate) fn biased(self) -> bool {
+        self.form != DotForm::Int8 && self.signed[0] == self.signed[1]
+    }
+
+    /// 0x80 in every byte of `xmm`: all-ones words shifted to 0x8000
+    /// saturate to 0x80 bytes.
+    pub(crate) fn bias(code: &mut Code, xmm: u8) {
+        code.asm()
+            .simd(Host::EqualByte, xmm, Rm::Xmm(xmm), TargetCpu::Baseline);
+        Shift::LeftWord.emit(code, xmm, 15);
+        code.asm().simd(
+            Host::PackSignedWordToByte,
+            xmm,
+            Rm::Xmm(xmm),
+            TargetCpu::Baseline,
+        );
+    }
+
+    /// Flip the sign bit of each byte of `xmm` with [`Self::bias`] `bias`.
+    pub(crate) fn flip(code: &mut Code, xmm: u8, bias: u8) {
+        code.asm()
+            .simd(Host::Xor, xmm, Rm::Xmm(bias), TargetCpu::Baseline);
+    }
+
+    /// VPDPBUSD, `unsigned` bytes by `signed` bytes, into `sum`.
+    fn unsigned_by_signed(self, code: &mut Code, sum: u8, unsigned: u8, signed: u8) {
+        if self.form == DotForm::Vex {
             code.asm().vex(
                 Vex {
                     map: Map::M0f38,
@@ -190,7 +203,7 @@ pub(crate) fn byte_dot(
                     l: false,
                 },
                 0x50,
-                into,
+                sum,
                 unsigned,
                 Rm::Xmm(signed),
             );
@@ -207,26 +220,93 @@ pub(crate) fn byte_dot(
                     scale: 16,
                 },
                 0x50,
-                into,
+                sum,
                 unsigned,
                 Rm::Xmm(signed),
             );
         }
+    }
+
+    /// Add to `sum` the dot products of `[left, right]`. A biased recipe
+    /// expects operand `flipped` (0 or 1) to have been flipped.
+    pub(crate) fn accumulate(
+        self,
+        code: &mut Code,
+        sum: u8,
+        [left, right]: [u8; 2],
+        flipped: usize,
+    ) {
+        if self.form == DotForm::Int8 {
+            // VEX.pp names the signedness: VPDPBUUD, VPDPBSUD (signed first
+            // source), VPDPBSSD.
+            let (pp, [first, second]) = match self.signed {
+                [false, false] => (Pp::None, [left, right]),
+                [true, true] => (Pp::Pf2, [left, right]),
+                [true, false] => (Pp::Pf3, [left, right]),
+                [false, true] => (Pp::Pf3, [right, left]),
+            };
+            code.asm().vex(
+                Vex {
+                    map: Map::M0f38,
+                    pp,
+                    w: false,
+                    l: false,
+                },
+                0x50,
+                sum,
+                first,
+                Rm::Xmm(second),
+            );
+            return;
+        }
+        let operands = [left, right];
+        // A flipped signed operand becomes unsigned, a flipped unsigned one
+        // signed; otherwise each keeps its own signedness.
+        let unsigned = match self.signed {
+            [true, true] => flipped,
+            [false, false] => 1 - flipped,
+            [left_signed, _] => usize::from(left_signed),
+        };
+        self.unsigned_by_signed(code, sum, operands[unsigned], operands[1 - unsigned]);
+    }
+
+    /// Add to `correction` what the flip of a biased recipe adds to every
+    /// product sum, from the unflipped operand `other` and [`Self::bias`]
+    /// `bias`: 128 times its byte sum for signed operands, as
+    /// (x + 128)·y - 128·y = x·y, and -128 times it for unsigned ones, as
+    /// x·(y - 128) + 128·x = x·y. Subtracting it completes the dot products.
+    pub(crate) fn correction(self, code: &mut Code, correction: u8, other: u8, bias: u8) {
+        debug_assert!(self.biased());
+        if self.signed[0] {
+            self.unsigned_by_signed(code, correction, bias, other);
+        } else {
+            self.unsigned_by_signed(code, correction, other, bias);
+        }
+    }
+}
+
+/// Set each dword of `sum` to the wrapping sum of the four products of the
+/// bytes in that dword of each `[left, right]` pair, each operand's bytes
+/// signed as `signed` says (SDOT, UDOT, USDOT, SUDOT and the matrix forms).
+/// Callers add the old destination afterwards, so a chain of accumulations
+/// waits on one PADDD rather than on the multiply. A [`ByteDot::biased`]
+/// recipe flips each left operand in place, with the bias in `scratch[0]` and
+/// the correction collected in `scratch[1]`.
+pub(crate) fn byte_dot(
+    code: &mut Code,
+    sum: u8,
+    pairs: &[[u8; 2]],
+    signed: [bool; 2],
+    scratch: [u8; 2],
+    target: TargetCpu,
+) -> bool {
+    let Some(dot) = ByteDot::new(signed, target) else {
+        return false;
     };
     let [bias, correction] = scratch;
-    if signed[0] == signed[1] {
-        // All-ones words shifted to 0x8000 saturate to 0x80 bytes.
-        let mut asm = code.asm();
-        asm.simd(Host::EqualByte, bias, Rm::Xmm(bias), TargetCpu::Baseline);
-        Shift::LeftWord.emit(code, bias, 15);
-        let mut asm = code.asm();
-        asm.simd(
-            Host::PackSignedWordToByte,
-            bias,
-            Rm::Xmm(bias),
-            TargetCpu::Baseline,
-        );
-        asm.simd(
+    if dot.biased() {
+        ByteDot::bias(code, bias);
+        code.asm().simd(
             Host::Xor,
             correction,
             Rm::Xmm(correction),
@@ -236,26 +316,13 @@ pub(crate) fn byte_dot(
     code.asm()
         .simd(Host::Xor, sum, Rm::Xmm(sum), TargetCpu::Baseline);
     for &[left, right] in pairs {
-        match signed {
-            [false, true] => unsigned_by_signed(code, sum, left, right),
-            [true, false] => unsigned_by_signed(code, sum, right, left),
-            [true, true] => {
-                // a·b = (a + 128)·b - 128·b.
-                unsigned_by_signed(code, correction, bias, right);
-                code.asm()
-                    .simd(Host::Xor, left, Rm::Xmm(bias), TargetCpu::Baseline);
-                unsigned_by_signed(code, sum, left, right);
-            }
-            [false, false] => {
-                // a·b = a·(b - 128) + 128·a, and 0x80 is -128 signed.
-                unsigned_by_signed(code, correction, left, bias);
-                code.asm()
-                    .simd(Host::Xor, right, Rm::Xmm(bias), TargetCpu::Baseline);
-                unsigned_by_signed(code, sum, left, right);
-            }
+        if dot.biased() {
+            dot.correction(code, correction, right, bias);
+            ByteDot::flip(code, left, bias);
         }
+        dot.accumulate(code, sum, [left, right], 0);
     }
-    if signed[0] == signed[1] {
+    if dot.biased() {
         code.asm().simd(
             Host::SubDword,
             sum,
@@ -530,6 +597,9 @@ pub(crate) mod execution {
         }
     }
 }
+
+#[cfg(test)]
+mod scalable_tests;
 
 #[cfg(test)]
 mod tests {
