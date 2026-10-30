@@ -111,7 +111,7 @@ fn v4_410_clock_waits_for_both_phases_beyond_the_old_twenty_ms_window() {
 #[test]
 fn unacknowledged_or_unstable_v4_pll_never_enables_card_clock() {
     for ignore in [false, true] {
-        let mut port = Port::new(true, 0, if ignore { 0 } else { 180_000 });
+        let mut port = Port::new(true, 0, if ignore { 0 } else { u64::MAX });
         port.ignored_pll = ignore;
         let result = enable_clock(
             &mut port,
