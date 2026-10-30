@@ -74,7 +74,7 @@ pub fn translator_id() -> Digest {
 pub const ENGINE_SOURCE_SHA256: &str = env!("STELA_ENGINE_SOURCE_SHA256");
 
 /// The address class of a page: bits 47..63 of its address.
-pub fn address_class(page: u64) -> u64 {
+pub const fn address_class(page: u64) -> u64 {
     page >> CLASS_SHIFT
 }
 

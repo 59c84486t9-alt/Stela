@@ -39,7 +39,15 @@ pub struct Preparation {
     /// The PE has SME, and PSTATE.SM.
     scalable: Option<bool>,
     system: NativeSystem,
+    /// [`Self::context`] of the lower and upper halves' address classes,
+    /// which every fetch page lies in: each install of a block prepared
+    /// elsewhere checks it.
+    contexts: [Digest; 2],
 }
+
+/// The address classes of the lower and upper halves of a 48-bit address
+/// space.
+const HALVES: [u64; 2] = [0, translations::address_class(u64::MAX)];
 
 /// The inputs of a [`Preparation`], serializable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -93,7 +101,7 @@ impl Preparation {
         scalable: Option<bool>,
         system: NativeSystem,
     ) -> Self {
-        Self {
+        let mut preparation = Self {
             chip,
             admit,
             target,
@@ -101,7 +109,10 @@ impl Preparation {
             checks,
             scalable,
             system,
-        }
+            contexts: [Digest::default(); 2],
+        };
+        preparation.contexts = HALVES.map(|class| preparation.describe(class));
+        preparation
     }
 
     /// What decides this preparation, for another process to make it again
@@ -153,6 +164,14 @@ impl Preparation {
     /// `page`: everything besides their bytes and offset that shapes their
     /// compilation (`docs/design/runtime.md#persistent-translation-store`).
     pub fn context(&self, page: u64) -> Digest {
+        let class = translations::address_class(page);
+        match HALVES.iter().position(|&half| half == class) {
+            Some(half) => self.contexts[half],
+            None => self.describe(class),
+        }
+    }
+
+    fn describe(&self, class: u64) -> Digest {
         let Self {
             chip,
             admit,
@@ -161,12 +180,12 @@ impl Preparation {
             checks,
             scalable,
             system,
+            contexts: _,
         } = self;
         let described = format!(
             "chip {chip:?} withheld {:#x} target {target:?} fp {fp} checks {checks:?} scalable {scalable:?} \
-             system {system:?} class {:#x}",
+             system {system:?} class {class:#x}",
             admit.withheld(),
-            translations::address_class(page)
         );
         Digest::of(described.as_bytes())
     }
