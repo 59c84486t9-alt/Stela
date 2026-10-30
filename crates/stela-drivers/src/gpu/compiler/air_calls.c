@@ -460,13 +460,20 @@ typed_arguments(LLVMValueRef call)
    return false;
 }
 
-/* Replaces each call through pointer, a table's, with a dispatch of handle. */
+/* Replaces each call through pointer, a table's, with a dispatch of handle;
+ * a bitcast of the pointer to its own type, which Apple's compiler emits
+ * before the call, is the pointer. */
 static bool
 dispatch_calls(struct dispatching *d, LLVMValueRef pointer, LLVMValueRef handle)
 {
    LLVMUseRef use;
    while ((use = LLVMGetFirstUse(pointer))) {
       LLVMValueRef call = LLVMGetUser(use);
+      if (LLVMIsABitCastInst(call) && LLVMTypeOf(call) == LLVMTypeOf(pointer)) {
+         LLVMReplaceAllUsesWith(call, pointer);
+         LLVMInstructionEraseFromParent(call);
+         continue;
+      }
       unsigned arguments = LLVMIsACallInst(call) ? LLVMGetNumArgOperands(call) : 0;
       bool callee = LLVMIsACallInst(call) && LLVMGetCalledValue(call) == pointer;
       for (unsigned i = 0; callee && i < arguments; i++)

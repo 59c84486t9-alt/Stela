@@ -307,6 +307,9 @@ static const char *calls =
    " !\"x\"}\n"
 
 static const char *tables = TABLES("%v = call i32 %f(i32 %tid)\n");
+/* A call through a bitcast of the pointer to its own type, as Apple's
+ * compiler emits it. */
+static const char *recast = TABLES("%g = bitcast ptr %f to ptr\n%v = call i32 %g(i32 %tid)\n");
 /* A table's pointer used as other than a callee. */
 static const char *escaping = TABLES("%v = ptrtoint ptr %f to i32\n");
 /* The library linked with it: the external function and two visible
@@ -994,6 +997,9 @@ linked_functions_resolve_tables_and_externals(void)
    nir_shader *shader = compile_linked(tables, "tables", &linked, 1, functions, 3, &error);
    if (!shader)
       fprintf(stderr, "tables: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   stela_metal_release(shader);
+   shader = compile_linked(recast, "tables", &linked, 1, functions, 3, &error);
    assert(shader);
    stela_metal_release(shader);
 
