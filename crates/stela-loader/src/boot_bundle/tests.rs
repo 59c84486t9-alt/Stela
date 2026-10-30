@@ -45,7 +45,7 @@ fn ordered_region_fixture(optional_images: bool) -> Vec<Region> {
 }
 
 #[test]
-fn sptm_order_accepts_optional_images_at_any_address_and_a_trailing_payload() -> Result<()> {
+fn sptm_order_accepts_optional_images_at_any_address() -> Result<()> {
     for optional_images in [false, true] {
         let mut regions = ordered_region_fixture(optional_images);
         validate_sptm_region_order(&regions)?;
@@ -53,31 +53,31 @@ fn sptm_order_accepts_optional_images_at_any_address_and_a_trailing_payload() ->
         for region in &mut regions {
             region.guest_pa += 7 * PAGE;
         }
-        let last = regions.last().unwrap();
-        let mut trailing = last.clone();
-        trailing.name = "BootManifest".into();
-        trailing.guest_pa = last.guest_pa + last.memory_bytes;
-        regions.push(trailing);
         validate_sptm_region_order(&regions)?;
     }
     Ok(())
 }
 
 #[test]
-fn sptm_order_rejects_a_payload_in_the_physical_slide() {
+fn the_physical_slide_admits_carveouts_below_it_but_no_region_in_it() -> Result<()> {
     let mut regions = ordered_region_fixture(false);
+    let phys_base = regions[0].guest_pa;
     for region in &mut regions {
-        region.guest_pa += PAGE;
+        region.guest_pa += 2 * PAGE;
     }
-    let mut prefix = regions[0].clone();
-    prefix.name = "BootManifest".into();
-    prefix.guest_pa -= PAGE;
-    regions.insert(0, prefix);
-    let error = validate_sptm_region_order(&regions)
+    validate_physical_slide(&regions, phys_base)?;
+    let mut carveout = regions[0].clone();
+    carveout.name = "BootManifest".into();
+    carveout.guest_pa = phys_base - PAGE;
+    regions.insert(0, carveout);
+    validate_physical_slide(&regions, phys_base)?;
+    regions[0].guest_pa = phys_base + PAGE;
+    let error = validate_physical_slide(&regions, phys_base)
         .unwrap_err()
         .to_string();
     assert!(error.contains("BootManifest"), "{error}");
     assert!(error.contains("physical slide"), "{error}");
+    Ok(())
 }
 
 #[test]
@@ -777,8 +777,8 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     assert_eq!(
         (REVISION, prepared_digest(&bundle)?),
         (
-            31,
-            "b35ee1dea9358b5e1031fd5a3887b791e4e46daa697e429901b2de21574321f2".to_owned()
+            32,
+            "b284eebb93b9c998316d910cf9af9dbe3b121bb9312c4497a5fd2dffba9f99e4".to_owned()
         )
     );
     let original = bundle
@@ -849,10 +849,14 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     inputs.board_firmware = supplied;
     let manifest = &bundle.manifest;
     let names: Vec<_> = manifest.regions.iter().map(|r| r.name.as_str()).collect();
-    let expected: Vec<_> = REGION_ORDER
-        .iter()
-        .copied()
-        .filter(|n| !["SEPFW", lock_regs::CL4_DUMMY_PAGE].contains(n))
+    // The manifest's carveout lies below the loaded images.
+    let expected: Vec<_> = core::iter::once("BootManifest")
+        .chain(
+            REGION_ORDER
+                .iter()
+                .copied()
+                .filter(|n| !["SEPFW", lock_regs::CL4_DUMMY_PAGE].contains(n)),
+        )
         .collect();
     assert_eq!(names, expected);
     // The M1 to M3 hand off no core lock registers.
@@ -896,13 +900,14 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
             .value,
         im4m::sha384(original_manifest),
     );
-    // Above SPTM's physical slide, which XNU allocates from, and below
-    // topOfKernelData.
-    assert_eq!(manifest.regions[0].name, "TXM-ro");
-    assert!(
-        manifest_region.guest_pa + manifest_region.memory_bytes
-            <= manifest.boot_args.top_of_kernel_data
-    );
+    // In iBoot's loaded-object carveout, outside the memory SPTM gives XNU.
+    let loaded_objects = manifest
+        .carveouts
+        .iter()
+        .find(|c| c.id == carveouts::LOADED_OBJECTS)
+        .unwrap();
+    assert_eq!(manifest_region.guest_pa, loaded_objects.base);
+    assert!(manifest_region.memory_bytes <= loaded_objects.bytes);
     // Regions are page-aligned, ascending and non-overlapping.
     for pair in manifest.regions.windows(2) {
         assert!(pair[0].guest_pa + pair[0].memory_bytes <= pair[1].guest_pa);
@@ -923,7 +928,13 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     assert_eq!(phys_base, 0x8_0200_0000);
     assert_eq!(manifest.boot_args.phys_base, phys_base);
     assert_eq!(manifest.boot_args.mem_size, 0xa_0000_0000 - phys_base);
-    assert!(manifest.regions[0].guest_pa >= phys_base);
+    assert!(
+        manifest
+            .regions
+            .iter()
+            .filter(|r| r.name != "BootManifest")
+            .all(|r| r.guest_pa >= phys_base)
+    );
     assert!(
         manifest
             .carveouts
@@ -1028,9 +1039,7 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
         args.device_tree_length as usize,
         file(DEVICE_TREE_FILE).len()
     );
-    let last = manifest.regions.last().unwrap();
-    assert_eq!(last.name, "BootManifest");
-    assert_eq!(args.top_of_kernel_data, last.guest_pa + last.memory_bytes);
+    assert_eq!(args.top_of_kernel_data, region("BootArgs").guest_pa + PAGE);
     assert_eq!(args.command_line, "-v");
 
     // Every patch addresses its prepared bytes in its file.
@@ -1156,6 +1165,18 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     let m4_bundle = prepare(&inputs, &m4_options)?;
     inputs.target.chip_id = Some(0x8142);
     let m5_bundle = prepare(&inputs, &m4_options)?;
+    // The M6 places no loaded-object carveout, so its manifest goes
+    // unpublished, and says so.
+    inputs.target.chip_id = Some(0x8152);
+    inputs.boot_manifest = Some(input(leak(boot_manifest()), "BootManifest"));
+    let m6_manifest = prepare(&inputs, &m4_options)?.manifest;
+    assert!(m6_manifest.regions.iter().all(|r| r.name != "BootManifest"));
+    assert!(
+        m6_manifest
+            .unresolved
+            .iter()
+            .any(|u| u.contains("loaded-object carveout 0x4c"))
+    );
     (inputs.target, inputs.device_tree.bytes) = m2;
     inputs.boot_manifest = m2_manifest;
     let m4_manifest = &m4_bundle.manifest;
@@ -1205,10 +1226,13 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     let staged = prepare(&inputs, &options)?;
     inputs.sep_firmware = None;
     let names: Vec<_> = staged.manifest.regions.iter().map(|r| &*r.name).collect();
-    let expected: Vec<_> = REGION_ORDER
-        .iter()
-        .copied()
-        .filter(|n| *n != lock_regs::CL4_DUMMY_PAGE)
+    let expected: Vec<_> = core::iter::once("BootManifest")
+        .chain(
+            REGION_ORDER
+                .iter()
+                .copied()
+                .filter(|n| *n != lock_regs::CL4_DUMMY_PAGE),
+        )
         .collect();
     assert_eq!(names, expected);
     let sepfw = staged

@@ -56,6 +56,12 @@ pub use stela_formats::boot_bundle::schema::Placed;
 use stela_soc_data::board;
 
 pub const MEMORY_MAP: &str = "/chosen/carveout-memory-map";
+/// iBoot's loaded-object state, which holds the manifests
+/// `/chosen/boot-object-manifests` names: 26A434 J473 iBEC looks the region
+/// up (0xe7fc4), checks its header (magic 0x686d6674), and its publisher
+/// (0xe8c2c) gives each record's manifest as an address inside it. Being a
+/// carveout, it lies outside the memory SPTM types for XNU.
+pub const LOADED_OBJECTS: u16 = 0x4c;
 const SGX: &str = "/arm-io/sgx";
 /// The node whose `reg` names the panic region.
 pub const PRAM: &str = "/pram";

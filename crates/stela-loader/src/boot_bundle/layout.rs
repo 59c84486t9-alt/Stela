@@ -186,7 +186,7 @@ impl Shaped {
         shaped
             .unresolved
             .extend(platform_gaps(&shaped.tree, inputs));
-        shaped.boot_manifest_object = shaped.boot_manifest_object(inputs, options)?;
+        shaped.boot_manifest_object = shaped.boot_manifest_object(inputs, options, carveouts)?;
         Ok(shaped)
     }
 
@@ -331,13 +331,22 @@ impl Shaped {
     /// The boot manifest's object, reserved in the tree: the IM4M boot
     /// policy selected, unchanged. The payload tag belongs to the source
     /// input, not a guessed iBoot identity or name. A tethered restore loads
-    /// the IPSW's firmware under the same ticket.
+    /// the IPSW's firmware under the same ticket. A SoC whose loaded-object
+    /// carveout is not placed publishes none ([`boot_manifest_region`]).
     pub(super) fn boot_manifest_object(
         &mut self,
         inputs: &Inputs,
         options: &Options,
+        carveouts: &[Placed],
     ) -> Result<Option<boot_manifests::Object>> {
         let restore = options.boot_command == Some(handoff::BootCommand::TetheredRestore);
+        let id = carveouts::LOADED_OBJECTS;
+        if inputs.boot_manifest.is_some() && !carveouts.iter().any(|carveout| carveout.id == id) {
+            self.unresolved.push(format!(
+                "/chosen/boot-object-manifests: iBoot's loaded-object carveout {id:#x} is not                  placed on this SoC, so the boot manifest is not published"
+            ));
+            return Ok(None);
+        }
         let object = inputs
             .boot_manifest
             .as_ref()
@@ -392,15 +401,6 @@ pub(super) fn contents(
                 trust_cache.len() as u64,
                 page_round(trust_cache.len() as u64),
             ),
-            "BootManifest" => match &inputs.boot_manifest {
-                Some(manifest) => content(
-                    name,
-                    BOOT_MANIFEST_FILE,
-                    manifest.bytes.len() as u64,
-                    page_round(manifest.bytes.len() as u64),
-                ),
-                None => continue,
-            },
             "DeviceTree" => content(name, DEVICE_TREE_FILE, 0, 0),
             "RAMDisk" => match ramdisk_bytes {
                 Some(bytes) => content(name, RAMDISK_FILE, bytes as u64, page_round(bytes as u64)),
@@ -534,6 +534,33 @@ pub(super) fn place(contents: Vec<Content>, load_base: u64) -> Result<(Vec<Regio
     Ok((regions, cursor))
 }
 
+/// The original boot manifest at the start of iBoot's loaded-object
+/// carveout, where iBoot keeps the manifests it publishes
+/// ([`carveouts::LOADED_OBJECTS`]). Its state header is not reproduced.
+pub(super) fn boot_manifest_region(carveouts: &[Placed], bytes: u64) -> Result<Region> {
+    let id = carveouts::LOADED_OBJECTS;
+    let carveout = carveouts
+        .iter()
+        .find(|carveout| carveout.id == id)
+        .ok_or(refuse!("no loaded-object carveout {id:#x}", id))?;
+    require!(
+        page_round(bytes) <= carveout.bytes,
+        "a {bytes:#x}-byte boot manifest exceeds the {carveout_bytes:#x}-byte loaded-object carveout",
+        bytes,
+        carveout_bytes = carveout.bytes
+    );
+    Ok(Region {
+        name: BOOT_MANIFEST_REGION.into(),
+        file: BOOT_MANIFEST_FILE.into(),
+        file_offset: 0,
+        bytes,
+        guest_pa: carveout.base,
+        memory_bytes: page_round(bytes),
+        sha256: String::new(),
+        virtual_address: None,
+    })
+}
+
 /// The placed regions and the auxiliary entries in `/chosen/memory-map`.
 pub(super) fn fill_memory_map(
     tree: &mut DeviceTree,
@@ -543,7 +570,8 @@ pub(super) fn fill_memory_map(
     load_base: u64,
 ) -> Result<()> {
     let memory_map = tree.node_mut(MEMORY_MAP).ok_or(refuse!("memory-map"))?;
-    for region in regions {
+    // The manifest lies in a carveout, which only the carveout map names.
+    for region in regions.iter().filter(|r| r.name != BOOT_MANIFEST_REGION) {
         memory_map.set_property(
             &region.name,
             range_value(region.guest_pa, region.memory_bytes),

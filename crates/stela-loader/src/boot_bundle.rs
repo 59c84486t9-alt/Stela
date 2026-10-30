@@ -55,7 +55,7 @@ use patches::*;
 
 /// The revision of the content [`prepare`] writes within its schema; a
 /// bundle of another revision is prepared again (`stela setup update stela`).
-pub const REVISION: u32 = 31;
+pub const REVISION: u32 = 32;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -232,9 +232,6 @@ const REGION_ORDER: &[&str] = &[
     "RAMDisk",
     "SEPFW",
     "BootArgs",
-    // A range SPTM does not name: after its image sequence, and below
-    // topOfKernelData, under which XNU allocates nothing.
-    "BootManifest",
 ];
 
 /// Independent handoff contract: SPTM's validate_region_order table, raw
@@ -295,21 +292,29 @@ fn validate_sptm_region_order(regions: &[Region]) -> Result<()> {
         }
         previous = Some((name, end));
     }
-    // SPTM hands XNU physBase up to TXM-ro as free memory (`PHYS_SLIDE`,
-    // registered at raw 0xc7da0), so nothing loaded may lie below TXM-ro.
+    Ok(())
+}
+
+/// SPTM gives XNU the physical slide, physBase up to the first image, as
+/// free memory (`PHYS_SLIDE`, registered at raw 0xba7dc of 26A434's SPTM):
+/// no region may lie in it.
+fn validate_physical_slide(regions: &[Region], phys_base: u64) -> Result<()> {
     let first = SPTM_REGION_ORDER[0].0;
-    let Some(sequence) = regions.iter().find(|region| region.name == first) else {
-        return Ok(());
-    };
+    let start = regions
+        .iter()
+        .find(|region| region.name == first)
+        .ok_or_else(|| refuse!("physical slide: missing region {first}", first))?
+        .guest_pa;
     for region in regions {
+        let end = region.guest_pa.saturating_add(region.memory_bytes);
         require!(
-            region.guest_pa >= sequence.guest_pa,
-            "SPTM region order: {name} at {start:#x} lies below {first} at {sequence_start:#x}, \
-             in the physical slide SPTM gives XNU as free memory",
+            end <= phys_base || region.guest_pa >= start,
+            "{name} at {guest_pa:#x} lies in the physical slide {phys_base:#x}..{start:#x}, \
+             which SPTM gives XNU as free memory",
             name = region.name,
-            start = region.guest_pa,
-            first,
-            sequence_start = sequence.guest_pa
+            guest_pa = region.guest_pa,
+            phys_base,
+            start
         );
     }
     Ok(())
@@ -363,6 +368,9 @@ pub const DEVICE_TREE_FILE: &str = "devicetree.adt";
 pub const ORIGINAL_DEVICE_TREE_FILE: &str = "original-devicetree.adt";
 const TRUST_CACHE_FILE: &str = "trustcache.bin";
 const BOOT_MANIFEST_FILE: &str = "boot-manifest.im4m";
+/// The region of the original boot manifest, in iBoot's loaded-object
+/// carveout rather than the memory map (`layout::boot_manifest_region`).
+const BOOT_MANIFEST_REGION: &str = "BootManifest";
 const SEP_FILE: &str = "sepfw.im4p";
 const RAMDISK_FILE: &str = "ramdisk.img";
 /// The engine handoff's file-name capacity (`stela-boot` `handoff::MAX_NAME`).
@@ -663,6 +671,13 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         .ok_or(refuse!("load base overflows"))?;
     let (mut regions, top_of_kernel_data) = place(contents, load_base)?;
     validate_sptm_region_order(&regions)?;
+    if let (Some(manifest), Some(_)) = (&inputs.boot_manifest, &shaped.boot_manifest_object) {
+        regions.insert(
+            0,
+            boot_manifest_region(&carveouts, manifest.bytes.len() as u64)?,
+        );
+    }
+    validate_physical_slide(&regions, options.phys_base)?;
     require!(
         top_of_kernel_data <= dram_end,
         "regions end at {top_of_kernel_data:#x}, past DRAM end {dram_end:#x}",
@@ -706,7 +721,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         })
         .transpose()?;
     if let Some(object) = &shaped.boot_manifest_object {
-        let manifest = region("BootManifest")?;
+        let manifest = region(BOOT_MANIFEST_REGION)?;
         shaped
             .security
             .extend(object.place(&mut shaped.tree, manifest.guest_pa)?);
