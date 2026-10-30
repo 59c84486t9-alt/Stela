@@ -1,9 +1,10 @@
-//! Opt-in journal of the SEP's keystore (`sks`), BootPolicy (`pnon`) and
-//! credential manager (`scrd`) traffic.
+//! Opt-in journal of the SEP's keystore (`sks`), BootPolicy (`pnon`),
+//! credential manager (`scrd`) and xART (`xars`, `xarm`) traffic.
 //!
 //! With observation on (`--sep-observe`), each request to one of these
 //! services is recorded in the SEP's [`Journal`]: the frame and a bounded
-//! prefix of its OOL input, read by the SEP model, not by recovering sepOS.
+//! prefix of its OOL input, read by the SEP model, not by recovering sepOS,
+//! and then the frame of the answer it was given, if any.
 //! `sks` and `pnon` are native services ([`super::keystore`],
 //! [`super::boot_policy`]) and are answered as usual after the record; the
 //! journal shows the bodies of the commands they refuse. `scrd`'s contract
@@ -17,7 +18,7 @@
 //! The `scrd` capacities are Stela's broad diagnostic choice, one to 32 SEP
 //! pages each way, not recovered limits: a client whose registration falls
 //! outside them is refused by length.
-use super::{boot_policy, endpoint::Service, keystore};
+use super::{boot_policy, endpoint::Service, keystore, xart};
 use alloc::{collections::VecDeque, format, string::String};
 
 /// Stela's catalog ID for `scrd`, after the native services.
@@ -45,6 +46,8 @@ pub fn name(id: u8) -> Option<&'static str> {
         keystore::ID => Some("sks"),
         boot_policy::ID => Some("pnon"),
         CREDENTIALS_ID => Some("scrd"),
+        xart::SLAVE_ID => Some("xars"),
+        xart::MASTER_ID => Some("xarm"),
         _ => None,
     }
 }
@@ -100,7 +103,11 @@ mod tests {
             (name(keystore::ID), name(boot_policy::ID)),
             (Some("sks"), Some("pnon"))
         );
-        assert_eq!(name(0x11), None);
+        assert_eq!(
+            (name(xart::SLAVE_ID), name(xart::MASTER_ID)),
+            (Some("xars"), Some("xarm"))
+        );
+        assert_eq!(name(0x1f), None);
     }
 
     #[test]

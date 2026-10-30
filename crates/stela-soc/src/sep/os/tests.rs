@@ -651,9 +651,16 @@ fn services_are_advertised_and_journaled() {
     assert_eq!(ram.bytes[0x1c000..0x1c004], *b"hrPB");
     assert_eq!(ram.bytes[0x1c004..0x1c008], 255u32.to_le_bytes());
     let lines = os.observations();
-    assert_eq!(lines.len(), 1);
+    assert_eq!(lines.len(), 2);
     assert!(lines[0].starts_with("pnon tag=2 op=0"), "{}", lines[0]);
     assert!(lines[0].contains("686350423e000000"), "{}", lines[0]);
+    assert_eq!(
+        lines[1],
+        format!(
+            "pnon tag={} answer op={} param={:#x} data={:#010x}",
+            request.tag, request.opcode, request.parameter, request.data
+        )
+    );
     // Draining empties the journal.
     assert!(os.observations().is_empty());
 }
@@ -686,10 +693,19 @@ fn refusals_are_answered_but_never_an_observed_scrd_request() {
     assert!(dma(&mut os, &mut ram).unwrap().is_empty());
     assert!(!os.dma_pending());
     let lines = os.observations();
-    assert_eq!(lines.len(), 2);
+    assert_eq!(lines.len(), 3);
     assert!(lines[0].starts_with("sks tag=1 op=0"), "{}", lines[0]);
     assert!(lines[0].ends_with("input=unregistered"), "{}", lines[0]);
-    assert!(lines[1].starts_with("scrd tag=2 op=0"), "{}", lines[1]);
+    let failure = keystore::failure(request(keystore::ID, 1));
+    assert_eq!(
+        lines[1],
+        format!(
+            "sks tag={} answer op={} param={:#x} data={:#010x}",
+            failure.tag, failure.opcode, failure.parameter, failure.data
+        )
+    );
+    // scrd is recorded and never answered, so no answer line follows.
+    assert!(lines[2].starts_with("scrd tag=2 op=0"), "{}", lines[2]);
 }
 
 #[test]

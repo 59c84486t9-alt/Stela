@@ -239,21 +239,32 @@ impl SepOs {
                 "SEP application service has no native handler",
             )),
         };
-        match result {
-            Ok(reply) => {
-                outbox.push(reply.mailbox());
-                Ok(())
-            }
+        let (answer, outcome) = match result {
+            Ok(reply) => (Some(reply), Ok(())),
             Err(refusal) => {
                 // The failure answer, once its bytes are written.
-                if let Some(answer) = refusal.answer
-                    && (answer.output.is_empty() || payload.output(&answer.output).is_ok())
-                {
-                    outbox.push(answer.frame.mailbox());
-                }
-                Err(refusal.reason)
+                let answer = refusal.answer.and_then(|answer| {
+                    (answer.output.is_empty() || payload.output(&answer.output).is_ok())
+                        .then_some(answer.frame)
+                });
+                (answer, Err(refusal.reason))
             }
+        };
+        if let Some(journal) = self.observe.as_mut()
+            && let Some(name) = observe::name(frame.service)
+        {
+            journal.record(match answer {
+                Some(reply) => format!(
+                    "{name} tag={} answer op={} param={:#x} data={:#010x}",
+                    reply.tag, reply.opcode, reply.parameter, reply.data
+                ),
+                None => format!("{name} tag={} unanswered", frame.tag),
+            });
         }
+        if let Some(reply) = answer {
+            outbox.push(reply.mailbox());
+        }
+        outcome
     }
 
     /// Record one observed `sks`/`pnon`/`scrd` request: its frame fields and,
