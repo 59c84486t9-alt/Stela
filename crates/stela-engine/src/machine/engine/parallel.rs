@@ -1667,6 +1667,16 @@ impl<D: Devices> Devices for SharedDevices<D> {
             devices.transfer(cpu, memory, now)
         })
     }
+    fn serve_call(
+        &mut self,
+        cpu: usize,
+        caller: &mut dyn super::CallerMemory,
+        now: u64,
+    ) -> Result<(), DeviceError> {
+        self.changing(Call::Access, cpu, now, |devices, now| {
+            devices.serve_call(cpu, caller, now)
+        })
+    }
 }
 
 #[cfg(test)]

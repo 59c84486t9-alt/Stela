@@ -3,6 +3,7 @@
 mod amx;
 mod apple_maintenance;
 mod budget;
+mod caller;
 mod chain_control;
 mod clock;
 mod compression;
@@ -107,6 +108,7 @@ use stela_compiler::{
 };
 pub use stela_contracts::bus::Transition;
 pub use stela_contracts::dma::Memory;
+pub use stela_contracts::gate::{CallerFault, CallerMemory};
 pub use stored::{Offer, SharedTranslation, Translations};
 pub use system::FP_TRAPS_WRITABLE;
 use {
@@ -846,6 +848,17 @@ pub trait Devices {
         &mut self,
         _cpu: usize,
         _memory: &mut dyn Memory,
+        _now: u64,
+    ) -> Result<(), DeviceError> {
+        Ok(())
+    }
+    /// Serve the call a device access by PE `cpu` made through a call
+    /// gate, on the address space of the thread that made it, after
+    /// [`Self::transfer`]: the call completes in the access's own step.
+    fn serve_call(
+        &mut self,
+        _cpu: usize,
+        _caller: &mut dyn CallerMemory,
         _now: u64,
     ) -> Result<(), DeviceError> {
         Ok(())
@@ -2716,7 +2729,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
             host: &mut self.host,
             lock: self.devices.memory_lock(),
         };
-        let result = match self.devices.transfer(self.current, &mut memory, now) {
+        let mut result = self.devices.transfer(self.current, &mut memory, now);
+        if result.is_ok() {
+            let mut caller = caller::CallerSpace {
+                controls: self.cpu.controls(self.cpu.regime()),
+                requester: mmu::Requester {
+                    unprivileged: true,
+                    ..self.cpu.requester()
+                },
+                lock: memory.lock,
+                host: &mut self.host,
+            };
+            result = self.devices.serve_call(self.current, &mut caller, now);
+        }
+        let result = match result {
             Ok(()) => Ok(()),
             Err(DeviceError::Refused(reason) | DeviceError::TransferRefused(reason)) => {
                 Err(DeviceError::TransferRefused(reason))
@@ -8132,6 +8158,37 @@ mod tests {
         fn lines(&mut self, _: usize, _: u64) -> Lines {
             Lines::default()
         }
+    }
+
+    #[test]
+    fn a_call_reaches_the_callers_ram_across_pages_outside_locks() {
+        let mut machine = board(&[], pair_fault_device(), Vec::new());
+        let locked = BASE + 0x2000;
+        let mut caller = caller::CallerSpace {
+            controls: machine.cpu.controls(machine.cpu.regime()),
+            requester: mmu::Requester {
+                unprivileged: true,
+                ..machine.cpu.requester()
+            },
+            lock: [Some((locked, locked + 0xf)), None, None, None],
+            host: &mut machine.host,
+        };
+        let straddling = BASE + FETCH_PAGE - 4;
+        caller.write(straddling, &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let mut read = [0; 8];
+        caller.read(straddling, &mut read).unwrap();
+        assert_eq!(read, [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            caller.write(locked - 4, &[0xa5; 8]),
+            Err(CallerFault::Denied { address: locked })
+        );
+        let mut before = [0; 4];
+        caller.read(locked - 4, &mut before).unwrap();
+        assert_eq!(before, [0; 4]);
+        assert!(matches!(
+            caller.read(u64::MAX - 1, &mut read),
+            Err(CallerFault::Denied { .. } | CallerFault::NotRam { .. })
+        ));
     }
 
     fn pair_fault_device() -> PairFaultDevice {
