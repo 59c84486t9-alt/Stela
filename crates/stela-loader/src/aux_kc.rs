@@ -18,12 +18,12 @@
 //! - `__PRELINK_INFO,__info` holds each kext's `Info.plist` with its
 //!   placement, the collection's UUID and the boot collection's, which XNU
 //!   checks against the one it booted.
-//! - `__RECEIPT_INFO,__aux_kc_receipt` holds the receipt, without which XNU
-//!   refuses the collection.
+//! - `__RECEIPT_INFO,__aux_kc_receipt` holds the [`receipt`].
 mod boot;
 mod commands;
 mod fixups;
 mod prelink;
+mod receipt;
 mod relocatable;
 mod unit;
 
@@ -92,15 +92,11 @@ struct Symbols {
 }
 
 /// Links `kexts` against the boot collection `boot` into an auxiliary
-/// collection that carries `receipt`.
-pub fn link(boot: &[u8], kexts: &[Kext<'_>], receipt: &[u8]) -> Result<Vec<u8>> {
+/// collection.
+pub fn link(boot: &[u8], kexts: &[Kext<'_>]) -> Result<Vec<u8>> {
     require!(
         !kexts.is_empty(),
         "an auxiliary collection holds at least one kext"
-    );
-    require!(
-        !receipt.is_empty(),
-        "XNU refuses an auxiliary collection without a receipt"
     );
     let boot = BootCollection::parse(boot)?;
     let mut units = kexts
@@ -116,8 +112,9 @@ pub fn link(boot: &[u8], kexts: &[Kext<'_>], receipt: &[u8]) -> Result<Vec<u8>> 
             kext = unit.identifier
         );
     }
+    let receipt = receipt::encode(kexts.iter().zip(&units))?;
     let uuid = unit::uuid(
-        [&boot.uuid[..], receipt]
+        [&boot.uuid[..], &receipt[..]]
             .into_iter()
             .chain(units.iter().map(|unit| &unit.uuid[..])),
     );
@@ -209,7 +206,7 @@ pub fn link(boot: &[u8], kexts: &[Kext<'_>], receipt: &[u8]) -> Result<Vec<u8>> 
         }
     }
     write(&mut image, segments[PRELINK_INFO].address, &info)?;
-    write(&mut image, segments[RECEIPT_INFO].address, receipt)?;
+    write(&mut image, segments[RECEIPT_INFO].address, &receipt)?;
     let fixup_segments: Vec<fixups::Segment> = segments
         .iter()
         .take(LINKEDIT)

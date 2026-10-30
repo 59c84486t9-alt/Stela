@@ -8,6 +8,8 @@ use ::object::{
 use super::*;
 use crate::kernel_collection::tests::{BASE, Builder};
 use anyhow::Result;
+use sha2::{Digest, Sha256};
+use stela_formats::der;
 
 const BOOT_UUID: [u8; 16] = [0x5a; 16];
 const IOLOG: u64 = BASE + 0x4100;
@@ -367,6 +369,7 @@ const INFO: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>com.stela.Test</string>
 <key>CFBundleExecutable</key><string>Test</string>
+<key>CFBundleVersion</key><string>1.2.3</string>
 <key>OSBundleLibraries</key><dict><key>com.apple.kpi.iokit</key><string>8.0.0</string></dict>
 </dict></plist>"#;
 
@@ -492,8 +495,7 @@ fn page_target(adrp: u32, place: u64) -> u64 {
 fn links_a_kext_against_the_boot_collection() -> Result<()> {
     let boot = boot_collection();
     let object = kext_object();
-    let receipt = b"receipt";
-    let file = link(&boot, &[kext(vec![&object])], receipt)?;
+    let file = link(&boot, &[kext(vec![&object])])?;
 
     let collection = sections(&file, 0);
     let order: Vec<_> = SEGMENTS
@@ -504,10 +506,23 @@ fn links_a_kext_against_the_boot_collection() -> Result<()> {
     assert_eq!(collection["__PRELINK_INFO"].address, 0);
     assert_eq!(collection["__TEXT"].offset, 0);
     assert_eq!(collection["__TEXT_EXEC"].flags, 5);
+    let section = &collection["__RECEIPT_INFO,__aux_kc_receipt"];
+    let receipt = read(&file, section, 0, section.size as usize);
+    let mut receipt = der::sequence(&receipt)?;
+    assert_eq!(receipt.take(2)?.value, [1]);
+    let mut entries = der::Cursor(receipt.take(16)?.value);
+    receipt.end()?;
+    let mut entry = der::Cursor(entries.take(16)?.value);
+    entries.end()?;
+    let cd_hash = Sha256::digest(&object);
+    assert_eq!(entry.take(4)?.value, &cd_hash[..20]);
+    assert!(entry.take(4)?.value.is_empty());
+    assert_eq!(entry.take(4)?.value, &Sha256::digest("com.stela.Test")[..]);
     assert_eq!(
-        read(&file, &collection["__RECEIPT_INFO,__aux_kc_receipt"], 0, 7),
-        receipt
+        entry.take(2)?.value,
+        &1_000_200_039_000_u64.to_be_bytes()[2..]
     );
+    entry.end()?;
 
     let header = macho::MachHeader64::<LE>::parse(&file[..], 0)?;
     assert_eq!(header.filetype(LE), macho::MH_FILESET);
@@ -664,7 +679,7 @@ fn links_a_kext_against_the_boot_collection() -> Result<()> {
     );
 
     assert_eq!(
-        link(&boot, &[kext(vec![&object])], receipt)?,
+        link(&boot, &[kext(vec![&object])])?,
         file,
         "linking is deterministic"
     );
@@ -694,11 +709,7 @@ fn a_strong_definition_overrides_weak_ones() -> Result<()> {
         &[InputSection::new("__DATA", "__data", 0, vec![0; 8])],
         &[defined("_shared", true, 0, 0)],
     );
-    let file = link(
-        &boot_collection(),
-        &[kext(vec![&weak, &strong])],
-        b"receipt",
-    )?;
+    let file = link(&boot_collection(), &[kext(vec![&weak, &strong])])?;
     let entry_offset = {
         let collection = sections(&file, 0);
         collection["__PRELINK_TEXT"].offset
@@ -729,7 +740,7 @@ fn refuses_what_it_cannot_link() {
             undefined("_hidden", false),
         ],
     );
-    let error = link(&boot, &[kext(vec![&missing])], b"receipt").unwrap_err();
+    let error = link(&boot, &[kext(vec![&missing])]).unwrap_err();
     assert!(
         format!("{error:#}").contains("_hidden is undefined"),
         "{error:#}"
@@ -739,16 +750,15 @@ fn refuses_what_it_cannot_link() {
         &[InputSection::new("__DATA", "__data", 0, vec![0; 8])],
         &[defined("_kmod_info", true, 0, 0)],
     );
-    let error = link(&boot, &[kext(vec![&twice, &twice])], b"receipt").unwrap_err();
+    let error = link(&boot, &[kext(vec![&twice, &twice])]).unwrap_err();
     assert!(format!("{error:#}").contains("defined twice"), "{error:#}");
 
     let no_kmod = object_file(
         &[InputSection::new("__DATA", "__data", 0, vec![0; 8])],
         &[defined("_other", true, 0, 0)],
     );
-    assert!(link(&boot, &[kext(vec![&no_kmod])], b"receipt").is_err());
-    assert!(link(&boot, &[kext(vec![&twice])], b"").is_err());
-    assert!(link(&boot, &[kext(vec![&twice]), kext(vec![&twice])], b"receipt").is_err());
+    assert!(link(&boot, &[kext(vec![&no_kmod])]).is_err());
+    assert!(link(&boot, &[kext(vec![&twice]), kext(vec![&twice])]).is_err());
 
     let foreign = br#"<plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>com.stela.Test</string>
@@ -759,7 +769,7 @@ fn refuses_what_it_cannot_link() {
         objects: vec![&twice],
         bundle_path: "/Library/Extensions/Test.kext".into(),
     };
-    let error = link(&boot, &[kext], b"receipt").unwrap_err();
+    let error = link(&boot, &[kext]).unwrap_err();
     assert!(
         format!("{error:#}").contains("com.example.Missing"),
         "{error:#}"
@@ -802,7 +812,7 @@ fn child_object(last: &'static str) -> Vec<u8> {
 #[test]
 fn inherited_vtable_slots_take_the_kernel_superclass_entries() -> Result<()> {
     let object = child_object("__ZN4Base10_RESERVED0Ev");
-    let file = link(&boot_collection(), &[kext(vec![&object])], b"receipt")?;
+    let file = link(&boot_collection(), &[kext(vec![&object])])?;
     let entry_offset = sections(&file, 0)["__PRELINK_TEXT"].offset;
     let bundle = sections(&file, entry_offset);
     let vtable = bundle["__DATA_CONST,__const"].address;
@@ -824,7 +834,7 @@ fn inherited_vtable_slots_take_the_kernel_superclass_entries() -> Result<()> {
 #[test]
 fn a_method_in_a_slot_the_kernel_reserves_is_refused() {
     let object = child_object("__ZN4Base1bEv");
-    let error = link(&boot_collection(), &[kext(vec![&object])], b"receipt").unwrap_err();
+    let error = link(&boot_collection(), &[kext(vec![&object])]).unwrap_err();
     assert!(
         format!("{error:#}").contains("reserves in this kernel"),
         "{error:#}"

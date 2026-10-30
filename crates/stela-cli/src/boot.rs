@@ -452,12 +452,8 @@ pub struct Prepare {
     /// `Info.plist` and arm64e objects (such as `target/guest/StelaGPU.kext`),
     /// which the installed system keeps in `/Library/Extensions`; repeat for
     /// each kext.
-    #[arg(long = "kext", requires = "kext_receipt", conflicts_with = "disk")]
+    #[arg(long = "kext", conflicts_with = "disk")]
     kexts: Vec<PathBuf>,
-    /// The receipt the auxiliary collection carries, which XNU requires
-    /// before it loads the collection's kexts.
-    #[arg(long, requires = "kexts")]
-    kext_receipt: Option<PathBuf>,
 }
 
 /// The recoveryOS copy `--disk-recovery` boots.
@@ -646,11 +642,9 @@ pub(super) fn boot_args(console: &str, mode: &[&str]) -> String {
 impl Prepare {
     /// The `--kext` bundles linked against `kernel` (`stela_loader::aux_kc`).
     fn auxiliary_collection(&self, kernel: &[u8]) -> Result<Option<Decoded>> {
-        let Some(receipt) = &self.kext_receipt else {
+        if self.kexts.is_empty() {
             return Ok(None);
-        };
-        let receipt =
-            std::fs::read(receipt).with_context(|| format!("cannot read {}", receipt.display()))?;
+        }
         let mut bundles = Vec::with_capacity(self.kexts.len());
         for directory in &self.kexts {
             let read = |path: &std::path::Path| {
@@ -688,7 +682,7 @@ impl Prepare {
                 bundle_path: format!("/Library/Extensions/{name}"),
             })
             .collect();
-        let bytes = stela_loader::aux_kc::link(kernel, &kexts, &receipt)?;
+        let bytes = stela_loader::aux_kc::link(kernel, &kexts)?;
         let digest = stela_formats::sha256(&bytes);
         let names: Vec<_> = bundles.iter().map(|(_, _, name)| name.as_str()).collect();
         Ok(Some(Decoded {
