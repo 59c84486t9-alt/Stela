@@ -319,6 +319,11 @@ impl<D: Devices> Devices for SharedDevices<D> {
             devices.read(cpu, physical, bytes, now)
         })
     }
+    fn read_scalar(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> ScalarRead {
+        self.changing(Call::Access, cpu, now, |devices, now| {
+            devices.read_scalar(cpu, physical, bytes, now)
+        })
+    }
     fn requires_canonical_read(&self, cpu: usize, physical: u64, shape: DeviceReadShape) -> bool {
         self.with(|devices| devices.requires_canonical_read(cpu, physical, shape))
     }
@@ -409,6 +414,19 @@ impl<D: Devices> Devices for SharedDevices<D> {
     ) -> Result<(), DeviceError> {
         self.changing(Call::Access, cpu, now, |devices, now| {
             devices.write_with_processors(cpu, physical, bytes, value, now, processors)
+        })
+    }
+    fn write_plain(
+        &mut self,
+        cpu: usize,
+        physical: u64,
+        bytes: u8,
+        value: u64,
+        now: u64,
+        processors: super::super::ProcessorWrite<'_>,
+    ) -> Option<Result<(), DeviceError>> {
+        self.changing(Call::Access, cpu, now, |devices, now| {
+            devices.write_plain(cpu, physical, bytes, value, now, processors)
         })
     }
     /// The home machine's asking advances the devices to `now`, which can

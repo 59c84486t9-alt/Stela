@@ -279,6 +279,18 @@ pub struct ConsumedPair {
     pub settlement: Result<(), DeviceError>,
 }
 
+/// How [`Devices::read_scalar`] answered a scalar read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScalarRead {
+    /// Only [`Devices::read_canonical`] serves it; nothing was read.
+    Canonical,
+    /// It triggers a debug PC sample of this PE; nothing was read. The
+    /// engine supplies the PC ([`Devices::observe_pc_sample`]) and reads.
+    Sample(usize),
+    /// Read in the same call.
+    Served(Result<u64, DeviceError>),
+}
+
 /// The board's devices on the guest physical bus. `cpu` is the number of the
 /// PE making the access, as [`CpuProfile::processors`] numbers it, and `now`
 /// is the system counter value (24 MHz ticks) of the access.
@@ -290,6 +302,17 @@ pub trait Devices {
     /// Supply that PE's execution PC immediately before its sample trigger.
     fn observe_pc_sample(&mut self, _physical: u64, _pc: u64) {}
     fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError>;
+    /// Classify a scalar read and serve it when it is plain, in one call: a
+    /// board shared between PEs takes its lock once for the three.
+    fn read_scalar(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> ScalarRead {
+        if self.requires_canonical_read(cpu, physical, DeviceReadShape::Scalar { bytes }) {
+            ScalarRead::Canonical
+        } else if let Some(sampled) = self.pc_sample_target(physical, bytes) {
+            ScalarRead::Sample(sampled)
+        } else {
+            ScalarRead::Served(self.read(cpu, physical, bytes, now))
+        }
+    }
     /// Effect-free classification only; this grants no memory permission. A
     /// canonical-required read must never execute through the raw/serial hook.
     fn requires_canonical_read(
@@ -398,6 +421,21 @@ pub trait Devices {
         _processors: ProcessorWrite<'_>,
     ) -> Result<(), DeviceError> {
         self.write(cpu, physical, bytes, value, now)
+    }
+    /// [`Self::write_with_processors`] by a machine without canonical
+    /// memory, in one call with its classification: `None`, with nothing
+    /// written, for a write [`Self::requires_canonical_write`] holds for.
+    fn write_plain(
+        &mut self,
+        cpu: usize,
+        physical: u64,
+        bytes: u8,
+        value: u64,
+        now: u64,
+        processors: ProcessorWrite<'_>,
+    ) -> Option<Result<(), DeviceError>> {
+        (!self.requires_canonical_write(cpu, physical, bytes))
+            .then(|| self.write_with_processors(cpu, physical, bytes, value, now, processors))
     }
     /// Bring time-driven state up to `now` and report the interrupt lines
     /// the devices drive into PE `cpu`.

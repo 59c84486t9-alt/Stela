@@ -28,8 +28,8 @@
 use super::chain_control;
 use super::{
     CanonicalDeviceMemory, CanonicalDeviceWrite, ConsumedPair, ConsumedScalar, ConsumedWrite,
-    DeviceError, DeviceReadShape, Devices, Discard, Host, Machine, RequirementKind, Reset, Start,
-    Step,
+    DeviceError, DeviceReadShape, Devices, Discard, Host, Machine, RequirementKind, Reset,
+    ScalarRead, Start, Step,
     clock::{ClockStatus, Pace, SharedClock},
     processors::Peer,
     step_timing,

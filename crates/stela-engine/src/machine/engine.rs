@@ -4,7 +4,7 @@ mod boundary;
 mod mirrors;
 mod reports;
 use boundary::*;
-pub use boundary::{ConsumedPair, DeviceError, Devices, Host, NoDevices, Start};
+pub use boundary::{ConsumedPair, DeviceError, Devices, Host, NoDevices, ScalarRead, Start};
 use mirrors::*;
 use reports::*;
 pub use reports::{
