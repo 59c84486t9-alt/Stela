@@ -345,10 +345,7 @@ fn translated_fixture() -> (Machine<FakeHost, NoDevices>, usize, usize) {
         (8, false, false, false)
     );
     assert_eq!(row.end, offset + 1, "only exact CALL return token");
-    assert_eq!(
-        &owner.template.native.x86_64_code[offset..offset + 2],
-        &[8, 0]
-    );
+    assert_eq!(&owner.native().x86_64_code[offset..offset + 2], &[8, 0]);
     owner.test_make_pending();
     (machine, index, offset)
 }

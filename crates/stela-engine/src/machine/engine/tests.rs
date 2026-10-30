@@ -3283,7 +3283,7 @@ fn dc_clean_blocks_follow_the_traps_and_faults_complete_in_the_engine() {
         stela_compiler::block::RecoverySiteKind::GuestAccess,
     );
     assert_eq!(
-        &machine.fault_recovery[&entered].template.native.x86_64_code[offset..offset + 3],
+        &machine.fault_recovery[&entered].native().x86_64_code[offset..offset + 3],
         &[0x0f, 0xb6, 0x08],
         "actual MOVZX byte probe at the minted DC clean site"
     );
@@ -4992,8 +4992,7 @@ fn dc_zva_blocks_follow_the_permission_and_faults_complete_in_the_engine() {
         &[0x48, 0x89, 0x48, 0x00]
     };
     assert_eq!(
-        &machine.fault_recovery[&entered].template.native.x86_64_code
-            [offset..offset + expected.len()],
+        &machine.fault_recovery[&entered].native().x86_64_code[offset..offset + expected.len()],
         expected,
         "actual first zero store at the minted DC ZVA site"
     );

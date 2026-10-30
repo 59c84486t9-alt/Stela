@@ -91,7 +91,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(owner) = self.fault_recovery.get_mut(&index) else {
             return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
         };
-        if fault.offset >= owner.template.native.x86_64_code.len() {
+        if fault.offset >= owner.native().x86_64_code.len() {
             return Err(self.fail_native(index, fault, NativeFailureReason::CodeExtent));
         }
         if let Err(reason) = owner.validate_live(&mut self.host, code, &self.native_patches) {

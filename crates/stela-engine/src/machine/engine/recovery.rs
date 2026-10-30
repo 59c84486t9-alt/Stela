@@ -1,13 +1,14 @@
 //! Invocation-kept source/profile and immutable native recovery templates.
+use super::stored::Emission;
 use super::{Host, NativeCode, NativeFault, Preparation};
 use crate::translations::{Digest, StoredBlock};
 use alloc::collections::BTreeMap;
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use stela_compiler::NativeBlock;
 use stela_compiler::block::{
     CompiledBlock, FaultRecovery, RecoveryQualificationError, RecoveryTemplate,
     UnqualifiedFaultRecovery,
 };
-use stela_compiler::{NativeBlock, x86_64::chain::DirectExit};
 
 #[derive(Clone)]
 pub(super) struct OwnedPatch {
@@ -25,24 +26,14 @@ pub(super) enum NativeAdapter {
     MirroredRead,
 }
 
-pub(super) struct CodeTemplate {
-    pub(super) native: NativeBlock,
-    pub(super) source_bytes: usize,
-    pub(super) direct_exits: Vec<DirectExit>,
-}
-
-/// An installed owner keeps one row bank. Portable records have no minted
-/// permission; successful lazy validation replaces that bank, never duplicates it.
-enum RecoveryRows {
-    Pending(Box<[UnqualifiedFaultRecovery]>),
-    Qualified(Box<[FaultRecovery]>),
-}
-
 pub(super) struct CodeRecovery {
-    pub(super) template: CodeTemplate,
-    input: Vec<u8>,
-    preparation: Arc<Preparation>,
-    rows: RecoveryRows,
+    /// The native template, its input and preparation: the store's and
+    /// other PEs' own for a block compiled in this process.
+    emission: Arc<Emission>,
+    /// A stored record's portable rows. Portable records have no minted
+    /// permission; successful lazy validation replaces them with the
+    /// emission's qualified rows, never duplicates them.
+    pending: Option<Box<[UnqualifiedFaultRecovery]>>,
     source_record: Option<SourceRecord>,
     source_record_checked: bool,
     #[cfg(test)]
@@ -109,38 +100,55 @@ impl CodeRecovery {
         self
     }
 
+    /// The native template.
+    pub(super) fn native(&self) -> &NativeBlock {
+        &self.emission.block.native
+    }
+    /// The guest bytes its native template consumed.
+    pub(super) fn source_bytes(&self) -> usize {
+        self.emission.block.source_bytes
+    }
+    /// The native template's direct exits to static successors.
+    pub(super) fn direct_exits(&self) -> &[stela_compiler::x86_64::chain::DirectExit] {
+        &self.emission.block.direct_exits
+    }
+
     #[cfg(test)]
     pub(super) fn test_make_pending(&mut self) {
-        self.rows = RecoveryRows::Pending(self.test_portable_rows().into_boxed_slice());
+        let rows = self.test_portable_rows().into_boxed_slice();
+        Arc::make_mut(&mut self.emission).block.fault_recovery = Vec::new();
+        self.pending = Some(rows);
     }
     #[cfg(test)]
     pub(super) fn test_rows_mut(&mut self) -> &mut [FaultRecovery] {
-        match &mut self.rows {
-            RecoveryRows::Qualified(rows) => rows,
-            RecoveryRows::Pending(_) => panic!("actual emitted plan"),
-        }
+        assert!(self.pending.is_none(), "actual emitted plan");
+        &mut Arc::make_mut(&mut self.emission).block.fault_recovery
     }
     #[cfg(test)]
     pub(super) fn test_portable_rows(&self) -> Vec<UnqualifiedFaultRecovery> {
-        match &self.rows {
-            RecoveryRows::Qualified(rows) => {
-                rows.iter().map(UnqualifiedFaultRecovery::from).collect()
-            }
-            RecoveryRows::Pending(rows) => rows.to_vec(),
+        match &self.pending {
+            Some(rows) => rows.to_vec(),
+            None => self
+                .emission
+                .block
+                .fault_recovery
+                .iter()
+                .map(UnqualifiedFaultRecovery::from)
+                .collect(),
         }
     }
     #[cfg(test)]
     pub(super) fn test_pending_rows_mut(&mut self) -> &mut [UnqualifiedFaultRecovery] {
-        match &mut self.rows {
-            RecoveryRows::Pending(rows) => rows,
-            RecoveryRows::Qualified(_) => panic!("explicitly pending fixture"),
-        }
+        self.pending
+            .as_deref_mut()
+            .expect("explicitly pending fixture")
     }
     #[cfg(test)]
     pub(super) fn test_push_pending(&mut self, row: UnqualifiedFaultRecovery) {
         let mut rows = self.test_portable_rows();
         rows.push(row);
-        self.rows = RecoveryRows::Pending(rows.into_boxed_slice());
+        Arc::make_mut(&mut self.emission).block.fault_recovery = Vec::new();
+        self.pending = Some(rows.into_boxed_slice());
     }
     /// A portable request may only reject this legacy implementation. Absence
     /// of tags never grants private/APX admission: that must be derived from an
@@ -156,17 +164,20 @@ impl CodeRecovery {
                     RecoverySource::NativeSpill(_) => true,
                 })
         };
-        match &self.rows {
-            RecoveryRows::Pending(rows) => rows
+        match &self.pending {
+            Some(rows) => rows
                 .iter()
                 .any(|row| requires(row.retirement, &row.bindings)),
-            RecoveryRows::Qualified(rows) => rows
+            None => self
+                .emission
+                .block
+                .fault_recovery
                 .iter()
                 .any(|row| requires(row.retirement, &row.bindings)),
         }
     }
     pub(super) fn matches_source(&self, source: &[u8]) -> bool {
-        source.get(..self.input.len()) == Some(self.input.as_slice())
+        source.get(..self.emission.input.len()) == Some(self.emission.input.as_slice())
     }
     pub(super) fn validate_live<H: Host>(
         &self,
@@ -175,7 +186,7 @@ impl CodeRecovery {
         patches: &BTreeMap<usize, OwnedPatch>,
     ) -> Result<(), NativeFailureReason> {
         use stela_compiler::x86_64::chain;
-        let body = &self.template.native.x86_64_code;
+        let body = &self.emission.block.native.x86_64_code;
         let end = code
             .0
             .checked_add(body.len())
@@ -193,21 +204,29 @@ impl CodeRecovery {
             let finish = offset
                 .checked_add(bytes.len())
                 .ok_or(NativeFailureReason::PatchPlan)?;
-            let direct = self.template.direct_exits.iter().any(|exit| {
+            let direct = self.emission.block.direct_exits.iter().any(|exit| {
                 exit.offset == offset
                     && body.get(offset..offset + chain::DIRECT_EXIT_BYTES)
                         == Some(chain::direct_exit(exit.target, exit.kind).as_slice())
             });
-            let dynamic = self.template.native.source_map.last().is_some_and(|_| {
-                offset.checked_add(chain::DYNAMIC_EXIT_BYTES) == Some(body.len())
-                    && [
-                        stela_compiler::block::ExitKind::Return,
-                        stela_compiler::block::ExitKind::Indirect,
-                        stela_compiler::block::ExitKind::Call,
-                    ]
-                    .into_iter()
-                    .any(|kind| body.get(offset..) == Some(chain::dynamic_exit(kind).as_slice()))
-            });
+            let dynamic = self
+                .emission
+                .block
+                .native
+                .source_map
+                .last()
+                .is_some_and(|_| {
+                    offset.checked_add(chain::DYNAMIC_EXIT_BYTES) == Some(body.len())
+                        && [
+                            stela_compiler::block::ExitKind::Return,
+                            stela_compiler::block::ExitKind::Indirect,
+                            stela_compiler::block::ExitKind::Call,
+                        ]
+                        .into_iter()
+                        .any(|kind| {
+                            body.get(offset..) == Some(chain::dynamic_exit(kind).as_slice())
+                        })
+                });
             let admitted = match patch.purpose {
                 PatchPurpose::Chain => direct || dynamic,
                 PatchPurpose::NativeAdapter { pc, kind } => self.adapter_patch(offset, pc, kind),
@@ -257,10 +276,11 @@ impl CodeRecovery {
 
     fn adapter_patch(&self, offset: usize, pc: u64, kind: NativeAdapter) -> bool {
         use stela_compiler::{GuestAddress, block::ExitKind, x86_64::chain};
-        let body = &self.template.native.x86_64_code;
+        let body = &self.emission.block.native.x86_64_code;
         if offset.checked_add(chain::DIRECT_EXIT_BYTES) != Some(body.len())
             || self
-                .template
+                .emission
+                .block
                 .native
                 .source_map
                 .last()
@@ -268,7 +288,7 @@ impl CodeRecovery {
         {
             return false;
         }
-        let Some((entry, _)) = self.template.native.source_map.first() else {
+        let Some((entry, _)) = self.emission.block.native.source_map.first() else {
             return false;
         };
         let Some(at) = pc
@@ -279,7 +299,7 @@ impl CodeRecovery {
         };
         let Some(word) = at
             .checked_add(4)
-            .and_then(|end| self.input.get(at..end))
+            .and_then(|end| self.emission.input.get(at..end))
             .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
             .map(u32::from_le_bytes)
         else {
@@ -300,20 +320,12 @@ impl CodeRecovery {
         source && body.get(offset..) == Some(chain::direct_exit(GuestAddress(pc), kind).as_slice())
     }
 
-    pub(super) fn compiled(
-        block: CompiledBlock,
-        input: Vec<u8>,
-        preparation: Arc<Preparation>,
-    ) -> Self {
+    /// The owner of a block compiled in this process, here or by a PE that
+    /// shared it through the store.
+    pub(super) fn compiled(emission: Arc<Emission>) -> Self {
         Self {
-            template: CodeTemplate {
-                native: block.native,
-                source_bytes: block.source_bytes,
-                direct_exits: block.direct_exits,
-            },
-            input,
-            preparation,
-            rows: RecoveryRows::Qualified(block.fault_recovery.into_boxed_slice()),
+            emission,
+            pending: None,
             source_record: None,
             source_record_checked: false,
             #[cfg(test)]
@@ -325,15 +337,15 @@ impl CodeRecovery {
         input: Vec<u8>,
         preparation: Arc<Preparation>,
     ) -> Self {
+        let block = CompiledBlock {
+            native: template.native,
+            source_bytes: template.source_bytes,
+            direct_exits: template.direct_exits,
+            fault_recovery: Vec::new(),
+        };
         Self {
-            template: CodeTemplate {
-                native: template.native,
-                source_bytes: template.source_bytes,
-                direct_exits: template.direct_exits,
-            },
-            input,
-            preparation,
-            rows: RecoveryRows::Pending(template.fault_recovery.into_boxed_slice()),
+            emission: Arc::new(Emission::new(input, block, preparation)),
+            pending: Some(template.fault_recovery.into_boxed_slice()),
             source_record: None,
             source_record_checked: false,
             #[cfg(test)]
@@ -346,37 +358,39 @@ impl CodeRecovery {
         if !self.source_record_checked {
             if let Some(record) = self.source_record
                 && (pc & !(crate::translations::PAGE_BYTES as u64 - 1) != record.page
-                    || self.preparation.context(record.page) != record.preparation_context)
+                    || self.emission.preparation.context(record.page) != record.preparation_context)
             {
                 return Err(NativeFailureReason::SourceContext);
             }
             self.source_record_checked = true;
         }
-        if let RecoveryRows::Pending(rows) = &self.rows {
+        if let Some(rows) = &self.pending {
             #[cfg(test)]
             {
                 self.qualification_attempts += 1;
             }
             let block = self
+                .emission
                 .preparation
                 .qualify_recovery(
-                    &self.input,
+                    &self.emission.input,
                     pc,
                     RecoveryTemplate {
-                        code: &self.template.native.x86_64_code,
-                        source_map: &self.template.native.source_map,
-                        source_bytes: self.template.source_bytes,
-                        direct_exits: &self.template.direct_exits,
+                        code: &self.emission.block.native.x86_64_code,
+                        source_map: &self.emission.block.native.source_map,
+                        source_bytes: self.emission.block.source_bytes,
+                        direct_exits: &self.emission.block.direct_exits,
                         recovery: rows,
                     },
                 )
                 .map_err(NativeFailureReason::Qualification)?;
-            self.rows = RecoveryRows::Qualified(block.fault_recovery.into_boxed_slice());
+            // A stored record's emission is this owner's alone: no copy.
+            let rows = &mut Arc::make_mut(&mut self.emission).block.fault_recovery;
+            *rows = block.fault_recovery;
+            rows.shrink_to_fit();
+            self.pending = None;
         }
-        match &self.rows {
-            RecoveryRows::Qualified(rows) => Ok(rows),
-            RecoveryRows::Pending(_) => unreachable!("qualified above"),
-        }
+        Ok(&self.emission.block.fault_recovery)
     }
 }
 

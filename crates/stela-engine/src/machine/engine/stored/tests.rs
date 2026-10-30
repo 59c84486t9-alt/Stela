@@ -45,7 +45,7 @@ fn sealed_shared_handoff_rejects_other_source_pc_and_profile_before_install() {
         &genuine.key,
         genuine.pc,
         &genuine.context,
-        &genuine.input
+        genuine.input()
     ));
 
     let mut different = machine(&[0x91000800, 0xd4000001]);
@@ -68,12 +68,12 @@ fn sealed_shared_handoff_rejects_other_source_pc_and_profile_before_install() {
         genuine.page,
         genuine.pc + 4,
         genuine.context,
-        genuine.input.clone(),
-        Arc::clone(&genuine.preparation),
+        genuine.input().to_vec(),
+        Arc::clone(genuine.preparation()),
     )
     .unwrap()
     .shared();
-    let mut description = genuine.preparation.description();
+    let mut description = genuine.preparation().description();
     description.fp = !description.fp;
     let other_preparation = Arc::new(Preparation::from_description(&description).unwrap());
     let other_context = other_preparation.context(genuine.page);
@@ -82,14 +82,14 @@ fn sealed_shared_handoff_rejects_other_source_pc_and_profile_before_install() {
         genuine.page,
         genuine.pc,
         other_context,
-        genuine.input.clone(),
+        genuine.input().to_vec(),
         other_preparation,
     )
     .unwrap()
     .shared();
     assert_eq!(
         other_profile.block().native.x86_64_code,
-        genuine.block.native.x86_64_code,
+        genuine.block().native.x86_64_code,
         "identical scalar bytes do not prove profile identity"
     );
     assert!(
@@ -98,14 +98,14 @@ fn sealed_shared_handoff_rejects_other_source_pc_and_profile_before_install() {
             genuine.page,
             genuine.pc,
             other_context,
-            genuine.input.clone(),
-            Arc::clone(&genuine.preparation)
+            genuine.input().to_vec(),
+            Arc::clone(genuine.preparation())
         )
         .is_none()
     );
 
     for wrong in [other_source, other_pc, other_profile] {
-        assert!(!wrong.matches(&genuine.key, genuine.pc, &genuine.context, &genuine.input));
+        assert!(!wrong.matches(&genuine.key, genuine.pc, &genuine.context, genuine.input()));
         let mut store = MemoryStore::default();
         store
             .prepared
@@ -122,7 +122,7 @@ fn sealed_shared_handoff_rejects_other_source_pc_and_profile_before_install() {
         );
         assert_eq!(
             receiver.host.installed,
-            core::slice::from_ref(&genuine.block.native.x86_64_code),
+            core::slice::from_ref(&genuine.block().native.x86_64_code),
             "wrong handoff never reaches installation"
         );
     }
@@ -230,7 +230,7 @@ fn a_block_another_thread_prepared_at_the_same_pc_is_installed_as_it_is() {
     assert_eq!(
         second.host.installed
             [second.blocks[index].code.0 / super::super::tests::NATIVE_CODE_STRIDE - 1],
-        offer.block.native.x86_64_code
+        offer.block().native.x86_64_code
     );
     // Another PC of the same page is compiled.
     assert!(second.fetch_block(BASE, false).is_ok());
@@ -318,7 +318,7 @@ fn a_block_longer_than_the_first_window_compiles_and_is_stored_whole() {
     };
     assert_eq!(first.blocks[index].source_bytes, block_bytes);
     let offer = first.host.store.as_mut().unwrap().offers.pop().unwrap();
-    assert_eq!(offer.input.len(), block_bytes);
+    assert_eq!(offer.input().len(), block_bytes);
     let mut record = Record::new(translations::translator_id(), offer.key);
     record.insert(proven(&offer));
     let mut store = MemoryStore::default();
@@ -359,7 +359,7 @@ fn a_page_written_without_invalidation_is_read_and_hashed_again() {
     let offer = machine.host.store.as_mut().unwrap().offers.pop().unwrap();
     assert_ne!(offer.key, key);
     assert_eq!(offer.key, machine.pages[&BASE].key);
-    assert_eq!(offer.input[..4], 0x9100_0c00u32.to_le_bytes());
+    assert_eq!(offer.input()[..4], 0x9100_0c00u32.to_le_bytes());
 }
 
 #[test]

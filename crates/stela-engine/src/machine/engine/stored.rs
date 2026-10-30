@@ -11,13 +11,36 @@ use crate::translations::{Digest, PAGE_BYTES, Record};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use stela_compiler::block::CompiledBlock;
 
-/// A same-process prepared block together with its complete admitted input.
-/// The page key and context remain independent lookup bindings.
+/// A block as compiled, with its complete admitted input and the
+/// preparation that compiled it: immutable once made, so the store and every
+/// PE that installs it share one. Its fault recovery rows are qualified; a
+/// stored record's block has none until its owner qualifies them.
 #[derive(Debug, Clone)]
-pub struct SharedTranslation {
+pub(super) struct Emission {
     pub(super) input: Vec<u8>,
     pub(super) block: CompiledBlock,
     pub(super) preparation: Arc<Preparation>,
+}
+impl Emission {
+    pub(super) fn new(
+        input: Vec<u8>,
+        mut block: CompiledBlock,
+        preparation: Arc<Preparation>,
+    ) -> Self {
+        block.fault_recovery.shrink_to_fit();
+        Self {
+            input,
+            block,
+            preparation,
+        }
+    }
+}
+
+/// A same-process prepared block together with its complete admitted input.
+/// The page key and context remain independent lookup bindings.
+#[derive(Debug)]
+pub struct SharedTranslation {
+    pub(super) emission: Arc<Emission>,
     key: Digest,
     page: u64,
     pc: u64,
@@ -25,24 +48,24 @@ pub struct SharedTranslation {
 }
 impl SharedTranslation {
     pub fn input(&self) -> &[u8] {
-        &self.input
+        &self.emission.input
     }
     pub fn block(&self) -> &CompiledBlock {
-        &self.block
+        &self.emission.block
     }
     pub fn preparation(&self) -> &Arc<Preparation> {
-        &self.preparation
+        &self.emission.preparation
     }
     pub(super) fn matches(&self, key: &Digest, pc: u64, context: &Digest, source: &[u8]) -> bool {
         self.key == *key
             && self.pc == pc
             && self.context == *context
             && self.page == pc & !(PAGE_BYTES as u64 - 1)
-            && self.preparation.context(self.page) == *context
-            && source.get(..self.input.len()) == Some(self.input.as_slice())
-            && self.block.source_bytes <= self.input.len()
+            && self.preparation().context(self.page) == *context
+            && source.get(..self.input().len()) == Some(self.input())
+            && self.block().source_bytes <= self.input().len()
             && self
-                .block
+                .block()
                 .native
                 .source_map
                 .first()
@@ -50,13 +73,14 @@ impl SharedTranslation {
     }
 }
 
-/// The Arc payload/header and every privately owned vector allocation. This
+/// The Arc payloads/headers and every privately owned vector allocation. This
 /// excludes allocator bookkeeping and shared immutable preparation storage.
-fn translation_bytes(input_capacity: usize, block: &CompiledBlock) -> usize {
+fn translation_bytes(emission: &Emission) -> usize {
     use core::mem::size_of;
+    let block = &emission.block;
     let bytes = [
-        size_of::<SharedTranslation>() + 2 * size_of::<usize>(),
-        input_capacity,
+        size_of::<SharedTranslation>() + size_of::<Emission>() + 4 * size_of::<usize>(),
+        emission.input.capacity(),
         block.native.x86_64_code.capacity(),
         block.native.source_map.capacity() * size_of::<(stela_compiler::GuestAddress, usize)>(),
         block.direct_exits.capacity() * size_of::<stela_compiler::x86_64::chain::DirectExit>(),
@@ -98,7 +122,7 @@ pub trait Translations {
 ///
 /// ```compile_fail
 /// fn replace_source(offer: &mut stela_engine::machine::Offer) {
-///     offer.input.clear();
+///     offer.emission.input.clear();
 /// }
 /// ```
 #[derive(Debug, Clone)]
@@ -108,18 +132,17 @@ pub struct Offer {
     pub(super) page: u64,
     pub(super) pc: u64,
     pub(super) context: Digest,
-    /// The admitted words the compiler was given.
-    pub(super) input: Vec<u8>,
-    pub(super) preparation: Arc<Preparation>,
+    /// The block, the admitted words the compiler was given and how it
+    /// compiled them, shared with the PE that installed it.
+    pub(super) emission: Arc<Emission>,
     /// The entry PCs of its static successors, for translation ahead of
     /// execution.
     pub(super) successors: Vec<u64>,
-    pub(super) block: CompiledBlock,
 }
 
 impl Offer {
     pub(crate) fn retained_bytes(&self) -> usize {
-        translation_bytes(self.input.capacity(), &self.block)
+        translation_bytes(&self.emission)
     }
     /// Off-path preparation from canonical immutable input. No native template
     /// or copied site can be supplied; this owner emits the block itself.
@@ -140,10 +163,8 @@ impl Offer {
             page,
             pc,
             context,
-            input,
-            preparation,
+            emission: Arc::new(Emission::new(input, block, preparation)),
             successors: Vec::new(),
-            block,
         })
     }
     pub fn key(&self) -> Digest {
@@ -159,16 +180,16 @@ impl Offer {
         self.context
     }
     pub fn input(&self) -> &[u8] {
-        &self.input
+        &self.emission.input
     }
     pub fn preparation(&self) -> &Arc<Preparation> {
-        &self.preparation
+        &self.emission.preparation
     }
     pub fn successors(&self) -> &[u64] {
         &self.successors
     }
     pub fn block(&self) -> &CompiledBlock {
-        &self.block
+        &self.emission.block
     }
 
     /// Keep this same-process emission and its complete private
@@ -176,14 +197,12 @@ impl Offer {
     ///
     /// ```compile_fail
     /// fn substitute(shared: &mut stela_engine::machine::engine::SharedTranslation) {
-    ///     shared.block.fault_recovery.clear();
+    ///     shared.emission.block.fault_recovery.clear();
     /// }
     /// ```
     pub fn shared(self) -> Arc<SharedTranslation> {
         Arc::new(SharedTranslation {
-            input: self.input,
-            block: self.block,
-            preparation: self.preparation,
+            emission: self.emission,
             key: self.key,
             page: self.page,
             pc: self.pc,
@@ -196,16 +215,16 @@ impl Offer {
     /// ([`translations::prove`](crate::translations::prove)).
     pub fn prove(&self) -> Option<crate::translations::Entry> {
         let probes = crate::translations::probe_displacements(self.page).map(|displacement| {
-            self.preparation
-                .compile_input(&self.input, self.pc.wrapping_add(displacement))
+            self.preparation()
+                .compile_input(self.input(), self.pc.wrapping_add(displacement))
                 .ok()
         });
         let [Some(first), Some(second)] = &probes else {
             return None;
         };
         crate::translations::prove(
-            &self.block,
-            &self.input,
+            self.block(),
+            self.input(),
             self.page,
             self.pc,
             self.context,

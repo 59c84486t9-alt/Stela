@@ -28,15 +28,15 @@ fn legacy_first_fault_qualification_is_cached_and_reports_dispatcher_cost() {
     );
     eprintln!(
         "dispatcher recovery qualification: source={} native={} cold_ns={} cached_average_ns={} (current host; no native guest entered)",
-        owner.input.len(),
-        owner.template.native.x86_64_code.len(),
+        owner.emission.input.len(),
+        owner.native().x86_64_code.len(),
         cold.as_nanos(),
         cached.as_nanos() / 32
     );
 }
 
 use super::super::{Prepared, prepare};
-use super::{CodeRecovery, RecoveryRows};
+use super::{CodeRecovery, Emission};
 use alloc::{sync::Arc, vec::Vec};
 use stela_compiler::block::{FaultRecovery, RecoveryBinding, UnqualifiedFaultRecovery};
 
@@ -91,19 +91,19 @@ fn compiled_owner_moves_one_compact_minted_row_bank_without_binding_copies() {
     let native_pointer = compiled.native.x86_64_code.as_ptr();
     let map_pointer = compiled.native.source_map.as_ptr();
     let native_bytes = compiled.native.x86_64_code.len();
-    let owner = CodeRecovery::compiled(compiled, source, preparation);
-    let RecoveryRows::Qualified(bank) = &owner.rows else {
-        panic!("actual compiler-minted bank");
-    };
+    let owner = CodeRecovery::compiled(Arc::new(Emission::new(source, compiled, preparation)));
+    assert!(owner.pending.is_none(), "actual compiler-minted bank");
+    let bank = &owner.emission.block.fault_recovery;
     assert_eq!(bank.len(), rows);
-    assert_eq!(owner.template.native.x86_64_code.as_ptr(), native_pointer);
-    assert_eq!(owner.template.native.source_map.as_ptr(), map_pointer);
+    assert_eq!(owner.native().x86_64_code.as_ptr(), native_pointer);
+    assert_eq!(owner.native().source_map.as_ptr(), map_pointer);
     for (row, pointer) in bank.iter().zip(binding_pointers) {
         assert_eq!(row.bindings.as_ptr(), pointer);
     }
     let old_row_bytes =
         capacity * core::mem::size_of::<FaultRecovery>() + binding_bytes + portable_bytes;
-    let retained_row_bytes = core::mem::size_of_val(bank.as_ref()) + binding_bytes;
+    assert_eq!(bank.capacity(), bank.len());
+    let retained_row_bytes = core::mem::size_of_val(bank.as_slice()) + binding_bytes;
     assert!(
         retained_row_bytes < old_row_bytes,
         "one exact-length bank replaces duplicate portable and capacity storage"
@@ -128,9 +128,9 @@ fn exact_lazy_qualification_replaces_portable_bank_with_only_minted_rows() {
             .collect(),
     };
     let mut owner = CodeRecovery::stored(template, source, preparation);
-    assert!(matches!(owner.rows, RecoveryRows::Pending(_)));
+    assert!(owner.pending.is_some());
     assert_eq!(owner.qualify(BASE).unwrap(), expected);
-    assert!(matches!(owner.rows, RecoveryRows::Qualified(_)));
+    assert!(owner.pending.is_none());
     assert_eq!(owner.qualification_attempts, 1);
     assert_eq!(owner.qualify(BASE).unwrap(), expected);
     assert_eq!(owner.qualification_attempts, 1);
@@ -164,11 +164,10 @@ fn dirty_guest_binding_buffers_move_with_the_compact_minted_bank() {
         .map(|row| row.bindings.as_ptr())
         .collect();
     let expected = compiled.fault_recovery.clone();
-    let owner = CodeRecovery::compiled(compiled, source, preparation);
-    let RecoveryRows::Qualified(rows) = &owner.rows else {
-        panic!("minted bank");
-    };
-    assert_eq!(rows.as_ref(), expected);
+    let owner = CodeRecovery::compiled(Arc::new(Emission::new(source, compiled, preparation)));
+    assert!(owner.pending.is_none(), "minted bank");
+    let rows = &owner.emission.block.fault_recovery;
+    assert_eq!(rows, &expected);
     for (row, pointer) in rows.iter().zip(pointers) {
         assert_eq!(row.bindings.as_ptr(), pointer);
     }

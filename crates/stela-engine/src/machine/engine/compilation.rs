@@ -179,28 +179,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .translations()
                 .and_then(|translations| translations.prepared(key, pc, context))
             {
-                if !within(&compiled.block) {
+                if !within(compiled.block()) {
                     return Ok(None);
                 }
                 if compiled.matches(key, pc, context, &source) {
                     self.statistics.shared += 1;
-                    let shared = Arc::unwrap_or_clone(compiled);
                     return self
                         .install(
                             pc,
                             physical,
                             variant,
                             &source,
-                            recovery::CodeRecovery::compiled(
-                                shared.block,
-                                shared.input,
-                                shared.preparation,
-                            )
-                            .with_record(SourceRecord {
-                                page,
-                                raw_page_sha256: *key,
-                                preparation_context: *context,
-                            }),
+                            recovery::CodeRecovery::compiled(compiled.emission.clone())
+                                .with_record(SourceRecord {
+                                    page,
+                                    raw_page_sha256: *key,
+                                    preparation_context: *context,
+                                }),
                         )
                         .map(Some);
                 }
@@ -253,6 +248,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.statistics.compiled += 1;
         self.statistics.compiled_instructions += (compiled.source_bytes as u64) / INSTRUCTION;
         self.statistics.compile_ticks += self.host.counter().wrapping_sub(started);
+        let emission = Arc::new(super::stored::Emission::new(
+            source[..input].to_vec(),
+            compiled,
+            preparation,
+        ));
         // An offer is kept until the store proves it; with memory low the
         // block is only compiled, as one the store cannot hold.
         let source_record = stored
@@ -272,15 +272,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 page,
                 pc,
                 context,
-                input: source[..input].to_vec(),
-                preparation: preparation.clone(),
-                block: compiled.clone(),
+                emission: emission.clone(),
                 successors,
             });
             self.statistics.offered += 1;
         }
-        let mut recovery =
-            recovery::CodeRecovery::compiled(compiled, source[..input].to_vec(), preparation);
+        let mut recovery = recovery::CodeRecovery::compiled(emission);
         if let Some(record) = source_record {
             recovery = recovery.with_record(record);
         }
@@ -358,17 +355,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             )));
         }
         if !compiled.matches_source(source)
-            || compiled.template.source_bytes < INSTRUCTION as usize
-            || compiled.template.source_bytes > source.len()
-            || pc
-                .checked_add(compiled.template.source_bytes as u64)
-                .is_none()
+            || compiled.source_bytes() < INSTRUCTION as usize
+            || compiled.source_bytes() > source.len()
+            || pc.checked_add(compiled.source_bytes() as u64).is_none()
         {
             return Err(self.unsupported(RequirementKind::Native(
                 "native template has no matching admitted source extent",
             )));
         }
-        let last = compiled.template.source_bytes - INSTRUCTION as usize;
+        let last = compiled.source_bytes() - INSTRUCTION as usize;
         let terminal = u32::from_le_bytes(source[last..last + 4].try_into().expect("a word"));
         // A heap without room for the block table's next chunk reuses the
         // oldest code's slots instead, or, when none of this machine's
@@ -379,21 +374,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.discard_code();
             }
         }
-        let code = match self.host.install(&compiled.template.native.x86_64_code) {
+        let code = match self.host.install(&compiled.native().x86_64_code) {
             Ok(code) => code,
             Err(InstallError::Full) => {
                 self.reclaim_code();
                 self.host
-                    .install(&compiled.template.native.x86_64_code)
+                    .install(&compiled.native().x86_64_code)
                     .map_err(|_| {
                         self.unsupported(RequirementKind::Native("block exceeds the code arena"))
                     })?
             }
         };
-        let terminal_pc = pc + compiled.template.source_bytes as u64 - INSTRUCTION;
+        let terminal_pc = pc + compiled.source_bytes() as u64 - INSTRUCTION;
         let mut successors: Vec<Successor> = compiled
-            .template
-            .direct_exits
+            .direct_exits()
             .iter()
             .map(|exit| Successor {
                 site: code.0 as u64 + exit.offset as u64,
@@ -403,7 +397,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .collect();
         // RET, BR and BLR end the code with their exit to the target in
         // RAX; the PAC thunk of a RETA*, BRA* or BLRA* has one too.
-        let code_bytes = &compiled.template.native.x86_64_code;
+        let code_bytes = &compiled.native().x86_64_code;
         let mut dynamic_site = (!single
             && terminal & 0xff9f_fc1f == 0xd61f_0000
             && dynamic_branch(terminal)
@@ -414,7 +408,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let (successor, dynamic) = self
                 .complete_pointer_natively(
                     code,
-                    &compiled.template.native.x86_64_code,
+                    &compiled.native().x86_64_code,
                     terminal_pc,
                     terminal,
                 )
@@ -423,7 +417,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             dynamic_site = dynamic_site.or(dynamic);
             successors.extend(self.complete_mirrored_read_natively(
                 code,
-                &compiled.template.native.x86_64_code,
+                &compiled.native().x86_64_code,
                 terminal_pc,
                 terminal,
             ));
@@ -433,8 +427,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             physical,
             code,
             source_map: compiled
-                .template
-                .native
+                .native()
                 .source_map
                 .iter()
                 .map(|(guest, offset)| (guest.0, *offset))
@@ -446,8 +439,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             first,
             terminal: (terminal_pc, terminal),
             taken: 0,
-            source_bytes: compiled.template.source_bytes,
-            source_hash: source_hash(&source[..compiled.template.source_bytes]),
+            source_bytes: compiled.source_bytes(),
+            source_hash: source_hash(&source[..compiled.source_bytes()]),
         };
         let index = match self.free_blocks.pop() {
             Some(slot) => {
