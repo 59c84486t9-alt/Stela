@@ -1,0 +1,443 @@
+use super::{
+    GuestMemory, Outcome, Service,
+    wire::{
+        self, ConstantRecord, Empty, Fault, Handle, Length, LibraryFunctionNamesRequest,
+        NegotiateRequest, NegotiateResponse, NewFunctionRequest, NewLibraryRequest, Operation,
+        Record, Span, Status,
+    },
+};
+use crate::gpu::{
+    metal::{
+        abi::DataType,
+        capabilities::block::Block,
+        device::{
+            LibraryId,
+            fixture::{MockBackend, MockCompiler, device},
+        },
+        library::tests::fixture,
+    },
+    protocol::identity::DeviceEpoch,
+};
+use alloc::{vec, vec::Vec};
+use core::num::NonZeroU64;
+
+type TestService = Service<MockBackend, MockCompiler>;
+
+/// A guest address space of one mapping at `BASE`.
+#[derive(Default)]
+struct Memory {
+    bytes: Vec<u8>,
+}
+
+impl Memory {
+    const BASE: u64 = 0x1_0000;
+
+    /// Maps `data` and spans it.
+    fn put(&mut self, data: &[u8]) -> Span {
+        let span = Span {
+            address: Self::BASE + self.bytes.len() as u64,
+            length: data.len() as u64,
+        };
+        self.bytes.extend_from_slice(data);
+        span
+    }
+
+    fn records<T: Record>(&mut self, records: &[T]) -> Span {
+        let mut data = vec![0; core::mem::size_of_val(records)];
+        for (record, out) in records
+            .iter()
+            .zip(data.chunks_exact_mut(core::mem::size_of::<T>()))
+        {
+            wire::write(record, out).unwrap();
+        }
+        self.put(&data)
+    }
+
+    fn range(&self, span: Span) -> Result<core::ops::Range<usize>, Fault> {
+        let start = span
+            .address
+            .checked_sub(Self::BASE)
+            .ok_or(Fault::malformed("unmapped"))? as usize;
+        let end = start + span.length as usize;
+        if end > self.bytes.len() {
+            return Err(Fault::malformed("unmapped"));
+        }
+        Ok(start..end)
+    }
+}
+
+impl GuestMemory for Memory {
+    fn read(&self, span: Span) -> Result<&[u8], Fault> {
+        Ok(&self.bytes[self.range(span)?])
+    }
+
+    fn write(&mut self, span: Span, bytes: &[u8]) -> Result<(), Fault> {
+        let range = self.range(span)?;
+        self.bytes[range].copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
+fn service() -> TestService {
+    Service::new(device(), DeviceEpoch::from_registered(NonZeroU64::MIN))
+}
+
+/// Runs `operation` with `request`, decoding its response.
+fn call<Q: Record, R: Record>(
+    service: &mut TestService,
+    connection: NonZeroU64,
+    operation: Operation,
+    request: &Q,
+    memory: &mut Memory,
+) -> Result<R, Outcome> {
+    let mut request_bytes = vec![0; core::mem::size_of::<Q>()];
+    wire::write(request, &mut request_bytes).unwrap();
+    let mut response = vec![0; core::mem::size_of::<R>()];
+    let outcome = service.call(
+        connection.get(),
+        operation.raw(),
+        &request_bytes,
+        &mut response,
+        memory,
+    );
+    match outcome.status {
+        Status::Ok => Ok(wire::read(&response).unwrap()),
+        _ => Err(outcome),
+    }
+}
+
+fn status<R>(result: Result<R, Outcome>) -> Status {
+    result.map_or_else(|outcome| outcome.status, |_| Status::Ok)
+}
+
+/// A negotiated connection.
+fn connect(service: &mut TestService) -> NonZeroU64 {
+    let connection = service.connect().unwrap();
+    let request = NegotiateRequest {
+        major: wire::MAJOR,
+        minor: wire::MINOR,
+    };
+    let _: NegotiateResponse = call(
+        service,
+        connection,
+        Operation::Negotiate,
+        &request,
+        &mut Memory::default(),
+    )
+    .unwrap();
+    connection
+}
+
+fn new_library(service: &mut TestService, connection: NonZeroU64, memory: &mut Memory) -> u64 {
+    let request = NewLibraryRequest {
+        data: memory.put(&fixture(false)),
+    };
+    let library: Handle =
+        call(service, connection, Operation::NewLibrary, &request, memory).unwrap();
+    library.handle
+}
+
+fn new_function(
+    service: &mut TestService,
+    connection: NonZeroU64,
+    library: u64,
+    name: &str,
+    constants: &[ConstantRecord],
+    memory: &mut Memory,
+) -> Result<Handle, Outcome> {
+    let request = NewFunctionRequest {
+        library,
+        name: memory.put(name.as_bytes()),
+        constants: memory.records(constants),
+    };
+    call(
+        service,
+        connection,
+        Operation::NewFunction,
+        &request,
+        memory,
+    )
+}
+
+#[test]
+fn connections_negotiate_before_anything_else() {
+    let mut service = service();
+    let memory = &mut Memory::default();
+    let connection = service.connect().unwrap();
+    let capabilities = |service: &mut TestService, memory: &mut Memory| {
+        call::<_, Block>(
+            service,
+            connection,
+            Operation::Capabilities,
+            &Empty {},
+            memory,
+        )
+    };
+    assert_eq!(
+        capabilities(&mut service, memory).unwrap_err().status,
+        Status::Invalid
+    );
+    let negotiate = |service: &mut TestService, major| {
+        let request = NegotiateRequest { major, minor: 7 };
+        call::<_, NegotiateResponse>(
+            service,
+            connection,
+            Operation::Negotiate,
+            &request,
+            &mut Memory::default(),
+        )
+    };
+    assert_eq!(
+        status(negotiate(&mut service, wire::MAJOR + 1)),
+        Status::Unsupported
+    );
+    assert_eq!(
+        negotiate(&mut service, wire::MAJOR),
+        Ok(NegotiateResponse {
+            major: wire::MAJOR,
+            minor: wire::MINOR,
+            capability_bytes: core::mem::size_of::<Block>() as u32,
+            reserved: 0,
+        })
+    );
+    // The block the frontend reads decodes to the device's capabilities.
+    let block = capabilities(&mut service, memory).unwrap();
+    assert_eq!(
+        block.capabilities().as_ref(),
+        Ok(service.device().capabilities())
+    );
+}
+
+#[test]
+fn calls_carry_exact_records_of_known_operations() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let mut response = [0; 8];
+    let mut outcome = |connection, operation, request: &[u8], response: &mut [u8]| {
+        service
+            .call(connection, operation, request, response, memory)
+            .status
+    };
+    let release = Operation::Release.raw();
+    assert_eq!(
+        outcome(connection.get(), release, &[0; 7], &mut []),
+        Status::Malformed
+    );
+    assert_eq!(
+        outcome(connection.get(), release, &[0; 8], &mut response),
+        Status::Malformed
+    );
+    assert_eq!(
+        outcome(connection.get(), 0xffff, &[], &mut []),
+        Status::UnknownOperation
+    );
+    assert_eq!(outcome(0, release, &[0; 8], &mut []), Status::Closed);
+    assert_eq!(
+        outcome(connection.get() + 1, release, &[0; 8], &mut []),
+        Status::Closed
+    );
+    // Handle zero names nothing.
+    assert_eq!(
+        outcome(connection.get(), release, &[0; 8], &mut []),
+        Status::StaleHandle
+    );
+}
+
+#[test]
+fn libraries_list_and_make_their_functions() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let library = new_library(&mut service, connection, memory);
+
+    // Too short a span receives nothing but the length.
+    let mut names = |memory: &mut Memory, capacity| {
+        let out = memory.put(&vec![0xee; capacity]);
+        let request = LibraryFunctionNamesRequest { library, out };
+        let length: Length = call(
+            &mut service,
+            connection,
+            Operation::LibraryFunctionNames,
+            &request,
+            memory,
+        )
+        .unwrap();
+        (length.length, memory.read(out).unwrap().to_vec())
+    };
+    assert_eq!(names(memory, 3), (7, vec![0xee; 3]));
+    assert_eq!(names(memory, 8), (7, b"kernel\0\xee".to_vec()));
+
+    let scale = |memory: &mut Memory, name: &str, data_type: DataType| ConstantRecord {
+        data_type: data_type.raw(),
+        index: 0,
+        name: memory.put(name.as_bytes()),
+        value: memory.put(&2u32.to_le_bytes()),
+    };
+    let named = scale(memory, "scale", DataType::UInt);
+    let function = new_function(
+        &mut service,
+        connection,
+        library,
+        "constants",
+        &[named],
+        memory,
+    );
+    assert!(function.is_ok());
+    let indexed = scale(memory, "", DataType::UInt);
+    assert!(
+        new_function(
+            &mut service,
+            connection,
+            library,
+            "constants",
+            &[indexed],
+            memory
+        )
+        .is_ok()
+    );
+    let mistyped = scale(memory, "", DataType::Int);
+    assert_eq!(
+        new_function(
+            &mut service,
+            connection,
+            library,
+            "constants",
+            &[mistyped],
+            memory
+        ),
+        Err(Outcome {
+            status: Status::Invalid,
+            reason: "a function constant value of another type",
+        })
+    );
+    let unknown = ConstantRecord {
+        data_type: 2,
+        ..indexed
+    };
+    assert_eq!(
+        status(new_function(
+            &mut service,
+            connection,
+            library,
+            "constants",
+            &[unknown],
+            memory
+        )),
+        Status::Malformed
+    );
+    let not_utf8 = ConstantRecord {
+        name: memory.put(&[0xff]),
+        ..indexed
+    };
+    assert_eq!(
+        status(new_function(
+            &mut service,
+            connection,
+            library,
+            "constants",
+            &[not_utf8],
+            memory
+        )),
+        Status::Malformed
+    );
+    // A function's handle names no library.
+    let function = function.unwrap().handle;
+    assert_eq!(
+        status(new_function(
+            &mut service,
+            connection,
+            function,
+            "kernel",
+            &[],
+            memory
+        )),
+        Status::StaleHandle
+    );
+}
+
+#[test]
+fn released_handles_name_nothing() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let library = new_library(&mut service, connection, memory);
+    let function = new_function(&mut service, connection, library, "kernel", &[], memory)
+        .unwrap()
+        .handle;
+    let release = |service: &mut TestService, handle| {
+        call::<_, Empty>(
+            service,
+            connection,
+            Operation::Release,
+            &Handle { handle },
+            &mut Memory::default(),
+        )
+    };
+    // The function keeps the library it was made from.
+    release(&mut service, library).unwrap();
+    assert!(
+        service
+            .device()
+            .library_function_names(LibraryId(1))
+            .is_ok()
+    );
+    assert_eq!(status(release(&mut service, library)), Status::StaleHandle);
+    assert_eq!(
+        status(new_function(
+            &mut service,
+            connection,
+            library,
+            "kernel",
+            &[],
+            memory
+        )),
+        Status::StaleHandle
+    );
+    release(&mut service, function).unwrap();
+    assert!(
+        service
+            .device()
+            .library_function_names(LibraryId(1))
+            .is_err()
+    );
+}
+
+#[test]
+fn connections_hold_their_own_objects_until_they_close() {
+    let mut service = service();
+    let (first, second) = (connect(&mut service), connect(&mut service));
+    let memory = &mut Memory::default();
+    let library = new_library(&mut service, first, memory);
+    new_function(&mut service, first, library, "kernel", &[], memory).unwrap();
+    assert_eq!(
+        status(new_function(
+            &mut service,
+            second,
+            library,
+            "kernel",
+            &[],
+            memory
+        )),
+        Status::StaleHandle
+    );
+    service.disconnect(first).unwrap();
+    assert!(
+        service
+            .device()
+            .library_function_names(LibraryId(1))
+            .is_err()
+    );
+    assert_eq!(
+        status(new_function(
+            &mut service,
+            first,
+            library,
+            "kernel",
+            &[],
+            memory
+        )),
+        Status::Closed
+    );
+    assert_eq!(service.disconnect(first), Err(Fault::CLOSED));
+}

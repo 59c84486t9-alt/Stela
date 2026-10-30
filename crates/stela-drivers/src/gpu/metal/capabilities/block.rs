@@ -126,7 +126,7 @@ pub struct GapEntry {
 }
 
 #[repr(C)]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Block {
     pub magic: [u8; 4],
     pub version: u32,

@@ -31,6 +31,7 @@ pub mod pipeline;
 pub mod pixel_format;
 pub mod resource;
 pub mod sampler;
+pub mod service;
 pub mod shader;
 pub mod sparse;
 pub mod upload;
