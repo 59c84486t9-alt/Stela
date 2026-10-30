@@ -1252,7 +1252,7 @@ fn unselected_ap_mlo_never_changes_single_link_context_bssid_or_outgoing_request
         &response_metadata(response),
     )
     .unwrap();
-    assert_eq!(c.intent(), AssociationIntent::SingleLink);
+    assert_eq!(c.affiliation(), None);
     assert_eq!(c.bssid(), AP);
     assert_eq!(c.definition(), baseline.definition());
     assert_eq!(c.negotiated().eht, baseline.negotiated().eht);
@@ -1295,7 +1295,7 @@ fn malformed_unselected_ml_body_and_fragment_cannot_replace_single_link_operatio
         &response_metadata(response),
     )
     .unwrap();
-    assert_eq!(c.intent(), AssociationIntent::SingleLink);
+    assert_eq!(c.affiliation(), None);
     assert_eq!(c.bssid(), AP);
     assert_eq!(c.channel().number, 36);
     assert_eq!(c.definition().center1_mhz, 5210);

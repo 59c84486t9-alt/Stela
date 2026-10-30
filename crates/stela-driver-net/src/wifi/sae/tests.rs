@@ -221,3 +221,26 @@ fn an_anti_clogging_token_goes_after_the_group_or_in_its_container() {
         [255, 3, 33, b'i', b'd', 255, 3, 93, 0xaa, 0xbb]
     );
 }
+
+/// `ie_offset`: an AP MLD's multi-link element follows each frame's SAE
+/// fields, the hash-to-element containers among them.
+#[test]
+fn an_ap_mld_element_follows_the_sae_fields() {
+    let mld = [255, 10, 107, 0, 0, 7, 2, 9, 9, 9, 9, 9];
+    let mut commit = vec![19, 0];
+    commit.extend_from_slice(&[1; SCALAR_BYTES + ELEMENT_BYTES]);
+    commit.extend_from_slice(&[EXTENSION, 3, REJECTED_GROUPS, 20, 0]);
+    commit.extend_from_slice(&[EXTENSION, 2, TOKEN_CONTAINER, 7]);
+    let fields = commit.len();
+    commit.extend_from_slice(&mld);
+    assert_eq!(fields_end(COMMIT, STATUS_HASH_TO_ELEMENT, &commit), fields);
+    let mut clogging = vec![19, 0, EXTENSION, 2, TOKEN_CONTAINER, 7];
+    clogging.extend_from_slice(&mld);
+    assert_eq!(fields_end(COMMIT, STATUS_ANTI_CLOGGING, &clogging), 6);
+    let mut confirm = vec![1, 0];
+    confirm.extend_from_slice(&[0; 32]);
+    confirm.extend_from_slice(&mld);
+    assert_eq!(fields_end(CONFIRM, 0, &confirm), 34);
+    // A short frame ends at its own length.
+    assert_eq!(fields_end(CONFIRM, 0, &[1, 0]), 2);
+}

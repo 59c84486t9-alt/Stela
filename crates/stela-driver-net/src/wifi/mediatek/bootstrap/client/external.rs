@@ -63,7 +63,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let broadcast = profile.broadcast_request().map_err(Error::Codec)?;
         let session = s
             .station
-            .begin_external_authentication(profile.peer, profile.channel, ssid, now, budget, policy)
+            .begin_external_authentication(
+                station::external::Peer {
+                    bssid: profile.peer,
+                    channel: profile.channel,
+                    ssid,
+                    multi_link: None,
+                },
+                now,
+                budget,
+                policy,
+            )
             .map_err(Error::Station)?;
         s.authentication_deadline = Some(deadline);
         s.profile = Some(profile);

@@ -479,7 +479,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 request: _,
                 response,
                 context,
+                links,
             } => {
+                // The MT7925 programs no affiliated link's records yet.
+                if !links.is_empty() {
+                    return Err(Error::Unsupported);
+                }
                 if let Some(context) = context {
                     return Self::prepare_modern(s, ticket, context);
                 }

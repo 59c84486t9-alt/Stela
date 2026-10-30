@@ -8,6 +8,7 @@
 //! This is not OS authentication, native completion or regulatory permission.
 use super::{
     Error, Join, Ticket,
+    multi_link::Affiliation,
     operations::{ChannelDefinition, Operations},
     phy::{Capabilities, Negotiated, Role},
     wire::AssociationResponse,
@@ -34,13 +35,6 @@ impl NativeBssObservation {
     }
 }
 
-/// Explicit request/resource mode. No MLD constructor or permission is
-/// available; advertising ML or EHT cannot create a multi-link association.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AssociationIntent {
-    SingleLink,
-}
-
 #[derive(Debug)]
 pub struct AssociationContext {
     ticket: Ticket,
@@ -54,6 +48,8 @@ pub struct AssociationContext {
     dtim_count: u8,
     pmf: Option<super::wire::pmf::Selection>,
     native_observation: Option<Arc<NativeBssObservation>>,
+    /// The MLD link this configures, for a multi-link association.
+    affiliation: Option<Affiliation>,
 }
 fn failure(error: super::phy::Error) -> Error {
     Error::Phy(error)
@@ -236,6 +232,7 @@ impl AssociationContext {
             dtim_count,
             pmf: join.request.pmf().cloned(),
             native_observation: native_observation.cloned(),
+            affiliation: join.request.multi_link().map(|setup| setup.association),
         })
     }
     /// Original OS-selected RSNE, validated against this BSS and
@@ -247,8 +244,15 @@ impl AssociationContext {
     pub fn pmf(&self) -> Option<&super::wire::pmf::Selection> {
         self.pmf.as_ref()
     }
-    pub fn intent(&self) -> AssociationIntent {
-        AssociationIntent::SingleLink
+    /// The MLD link of a multi-link association this configures.
+    pub fn affiliation(&self) -> Option<&Affiliation> {
+        self.affiliation.as_ref()
+    }
+    pub(super) fn affiliated(self, affiliation: Affiliation) -> Self {
+        Self {
+            affiliation: Some(affiliation),
+            ..self
+        }
     }
     pub fn ticket(&self) -> Ticket {
         self.ticket

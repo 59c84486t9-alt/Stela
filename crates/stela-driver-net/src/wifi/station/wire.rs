@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Layouts adapted from Linux include/linux/ieee80211.h and
 // net/mac80211/{util.c,mlme.c}; source notices in THIRD_PARTY.md.
-//! Single-link open-system, shared-key, static WEP and RSN wire forms. Legacy
-//! constructors refuse PMF; the explicit modern PMF profile requires separate
-//! OS permission.
+//! Open-system, shared-key, static WEP and RSN wire forms, and the multi-link
+//! setup an EHT PMF request carries. Legacy constructors refuse PMF; the
+//! explicit modern PMF profile requires separate OS permission.
 
 use super::{PortPolicy, phy};
 use crate::{
@@ -37,6 +37,7 @@ pub struct AssociationRequest {
     wep: Option<Wep>,
     modern: Option<Arc<ModernSelection>>,
     pmf: Option<pmf::Selection>,
+    multi_link: Option<Arc<super::multi_link::Setup>>,
 }
 
 /// WLAN_AUTH_OPEN and WLAN_AUTH_SHARED_KEY.
@@ -328,6 +329,44 @@ impl AssociationRequest {
         self.pmf.as_ref()
     }
 
+    /// `ieee80211_mgd_assoc` for an AP MLD: this EHT request with PMF on
+    /// the setup's link, requesting its other links in the Basic Multi-Link
+    /// element `ieee80211_add_link_elems` places before the EHT capabilities.
+    pub fn with_multi_link(mut self, setup: super::multi_link::Setup) -> Result<Self, Error> {
+        let mode = self.modern().map(ModernSelection::mode);
+        if mode != Some(phy::Mode::Eht) || self.pmf.is_none() || self.multi_link.is_some() {
+            return Err(Error::Unsupported("multi-link outside an EHT PMF request"));
+        }
+        setup.validate().map_err(|error| match error {
+            super::Error::Wire(error) => error,
+            _ => Error::Invalid("multi-link setup"),
+        })?;
+        let element = setup.element(&self.elements);
+        let mut at = 0;
+        for (id, data) in elements(&self.elements)? {
+            if id == 255 && data.first() == Some(&108) {
+                break;
+            }
+            at += 2 + data.len();
+        }
+        if at == self.elements.len() {
+            return Err(Error::Invalid(
+                "multi-link request without EHT capabilities",
+            ));
+        }
+        if self.elements.len() + element.len() > MAX_ELEMENTS {
+            return Err(Error::Invalid("association elements too long"));
+        }
+        self.elements.splice(at..at, element);
+        self.multi_link = Some(Arc::new(setup));
+        Ok(self)
+    }
+
+    /// The multi-link setup the request carries.
+    pub fn multi_link(&self) -> Option<&super::multi_link::Setup> {
+        self.multi_link.as_deref()
+    }
+
     /// Select static WEP with open-system or shared-key authentication. As
     /// `ieee80211_determine_our_sta_mode` does for a WEP pairwise cipher, the
     /// association stays in legacy mode.
@@ -467,6 +506,7 @@ impl AssociationRequest {
             wep: None,
             modern: None,
             pmf: selected_pmf,
+            multi_link: None,
         })
     }
 

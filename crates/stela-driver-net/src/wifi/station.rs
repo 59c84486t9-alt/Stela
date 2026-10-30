@@ -4,7 +4,8 @@
 // 2005 Devicescape Software, Inc.; 2006-2007 Jiri Benc; 2007 Michael Wu;
 // 2013-2014 Intel Mobile Communications GmbH;
 // 2015-2017 Intel Deutschland GmbH; 2018-2026 Intel Corporation.
-//! Single-link open-system authentication and association control.
+//! Open-system authentication and association control, on one link or, after
+//! SAE with an AP MLD, on the links a multi-link setup requests.
 //!
 //! The OS/frontend chooses the BSS and complete negotiated association IEs.
 //! WPA/802.1X authentication remains with that OS service. This layer cannot
@@ -24,8 +25,10 @@ mod aggregate;
 mod context;
 pub mod csa;
 pub mod external;
+pub mod multi_link;
 mod sequence;
-pub use context::{AssociationContext, AssociationIntent, NativeBssObservation};
+pub use context::{AssociationContext, NativeBssObservation};
+use multi_link::Affiliation;
 pub mod ba;
 pub mod data;
 pub mod operations;
@@ -125,6 +128,9 @@ pub enum Failure {
     PeerDeparture(u16),
     Timeout,
     Transmit,
+    /// The AP MLD's answer broke the multi-link setup, which
+    /// `ieee80211_rx_mgmt_assoc_resp` abandons.
+    MultiLink,
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +152,8 @@ pub enum Action {
         response: wire::AssociationResponse,
         /// Kept modern configuration. Legacy actions carry None.
         context: Option<Arc<AssociationContext>>,
+        /// The other links an AP MLD accepted, each its own configuration.
+        links: Vec<Arc<AssociationContext>>,
     },
     /// Remove association/keys, mask/drain associated work, then acknowledge.
     Remove {
@@ -172,6 +180,8 @@ pub struct Station {
     sae: external::Progress,
     selected_beacon: Option<super::scan::result::Bss>,
     context: Option<Arc<AssociationContext>>,
+    /// The other links of a multi-link association.
+    links: Vec<Arc<AssociationContext>>,
     /// Where a channel switch moved the association of this context ticket.
     switched: Option<(Ticket, operations::ChannelDefinition)>,
     pmf_observation: Option<Arc<NativeBssObservation>>,
@@ -203,6 +213,7 @@ impl Station {
             sae: external::Progress::default(),
             selected_beacon: None,
             context: None,
+            links: Vec::new(),
             switched: None,
             pmf_observation: None,
             epoch: 0,
@@ -230,6 +241,24 @@ impl Station {
         }
     }
 
+    /// The station's address on the link its management frames use: the
+    /// setup link of a multi-link request, or the interface's own.
+    fn link_address(&self) -> Mac {
+        self.join
+            .as_ref()
+            .and_then(|join| join.request.multi_link())
+            .map_or(self.local, |setup| setup.association.local)
+    }
+
+    /// The other links of the current association.
+    pub fn link_contexts(&self) -> &[Arc<AssociationContext>] {
+        if matches!(self.phase, Phase::Configuring | Phase::Associated) {
+            &self.links
+        } else {
+            &[]
+        }
+    }
+
     fn clock(&mut self, now_us: u64) -> Result<(), Error> {
         if now_us < self.now {
             return Err(Error::ClockRegressed);
@@ -252,6 +281,7 @@ impl Station {
         attempts: u8,
         policy: &mut impl RegulatoryPolicy,
     ) -> Result<Action, Error> {
+        let local = self.link_address();
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
         let channel = join.channel;
         if !policy.allow_management_tx(channel) {
@@ -265,7 +295,7 @@ impl Station {
                 self.sequence,
                 join.request.algorithm(),
             ),
-            Phase::Associating => join.request.encode(self.local, join.bssid, self.sequence),
+            Phase::Associating => join.request.encode(local, join.bssid, self.sequence),
             _ => return Err(Error::Busy),
         }?;
         let deadline = self
@@ -411,6 +441,7 @@ impl Station {
         self.join = None;
         self.selected_beacon = None;
         self.context = None;
+        self.links.clear();
         self.pmf_observation = None;
         self.phase = if external {
             Phase::ExternalAuthenticating
@@ -446,6 +477,14 @@ impl Station {
         if join.bssid != session.peer() || join.channel != session.channel() {
             return Err(Error::InvalidAddress);
         }
+        // A multi-link setup runs on the link and between the MLDs the
+        // exchange authenticated.
+        if join.request.multi_link().map(|setup| setup.association) != session.multi_link().copied()
+        {
+            return Err(Error::Unsupported(
+                "multi-link association outside its exchange",
+            ));
+        }
         // A 6 GHz exchange associates with the beacon and RSN it authenticated.
         if let Some(six) = session.six_ghz_observation()
             && (!Arc::ptr_eq(six, &observed)
@@ -472,6 +511,7 @@ impl Station {
         self.join = Some(join);
         self.selected_beacon = Some(beacon);
         self.context = None;
+        self.links.clear();
         self.pmf_observation = Some(observed);
         self.phase = Phase::Associating;
         match self.transmit(Phase::Associating, 1, policy) {
@@ -560,12 +600,16 @@ impl Station {
         if join.channel.band == super::Band::Ghz6 {
             return Err(Error::Unsupported("6GHz HE/SAE/PMF association"));
         }
+        if join.request.multi_link().is_some() {
+            return Err(Error::Unsupported("multi-link setup outside SAE"));
+        }
         join.request.validate_policy(join.policy)?;
         self.epoch = NEXT_ASSOCIATION.next().ok_or(Error::Overflow)?;
         self.serial = 0;
         self.join = Some(join);
         self.selected_beacon = beacon;
         self.context = None;
+        self.links.clear();
         self.pmf_observation = None;
         self.wep_iv = self
             .join
@@ -679,7 +723,7 @@ impl Station {
         if header.control & 0x800c != 0 || header.length != 24 || header.fragmented() {
             return Err(Error::Unsupported("nonordinary management frame"));
         }
-        if (header.receiver != self.local && header.receiver != Mac::BROADCAST)
+        if (header.receiver != self.link_address() && header.receiver != Mac::BROADCAST)
             || header.transmitter != Some(join.bssid)
             || frame.bytes()[16..22] != join.bssid.0
         {
@@ -718,7 +762,7 @@ impl Station {
         if frame.fcs_error || frame.monitor_only {
             return Err(Error::Wire(wire::Error::Integrity));
         }
-        wire::check_peer(frame, self.local, join.bssid)?;
+        wire::check_peer(frame, self.link_address(), join.bssid)?;
         if join.request.pmf().is_some() && super::security::management::robust(frame) {
             return Err(Error::Unsupported(
                 "PMF requires authenticated management consumer",
@@ -774,6 +818,21 @@ impl Station {
                 if response.status != 0 {
                     return self.remove(Some(Failure::PeerRejected(response.status)));
                 }
+                let answers = match join.request.multi_link() {
+                    Some(setup) => {
+                        let requested: Vec<u8> =
+                            setup.links.iter().map(|link| link.link_id).collect();
+                        match wire::multi_link::association_response(
+                            setup.association.mld.ap,
+                            &response.elements,
+                            &requested,
+                        ) {
+                            Ok((_, answers)) => answers,
+                            Err(_) => return self.remove(Some(Failure::MultiLink)),
+                        }
+                    }
+                    None => Vec::new(),
+                };
                 let bssid = join.bssid;
                 let channel = join.channel;
                 let request = join.request.clone();
@@ -803,7 +862,9 @@ impl Station {
                 } else {
                     None
                 };
+                let links = self.accepted_links(ticket, &response, &answers)?;
                 self.context = context.clone();
+                self.links = links.clone();
                 self.external = None;
                 self.phase = Phase::Configuring;
                 self.pending = Some(Pending {
@@ -819,10 +880,58 @@ impl Station {
                     request,
                     response,
                     context,
+                    links,
                 })
             }
             _ => Err(Error::Stale),
         }
+    }
+
+    /// `ieee80211_assoc_success` for the other links of a multi-link
+    /// setup: each the AP MLD accepted is configured from its affiliated
+    /// BSS and its answer under the association's AID, and one it refused is
+    /// left out.
+    fn accepted_links(
+        &self,
+        ticket: Ticket,
+        response: &wire::AssociationResponse,
+        answers: &[wire::multi_link::Answer],
+    ) -> Result<Vec<Arc<AssociationContext>>, Error> {
+        let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
+        let Some(setup) = join.request.multi_link() else {
+            return Ok(Vec::new());
+        };
+        let mut links = Vec::new();
+        for answer in answers.iter().filter(|answer| answer.status == 0) {
+            let link = setup.link(answer.link_id).ok_or(Error::Stale)?;
+            let bss = link.observation.bss();
+            let link_join = Join {
+                bssid: bss.bssid,
+                channel: bss.channel,
+                policy: join.policy,
+                request: link.request.clone(),
+            };
+            let link_response = wire::AssociationResponse {
+                capabilities: answer.capability,
+                status: 0,
+                elements: answer.elements.clone(),
+                ..response.clone()
+            };
+            let context = AssociationContext::build_with_native(
+                ticket,
+                &link_join,
+                bss,
+                &link_response,
+                Some(&link.observation),
+            )?
+            .affiliated(Affiliation {
+                link_id: link.link_id,
+                local: link.local,
+                ..setup.association
+            });
+            links.push(Arc::new(context));
+        }
+        Ok(links)
     }
 
     pub fn poll(
@@ -912,6 +1021,7 @@ impl Station {
                 self.join = None;
                 self.selected_beacon = None;
                 self.context = None;
+                self.links.clear();
                 self.pmf_observation = None;
                 Phase::Idle
             }
@@ -1062,6 +1172,7 @@ impl Station {
             self.external = None;
             self.selected_beacon = None;
             self.context = None;
+            self.links.clear();
             self.pmf_observation = None;
             Phase::Idle
         } else {

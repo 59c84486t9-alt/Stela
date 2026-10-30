@@ -101,17 +101,19 @@ const FIXED_BYTES: usize = 30;
 // IEEE80211_MAX_DATA_LEN (2304), less the six fixed authentication bytes.
 const MAX_AUTHENTICATION_DATA: usize = 2304 - 6;
 
-/// Identity of one selected single-link authentication attempt.
+/// Identity of one selected authentication attempt on one link.
 /// No public constructor, mutation or conversion into association permission.
 #[derive(Debug)]
 pub struct Session {
     epoch: u64,
+    /// The station's address on the link.
     local: Mac,
     peer: Mac,
     channel: Channel,
     ssid: Vec<u8>,
     deadline: u64,
     six_ghz: Option<SixGhzBinding>,
+    multi_link: Option<Affiliation>,
 }
 /// Original native inputs kept transitively by every packet Session.
 #[derive(Debug)]
@@ -134,6 +136,10 @@ impl Session {
     pub const fn epoch(&self) -> u64 {
         self.epoch
     }
+    /// The MLD link an AP MLD's authentication runs on.
+    pub const fn multi_link(&self) -> Option<&Affiliation> {
+        self.multi_link.as_ref()
+    }
     pub const fn local(&self) -> Mac {
         self.local
     }
@@ -149,6 +155,16 @@ impl Session {
     pub const fn deadline(&self) -> u64 {
         self.deadline
     }
+}
+
+/// The AP an exchange authenticates with: its BSSID and channel on the
+/// link, its SSID, and with an AP MLD, the link the exchange runs on.
+#[derive(Clone, Debug)]
+pub struct Peer {
+    pub bssid: Mac,
+    pub channel: Channel,
+    pub ssid: Vec<u8>,
+    pub multi_link: Option<Affiliation>,
 }
 
 /// Original RX bytes for the real OS supplicant. The native implementation
@@ -177,6 +193,16 @@ impl Received {
 }
 
 impl Station {
+    /// The station's address on the link of `affiliation`, an MLD's own
+    /// interface address, or the interface address alone.
+    fn link_local(&self, affiliation: Option<&Affiliation>) -> Result<Mac, Error> {
+        match affiliation {
+            None => Ok(self.local),
+            Some(affiliation) if affiliation.mld.local == self.local => Ok(affiliation.local),
+            Some(_) => Err(Error::InvalidAddress),
+        }
+    }
+
     /// Reserve an exchange for an OS-selected BSS. Native publication
     /// must additionally bind this to hardware/source/regulatory owners.
     /// The deadline covers OS computation as well as transport; repeated commits
@@ -184,9 +210,7 @@ impl Station {
     /// `ieee80211_auth` retries it.
     pub fn begin_external_authentication(
         &mut self,
-        peer: Mac,
-        channel: Channel,
-        ssid: Vec<u8>,
+        peer: Peer,
         now: u64,
         budget: u64,
         policy: &mut impl RegulatoryPolicy,
@@ -195,7 +219,14 @@ impl Station {
             return Err(Error::Busy);
         }
         self.clock(now)?;
-        if peer.is_multicast() || peer.0 == [0; 6] || peer == self.local {
+        let Peer {
+            bssid: peer,
+            channel,
+            ssid,
+            multi_link,
+        } = peer;
+        let local = self.link_local(multi_link.as_ref())?;
+        if peer.is_multicast() || peer.0 == [0; 6] || peer == local || peer == self.local {
             return Err(Error::InvalidAddress);
         }
         if channel.band == super::super::Band::Ghz6 {
@@ -215,12 +246,13 @@ impl Station {
         let epoch = NEXT_ASSOCIATION.next().ok_or(Error::Overflow)?;
         let session = Arc::new(Session {
             epoch,
-            local: self.local,
+            local,
             peer,
             channel,
             ssid,
             deadline,
             six_ghz: None,
+            multi_link,
         });
         self.epoch = epoch;
         self.serial = 0;
@@ -237,6 +269,7 @@ impl Station {
         observation: Arc<NativeBssObservation>,
         selection: wire::six_ghz::Selection,
         local: phy::Capabilities,
+        multi_link: Option<Affiliation>,
         now: u64,
         budget: u64,
     ) -> Result<Arc<Session>, Error> {
@@ -244,10 +277,12 @@ impl Station {
             return Err(Error::Busy);
         }
         self.clock(now)?;
+        let address = self.link_local(multi_link.as_ref())?;
         let bss = observation.bss();
         if bss.channel.band != super::super::Band::Ghz6
             || bss.bssid.is_multicast()
             || bss.bssid.0 == [0; 6]
+            || bss.bssid == address
             || bss.bssid == self.local
             || bss.transmitter != bss.bssid
         {
@@ -270,7 +305,7 @@ impl Station {
         let ssid = ssid.clone();
         Ok(Arc::new(Session {
             epoch: NEXT_ASSOCIATION.next().ok_or(Error::Overflow)?,
-            local: self.local,
+            local: address,
             peer,
             channel,
             ssid,
@@ -280,6 +315,7 @@ impl Station {
                 selection,
                 local,
             }),
+            multi_link,
         }))
     }
     /// Only a native callback holding both transport providers calls
@@ -289,7 +325,10 @@ impl Station {
         session: Arc<Session>,
         now: u64,
     ) -> Result<(), Error> {
-        if self.phase != Phase::Idle || session.local != self.local || session.six_ghz.is_none() {
+        if self.phase != Phase::Idle
+            || self.link_local(session.multi_link.as_ref()) != Ok(session.local)
+            || session.six_ghz.is_none()
+        {
             return Err(Error::Stale);
         }
         self.clock(now)?;
@@ -394,6 +433,8 @@ impl Station {
         Ok(bytes)
     }
 
+    /// The OS's SAE fields from the station's link address, an MLD's
+    /// followed by its multi-link element as wpa_supplicant appends it.
     fn external_frame(
         &mut self,
         session: &Session,
@@ -401,11 +442,14 @@ impl Station {
         status: u16,
         data: &[u8],
     ) -> Result<Vec<u8>, Error> {
-        let mut bytes = wire::authentication(self.local, session.peer, self.sequence)?;
+        let mut bytes = wire::authentication(session.local, session.peer, self.sequence)?;
         bytes[24..26].copy_from_slice(&SAE.to_le_bytes());
         bytes[26..28].copy_from_slice(&transaction.to_le_bytes());
         bytes[28..30].copy_from_slice(&status.to_le_bytes());
         bytes.extend_from_slice(data);
+        if let Some(affiliation) = &session.multi_link {
+            bytes.extend(wire::multi_link::authentication(affiliation.mld.local));
+        }
         self.sequence = next_sequence(self.sequence);
         Ok(bytes)
     }
@@ -477,7 +521,7 @@ impl Station {
         if frame.fcs_error || frame.monitor_only {
             return Err(Error::Wire(wire::Error::Integrity));
         }
-        wire::check_peer(&frame, self.local, session.peer)?;
+        wire::check_peer(&frame, session.local, session.peer)?;
         if frame.header().control & TYPE_SUBTYPE != AUTHENTICATION {
             return Err(Error::Wire(wire::Error::Invalid("authentication subtype")));
         }
