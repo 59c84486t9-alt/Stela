@@ -25,6 +25,8 @@ use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
 #[cfg(feature = "native-acpi")]
+mod companion;
+#[cfg(feature = "native-acpi")]
 mod i2c;
 #[cfg(feature = "native-acpi")]
 mod power;
@@ -1021,9 +1023,12 @@ pub unsafe fn probe_with_provider(
                                 .into_iter()
                                 .map(|d| Box::new(d) as Box<dyn BlockDevice>),
                         );
-                        devices
-                            .inputs
-                            .extend(found.inputs.into_iter().map(InputDevice::Usb));
+                        devices.inputs.extend(
+                            found
+                                .inputs
+                                .into_iter()
+                                .map(|input| InputDevice::Usb(Box::new(input))),
+                        );
                         devices.usb_devices.extend(found.devices);
                         devices.usb_hosts.extend(found.hosts);
                         devices.usb_storage.extend(found.storage);
@@ -1258,7 +1263,14 @@ pub unsafe fn probe_with_provider(
             .platform_failures
             .iter()
             .any(|(_, error)| matches!(error, PlatformError::Handoff(_)));
-        platform::attach_i8042(session, handoff.clock, usb_released, &mut devices);
+        let smbus_hosts = devices.smbus_hosts.clone();
+        platform::attach_i8042(
+            session,
+            handoff.clock,
+            usb_released,
+            &smbus_hosts,
+            &mut devices,
+        );
         i2c::attach(services, session, handoff.clock, &mut devices);
         power::attach_power(session, &mut devices);
     }

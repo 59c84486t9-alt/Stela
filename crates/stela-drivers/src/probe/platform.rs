@@ -74,6 +74,7 @@ pub(super) fn attach_i8042(
     session: &crate::platform::acpi::Session,
     clock: crate::Clock,
     usb_released: bool,
+    smbus_hosts: &[super::smbus::Host],
     devices: &mut super::Devices,
 ) {
     use super::{i2c::hardware_id, services::ids};
@@ -143,9 +144,17 @@ pub(super) fn attach_i8042(
         Ok(Some(controller))
     };
     match attempt() {
-        Ok(controller) => devices
-            .inputs
-            .extend(controller.map(crate::input::InputDevice::Ps2)),
+        Ok(Some(controller)) => {
+            let companion = controller.smbus_companion();
+            let shared = alloc::rc::Rc::new(core::cell::RefCell::new(controller));
+            devices
+                .inputs
+                .push(crate::input::InputDevice::Ps2(shared.clone()));
+            if let Some(companion) = companion {
+                super::companion::attach(&shared, companion, smbus_hosts, clock, devices);
+            }
+        }
+        Ok(None) => {}
         Err(error) => devices.platform_failures.push(("i8042".into(), error)),
     }
 }

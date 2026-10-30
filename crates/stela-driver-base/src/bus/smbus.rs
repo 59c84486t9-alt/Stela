@@ -113,6 +113,17 @@ pub trait Bus {
     ) -> Result<(), Error>;
 }
 
+impl<B: Bus + ?Sized> Bus for alloc::boxed::Box<B> {
+    fn transaction(
+        &mut self,
+        address: Address,
+        transaction: Transaction<'_>,
+        pec: bool,
+    ) -> Result<(), Error> {
+        (**self).transaction(address, transaction, pec)
+    }
+}
+
 /// Fixed-length SMBus I²C-block protocols: exactly 1..=32 payload bytes with
 /// no on-wire count prefix. Separate from SMBus Block, ProcessCall, arbitrary
 /// I²C transfers and combined repeated START. Failure never permits replay.

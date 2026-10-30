@@ -22,6 +22,12 @@ pub(super) fn knocked(reply: [u8; 3]) -> bool {
     reply[..2] == [0x3c, 3] && matches!(reply[2], 0xc8 | 0)
 }
 
+/// Linux `ETP_NEW_IC_SMBUS_HOST_NOTIFY`: whether the firmware version names
+/// a new IC that takes SMBus Host Notify.
+pub(super) fn host_notify(firmware: u32) -> bool {
+    firmware & 0x0f2000 == 0x0f2000 && firmware & 0xff > 0
+}
+
 /// Linux `elantech_is_signature_valid`: whether the firmware version query's
 /// answer is an Elantech version rather than a mouse's status.
 pub(super) fn signature_valid(probe: [u8; 3]) -> bool {

@@ -1,11 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux mousedev touchpad emulation reference: drivers/input/mousedev.c,
 // Copyright (c) 1999-2001 Vojtech Pavlik.
-//! ELAN and Cypress I²C touchpads as a mouse: their first contact's movement
-//! becomes [`Input::Motion`] and their buttons [`Input::MouseButtons`], as
-//! Linux `mousedev` emulates a mouse from a touchpad, tap to click included.
-use super::{Input, cyapa, elan, hid_i2c::Interrupt};
-use crate::{Clock, bus::i2c::Bus};
+//! ELAN and Cypress I²C touchpads, and the RMI4 and ELAN SMBus companions of
+//! PS/2 touchpads, as a mouse: their first contact's movement becomes
+//! [`Input::Motion`] and their buttons [`Input::MouseButtons`], as Linux
+//! `mousedev` emulates a mouse from a touchpad, tap to click included.
+use super::{
+    Input, cyapa, elan,
+    hid_i2c::Interrupt,
+    rmi::{self, FunctionReport},
+};
+use crate::{
+    Clock,
+    bus::{i2c::Bus, smbus},
+};
 use alloc::{boxed::Box, string::String, vec::Vec};
 
 /// mousedev's `FRACTION_DENOM`: motion keeps 1/128 count remainders.
@@ -113,6 +121,21 @@ impl Translator {
 
 type BoxedBus = Box<dyn Bus>;
 type BoxedInterrupt = Box<dyn Interrupt>;
+type BoxedSmbus = Box<dyn smbus::Bus>;
+
+/// An ELAN touchpad over SMBus, its interrupt a Host Notify.
+pub type ElanSmbus = elan::smbus::Device<BoxedSmbus, BoxedInterrupt, Clock>;
+
+/// An RMI4 touchpad over SMBus, its attention a Host Notify.
+pub type RmiSmbus = rmi::Device<
+    rmi::transport::Smbus<BoxedSmbus, Box<dyn rmi::transport::Companion>, Clock>,
+    Box<dyn rmi::Attention>,
+    Clock,
+>;
+
+/// RMI4 2D object types a finger reports: `RMI_2D_OBJECT_FINGER` and
+/// `RMI_2D_OBJECT_GLOVE`.
+const RMI_FINGERS: [u8; 2] = [1, 6];
 
 /// The touchpad drivers a [`TouchpadInput`] reads.
 #[allow(
@@ -125,6 +148,11 @@ pub enum Driver {
     Cypress(cyapa::Device<BoxedBus, BoxedInterrupt, Clock>),
     /// Cypress Gen5 and Gen6.
     CypressPip(cyapa::pip::Device<BoxedBus, BoxedInterrupt, Clock>),
+    /// ELAN over SMBus, the companion of an Elantech PS/2 touchpad.
+    ElanSmbus(ElanSmbus),
+    /// Synaptics RMI4 over SMBus, the InterTouch companion of a Synaptics
+    /// PS/2 touchpad.
+    Rmi(Box<RmiSmbus>),
 }
 
 /// Why reading a touchpad failed.
@@ -133,6 +161,7 @@ pub enum Error {
     Elan(elan::Error),
     Cypress(cyapa::Error),
     CypressPip(cyapa::pip::Error),
+    Rmi(rmi::Error),
 }
 
 impl core::fmt::Display for Error {
@@ -141,11 +170,12 @@ impl core::fmt::Display for Error {
             Self::Elan(error) => error.fmt(f),
             Self::Cypress(error) => error.fmt(f),
             Self::CypressPip(error) => error.fmt(f),
+            Self::Rmi(error) => error.fmt(f),
         }
     }
 }
 
-/// An initialized ELAN or Cypress touchpad and its mouse emulation.
+/// An initialized touchpad and its mouse emulation.
 pub struct TouchpadInput {
     driver: Driver,
     translator: Translator,
@@ -161,6 +191,8 @@ impl TouchpadInput {
             Driver::Elan(device) => device.capabilities().map_or(0, |c| c.maximum.0),
             Driver::Cypress(device) => device.capabilities().map_or(0, |c| c.maximum.0),
             Driver::CypressPip(device) => device.capabilities().map_or(0, |c| c.maximum.0),
+            Driver::ElanSmbus(device) => device.capabilities().map_or(0, |c| c.maximum.0),
+            Driver::Rmi(device) => rmi_maximum(device).0,
         };
         Self {
             driver,
@@ -220,6 +252,67 @@ impl TouchpadInput {
                     }
                     Some(_) => {}
                 },
+                Driver::ElanSmbus(device) => match device.poll().map_err(Error::Elan)? {
+                    None => break,
+                    Some(elan::Frame::Absolute(frame)) => {
+                        let contact = frame
+                            .contacts
+                            .iter()
+                            .flatten()
+                            .next()
+                            .map(|c| (c.x, c.y_top_down));
+                        self.translator
+                            .frame(contact, frame.buttons & 7, now, inputs);
+                    }
+                    Some(elan::Frame::Trackpoint(frame)) => {
+                        if let Some((dx, dy)) = frame.motion
+                            && (dx, dy) != (0, 0)
+                        {
+                            inputs.push(Input::Motion { dx, dy });
+                        }
+                        self.translator.buttons(frame.buttons & 7, inputs);
+                    }
+                },
+                Driver::Rmi(device) => {
+                    let poll = device.poll_input();
+                    let (_, maximum_y) = rmi_maximum(device);
+                    let polled = !poll.reports.is_empty();
+                    for report in poll.reports {
+                        let buttons = self.translator.buttons;
+                        // The InterTouch platform data flips y, which RMI4
+                        // reports bottom-up.
+                        let contact = match report {
+                            FunctionReport::F11(frame) => frame
+                                .contacts
+                                .iter()
+                                .find(|c| matches!(c.state, 1 | 2))
+                                .map(|c| (c.x, maximum_y.saturating_sub(c.y))),
+                            FunctionReport::F12(frame) => frame
+                                .contacts
+                                .iter()
+                                .find(|c| RMI_FINGERS.contains(&c.object_type))
+                                .map(|c| (c.x, maximum_y.saturating_sub(c.y))),
+                            FunctionReport::F30(frame) => {
+                                self.translator.buttons(rmi_buttons(&frame.buttons), inputs);
+                                continue;
+                            }
+                            FunctionReport::F3A(frame) => {
+                                let pressed =
+                                    frame.buttons.iter().map(|b| (b.gpio_index, b.pressed));
+                                self.translator.buttons(rmi_buttons_of(pressed), inputs);
+                                continue;
+                            }
+                            FunctionReport::F03(_) | FunctionReport::F1A(_) => continue,
+                        };
+                        self.translator.frame(contact, buttons, now, inputs);
+                    }
+                    if let Some(error) = poll.error {
+                        return Err(Error::Rmi(error));
+                    }
+                    if !polled {
+                        break;
+                    }
+                }
             }
         }
         Ok(())
@@ -231,8 +324,36 @@ impl TouchpadInput {
             Driver::Elan(device) => device.state() == elan::State::Uncertain,
             Driver::Cypress(device) => device.state() == cyapa::State::Uncertain,
             Driver::CypressPip(device) => device.state() == cyapa::pip::State::Uncertain,
+            Driver::ElanSmbus(device) => device.state() == elan::State::Uncertain,
+            Driver::Rmi(device) => device.control_state() == rmi::ControlState::Uncertain,
         }
     }
+}
+
+/// The pad's maximum x and y, from its F11 or F12 sensor.
+fn rmi_maximum(device: &RmiSmbus) -> (u16, u16) {
+    device
+        .f11_capabilities()
+        .map(|c| c.maximum)
+        .chain(device.f12_capabilities().filter_map(|c| c.maximum))
+        .next()
+        .unwrap_or((0, 0))
+}
+
+/// Mouse buttons from F30 GPIO buttons: the first three valid buttons are
+/// left, right and middle, as `rmi_f30_map_gpios` maps them from BTN_LEFT.
+fn rmi_buttons(buttons: &[rmi::f30::Button]) -> u8 {
+    rmi_buttons_of(buttons.iter().map(|b| (b.gpio_index, b.pressed)))
+}
+
+/// Mouse buttons from GPIO buttons in their pin order, the first three left,
+/// right and middle.
+fn rmi_buttons_of(buttons: impl Iterator<Item = (u8, bool)>) -> u8 {
+    buttons
+        .take(3)
+        .enumerate()
+        .filter(|(_, (_, pressed))| *pressed)
+        .fold(0, |mask, (bit, _)| mask | 1 << bit)
 }
 
 #[cfg(test)]
@@ -288,6 +409,14 @@ mod tests {
         pad.frame(Some((10, 10)), 0, 200_000, &mut inputs);
         pad.frame(None, 0, 500_000, &mut inputs);
         assert!(inputs.is_empty());
+    }
+
+    #[test]
+    fn rmi_gpio_buttons_are_left_right_and_middle_in_pin_order() {
+        let pressed = |pins: &[(u8, bool)]| rmi_buttons_of(pins.iter().copied());
+        assert_eq!(pressed(&[(0, true)]), 1);
+        assert_eq!(pressed(&[(2, false), (5, true)]), 2);
+        assert_eq!(pressed(&[(0, true), (1, true), (2, true), (3, true)]), 7);
     }
 
     #[test]

@@ -88,7 +88,12 @@ impl HostUsb {
             for (location, why) in &added.unused {
                 output::arguments(format_args!("USB UNUSED {location}: {why}\n"));
             }
-            inputs.extend(added.inputs.drain(..).map(InputDevice::Usb));
+            inputs.extend(
+                added
+                    .inputs
+                    .drain(..)
+                    .map(|input| InputDevice::Usb(alloc::boxed::Box::new(input))),
+            );
             for device in &added.devices {
                 output::arguments(format_args!("USB added {}\n", device.location));
             }
