@@ -164,7 +164,171 @@ records! {
         pub name: Span,
         pub value: Span,
     }
+
+    /// `newBufferWithLength:options:`.
+    pub struct NewBufferRequest {
+        pub length: u64,
+        pub options: u64,
+    }
+
+    /// A new buffer: its `gpuAddress`, its `contents` (zero for a private
+    /// buffer), `allocatedSize` and `heapOffset`.
+    pub struct BufferResponse {
+        pub handle: u64,
+        pub gpu_address: u64,
+        pub contents: u64,
+        pub allocated_size: u64,
+        pub heap_offset: u64,
+    }
+
+    /// `didModifyRange:`.
+    pub struct BufferRangeRequest {
+        pub buffer: u64,
+        pub offset: u64,
+        pub length: u64,
+    }
+
+    /// `MTLTextureDescriptor`.
+    pub struct TextureDescriptorRecord {
+        pub texture_type: u64,
+        pub pixel_format: u64,
+        pub width: u64,
+        pub height: u64,
+        pub depth: u64,
+        pub mipmap_level_count: u64,
+        pub sample_count: u64,
+        pub array_length: u64,
+        pub options: u64,
+        pub usage: u64,
+        /// `MTLTextureSwizzleChannels`: red, green, blue and alpha.
+        pub swizzle: [u8; 4],
+        pub reserved: u32,
+    }
+
+    /// A new texture: its `gpuResourceID`, `allocatedSize`, `heapOffset`
+    /// and, when `sparse`, `firstMipmapInTail` and `tailSizeInBytes`.
+    pub struct TextureResponse {
+        pub handle: u64,
+        pub resource_id: u64,
+        pub allocated_size: u64,
+        pub heap_offset: u64,
+        pub first_mipmap_in_tail: u64,
+        pub tail_size: u64,
+        pub sparse: u32,
+        pub reserved: u32,
+    }
+
+    /// `newTextureViewWithPixelFormat:textureType:levels:slices:swizzle:`;
+    /// ranges are a location and a length.
+    pub struct NewTextureViewRequest {
+        pub texture: u64,
+        pub pixel_format: u64,
+        pub texture_type: u64,
+        pub levels: [u64; 2],
+        pub slices: [u64; 2],
+        pub swizzle: [u8; 4],
+        pub reserved: u32,
+    }
+
+    /// `newTextureWithDescriptor:offset:bytesPerRow:` of a buffer.
+    pub struct NewBufferTextureRequest {
+        pub buffer: u64,
+        pub descriptor: TextureDescriptorRecord,
+        pub offset: u64,
+        pub bytes_per_row: u64,
+    }
+
+    /// `MTLRegion` of one mipmap level and slice.
+    pub struct RegionRecord {
+        pub slice: u64,
+        pub level: u64,
+        pub origin: [u64; 3],
+        pub size: [u64; 3],
+    }
+
+    /// `replaceRegion:…` from `bytes`, or `getBytes:…` into them.
+    pub struct TextureBytesRequest {
+        pub texture: u64,
+        pub region: RegionRecord,
+        pub bytes: Span,
+        pub bytes_per_row: u64,
+        pub bytes_per_image: u64,
+    }
+
+    /// `MTLSamplerDescriptor`; address modes are s, t and r.
+    pub struct SamplerDescriptorRecord {
+        pub min_filter: u64,
+        pub mag_filter: u64,
+        pub mip_filter: u64,
+        pub max_anisotropy: u64,
+        pub address_modes: [u64; 3],
+        pub border_color: u64,
+        pub reduction_mode: u64,
+        pub compare_function: u64,
+        pub lod_min_clamp: f32,
+        pub lod_max_clamp: f32,
+        pub normalized_coordinates: u32,
+        pub reserved: u32,
+    }
+
+    /// A new sampler and its `gpuResourceID`.
+    pub struct SamplerResponse {
+        pub handle: u64,
+        pub resource_id: u64,
+    }
+
+    /// `MTLHeapDescriptor`.
+    pub struct HeapDescriptorRecord {
+        pub size: u64,
+        pub options: u64,
+        pub heap_type: u64,
+        pub sparse_page_size: u64,
+    }
+
+    /// `heapBufferSizeAndAlignWithLength:options:`.
+    pub struct HeapBufferSizeRequest {
+        pub length: u64,
+        pub options: u64,
+    }
+
+    /// `MTLSizeAndAlign`.
+    pub struct SizeAndAlignRecord {
+        pub size: u64,
+        pub align: u64,
+    }
+
+    /// `newBufferWithLength:options:offset:` of a heap, or without an offset
+    /// when it is `AUTOMATIC`.
+    pub struct NewHeapBufferRequest {
+        pub heap: u64,
+        pub length: u64,
+        pub options: u64,
+        pub offset: u64,
+    }
+
+    /// `newTextureWithDescriptor:offset:` of a heap, or without an offset
+    /// when it is `AUTOMATIC`.
+    pub struct NewHeapTextureRequest {
+        pub heap: u64,
+        pub descriptor: TextureDescriptorRecord,
+        pub offset: u64,
+    }
+
+    /// `maxAvailableSizeWithAlignment:` of a heap.
+    pub struct HeapUsageRequest {
+        pub heap: u64,
+        pub alignment: u64,
+    }
+
+    /// `usedSize` and `maxAvailableSizeWithAlignment:`.
+    pub struct HeapUsageResponse {
+        pub used_size: u64,
+        pub max_available_size: u64,
+    }
 }
+
+/// The offset of a resource the heap places itself.
+pub const AUTOMATIC: u64 = u64::MAX;
 
 raw_enum! {
     /// How an operation ended.
@@ -273,4 +437,26 @@ operations! {
     LibraryFunctionNames = 0x0102 => LibraryFunctionNamesRequest, Length;
     /// `newFunctionWithName:constantValues:`.
     NewFunction = 0x0103 => NewFunctionRequest, Handle;
+    /// `newBufferWithLength:options:`.
+    NewBuffer = 0x0201 => NewBufferRequest, BufferResponse;
+    /// `didModifyRange:`.
+    BufferDidModifyRange = 0x0202 => BufferRangeRequest, Empty;
+    /// `newTextureWithDescriptor:`.
+    NewTexture = 0x0203 => TextureDescriptorRecord, TextureResponse;
+    NewTextureView = 0x0204 => NewTextureViewRequest, TextureResponse;
+    NewBufferTexture = 0x0205 => NewBufferTextureRequest, TextureResponse;
+    ReplaceRegion = 0x0206 => TextureBytesRequest, Empty;
+    GetBytes = 0x0207 => TextureBytesRequest, Empty;
+    /// `newSamplerStateWithDescriptor:`.
+    NewSampler = 0x0208 => SamplerDescriptorRecord, SamplerResponse;
+    /// `newHeapWithDescriptor:`.
+    NewHeap = 0x0209 => HeapDescriptorRecord, Handle;
+    HeapBufferSizeAndAlign = 0x020a => HeapBufferSizeRequest, SizeAndAlignRecord;
+    /// `heapTextureSizeAndAlignWithDescriptor:`.
+    HeapTextureSizeAndAlign = 0x020b => TextureDescriptorRecord, SizeAndAlignRecord;
+    NewHeapBuffer = 0x020c => NewHeapBufferRequest, BufferResponse;
+    NewHeapTexture = 0x020d => NewHeapTextureRequest, TextureResponse;
+    HeapUsage = 0x020e => HeapUsageRequest, HeapUsageResponse;
+    /// `makeAliasable` of a heap buffer or texture.
+    MakeAliasable = 0x020f => Handle, Empty;
 }

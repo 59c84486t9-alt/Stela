@@ -12,7 +12,7 @@ use crate::gpu::{
         capabilities::block::Block,
         device::{
             LibraryId,
-            fixture::{MockBackend, MockCompiler, device},
+            fixture::{MockBackend, MockCompiler, device_on},
         },
         library::tests::fixture,
     },
@@ -20,6 +20,8 @@ use crate::gpu::{
 };
 use alloc::{vec, vec::Vec};
 use core::num::NonZeroU64;
+
+mod resources;
 
 type TestService = Service<MockBackend, MockCompiler>;
 
@@ -79,7 +81,14 @@ impl GuestMemory for Memory {
 }
 
 fn service() -> TestService {
-    Service::new(device(), DeviceEpoch::from_registered(NonZeroU64::MIN))
+    service_on(MockBackend::new())
+}
+
+fn service_on(backend: MockBackend) -> TestService {
+    Service::new(
+        device_on(backend),
+        DeviceEpoch::from_registered(NonZeroU64::MIN),
+    )
 }
 
 /// Runs `operation` with `request`, decoding its response.

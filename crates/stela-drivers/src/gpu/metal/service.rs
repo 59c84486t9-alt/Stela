@@ -13,7 +13,7 @@
 //! refused, and closing a connection releases what it still holds, newest
 //! first, so views and aliases go before the resources under them.
 use super::{
-    device::{Device, FunctionId, LibraryId},
+    device::{BufferId, Device, FunctionId, HeapId, LibraryId, SamplerId, TextureId},
     error::Error,
     shader::Compiler,
     vulkan::backend::Backend,
@@ -24,6 +24,7 @@ use core::num::{NonZeroU32, NonZeroU64};
 use wire::{Fault, Handle, NegotiateRequest, NegotiateResponse, Operation, Record, Span, Status};
 
 mod libraries;
+mod resources;
 #[cfg(test)]
 mod tests;
 pub mod wire;
@@ -41,6 +42,10 @@ pub trait GuestMemory {
 /// A device object a connection holds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Object {
+    Buffer(BufferId),
+    Texture(TextureId),
+    Sampler(SamplerId),
+    Heap(HeapId),
     Library(LibraryId),
     Function(FunctionId),
 }
@@ -64,6 +69,10 @@ macro_rules! kinds {
 }
 
 kinds! {
+    Buffer(BufferId);
+    Texture(TextureId);
+    Sampler(SamplerId);
+    Heap(HeapId);
     Library(LibraryId);
     Function(FunctionId);
 }
@@ -252,6 +261,21 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Operation::NewLibrary => self.new_library(&mut call),
             Operation::LibraryFunctionNames => self.library_function_names(&mut call),
             Operation::NewFunction => self.new_function(&mut call),
+            Operation::NewBuffer => self.new_buffer(&mut call),
+            Operation::BufferDidModifyRange => self.buffer_did_modify_range(&mut call),
+            Operation::NewTexture => self.new_texture(&mut call),
+            Operation::NewTextureView => self.new_texture_view(&mut call),
+            Operation::NewBufferTexture => self.new_buffer_texture(&mut call),
+            Operation::ReplaceRegion => self.replace_region(&mut call),
+            Operation::GetBytes => self.get_bytes(&mut call),
+            Operation::NewSampler => self.new_sampler(&mut call),
+            Operation::NewHeap => self.new_heap(&mut call),
+            Operation::HeapBufferSizeAndAlign => self.heap_buffer_size_and_align(&mut call),
+            Operation::HeapTextureSizeAndAlign => self.heap_texture_size_and_align(&mut call),
+            Operation::NewHeapBuffer => self.new_heap_buffer(&mut call),
+            Operation::NewHeapTexture => self.new_heap_texture(&mut call),
+            Operation::HeapUsage => self.heap_usage(&mut call),
+            Operation::MakeAliasable => self.make_aliasable(&mut call),
         }
     }
 
@@ -271,6 +295,23 @@ impl<B: Backend, C: Compiler> Service<B, C> {
 
     fn connection(&mut self, id: NonZeroU64) -> Result<&mut Connection, Fault> {
         self.connections.get_mut(&id).ok_or(Fault::CLOSED)
+    }
+
+    /// Gives the connection a handle to a new object with what `describe`
+    /// answers of it, releasing the object again if either fails.
+    fn adopt<T>(
+        &mut self,
+        connection: NonZeroU64,
+        object: Object,
+        describe: impl FnOnce(&Device<B, C>) -> Result<T, Error>,
+    ) -> Result<(Handle, T), Fault> {
+        match describe(&self.device) {
+            Ok(description) => Ok((self.hold(connection, object)?, description)),
+            Err(error) => {
+                self.destroy(object)?;
+                Err(error.into())
+            }
+        }
     }
 
     /// Gives the connection a handle to a new object, releasing the object
@@ -299,12 +340,16 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         }
     }
 
-    /// The object of kind `T` that `handle` names.
-    fn object<T: Kind>(&self, connection: NonZeroU64, handle: u64) -> Result<T, Fault> {
+    /// The object `handle` names.
+    fn entry(&self, connection: NonZeroU64, handle: u64) -> Result<Object, Fault> {
         let held = self.connections.get(&connection).ok_or(Fault::CLOSED)?;
         let handle = ObjectHandle::decode(handle).ok_or(Fault::STALE)?;
-        let entry = held.objects.get(connection, self.epoch, handle)?;
-        T::of(entry.object).ok_or(Fault::STALE)
+        Ok(held.objects.get(connection, self.epoch, handle)?.object)
+    }
+
+    /// The object of kind `T` that `handle` names.
+    fn object<T: Kind>(&self, connection: NonZeroU64, handle: u64) -> Result<T, Fault> {
+        T::of(self.entry(connection, handle)?).ok_or(Fault::STALE)
     }
 
     /// Releases the object `handle` names. When the device refuses, for an
@@ -324,6 +369,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     fn destroy(&mut self, object: Object) -> Result<(), Error> {
         let device = &mut self.device;
         match object {
+            Object::Buffer(id) => device.destroy_buffer(id),
+            Object::Texture(id) => device.destroy_texture(id),
+            Object::Sampler(id) => device.destroy_sampler(id),
+            Object::Heap(id) => device.destroy_heap(id),
             Object::Library(id) => device.destroy_library(id),
             Object::Function(id) => device.destroy_function(id),
         }
