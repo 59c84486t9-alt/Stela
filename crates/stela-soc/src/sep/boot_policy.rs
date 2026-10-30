@@ -34,7 +34,9 @@
 //! the booted OS, so the current OS type is not supported.
 //! Authenticated/owner-bearing bodies, remote nonce transactions, SIP flags
 //! and tags remain explicit refusals; restored logs the last two as
-//! "Choosing not to fail" and the remote nonce as "proceeding anyways".
+//! "Choosing not to fail". The remote nonce opens `create_production_ucrt`,
+//! whose failure restored logs as "proceeding anyways", and which skips the
+//! default LocalPolicy ([`local_policy`]).
 //! A frame or header outside the envelope gets a transport failure.
 mod local_policy;
 mod nonces;

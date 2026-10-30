@@ -8,6 +8,13 @@
 //! with 0x5a, and the install's next boot would be recoveryOS. SIP flags
 //! and Boolean tags between them are logged "Choosing not to fail".
 //!
+//! **When.** The step block (R 0x1000156ec) logs "Skipping local policy
+//! generation." unless `create_production_ucrt` succeeded: that step alone
+//! clears the flag (R 0x100015514), which starts true (R 0x10000dbd0). A
+//! production UCRT needs Apple to accept the machine's SEP identity, so an
+//! erase install here skips these commands; they serve a caller that reaches
+//! them, and no run has yet.
+//!
 //! **Wire** (libbootpolicy B 0x15818..0x15884, 0x1611c..0x16198,
 //! 0x168a4..0x16940). After the 32-byte header come a u32 DER length (B
 //! 0xffe4) and the DER: ccder implicit context tags, written last to first,
