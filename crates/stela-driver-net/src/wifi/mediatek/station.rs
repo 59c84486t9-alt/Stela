@@ -1,14 +1,6 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// Adapted from pinned Linux net/mac80211/mlme.c; full source notices in
-// THIRD_PARTY.md. The connection policy follows wpa_supplicant's behavior.
-//! One MT7925 station kept connected to the configured network, as
-//! wpa_supplicant and mac80211 keep one: a scan of every band, 6 GHz last as
-//! cfg80211 splits it, the strongest BSS of the network whose security the
-//! station supports, open-system or SAE authentication and association on
-//! mac80211's channel and mode, with an AP MLD's setup link and one more link
-//! when the NIC supports MLO, the 4-way and group key handshakes, their keys
-//! and the controlled port. A lost or failed connection scans again after
-//! wpa_supplicant's delays.
+// SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
+// Copyright (C) 2020-2023 MediaTek Inc.
+//! An attached MT7925 as the connection keeper's radio.
 use super::{
     bootstrap::client::{
         self, BssHandle, Event, LinkControlError, LinkEvent, ManagedLink, Phase, PolicyError,
@@ -24,260 +16,33 @@ use crate::{
     bus::dma::memory::PageSource,
     wifi::{
         Band, Channel,
-        connection::{
-            self, Request,
-            mode::{self, Channels},
-            security::{self, Security},
-        },
-        network::{Network, Secret},
-        regulatory::{PowerType, database::Country},
-        sae::{self, Derivation, Exchange},
+        connection::keeper::{self, Advertisement, Keeper, Peer, Radio, Stage},
+        network::Network,
+        regulatory::database::Country,
         scan::{self, result::Bss},
-        security::KeyIdentity,
+        security::{KeyIdentity, PacketNumber, ReplaySeed},
         station::{
-            Join, PortPolicy,
-            data::Ingress,
-            external::{self, Received},
-            multi_link::{self as mlo, Affiliation, Mld, Setup},
-            operations::Operations,
-            phy::{Capabilities, Mode, Role},
-            wire::{
-                AssociationRequest,
-                multi_link::{Basic, affiliated},
-                six_ghz::Selection,
-            },
+            Join, NativeBssObservation, Station as Association, data::Ingress, external,
+            multi_link::Affiliation, wire::six_ghz::Selection,
         },
-        supplicant::{self, Akm, EAPOL, IntegrityKey, MultiLink, Step, Supplicant},
     },
 };
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 use stela_driver_base::entropy::Entropy;
-use zeroize::Zeroizing;
 
-/// The longest a scan may run.
-const SCAN_BUDGET_US: u64 = 30_000_000;
-/// wpa_supplicant's default `scan_interval` after a scan finds nothing.
-const SCAN_INTERVAL_US: u64 = 5_000_000;
-/// The delay before reconnecting once the AP drops the association.
-const RECONNECT_US: u64 = 100_000;
-/// wpa_supplicant's 10 s authentication timeout around the handshake.
-const HANDSHAKE_TIMEOUT_US: u64 = 10_000_000;
-/// The longest an SAE exchange may take, its commits, anti-clogging retry
-/// and confirms included: the same 10 s wpa_supplicant allows.
-const SAE_BUDGET_US: u64 = 10_000_000;
-/// mac80211's `hw.conf.listen_interval`: mt76 leaves `max_listen_interval`
-/// at mac80211's default of 5.
-const LISTEN_INTERVAL: u16 = 5;
 /// The AP's WCID, the first `mt76_wcid_alloc` gives the sole station.
 const PEER_WCID: u16 = 1;
-/// WLAN_REASON_DEAUTH_LEAVING, which `wpa_supplicant_timeout` sends.
-const LEAVING: u16 = 3;
-
-/// Whether the link refused a key only until its queued frames drain.
-fn deferred(error: &LinkControlError) -> bool {
-    matches!(
-        error,
-        LinkControlError::Backpressure
-            | LinkControlError::Policy(PolicyError::Client(client::Error::NeedsDrain))
-    )
-}
-
-/// wpa_supplicant's `wpas_auth_failed` delay after `failures` consecutive
-/// failed connections.
-fn failure_delay_us(failures: u32) -> u64 {
-    let seconds = match failures {
-        51.. => 300,
-        11.. => 120,
-        6.. => 90,
-        4.. => 60,
-        3 => 30,
-        2 => 20,
-        _ => 10,
-    };
-    seconds * 1_000_000
-}
-
-/// `cfg80211_6ghz_power_type_valid`: whether a client may use the 6 GHz
-/// `bss` under the flags its channel has among `channels`.
-fn power_type_usable(bss: &Bss, channels: &[(Channel, u32)]) -> bool {
-    let info = Operations::parse(&bss.elements)
-        .ok()
-        .and_then(|operations| operations.he?.six_ghz)
-        .map(|six| (six[1] & 0x78) >> 3);
-    let flags = channels
-        .iter()
-        .find(|&&(channel, _)| channel == bss.channel)
-        .map(|&(_, flags)| flags);
-    info.zip(flags)
-        .is_some_and(|(info, flags)| PowerType::usable(info, flags))
-}
-
-/// The AP MLD `bss` is a link of, as its Basic Multi-Link element names it:
-/// the AP MLD's address and the link's ID.
-fn ap_mld(bss: &Bss) -> Option<(Mac, u8)> {
-    let basic = Basic::find(&bss.elements).ok()??;
-    Some((basic.address, basic.link_id?))
-}
-
-/// `mt76_select_links` beside the setup link `bss` of the AP MLD `ap`: the
-/// first link by ID that the RNR of `bss` reports on another band, whose AP
-/// `observed` holds as that link of the same AP MLD and `usable` takes.
-fn other_link<'a, H: Copy>(
-    bss: &Bss,
-    ap: Mac,
-    observed: &[(H, &'a Bss)],
-    usable: impl Fn(&Bss) -> bool,
-) -> Option<(u8, H, &'a Bss)> {
-    let mut reported = affiliated(&bss.elements).ok()?;
-    reported.sort_by_key(|link| link.link_id);
-    reported.into_iter().find_map(|link| {
-        observed
-            .iter()
-            .find(|(_, other)| {
-                other.bssid == link.bssid
-                    && other.channel.number == u16::from(link.channel)
-                    && other.channel.band != bss.channel.band
-                    && ap_mld(other) == Some((ap, link.link_id))
-                    && usable(other)
-            })
-            .map(|&(handle, other)| (link.link_id, handle, other))
-    })
-}
-
-/// The whole element `id` with `body`.
-fn element(id: u8, body: &[u8]) -> Vec<u8> {
-    let mut element = vec![id, body.len() as u8];
-    element.extend_from_slice(body);
-    element
-}
-
-/// Link `link_id` of an AP MLD association's handshakes, the station at
-/// `local` and the AP of `bss`, as wpa_supplicant keeps it in `sm->mlo`.
-fn keyed_link(link_id: u8, local: Mac, bss: &Bss) -> supplicant::Link {
-    supplicant::Link {
-        link_id,
-        local,
-        ap: bss.bssid,
-        rsn: element(48, security::rsn_element(&bss.elements).unwrap_or_default()),
-        rsnxe: connection::find(&bss.elements, 244).map(|body| element(244, body)),
-        accepted: false,
-    }
-}
-
-/// The handshake of an association with `bss` under `security` and `pmk`.
-fn candidate(bss: &Bss, security: Security, pmk: Zeroizing<[u8; 32]>) -> Candidate {
-    Candidate {
-        bssid: bss.bssid,
-        security,
-        pmk,
-        own_rsn: security.element(),
-        peer_rsn: element(48, security::rsn_element(&bss.elements).unwrap_or_default()),
-        links: None,
-    }
-}
-
-/// The chosen BSS of the network.
-struct Candidate {
-    /// The authenticator: the BSS, or the AP MLD of a multi-link
-    /// association.
-    bssid: Mac,
-    security: Security,
-    /// The PMK the 4-way handshake proves: the passphrase's or the PSK, or
-    /// the SAE exchange's.
-    pmk: Zeroizing<[u8; 32]>,
-    /// The station's whole RSN element.
-    own_rsn: Vec<u8>,
-    /// The AP's whole RSN element.
-    peer_rsn: Vec<u8>,
-    /// The links of a multi-link association.
-    links: Option<MultiLink>,
-}
-
-/// The links of an AP MLD association, as `ieee80211_mgd_assoc` requests
-/// them.
-struct Links {
-    /// The setup link, which the SAE exchange and association run on.
-    affiliation: Affiliation,
-    /// The other link requested, on another band.
-    other: Option<OtherLink>,
-}
-
-/// Another link of an AP MLD association.
-struct OtherLink {
-    link_id: u8,
-    /// The station's random address on the link.
-    local: Mac,
-    handle: BssHandle,
-    bss: Bss,
-}
-
-/// An SAE exchange with the chosen BSS, before its association.
-struct Authenticating {
-    handle: BssHandle,
-    bss: Bss,
-    security: Security,
-    session: Arc<external::Session>,
-    exchange: Exchange,
-    /// Whether the exchange derives its element by hash-to-element.
-    h2e: bool,
-    /// The AP MLD links the association requests.
-    links: Option<Links>,
-}
-
-enum State {
-    /// Scan once `at` passes.
-    Waiting {
-        at: u64,
-    },
-    /// A scan part runs; the parts after it follow in order.
-    Scanning(Vec<scan::Request>),
-    Authenticating(Box<Authenticating>),
-    Joining(Box<Candidate>),
-    Handshake {
-        supplicant: Box<Supplicant>,
-        bssid: Mac,
-        deadline: u64,
-        /// Message 3 failed its MIC: the passphrase may be wrong.
-        mic_failed: bool,
-        /// The pairwise key message 3 installed.
-        ptk: Option<KeyIdentity>,
-        /// Message 3's IGTK until the link has drained the frames before it.
-        integrity: Option<IntegrityKey>,
-        /// The protected-management transport of the IGTK message 3 gave.
-        management: Option<Arc<Session>>,
-    },
-    Connected {
-        supplicant: Box<Supplicant>,
-        bssid: Mac,
-        ptk: KeyIdentity,
-        management: Option<Arc<Session>>,
-        /// A rekeyed IGTK the link had no room to rotate in yet.
-        integrity: Option<IntegrityKey>,
-    },
-    /// Leave the association, then scan once `at` passes.
-    Leaving {
-        at: u64,
-    },
-}
 
 /// An attached MT7925 kept connected to one network.
 pub type Wifi<C> = Station<MmioBar, MmioQueue, C, &'static dyn PageSource>;
 
 /// A managed MT7925 link kept connected to one network.
-pub struct Station<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> {
+pub type Station<I, Q, C, S> = Keeper<Mt7925<I, Q, C, S>>;
+
+/// A managed MT7925 link and its station interface.
+pub struct Mt7925<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> {
     link: ManagedLink<I, Q, C, S>,
     interface: Context,
-    country: Country,
-    network: Network,
-    pmk: Zeroizing<[u8; 32]>,
-    entropy: Arc<dyn Entropy>,
-    clock: Clock,
-    state: State,
-    /// wpa_supplicant's `auth_failures` for the network.
-    failures: u32,
-    /// The latest failure, which `receive` reports once.
-    failure: Option<String>,
-    reported: Option<String>,
 }
 
 impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Station<I, Q, C, S> {
@@ -291,916 +56,17 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
         entropy: Arc<dyn Entropy>,
         clock: Clock,
     ) -> Self {
-        let pmk = network.secret.pmk(&network.ssid);
-        Self {
-            link,
-            interface,
-            country,
-            network,
-            pmk,
-            entropy,
-            clock,
-            state: State::Waiting { at: 0 },
-            failures: 0,
-            failure: None,
-            reported: None,
-        }
-    }
-
-    fn fail(&mut self, message: String) {
-        if self.reported.as_ref() != Some(&message) {
-            self.failure = Some(message);
-        }
-    }
-
-    /// A connection attempt failed: leave it and wait as wpa_supplicant
-    /// waits after `failures` attempts.
-    fn failed(&mut self, now: u64, message: String) {
-        self.failures = self.failures.saturating_add(1);
-        self.fail(message);
-        if self.link.phase() != Phase::Idle {
-            let _ = self.link.deauthenticate(LEAVING);
-        }
-        self.state = State::Leaving {
-            at: now + failure_delay_us(self.failures),
-        };
-    }
-
-    /// Service the link, take its notices and advance the connection.
-    fn poll(&mut self) {
-        let now = self.clock.now_us();
-        // A rotation waits for the frames queued before it to be taken.
-        if let State::Connected {
-            integrity: integrity @ Some(_),
-            ..
-        } = &mut self.state
-        {
-            let key = integrity.take().unwrap();
-            if let Err(message) = self.rotate(key) {
-                self.failed(now, message);
-            }
-        }
-        if let Err(error) = self.link.service() {
-            self.fail(format!("{error}"));
-        }
-        let mut notices = Vec::new();
-        while let Some(notice) = self.link.take_notice() {
-            notices.push(notice);
-        }
-        for notice in notices {
-            match notice.event {
-                LinkEvent::Controller(Event::Ingress(Ingress::ControlPort {
-                    ethernet, ..
-                })) => {
-                    self.eapol(&ethernet, now);
-                }
-                LinkEvent::Controller(Event::ExternalAuthentication(received)) => {
-                    self.sae(&received, now);
-                }
-                LinkEvent::Controller(Event::ExternalAuthenticationEnded {
-                    failure: Some(failure),
-                    ..
-                }) if matches!(self.state, State::Authenticating(_)) => {
-                    self.failed(
-                        now,
-                        format!("MT7925: SAE authentication ended: {failure:?}"),
-                    );
-                }
-                LinkEvent::Controller(Event::Unsupported(operation)) => {
-                    self.fail(format!("MT7925 unsupported: {operation}"));
-                }
-                LinkEvent::Controller(Event::ConnectionLost(_)) => {
-                    self.fail(String::from("MT7925: the AP ended the association"));
-                    self.state = State::Leaving {
-                        at: now + RECONNECT_US,
-                    };
-                }
-                _ => {}
-            }
-        }
-        if let Err(message) = self.complete() {
-            self.failed(now, message);
-        }
-        self.advance(now);
-    }
-
-    fn advance(&mut self, now: u64) {
-        let phase = self.link.phase();
-        match &self.state {
-            State::Waiting { at } if now >= *at => self.scan(now),
-            State::Scanning(_) if phase == Phase::ScanCompleted => self.scanned(now),
-            State::Authenticating(authenticating)
-                if authenticating.exchange.accepted()
-                    && self.link.station().external_authenticated() =>
-            {
-                self.associate(now)
-            }
-            State::Joining(_) if phase == Phase::AwaitingModernAdmission => self.configure(now),
-            State::Authenticating(_)
-            | State::Joining(_)
-            | State::Handshake { .. }
-            | State::Connected { .. }
-                if matches!(phase, Phase::Idle | Phase::NeedsDrain) =>
-            {
-                self.failed(
-                    now,
-                    String::from("MT7925: authentication or association failed"),
-                );
-            }
-            State::Handshake {
-                deadline,
-                mic_failed,
-                ..
-            } if now >= *deadline => {
-                let message = if *mic_failed {
-                    "MT7925: the 4-way handshake failed: the passphrase may be wrong"
-                } else {
-                    "MT7925: the 4-way handshake timed out"
-                };
-                self.failed(now, String::from(message));
-            }
-            State::Leaving { at } => match phase {
-                Phase::NeedsDrain => {
-                    // SAFETY: as for the scan above, the departure's removal
-                    // event was its last user, and the retirement refuses
-                    // while any peer work is queued.
-                    if let Err(error) = unsafe { self.link.retire_peer_after_drain() } {
-                        self.fail(format!("{error}"));
-                    }
-                }
-                Phase::Idle => self.state = State::Waiting { at: *at },
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-
-    /// `wpa_supplicant_req_scan`: a scan with the wildcard SSID on every
-    /// channel that may transmit, 2.4 and 5 GHz first and 6 GHz after them as
-    /// cfg80211 splits a scan. It probes where the channel permits and listens
-    /// elsewhere, as mac80211 scans NO_IR channels passively within one active
-    /// scan, so each runs in those two parts.
-    fn scan(&mut self, now: u64) {
-        let parts = [&[Band::Ghz2, Band::Ghz5][..], &[Band::Ghz6]]
-            .into_iter()
-            .flat_map(|bands| {
-                let (active, passive): (Vec<_>, Vec<_>) = bands
-                    .iter()
-                    .flat_map(|&band| self.link.channels(band))
-                    .map(|(channel, _)| channel)
-                    .partition(|&channel| self.link.probes(channel));
-                [(active, vec![Vec::new()]), (passive, Vec::new())]
-            })
-            .filter(|(channels, _)| !channels.is_empty())
-            .map(|(channels, ssids)| scan::Request::new(channels, ssids, Vec::new()))
-            .collect::<Result<Vec<_>, _>>();
-        match parts {
-            Ok(parts) => self.next_scan(now, parts),
-            Err(error) => {
-                self.fail(format!("MT7925 scan: {error:?}"));
-                self.state = State::Waiting {
-                    at: now + SCAN_INTERVAL_US,
-                };
-            }
-        }
-    }
-
-    /// A scan part completed: retire it, then run the next.
-    fn scanned(&mut self, now: u64) {
-        // SAFETY: the link is polled with the device's interrupts masked, so
-        // the scan's completion event was its last user; the retirement
-        // itself refuses while receive work is queued.
-        if let Err(error) = unsafe { self.link.retire_scan_after_drain() } {
-            return self.fail(format!("{error}"));
-        }
-        if let State::Scanning(parts) = &mut self.state {
-            let parts = core::mem::take(parts);
-            self.next_scan(now, parts);
-        }
-    }
-
-    /// Start the first of `parts`, or choose a BSS once none remains. A
-    /// 6 GHz part scans what `cfg80211_scan_6ghz` plans from the BSSes the
-    /// parts before it found, with wpa_supplicant's colocated 6 GHz scan.
-    fn next_scan(&mut self, now: u64, mut parts: Vec<scan::Request>) {
-        let part = loop {
-            if parts.is_empty() {
-                return self.choose(now);
-            }
-            let part = parts.remove(0);
-            if part.channels()[0].band != Band::Ghz6 {
-                break part;
-            }
-            let options = scan::six_ghz::Options {
-                colocated: true,
-                bssid: None,
-            };
-            match self.link.six_ghz_scan(&part, options) {
-                Ok(Some(planned)) => break planned,
-                Ok(None) => {}
-                Err(error) => self.fail(format!("{error}")),
-            }
-        };
-        self.state = match self.link.begin_scan(part, SCAN_BUDGET_US) {
-            Ok(_) => State::Scanning(parts),
-            Err(error) => {
-                self.fail(format!("{error}"));
-                State::Waiting {
-                    at: now + SCAN_INTERVAL_US,
-                }
-            }
-        };
-    }
-
-    /// Join the strongest BSS of the network whose security the station
-    /// supports, after an SAE exchange when that is the security. A 6 GHz
-    /// BSS whose power type its channel bars is not one cfg80211 connects to.
-    fn choose(&mut self, now: u64) {
-        let mut best: Option<(BssHandle, &Bss, Security)> = None;
-        let mut refusal = None;
-        let passphrase = matches!(self.network.secret, Secret::Passphrase(_));
-        let six = self.link.channels(Band::Ghz6);
-        for (handle, bss) in self.link.bss() {
-            if bss.ssid.as_deref() != Some(&self.network.ssid[..]) {
-                continue;
-            }
-            if bss.channel.band == Band::Ghz6 && !power_type_usable(bss, &six) {
-                refusal = Some(format!(
-                    "is on 6 GHz channel {} only as an AP whose power type the channel bars",
-                    bss.channel.number
-                ));
-                continue;
-            }
-            match Security::select_on(bss.channel.band, &bss.elements, passphrase) {
-                Ok(security) => {
-                    let signal = |bss: &Bss| bss.signal_dbm.unwrap_or(i8::MIN);
-                    if best
-                        .as_ref()
-                        .is_none_or(|(_, b, _)| signal(bss) > signal(b))
-                    {
-                        best = Some((handle, bss, security));
-                    }
-                }
-                Err(reason) => {
-                    refusal = Some(format!("offers no supported security: {reason:?}"));
-                }
-            }
-        }
-        let ssid = String::from_utf8_lossy(&self.network.ssid).into_owned();
-        let Some((handle, bss, security)) = best else {
-            self.fail(match refusal {
-                Some(reason) => format!("MT7925: {ssid} {reason}"),
-                None => format!("MT7925: {ssid} not found"),
-            });
-            self.state = State::Waiting {
-                at: now + SCAN_INTERVAL_US,
-            };
-            return;
-        };
-        let bss = bss.clone();
-        let started = if security.akm == Akm::Sae {
-            self.authenticate(handle, bss, security)
-                .map(State::Authenticating)
-        } else {
-            self.association(&bss, security, None)
-                .and_then(|(join, profile)| {
-                    self.link
-                        .join(handle, join, profile)
-                        .map_err(|error| format!("{error}"))?;
-                    Ok(State::Joining(Box::new(candidate(
-                        &bss,
-                        security,
-                        self.pmk.clone(),
-                    ))))
-                })
-        };
-        match started {
-            Ok(state) => self.state = state,
-            Err(message) => self.failed(now, message),
-        }
-    }
-
-    /// `sme_send_authentication` for SAE: claim the BSS's peer and send the
-    /// exchange's commit, its element by hash-to-element when the AP's RSNXE
-    /// offers it.
-    fn authenticate(
-        &mut self,
-        handle: BssHandle,
-        bss: Bss,
-        security: Security,
-    ) -> Result<Box<Authenticating>, String> {
-        let Secret::Passphrase(passphrase) = &self.network.secret else {
-            return Err(String::from("MT7925: SAE needs the network's passphrase"));
-        };
-        let (join, profile) = self.association(&bss, security, None)?;
-        let links = self.links(&bss, &join.request)?;
-        let session = if bss.channel.band == Band::Ghz6 {
-            // The exchange binds the RSN element and RSNXE the association
-            // will carry.
-            let mut elements = security.element();
-            elements.extend_from_slice(&sae::H2E_RSNXE);
-            let selection = Selection::new(elements)
-                .map_err(|error| format!("MT7925 6 GHz SAE selection: {error:?}"))?;
-            self.link.begin_six_ghz_external_authentication(
-                handle,
-                selection,
-                profile,
-                SAE_BUDGET_US,
-            )
-        } else {
-            self.link.begin_external_authentication(
-                handle,
-                profile,
-                links.as_ref().map(|links| links.affiliation),
-                SAE_BUDGET_US,
-            )
-        }
-        .map_err(|error| format!("{error}"))?;
-        let derivation = Derivation::for_rsnxe(connection::find(&bss.elements, 244));
-        let mut unavailable = None;
-        let mut random = || {
-            let mut bytes = [0; 32];
-            if let Err(error) = self.entropy.fill(&mut bytes) {
-                unavailable = Some(error);
-            }
-            bytes
-        };
-        let exchange = Exchange::for_session(
-            &session,
-            derivation,
-            passphrase.as_bytes(),
-            None,
-            &mut random,
-        );
-        if let Some(error) = unavailable {
-            return Err(format!("MT7925 SAE: {error}"));
-        }
-        let exchange = exchange.map_err(|error| format!("MT7925 SAE: {error:?}"))?;
-        self.send_sae(&session, exchange.commit())?;
-        Ok(Box::new(Authenticating {
-            handle,
-            bss,
-            security,
-            session,
-            exchange,
-            h2e: derivation == Derivation::HashToElement,
-            links,
-        }))
-    }
-
-    /// `ieee80211_mgd_assoc` for an AP MLD: when the NIC reports MLO and
-    /// `bss`, on 2.4 or 5 GHz, is a link of an AP MLD that `request`
-    /// associates with as EHT with PMF, the station takes a random address on
-    /// it and requests one more link as `mt76_select_links` picks it.
-    fn links(&self, bss: &Bss, request: &AssociationRequest) -> Result<Option<Links>, String> {
-        let Some((ap, link_id)) = ap_mld(bss) else {
-            return Ok(None);
-        };
-        let mlo = self
-            .link
-            .local_advertisement(bss.channel.band)
-            .map_err(|error| format!("{error}"))?
-            .mlo();
-        if bss.channel.band == Band::Ghz6
-            || mlo.reported_supported() != Some(true)
-            || request.pmf().is_none()
-            || request.modern().map(|modern| modern.mode()) != Some(Mode::Eht)
-        {
-            return Ok(None);
-        }
-        // The links run on 2.4 and 5 GHz channels that may transmit.
-        let usable = |other: &Bss| {
-            other.channel.band != Band::Ghz6
-                && self
-                    .link
-                    .channels(other.channel.band)
-                    .iter()
-                    .any(|&(channel, _)| channel == other.channel)
-        };
-        let observed: Vec<_> = self.link.bss().collect();
-        let other = other_link(bss, ap, &observed, usable)
-            .map(|(link_id, handle, other)| (link_id, handle, other.clone()));
-        let affiliation = Affiliation {
-            mld: Mld {
-                local: self.link.mac(),
-                ap,
-            },
-            link_id,
-            local: self.random_address()?,
-        };
-        let other = match other {
-            Some((link_id, handle, bss)) => Some(OtherLink {
-                link_id,
-                local: self.random_address()?,
-                handle,
-                bss,
-            }),
-            None => None,
-        };
-        Ok(Some(Links { affiliation, other }))
-    }
-
-    /// `eth_random_addr`: a random locally administered unicast address.
-    fn random_address(&self) -> Result<Mac, String> {
-        let mut address = [0; 6];
-        self.entropy
-            .fill(&mut address)
-            .map_err(|error| format!("MT7925 link address: {error}"))?;
-        address[0] = (address[0] & 0xfe) | 0x02;
-        Ok(Mac(address))
-    }
-
-    /// The multi-link setup of `links` with the AP MLD whose setup link is
-    /// `bss`, each other link requested as it would associate alone, and the
-    /// links the handshakes key. The station MLD reports mt7925's MLD
-    /// capabilities, one simultaneous link, and no EML capabilities.
-    fn multi_link(
-        &self,
-        links: &Links,
-        bss: &Bss,
-        security: Security,
-        rsnxe: Option<&[u8]>,
-    ) -> Result<(Setup, MultiLink), String> {
-        let affiliation = links.affiliation;
-        let mut requested = Vec::new();
-        let mut keyed = vec![keyed_link(affiliation.link_id, affiliation.local, bss)];
-        if let Some(other) = &links.other {
-            let (join, _) = self.association(&other.bss, security, rsnxe)?;
-            let observation = self
-                .link
-                .observation(other.handle)
-                .map_err(|error| format!("{error}"))?;
-            requested.push(mlo::Link {
-                link_id: other.link_id,
-                local: other.local,
-                observation,
-                request: join.request,
-            });
-            keyed.push(keyed_link(other.link_id, other.local, &other.bss));
-        }
-        Ok((
-            Setup {
-                association: affiliation,
-                mld_capabilities: 0,
-                eml_capabilities: 0,
-                links: requested,
-            },
-            MultiLink {
-                association: affiliation.link_id,
-                links: keyed,
-            },
-        ))
-    }
-
-    /// Send one SAE frame of `session`.
-    fn send_sae(&mut self, session: &external::Session, frame: sae::Frame) -> Result<(), String> {
-        self.link
-            .transmit_external_authentication(
-                session,
-                external::Frame {
-                    transaction: frame.transaction,
-                    status: frame.status,
-                    data: &frame.data,
-                },
-            )
-            .map(|_| ())
-            .map_err(|error| format!("{error}"))
-    }
-
-    /// One SAE frame from the AP: the exchange's answer goes back to it.
-    fn sae(&mut self, received: &Received, now: u64) {
-        let State::Authenticating(authenticating) = &mut self.state else {
-            return;
-        };
-        if !Arc::ptr_eq(received.session(), &authenticating.session) {
-            return;
-        }
-        let reply = match authenticating.exchange.receive_from(received) {
-            Ok(reply) => reply,
-            Err(sae::Error::Confirm) => {
-                return self.failed(
-                    now,
-                    String::from("MT7925: SAE confirm failed: the passphrase may be wrong"),
-                );
-            }
-            Err(error) => return self.failed(now, format!("MT7925 SAE: {error:?}")),
-        };
-        let session = authenticating.session.clone();
-        if let Some(frame) = reply
-            && let Err(message) = self.send_sae(&session, frame)
-        {
-            self.failed(now, message);
-        }
-    }
-
-    /// `sme_associate` once SAE authenticated the station: its PMK keys the
-    /// handshake, and the request carries no PMKID (`sae_pmkid_in_assoc`).
-    fn associate(&mut self, now: u64) {
-        let State::Authenticating(authenticating) =
-            core::mem::replace(&mut self.state, State::Scanning(Vec::new()))
-        else {
-            return;
-        };
-        let Authenticating {
-            handle,
-            bss,
-            security,
-            session,
-            exchange,
-            h2e,
-            links,
-        } = *authenticating;
-        let Some(pmk) = exchange.pmk() else {
-            return self.failed(now, String::from("MT7925: SAE gave no PMK"));
-        };
-        let rsnxe = h2e.then_some(&sae::H2E_RSNXE[..]);
-        let started = self
-            .association(&bss, security, rsnxe)
-            .and_then(|(mut join, _)| {
-                let mut candidate = candidate(&bss, security, pmk);
-                if let Some(links) = &links {
-                    let (setup, keyed) = self.multi_link(links, &bss, security, rsnxe)?;
-                    join.request = join
-                        .request
-                        .with_multi_link(setup)
-                        .map_err(|error| format!("MT7925 multi-link request: {error:?}"))?;
-                    candidate.bssid = links.affiliation.mld.ap;
-                    candidate.links = Some(keyed);
-                }
-                self.link
-                    .associate_external(&session, handle, join)
-                    .map_err(|error| format!("{error}"))?;
-                Ok(candidate)
-            });
-        match started {
-            Ok(candidate) => self.state = State::Joining(Box::new(candidate)),
-            Err(message) => self.failed(now, message),
-        }
-    }
-
-    /// `ieee80211_mgd_assoc`: the association request and station profile
-    /// for `bss` on mac80211's mode and channel, its RSN element with an SAE
-    /// exchange's `rsnxe`.
-    fn association(
-        &self,
-        bss: &Bss,
-        security: Security,
-        rsnxe: Option<&[u8]>,
-    ) -> Result<(Join, Profile), String> {
-        let band = bss.channel.band;
-        let advertisement = self
-            .link
-            .local_advertisement(band)
-            .map_err(|error| format!("{error}"))?;
-        let peer = Capabilities::parse(band, Role::AccessPoint, &bss.elements)
-            .map_err(|error| format!("MT7925 AP capabilities: {error:?}"))?;
-        let operations = Operations::parse(&bss.elements)
-            .map_err(|error| format!("MT7925 AP operation: {error:?}"))?;
-        let channels = self.link.channels(band);
-        let chosen = mode::determine(
-            advertisement.capabilities(),
-            &peer,
-            &operations,
-            bss.channel,
-            Channels(&channels),
-        )
-        .map_err(|refusal| format!("MT7925: {refusal:?}"))?;
-        let spectrum = connection::spectrum_management(bss.capabilities).then(|| {
-            let regulated = self.country.channel(bss.channel.frequency_mhz);
-            (
-                regulated.max_reg_dbm.clamp(0, 127) as i8,
-                regd::channels(band),
-            )
-        });
-        let own_rsn = security.element();
-        let elements = connection::request_elements(
-            &Request {
-                ssid: &self.network.ssid,
-                rsn: &own_rsn,
-                rsnxe,
-                mode: chosen.mode,
-                wmm: peer.wmm().is_some(),
-                spectrum,
-            },
-            advertisement.elements(),
-        );
-        let mut local = Capabilities::parse(band, Role::Station, &elements)
-            .map_err(|error| format!("MT7925 request capabilities: {error:?}"))?;
-        if local.he().is_some() {
-            local = local
-                .with_local_he_source_maps(*advertisement.he_source_maps())
-                .map_err(|error| format!("MT7925 request capabilities: {error:?}"))?;
-        }
-        let rates = local.rates().supported & peer.rates().supported;
-        let capability = connection::capability(band, chosen.mode, spectrum.is_some());
-        let width = chosen.definition.width;
-        let request = if security.management.is_some() {
-            AssociationRequest::new_modern_with_local_pmf(
-                capability,
-                LISTEN_INTERVAL,
-                elements,
-                local,
-                chosen.mode,
-                width,
-            )
-        } else {
-            AssociationRequest::new_modern_with_local(
-                capability,
-                LISTEN_INTERVAL,
-                elements,
-                local,
-                chosen.mode,
-                width,
-            )
-        }
-        .map_err(|error| format!("MT7925 association request: {error:?}"))?;
-        let dtim_period = connection::find(&bss.elements, 5)
-            .and_then(|tim| tim.get(1).copied())
-            .filter(|&period| period != 0)
-            .unwrap_or(1);
-        // mac80211 uses the short slot time on 5 GHz and wherever the AP does.
-        let slot_time = if band != Band::Ghz2 || bss.capabilities & (1 << 10) != 0 {
-            9
-        } else {
-            20
-        };
-        let profile = Profile {
-            interface: self.interface,
-            peer: bss.bssid,
-            wcid: PEER_WCID,
-            channel: bss.channel,
-            aid: 0,
-            basic_rates: peer.rates().basic,
-            supported_rates: rates,
-            beacon_interval: bss.beacon_interval,
-            dtim_period,
-            slot_time,
-            antenna_mask: advertisement.antenna_mask(),
-            // The client takes the cipher from the first installed key.
-            cipher: 0,
-        };
-        let join = Join {
-            bssid: bss.bssid,
-            channel: bss.channel,
-            policy: PortPolicy::Controlled,
-            request,
-        };
-        Ok((join, profile))
-    }
-
-    /// Configure the association the AP accepted, then await message 1.
-    fn configure(&mut self, now: u64) {
-        let State::Joining(candidate) =
-            core::mem::replace(&mut self.state, State::Scanning(Vec::new()))
-        else {
-            return;
-        };
-        if let Err(error) = self.link.configure() {
-            return self.failed(now, format!("{error}"));
-        }
-        let mut links = candidate.links;
-        if let Some(links) = &mut links {
-            // The links the AP MLD accepted, the setup link among them.
-            let accepted: Vec<u8> = self
-                .link
-                .station()
-                .link_contexts()
-                .iter()
-                .filter_map(|context| context.affiliation())
-                .map(|affiliation| affiliation.link_id)
-                .chain([links.association])
-                .collect();
-            for link in &mut links.links {
-                link.accepted = accepted.contains(&link.link_id);
-            }
-        }
-        match Supplicant::new(
-            candidate.security.suites(),
-            candidate.pmk,
-            self.link.mac(),
-            candidate.bssid,
-            candidate.own_rsn,
-            candidate.peer_rsn,
-        )
-        .and_then(|supplicant| match links {
-            Some(links) => supplicant.with_multi_link(links),
-            None => Ok(supplicant),
-        }) {
-            Ok(supplicant) => {
-                self.state = State::Handshake {
-                    supplicant: Box::new(supplicant),
-                    bssid: candidate.bssid,
-                    deadline: now + HANDSHAKE_TIMEOUT_US,
-                    mic_failed: false,
-                    ptk: None,
-                    integrity: None,
-                    management: None,
-                }
-            }
-            Err(error) => self.failed(now, format!("MT7925 supplicant: {error:?}")),
-        }
-    }
-
-    /// One EAPOL frame from the AP: answer it, install the keys it carries
-    /// and, once message 3 has, open the port.
-    fn eapol(&mut self, ethernet: &[u8], now: u64) {
-        if ethernet.get(12..14) != Some(&EAPOL.to_be_bytes()[..]) {
-            return;
-        }
-        let mut nonce = [0; 32];
-        if let Err(error) = self.entropy.fill(&mut nonce) {
-            return self.failed(now, format!("MT7925 SNonce: {error}"));
-        }
-        let (supplicant, bssid, ptk) = match &mut self.state {
-            State::Handshake {
-                supplicant, bssid, ..
-            } => (supplicant, *bssid, None),
-            State::Connected {
-                supplicant,
-                bssid,
-                ptk,
-                ..
-            } => (supplicant, *bssid, Some(*ptk)),
-            _ => return,
-        };
-        let step = match supplicant.receive(&ethernet[14..], &mut || nonce) {
-            Ok(step) => step,
-            // wpa_supplicant drops a frame that does not verify.
-            Err(error) => {
-                if let (crate::wifi::supplicant::Error::Mic, State::Handshake { mic_failed, .. }) =
-                    (error, &mut self.state)
-                {
-                    *mic_failed = true;
-                }
-                return;
-            }
-        };
-        if let Err(message) = self.apply(step, bssid, ptk) {
-            self.failed(now, message);
-        }
-    }
-
-    /// Send a handshake step's reply, then install its keys as
-    /// wpa_supplicant does after message 4.
-    fn apply(&mut self, step: Step, bssid: Mac, ptk: Option<KeyIdentity>) -> Result<(), String> {
-        if let Some(reply) = step.reply {
-            let mut frame = Vec::with_capacity(14 + reply.len());
-            frame.extend_from_slice(&bssid.0);
-            frame.extend_from_slice(&self.link.mac().0);
-            frame.extend_from_slice(&EAPOL.to_be_bytes());
-            frame.extend_from_slice(&reply);
-            self.link
-                .send_control(&frame, ptk)
-                .map_err(|error| format!("{error}"))?;
-        }
-        let pairwise = step
-            .pairwise
-            .map(|key| {
-                self.link
-                    .install_key(true, key.index, &key.material, key.receive)
-            })
-            .transpose()
-            .map_err(|error| format!("{error}"))?;
-        if let Some(key) = step.group {
-            self.link
-                .install_key(false, key.index, &key.material, key.receive)
-                .map_err(|error| format!("{error}"))?;
-        }
-        // Each other link's GTK goes to its AP's broadcast WCID.
-        for link in step.links {
-            let key = link.group;
-            self.link
-                .install_link_key(link.link_id, key.index, &key.material, key.receive)
-                .map_err(|error| format!("{error}"))?;
-            if link.integrity.is_some() {
-                self.fail(String::from(
-                    "MT7925 unsupported: MLO link IGTKs; another link's group-addressed \
-                     robust management frames reach the OS unverified",
-                ));
-            }
-        }
-        match &mut self.state {
-            State::Handshake { ptk, integrity, .. } => {
-                *ptk = pairwise.or(*ptk);
-                *integrity = step.integrity.or(integrity.take());
-            }
-            State::Connected { ptk, .. } => {
-                *ptk = pairwise.unwrap_or(*ptk);
-                if let Some(key) = step.integrity {
-                    self.rotate(key)?;
-                }
-            }
-            _ => {}
-        }
-        self.complete()
-    }
-
-    /// Install message 3's IGTK once the link drained the frames before it,
-    /// message 4 among them, then open the port.
-    fn complete(&mut self) -> Result<(), String> {
-        let State::Handshake {
-            ptk: Some(ptk),
-            integrity,
-            management,
-            ..
-        } = &mut self.state
-        else {
-            return Ok(());
-        };
-        let (ptk, pending, protected) = (*ptk, integrity.take(), management.is_some());
-        let epoch = self
-            .link
-            .station()
-            .association_epoch()
-            .ok_or_else(|| String::from("MT7925: the association ended"))?;
-        let installed = match pending {
-            // SAFETY: this association's authenticated handshake gave the
-            // IGTK, and the link is polled with the device's interrupts
-            // masked, so no earlier key user remains.
-            Some(key) => match unsafe {
-                self.link
-                    .install_management_key(epoch, key.index, &key.material, key.receive)
-            } {
-                Ok(session) => Some(session),
-                Err(error) if deferred(&error) => {
-                    if let State::Handshake { integrity, .. } = &mut self.state {
-                        *integrity = Some(key);
-                    }
-                    return Ok(());
-                }
-                Err(error) => return Err(format!("{error}")),
-            },
-            None => None,
-        };
-        if installed.is_none() && !protected && self.link.station().requires_protected_management()
-        {
-            return Ok(());
-        }
-        self.link
-            .authorize_port(epoch)
-            .map_err(|error| format!("{error}"))?;
-        let State::Handshake {
-            supplicant,
-            bssid,
-            management,
-            ..
-        } = core::mem::replace(&mut self.state, State::Scanning(Vec::new()))
-        else {
-            unreachable!("matched above")
-        };
-        self.state = State::Connected {
-            supplicant,
-            bssid,
-            ptk,
-            management: installed.or(management),
-            integrity: None,
-        };
-        self.failures = 0;
-        Ok(())
-    }
-
-    /// Rotate the protected-management transport to a rekeyed IGTK, once the
-    /// link holds no frame received before it.
-    fn rotate(&mut self, key: IntegrityKey) -> Result<(), String> {
-        let State::Connected {
-            management,
-            integrity,
-            ..
-        } = &mut self.state
-        else {
-            return Ok(());
-        };
-        let session = management
-            .as_ref()
-            .ok_or_else(|| String::from("MT7925: an IGTK without management protection"))?;
-        // SAFETY: as for the initial IGTK.
-        match unsafe {
-            self.link
-                .rotate_management_key(session, key.index, &key.material, key.receive)
-        } {
-            Ok(session) => *management = Some(session),
-            Err(error) if deferred(&error) => *integrity = Some(key),
-            Err(error) => return Err(format!("{error}")),
-        }
-        Ok(())
-    }
-
-    /// The failure `receive` has not reported yet.
-    fn take_failure(&mut self) -> Option<String> {
-        let failure = self.failure.take()?;
-        self.reported = Some(failure.clone());
-        Some(failure)
+        Keeper::keep(Mt7925 { link, interface }, country, network, entropy, clock)
     }
 }
 
 impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Link
-    for Station<I, Q, C, S>
+    for Mt7925<I, Q, C, S>
 {
     fn mac(&self) -> Mac {
         self.link.mac()
     }
     fn carrier(&mut self) -> bool {
-        self.poll();
         self.link.carrier()
     }
     fn signals(&self) -> bool {
@@ -1210,13 +76,264 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Li
         self.link.transmit(frame)
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
-        self.poll();
-        if let Some(failure) = self.take_failure() {
-            return Err(LinkError::Adapter(failure));
-        }
         self.link.receive()
     }
 }
 
-#[cfg(test)]
-mod tests;
+impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Radio
+    for Mt7925<I, Q, C, S>
+{
+    type Handle = BssHandle;
+    type Profile = Profile;
+    type Management = Arc<Session>;
+    type Error = LinkControlError;
+
+    const NAME: &'static str = "MT7925";
+    /// mt76 leaves `max_listen_interval` at mac80211's default.
+    const LISTEN_INTERVAL: u16 = 5;
+
+    fn deferred(error: &LinkControlError) -> bool {
+        matches!(
+            error,
+            LinkControlError::Backpressure
+                | LinkControlError::Policy(PolicyError::Client(client::Error::NeedsDrain))
+        )
+    }
+
+    fn service(&mut self) -> Result<(), LinkControlError> {
+        self.link.service().map(|_| ())
+    }
+
+    fn take_event(&mut self) -> Option<keeper::Event> {
+        while let Some(notice) = self.link.take_notice() {
+            let LinkEvent::Controller(event) = notice.event else {
+                continue;
+            };
+            return Some(match event {
+                Event::Ingress(Ingress::ControlPort { ethernet, .. }) => {
+                    keeper::Event::Eapol(ethernet)
+                }
+                Event::ExternalAuthentication(received) => keeper::Event::Sae(Box::new(received)),
+                Event::ExternalAuthenticationEnded {
+                    failure: Some(failure),
+                    ..
+                } => keeper::Event::SaeEnded(format!("{failure:?}")),
+                Event::Unsupported(operation) => keeper::Event::Unsupported(operation),
+                Event::ConnectionLost(_) => keeper::Event::ConnectionLost,
+                _ => continue,
+            });
+        }
+        None
+    }
+
+    fn stage(&self) -> Stage {
+        match self.link.phase() {
+            Phase::Idle => Stage::Idle,
+            Phase::ScanCompleted => Stage::Scanned,
+            Phase::AwaitingModernAdmission => Stage::Admitted,
+            Phase::NeedsDrain => Stage::NeedsDrain,
+            _ => Stage::Busy,
+        }
+    }
+
+    fn station(&self) -> &Association {
+        self.link.station()
+    }
+
+    fn channels(&self, band: Band) -> Vec<(Channel, u32)> {
+        self.link.channels(band)
+    }
+
+    fn probes(&self, channel: Channel) -> bool {
+        self.link.probes(channel)
+    }
+
+    fn supported_channels(&self, band: Band) -> &'static [u8] {
+        regd::channels(band)
+    }
+
+    fn advertisement(&self, band: Band) -> Result<Advertisement, LinkControlError> {
+        let local = self.link.local_advertisement(band)?;
+        Ok(Advertisement {
+            capabilities: local.capabilities().clone(),
+            elements: local.elements().to_vec(),
+            he_source_maps: *local.he_source_maps(),
+            multi_link: local.mlo().reported_supported(),
+        })
+    }
+
+    fn profile(&self, peer: Peer) -> Result<Profile, LinkControlError> {
+        let local = self.link.local_advertisement(peer.channel.band)?;
+        Ok(Profile {
+            interface: self.interface,
+            peer: peer.bssid,
+            wcid: PEER_WCID,
+            channel: peer.channel,
+            aid: 0,
+            basic_rates: peer.basic_rates,
+            supported_rates: peer.supported_rates,
+            beacon_interval: peer.beacon_interval,
+            dtim_period: peer.dtim_period,
+            slot_time: peer.slot_time,
+            antenna_mask: local.antenna_mask(),
+            // The client takes the cipher from the first installed key.
+            cipher: 0,
+        })
+    }
+
+    fn begin_scan(
+        &mut self,
+        request: scan::Request,
+        budget_us: u64,
+    ) -> Result<(), LinkControlError> {
+        self.link.begin_scan(request, budget_us).map(|_| ())
+    }
+
+    unsafe fn retire_scan(&mut self) -> Result<(), LinkControlError> {
+        // SAFETY: the keeper establishes the native client's scan drain.
+        unsafe { self.link.retire_scan_after_drain() }.map(|_| ())
+    }
+
+    fn six_ghz_scan(
+        &self,
+        request: &scan::Request,
+        options: scan::six_ghz::Options,
+    ) -> Result<Option<scan::Request>, LinkControlError> {
+        self.link.six_ghz_scan(request, options)
+    }
+
+    fn bss(&self) -> Vec<(BssHandle, &Bss)> {
+        self.link.bss().collect()
+    }
+
+    fn observation(
+        &self,
+        handle: BssHandle,
+    ) -> Result<Arc<NativeBssObservation>, LinkControlError> {
+        self.link.observation(handle)
+    }
+
+    fn join(
+        &mut self,
+        handle: BssHandle,
+        join: Join,
+        profile: Profile,
+    ) -> Result<(), LinkControlError> {
+        self.link.join(handle, join, profile)
+    }
+
+    fn begin_external_authentication(
+        &mut self,
+        handle: BssHandle,
+        profile: Profile,
+        multi_link: Option<Affiliation>,
+        budget_us: u64,
+    ) -> Result<Arc<external::Session>, LinkControlError> {
+        self.link
+            .begin_external_authentication(handle, profile, multi_link, budget_us)
+    }
+
+    fn begin_six_ghz_external_authentication(
+        &mut self,
+        handle: BssHandle,
+        selection: Selection,
+        profile: Profile,
+        budget_us: u64,
+    ) -> Result<Arc<external::Session>, LinkControlError> {
+        self.link
+            .begin_six_ghz_external_authentication(handle, selection, profile, budget_us)
+    }
+
+    fn transmit_external_authentication(
+        &mut self,
+        session: &external::Session,
+        frame: external::Frame<'_>,
+    ) -> Result<(), LinkControlError> {
+        self.link
+            .transmit_external_authentication(session, frame)
+            .map(|_| ())
+    }
+
+    fn associate_external(
+        &mut self,
+        session: &external::Session,
+        handle: BssHandle,
+        join: Join,
+    ) -> Result<(), LinkControlError> {
+        self.link.associate_external(session, handle, join)
+    }
+
+    fn configure(&mut self) -> Result<(), LinkControlError> {
+        self.link.configure()
+    }
+
+    fn send_control(
+        &mut self,
+        ethernet: &[u8],
+        key: Option<KeyIdentity>,
+    ) -> Result<(), LinkControlError> {
+        self.link.send_control(ethernet, key).map(|_| ())
+    }
+
+    fn install_key(
+        &mut self,
+        pairwise: bool,
+        index: u8,
+        material: &[u8],
+        receive: ReplaySeed,
+    ) -> Result<KeyIdentity, LinkControlError> {
+        self.link.install_key(pairwise, index, material, receive)
+    }
+
+    fn install_link_key(
+        &mut self,
+        link_id: u8,
+        index: u8,
+        material: &[u8],
+        receive: ReplaySeed,
+    ) -> Result<KeyIdentity, LinkControlError> {
+        self.link
+            .install_link_key(link_id, index, material, receive)
+    }
+
+    unsafe fn install_management_key(
+        &mut self,
+        epoch: u64,
+        index: u8,
+        material: &[u8],
+        receive: PacketNumber,
+    ) -> Result<Arc<Session>, LinkControlError> {
+        // SAFETY: forwarded from the keeper.
+        unsafe {
+            self.link
+                .install_management_key(epoch, index, material, receive)
+        }
+    }
+
+    unsafe fn rotate_management_key(
+        &mut self,
+        session: &Arc<Session>,
+        index: u8,
+        material: &[u8],
+        receive: PacketNumber,
+    ) -> Result<Arc<Session>, LinkControlError> {
+        // SAFETY: forwarded from the keeper.
+        unsafe {
+            self.link
+                .rotate_management_key(session, index, material, receive)
+        }
+    }
+
+    fn authorize_port(&mut self, epoch: u64) -> Result<(), LinkControlError> {
+        self.link.authorize_port(epoch)
+    }
+
+    fn deauthenticate(&mut self, reason: u16) -> Result<(), LinkControlError> {
+        self.link.deauthenticate(reason)
+    }
+
+    unsafe fn retire_peer(&mut self) -> Result<(), LinkControlError> {
+        // SAFETY: forwarded from the keeper.
+        unsafe { self.link.retire_peer_after_drain() }
+    }
+}
