@@ -1,9 +1,7 @@
 //! Capability-checked packed bit operations (Intel SDM Vol. 2).
-#[cfg(test)]
-use super::Vex;
-use super::{Code, Evex, Gpr, Map, Pp, Rm};
+use super::{Code, Evex, Gpr, Map, Pp, Rm, Vex};
 use crate::TargetCpu;
-use crate::x86_64::isa::SimdOpcode as Host;
+use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 
 /// Reverse each byte in `destination`, using `scratch` and RAX for the
 /// anti-diagonal affine matrix. The DIT profile keeps its reviewed recipe.
@@ -117,6 +115,153 @@ pub(crate) fn blend_bytes(
         Rm::Xmm(destination),
     );
     asm.data(&[mask << 4]);
+    true
+}
+
+/// Byte dot products need AVX-VNNI-INT8, AVX-VNNI, or AVX-512 VNNI with F
+/// and VL. The DIT profile keeps its reviewed recipe.
+pub(crate) fn byte_dot_supported(target: TargetCpu) -> bool {
+    (target.supports(TargetCpu::AvxVnniInt8)
+        || target.supports(TargetCpu::AvxVnni)
+        || target.supports(TargetCpu::Avx512f.with_avx512vl().with_avx512vnni()))
+        && !target.data_independent_timing()
+}
+
+/// Set each dword of `sum` to the wrapping sum of the four products of the
+/// bytes in that dword of each `[left, right]` pair, each operand's bytes
+/// signed as `signed` says (SDOT, UDOT, USDOT, SUDOT and the matrix forms).
+/// Callers add the old destination afterwards, so a chain of accumulations
+/// waits on one PADDD rather than on the multiply. AVX-VNNI-INT8 has every
+/// signedness. VPDPBUSD multiplies unsigned by signed bytes; for equal
+/// signedness it flips the sign bit of one operand in place,
+/// (a ^ 0x80) - 0x80 = a, and subtracts the 128-fold byte sum of the other,
+/// collected in `scratch[1]` with the 0x80 bytes in `scratch[0]`.
+pub(crate) fn byte_dot(
+    code: &mut Code,
+    sum: u8,
+    pairs: &[[u8; 2]],
+    signed: [bool; 2],
+    scratch: [u8; 2],
+    target: TargetCpu,
+) -> bool {
+    if !byte_dot_supported(target) {
+        return false;
+    }
+    if target.supports(TargetCpu::AvxVnniInt8) {
+        // VEX.pp names the signedness: VPDPBUUD, VPDPBSUD (signed first
+        // source), VPDPBSSD.
+        let pp = match signed {
+            [false, false] => Pp::None,
+            [true, true] => Pp::Pf2,
+            _ => Pp::Pf3,
+        };
+        code.asm()
+            .simd(Host::Xor, sum, Rm::Xmm(sum), TargetCpu::Baseline);
+        for &[left, right] in pairs {
+            let [first, second] = if signed == [false, true] {
+                [right, left]
+            } else {
+                [left, right]
+            };
+            code.asm().vex(
+                Vex {
+                    map: Map::M0f38,
+                    pp,
+                    w: false,
+                    l: false,
+                },
+                0x50,
+                sum,
+                first,
+                Rm::Xmm(second),
+            );
+        }
+        return true;
+    }
+    // VPDPBUSD: VEX.vvvv or EVEX.vvvv names the unsigned bytes.
+    let unsigned_by_signed = |code: &mut Code, into: u8, unsigned: u8, signed: u8| {
+        if target.supports(TargetCpu::AvxVnni) {
+            code.asm().vex(
+                Vex {
+                    map: Map::M0f38,
+                    pp: Pp::P66,
+                    w: false,
+                    l: false,
+                },
+                0x50,
+                into,
+                unsigned,
+                Rm::Xmm(signed),
+            );
+        } else {
+            code.asm().evex(
+                Evex {
+                    map: Map::M0f38,
+                    pp: Pp::P66,
+                    w: false,
+                    length: 0,
+                    mask: 0,
+                    zeroing: false,
+                    broadcast: false,
+                    scale: 16,
+                },
+                0x50,
+                into,
+                unsigned,
+                Rm::Xmm(signed),
+            );
+        }
+    };
+    let [bias, correction] = scratch;
+    if signed[0] == signed[1] {
+        // All-ones words shifted to 0x8000 saturate to 0x80 bytes.
+        let mut asm = code.asm();
+        asm.simd(Host::EqualByte, bias, Rm::Xmm(bias), TargetCpu::Baseline);
+        Shift::LeftWord.emit(code, bias, 15);
+        let mut asm = code.asm();
+        asm.simd(
+            Host::PackSignedWordToByte,
+            bias,
+            Rm::Xmm(bias),
+            TargetCpu::Baseline,
+        );
+        asm.simd(
+            Host::Xor,
+            correction,
+            Rm::Xmm(correction),
+            TargetCpu::Baseline,
+        );
+    }
+    code.asm()
+        .simd(Host::Xor, sum, Rm::Xmm(sum), TargetCpu::Baseline);
+    for &[left, right] in pairs {
+        match signed {
+            [false, true] => unsigned_by_signed(code, sum, left, right),
+            [true, false] => unsigned_by_signed(code, sum, right, left),
+            [true, true] => {
+                // a·b = (a + 128)·b - 128·b.
+                unsigned_by_signed(code, correction, bias, right);
+                code.asm()
+                    .simd(Host::Xor, left, Rm::Xmm(bias), TargetCpu::Baseline);
+                unsigned_by_signed(code, sum, left, right);
+            }
+            [false, false] => {
+                // a·b = a·(b - 128) + 128·a, and 0x80 is -128 signed.
+                unsigned_by_signed(code, correction, left, bias);
+                code.asm()
+                    .simd(Host::Xor, right, Rm::Xmm(bias), TargetCpu::Baseline);
+                unsigned_by_signed(code, sum, left, right);
+            }
+        }
+    }
+    if signed[0] == signed[1] {
+        code.asm().simd(
+            Host::SubDword,
+            sum,
+            Rm::Xmm(correction),
+            TargetCpu::Baseline,
+        );
+    }
     true
 }
 
@@ -388,6 +533,209 @@ mod tests {
             );
             assert_eq!(code.instructions(), 1);
         }
+    }
+
+    #[test]
+    fn byte_dot_checks_vector_state_and_encodes_each_signedness() {
+        let vnni = TargetCpu::Avx512f.with_avx512vl().with_avx512vnni();
+        for target in [
+            TargetCpu::Baseline,
+            TargetCpu::Avx512vnni,
+            TargetCpu::Avx512f.with_avx512vnni(),
+            TargetCpu::AvxVnni.with_data_independent_timing(),
+            TargetCpu::AvxVnniInt8.with_data_independent_timing(),
+            vnni.with_data_independent_timing(),
+        ] {
+            let mut code = Code::new();
+            assert!(!byte_dot(
+                &mut code,
+                2,
+                &[[0, 1]],
+                [true; 2],
+                [3, 4],
+                target
+            ));
+            assert!(code.is_empty());
+        }
+        let encoded = |signed, target| {
+            let mut code = Code::new();
+            assert!(byte_dot(&mut code, 2, &[[0, 1]], signed, [3, 4], target));
+            code.into_bytes()
+        };
+        const CLEAR_SUM: [u8; 4] = [0x66, 0x0f, 0xef, 0xd2];
+        // GNU as: vpdpbuud, vpdpbsud and vpdpbssd xmm2, xmm0, xmm1;
+        // vpdpbsud xmm2, xmm1, xmm0 for unsigned by signed.
+        for (signed, product) in [
+            ([false, false], [0xc4, 0xe2, 0x78, 0x50, 0xd1]),
+            ([true, false], [0xc4, 0xe2, 0x7a, 0x50, 0xd1]),
+            ([true, true], [0xc4, 0xe2, 0x7b, 0x50, 0xd1]),
+            ([false, true], [0xc4, 0xe2, 0x72, 0x50, 0xd0]),
+        ] {
+            assert_eq!(
+                encoded(signed, TargetCpu::AvxVnniInt8),
+                [&CLEAR_SUM[..], &product].concat()
+            );
+        }
+        // {vex} and {evex} vpdpbusd xmm2, xmm0, xmm1 multiply unsigned by
+        // signed alone; signed by unsigned swaps the sources.
+        for (target, prefix) in [
+            (TargetCpu::AvxVnni, &[0xc4, 0xe2, 0x79][..]),
+            (vnni, &[0x62, 0xf2, 0x7d, 0x08][..]),
+        ] {
+            let expected = [&CLEAR_SUM[..], prefix, &[0x50, 0xd1]].concat();
+            assert_eq!(encoded([false, true], target), expected);
+            let swapped = encoded([true, false], target);
+            assert_eq!(swapped.len(), expected.len());
+            assert_eq!(swapped[swapped.len() - 1], 0xd0);
+            for signed in [[true, true], [false, false]] {
+                let mut code = Code::new();
+                assert!(byte_dot(&mut code, 2, &[[0, 1]], signed, [3, 4], target));
+                // Bias, cleared correction and sum, the two products, the
+                // flip and the subtraction.
+                assert_eq!(code.instructions(), 9);
+            }
+        }
+    }
+
+    #[test]
+    fn byte_dots_match_the_lane_model_on_each_host_form() {
+        use crate::{GuestAddress, GuestState, context::ExecutionContext};
+        use alloc::vec::Vec;
+        use execution::Native;
+        #[derive(Clone, Copy)]
+        enum Form {
+            Dot { index: Option<u8>, q: bool },
+            Matrix,
+        }
+        let mut forms = Vec::new();
+        for q in [false, true] {
+            for (base, signed) in [
+                (0x0e809400, [true, true]),
+                (0x2e809400, [false, false]),
+                (0x0e809c00, [false, true]),
+            ] {
+                forms.push((base, signed, Form::Dot { index: None, q }));
+            }
+            for (base, signed) in [
+                (0x0f80e000, [true, true]),
+                (0x2f80e000, [false, false]),
+                (0x0f80f000, [false, true]),
+                (0x0f00f000, [true, false]),
+            ] {
+                for index in 0..4 {
+                    forms.push((
+                        base,
+                        signed,
+                        Form::Dot {
+                            index: Some(index),
+                            q,
+                        },
+                    ));
+                }
+            }
+        }
+        for (base, signed) in [
+            (0x4e80a400, [true, true]),
+            (0x6e80a400, [false, false]),
+            (0x4e80ac00, [false, true]),
+        ] {
+            forms.push((base, signed, Form::Matrix));
+        }
+        let host = TargetCpu::detect();
+        let mut extended = 0;
+        let mut random = 0x9e3779b97f4a7c15_u64;
+        for target in [
+            TargetCpu::X86_64_V3,
+            TargetCpu::X86_64_V3.with_avx_vnni(),
+            TargetCpu::X86_64_V3.with_avx_vnni_int8(),
+            TargetCpu::Avx512f.with_avx512vl().with_avx512vnni(),
+        ] {
+            if !host.supports(target) {
+                continue;
+            }
+            extended += usize::from(byte_dot_supported(target));
+            for &(base, signed, form) in &forms {
+                for (destination, left, right) in [(3u32, 1u32, 2u32), (4, 4, 4), (31, 17, 17)] {
+                    let mut word = base | right << 16 | left << 5 | destination;
+                    if let Form::Dot { index, q } = form {
+                        word |= u32::from(q) << 30;
+                        if let Some(index) = index {
+                            word |= u32::from(index & 1) << 21 | u32::from(index >> 1) << 11;
+                        }
+                    }
+                    let source: Vec<u8> = [word, 0xd65f03c0]
+                        .into_iter()
+                        .flat_map(u32::to_le_bytes)
+                        .collect();
+                    let block =
+                        crate::testing::leaf_for(&source, GuestAddress(0x1000), target).unwrap();
+                    let native = Native::new(&block.x86_64_code);
+                    for sample in 0..16 {
+                        let mut state = GuestState::default();
+                        for vector in &mut state.v {
+                            for limb in vector {
+                                random ^= random << 13;
+                                random ^= random >> 7;
+                                random ^= random << 17;
+                                *limb = match sample {
+                                    0 => 0x8080_8080_8080_8080,
+                                    1 => u64::MAX,
+                                    2 => 0x7f80_7f80_ff01_8081,
+                                    _ => random,
+                                };
+                            }
+                        }
+                        let value = |register: u32, at: usize, signed: bool| {
+                            let vector = state.v[register as usize];
+                            let byte = (vector[at / 8] >> (at % 8 * 8)) as u8;
+                            if signed {
+                                i64::from(byte as i8)
+                            } else {
+                                i64::from(byte)
+                            }
+                        };
+                        let old = state.v[destination as usize];
+                        let mut lanes: [u32; 4] =
+                            core::array::from_fn(|i| (old[i / 2] >> (i % 2 * 32)) as u32);
+                        let products = |left_at: usize, right_at: usize, count: usize| {
+                            (0..count)
+                                .map(|k| {
+                                    value(left, left_at + k, signed[0])
+                                        * value(right, right_at + k, signed[1])
+                                })
+                                .sum::<i64>() as u32
+                        };
+                        match form {
+                            Form::Dot { index, q } => {
+                                for (lane, sum) in lanes.iter_mut().enumerate() {
+                                    *sum = if lane < 2 || q {
+                                        let group = index.map_or(lane, usize::from);
+                                        sum.wrapping_add(products(4 * lane, 4 * group, 4))
+                                    } else {
+                                        0
+                                    };
+                                }
+                            }
+                            Form::Matrix => {
+                                for (lane, sum) in lanes.iter_mut().enumerate() {
+                                    let row = lane / 2;
+                                    let column = lane % 2;
+                                    *sum = sum.wrapping_add(products(8 * row, 8 * column, 8));
+                                }
+                            }
+                        }
+                        let mut expected = state.clone();
+                        expected.v[destination as usize] = [
+                            u64::from(lanes[0]) | u64::from(lanes[1]) << 32,
+                            u64::from(lanes[2]) | u64::from(lanes[3]) << 32,
+                        ];
+                        native.run(&mut state, &mut ExecutionContext::default());
+                        assert_eq!(state, expected, "{target:?} {word:#010x} sample={sample}");
+                    }
+                }
+            }
+        }
+        std::println!("BYTE_DOT_EXTENDED_TARGETS={extended}");
     }
 
     #[test]

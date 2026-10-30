@@ -303,6 +303,11 @@ features! {
     };
     /// AVX-VNNI: the VEX forms of VPDPBUSD and VPDPWSSD.
     AvxVnni, with_avx_vnni, "+avxvnni", |cpu| cpu.avx() && HostCpuid::bit(cpu.leaf7_1_eax, 4);
+    /// AVX-VNNI-INT8: VPDPBSSD, VPDPBSUD and VPDPBUUD byte dot products of
+    /// every signedness.
+    AvxVnniInt8, with_avx_vnni_int8, "+avxvnniint8", |cpu| {
+        cpu.avx() && HostCpuid::bit(cpu.leaf7_1_edx, 4)
+    };
     /// AVX-512 BF16: VDPBF16PS and VCVTNE2PS2BF16.
     Avx512bf16, with_avx512bf16, "+avx512bf16", |cpu| {
         cpu.avx512f() && HostCpuid::bit(cpu.leaf7_1_eax, 5)
