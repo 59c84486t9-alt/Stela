@@ -6,6 +6,7 @@
 //! Exact identity, bounded firmware parsing and download are separate from
 //! PCI ownership, WFDMA transport, radio initialization and client association.
 //! These primitives do not publish an Ethernet link or claim a ready radio.
+pub mod acpi;
 pub mod bootstrap;
 pub mod control;
 pub mod download;
