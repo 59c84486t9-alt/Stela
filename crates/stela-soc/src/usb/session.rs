@@ -173,8 +173,14 @@ impl Session {
                     }
                     self.due |= output || !completion.bytes.is_empty();
                 }
-                TransferStatus::Timeout if input && completion.transferred == 0 => {}
-                _ => return Err(refuse!("USB mux bulk transfer failed")),
+                status => {
+                    return Err(refuse!(
+                        "USB mux bulk transfer failed",
+                        ?status,
+                        input,
+                        transferred = completion.transferred
+                    ));
+                }
             }
         }
         if !self.host.ready() {
@@ -191,18 +197,17 @@ impl Session {
         }
         self.advance_probe()?;
         if self.input.is_none() {
-            self.input = Some(self.host.submit_in(MAX_PACKET, now)?);
+            self.input = Some(self.host.submit_in(MAX_PACKET)?);
         }
         if self.output.is_none()
             && let Some(packet) = self.mux.take_packet()
         {
             // A full-size last USB packet is followed by a ZLP; the mux
             // frame length remains independent of that USB terminator.
-            self.output = Some(self.host.submit_out(
-                &packet,
-                packet.len().is_multiple_of(MAX_PACKET),
-                now,
-            )?);
+            self.output = Some(
+                self.host
+                    .submit_out(&packet, packet.len().is_multiple_of(MAX_PACKET))?,
+            );
         }
         Ok(())
     }

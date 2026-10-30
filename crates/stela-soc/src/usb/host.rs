@@ -276,7 +276,6 @@ pub enum TransferStatus {
     Complete,
     Stall,
     Cancelled,
-    Timeout,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Completion {
@@ -292,7 +291,6 @@ struct Bulk {
     length: usize,
     done: usize,
     zlp: bool,
-    deadline: u64,
 }
 
 pub struct Host {
@@ -367,23 +365,19 @@ impl Host {
     pub fn completion(&mut self) -> Option<Completion> {
         self.completions.pop_front()
     }
-    pub fn submit_out(&mut self, data: &[u8], terminate_with_zlp: bool, now: u64) -> Result<u64> {
+    /// A bulk OUT of `data`, which waits for the device as long as it takes:
+    /// usbmuxd submits its transfers with no timeout.
+    pub fn submit_out(&mut self, data: &[u8], terminate_with_zlp: bool) -> Result<u64> {
         if data.len() > MAX_TRANSFER {
             return Err(refuse!("USB host transfer bound exceeded"));
         }
-        self.submit(false, data.to_vec(), data.len(), terminate_with_zlp, now)
+        self.submit(false, data.to_vec(), data.len(), terminate_with_zlp)
     }
-    pub fn submit_in(&mut self, length: usize, now: u64) -> Result<u64> {
-        self.submit(true, Vec::new(), length, false, now)
+    /// A bulk IN of up to `length` bytes, pending until the device sends.
+    pub fn submit_in(&mut self, length: usize) -> Result<u64> {
+        self.submit(true, Vec::new(), length, false)
     }
-    fn submit(
-        &mut self,
-        input: bool,
-        data: Vec<u8>,
-        length: usize,
-        zlp: bool,
-        now: u64,
-    ) -> Result<u64> {
+    fn submit(&mut self, input: bool, data: Vec<u8>, length: usize, zlp: bool) -> Result<u64> {
         if !self.ready() {
             return Err(refuse!("USB host is not configured"));
         }
@@ -401,7 +395,6 @@ impl Host {
             length,
             done: 0,
             zlp,
-            deadline: now.saturating_add(REQUEST_TIMEOUT),
         });
         Ok(id)
     }
@@ -421,7 +414,7 @@ impl Host {
                 }
                 return Ok(());
             }
-            Enumerate::Ready => return self.bulk_step(peer, now),
+            Enumerate::Ready => return self.bulk_step(peer),
             _ => {}
         }
         if self.control.is_none() {
@@ -567,7 +560,7 @@ impl Host {
             Enumerate::Configure
         }
     }
-    fn bulk_step(&mut self, peer: &mut impl BusPeer, now: u64) -> Result<()> {
+    fn bulk_step(&mut self, peer: &mut impl BusPeer) -> Result<()> {
         let Some(position) = self
             .bulk
             .iter()
@@ -578,51 +571,43 @@ impl Host {
         };
         let mut transfer = self.bulk.remove(position).unwrap();
         self.prefer_input = !transfer.input;
-        let mut status = None;
-        if now >= transfer.deadline {
-            status = Some(TransferStatus::Timeout);
+        let endpoints = self.endpoints.unwrap();
+        let (endpoint, token) = if transfer.input {
+            (endpoints.input, Token::In)
         } else {
-            let endpoints = self.endpoints.unwrap();
-            let (endpoint, token) = if transfer.input {
-                (endpoints.input, Token::In)
-            } else {
-                (endpoints.output, Token::Out)
-            };
-            let length = MAX_PACKET.min(transfer.length - transfer.done);
-            let mut packet = [0; MAX_PACKET];
-            if !transfer.input {
-                packet[..length]
-                    .copy_from_slice(&transfer.data[transfer.done..transfer.done + length]);
-            }
-            let reply = match peer.packet(endpoint, token, &mut packet[..length]) {
-                Ok(reply) => reply,
-                Err(error) => {
-                    self.bulk.insert(position, transfer);
-                    return Err(error);
-                }
-            };
-            match reply {
-                Reply::Nak => {}
-                Reply::Stall => status = Some(TransferStatus::Stall),
-                Reply::Ack(bytes) => {
-                    if bytes > length || (!transfer.input && bytes != length) {
-                        self.bulk.insert(position, transfer);
-                        return Err(refuse!(
-                            "USB peer returned an invalid bulk acknowledgement length"
-                        ));
-                    }
-                    if transfer.input {
-                        transfer.data.extend_from_slice(&packet[..bytes]);
-                    }
-                    transfer.done += bytes;
-                    if bytes < MAX_PACKET
-                        || (transfer.done == transfer.length && (transfer.input || !transfer.zlp))
-                    {
-                        status = Some(TransferStatus::Complete);
-                    }
-                }
-            }
+            (endpoints.output, Token::Out)
+        };
+        let length = MAX_PACKET.min(transfer.length - transfer.done);
+        let mut packet = [0; MAX_PACKET];
+        if !transfer.input {
+            packet[..length].copy_from_slice(&transfer.data[transfer.done..transfer.done + length]);
         }
+        let reply = match peer.packet(endpoint, token, &mut packet[..length]) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.bulk.insert(position, transfer);
+                return Err(error);
+            }
+        };
+        let status = match reply {
+            Reply::Nak => None,
+            Reply::Stall => Some(TransferStatus::Stall),
+            Reply::Ack(bytes) => {
+                if bytes > length || (!transfer.input && bytes != length) {
+                    self.bulk.insert(position, transfer);
+                    return Err(refuse!(
+                        "USB peer returned an invalid bulk acknowledgement length"
+                    ));
+                }
+                if transfer.input {
+                    transfer.data.extend_from_slice(&packet[..bytes]);
+                }
+                transfer.done += bytes;
+                (bytes < MAX_PACKET
+                    || (transfer.done == transfer.length && (transfer.input || !transfer.zlp)))
+                    .then_some(TransferStatus::Complete)
+            }
+        };
         if let Some(status) = status {
             self.completions.push_back(Completion {
                 id: transfer.id,
@@ -736,7 +721,7 @@ mod tests {
             [6, 5, 6, 6, 9]
         );
         assert_eq!(peer.requests.last().unwrap().value, 7);
-        let old = host.submit_in(512, 0).unwrap();
+        let old = host.submit_in(512).unwrap();
         host.attach(2);
         assert_eq!(
             host.completion().unwrap(),
@@ -751,10 +736,10 @@ mod tests {
             host.advance(&mut peer, n * 24_000).unwrap();
         }
         assert!(host.ready());
-        assert!(host.submit_in(512, 0).unwrap() > old);
+        assert!(host.submit_in(512).unwrap() > old);
     }
     #[test]
-    fn bounds_submissions_timeouts_and_zero_length_packets() {
+    fn bounds_submissions_waits_out_naks_and_zero_length_packets() {
         let mut host = Host::new();
         host.state = Enumerate::Ready;
         host.endpoints = mux_endpoints(&configuration(0x85, 9)).unwrap();
@@ -763,19 +748,21 @@ mod tests {
             requests: vec![],
             nak: false,
         };
-        let id = host.submit_out(&vec![0; 512], true, 0).unwrap();
+        let id = host.submit_out(&vec![0; 512], true).unwrap();
         for _ in 0..4 {
             host.advance(&mut peer, 0).unwrap();
         }
         let done = host.completion().unwrap();
         assert_eq!(done.id, id);
         assert_eq!(done.transferred, 512);
-        assert!(host.submit_in(MAX_TRANSFER + 1, 0).is_err());
+        assert!(host.submit_in(MAX_TRANSFER + 1).is_err());
         for _ in 0..MAX_TRANSFERS {
-            host.submit_in(512, 0).unwrap();
+            host.submit_in(512).unwrap();
         }
-        assert!(host.submit_in(512, 0).is_err());
-        host.advance(&mut peer, REQUEST_TIMEOUT).unwrap();
-        assert_eq!(host.completion().unwrap().status, TransferStatus::Timeout);
+        assert!(host.submit_in(512).is_err());
+        // A device that NAKs keeps its transfers pending, however long.
+        peer.nak = true;
+        host.advance(&mut peer, 100 * REQUEST_TIMEOUT).unwrap();
+        assert!(host.completion().is_none());
     }
 }
