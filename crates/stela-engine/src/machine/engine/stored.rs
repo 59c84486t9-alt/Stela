@@ -23,10 +23,16 @@ pub(super) struct Emission {
 }
 impl Emission {
     pub(super) fn new(
-        input: Vec<u8>,
+        mut input: Vec<u8>,
         mut block: CompiledBlock,
         preparation: Arc<Preparation>,
     ) -> Self {
+        // The store keeps an emission until it proves it, sharing its bound
+        // by capacity: none of it is slack.
+        input.shrink_to_fit();
+        block.native.x86_64_code.shrink_to_fit();
+        block.native.source_map.shrink_to_fit();
+        block.direct_exits.shrink_to_fit();
         block.fault_recovery.shrink_to_fit();
         Self {
             input,

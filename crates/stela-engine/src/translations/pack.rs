@@ -698,8 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_cache_replacement_charges_reserved_source_capacity_before_admission() {
-        let translator = Digest::of(b"translator");
+    fn an_offer_keeps_no_reserved_source_capacity_against_the_shared_bound() {
         let key = Digest::of(b"page");
         let first = offer(0x1000, key);
         let context = first.context();
@@ -707,13 +706,10 @@ mod tests {
         let mut input = Vec::with_capacity(2 << 20);
         input.extend_from_slice(first.input());
         let replacement = Offer::compile(key, 0x1000, 0x1000, context, input, preparation).unwrap();
-        let (mut store, _) = Store::new(translator, None);
+        let (mut store, _) = Store::new(Digest::of(b"translator"), None);
         store.share(1 << 20);
-        store.offer(first);
-        let original = store.prepared(&key, 0x1000, &context).unwrap();
         store.offer(replacement);
-        let retained = store.prepared(&key, 0x1000, &context).unwrap();
-        assert!(Arc::ptr_eq(&original, &retained));
+        assert!(store.prepared(&key, 0x1000, &context).is_some());
         assert_eq!(store.shared_order.len(), 1);
     }
 
