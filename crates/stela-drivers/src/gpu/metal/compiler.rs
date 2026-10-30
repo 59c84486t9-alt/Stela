@@ -124,10 +124,75 @@ pub struct Service {
     /// `stela_metal_tessellation_stages`.
     pub tessellation_stages:
         unsafe extern "C" fn(*const ffi::Target, *const ffi::Tessellation, *mut *mut c_void),
+    /// `stela_metal_accumulate_kernel`.
+    pub accumulate_kernel: KernelBuilder,
+    /// `stela_metal_select_kernel`.
+    pub select_kernel: KernelBuilder,
+    /// `stela_metal_resolve_draws_kernel`.
+    pub resolve_draws_kernel: KernelBuilder,
+    /// `stela_metal_resolve_dispatches_kernel`.
+    pub resolve_dispatches_kernel: KernelBuilder,
     /// `stela_metal_release`.
     pub release: unsafe extern "C" fn(*mut c_void),
     /// The Vulkan driver's `nir_shader_compiler_options`.
     pub nir_options: NonNull<c_void>,
+}
+
+/// One of the device's internal kernels' builders (`metal_abi.h`).
+pub type KernelBuilder = unsafe extern "C" fn(*const c_void) -> *mut c_void;
+
+impl Service {
+    /// Builds the device's internal kernels.
+    ///
+    /// # Safety
+    ///
+    /// As [`AirCompiler::new`]: the entry points are the service's and the
+    /// options the driver's.
+    pub unsafe fn internal_kernels(&self) -> Result<InternalKernelCode> {
+        let mut kernels = InternalKernelCode {
+            release: self.release,
+            code: [ShaderCode(0); 4],
+        };
+        let builders = [
+            self.accumulate_kernel,
+            self.select_kernel,
+            self.resolve_draws_kernel,
+            self.resolve_dispatches_kernel,
+        ];
+        for (code, build) in kernels.code.iter_mut().zip(builders) {
+            // SAFETY: the caller guarantees the builder and the options it
+            // reads.
+            let shader = unsafe { build(self.nir_options.as_ptr()) };
+            if shader.is_null() {
+                return Err(Error::OutOfMemory);
+            }
+            *code = ShaderCode(shader as usize as u64);
+        }
+        Ok(kernels)
+    }
+}
+
+/// The internal kernels' NIR, released when dropped: a pipeline keeps its
+/// own copy of its shader.
+pub struct InternalKernelCode {
+    release: unsafe extern "C" fn(*mut c_void),
+    code: [ShaderCode; 4],
+}
+
+impl InternalKernelCode {
+    /// The accumulate, select, resolve draws and resolve dispatches kernels.
+    pub fn code(&self) -> [ShaderCode; 4] {
+        self.code
+    }
+}
+
+impl Drop for InternalKernelCode {
+    fn drop(&mut self) {
+        for code in self.code.into_iter().filter(|code| code.0 != 0) {
+            // SAFETY: the service built the shader, which is released once.
+            unsafe { (self.release)(code.0 as usize as *mut c_void) }
+        }
+    }
 }
 
 /// The service's account of its last refusal.

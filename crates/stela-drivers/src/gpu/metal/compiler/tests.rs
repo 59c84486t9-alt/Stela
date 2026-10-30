@@ -65,6 +65,8 @@ struct Fake {
     refuse_compilation: Option<Refused>,
     compiled: Vec<Compiled>,
     released: Vec<usize>,
+    /// The internal kernel whose builder fails.
+    failing_kernel: Option<usize>,
     /// Every module's constexpr sampler states, and the sizes of the
     /// modules listed.
     states: Vec<u64>,
@@ -80,6 +82,7 @@ std::thread_local! {
             refuse_compilation: None,
             compiled: Vec::new(),
             released: Vec::new(),
+            failing_kernel: None,
             states: Vec::new(),
             listed: Vec::new(),
         })
@@ -347,22 +350,62 @@ unsafe extern "C" fn tessellation_stages(
     stages[1] = ptr::without_provenance_mut(0x20);
 }
 
+/// Internal kernel `N`, at `0x100 * (N + 1)`.
+unsafe extern "C" fn kernel<const N: usize>(options: *const c_void) -> *mut c_void {
+    assert!(!options.is_null());
+    if FAKE.with_borrow(|fake| fake.failing_kernel == Some(N)) {
+        return ptr::null_mut();
+    }
+    ptr::without_provenance_mut(0x100 * (N + 1))
+}
+
 unsafe extern "C" fn release(shader: *mut c_void) {
     FAKE.with_borrow_mut(|fake| fake.released.push(shader.addr()));
 }
 
-fn compiler(device: &PhysicalDevice) -> AirCompiler {
-    let service = Service {
+fn service() -> Service {
+    Service {
         reflect,
         reflect_bindings,
         sampler_states,
         compile,
         tessellation_stages,
+        accumulate_kernel: kernel::<0>,
+        select_kernel: kernel::<1>,
+        resolve_draws_kernel: kernel::<2>,
+        resolve_dispatches_kernel: kernel::<3>,
         release,
         nir_options: NonNull::dangling(),
-    };
+    }
+}
+
+fn compiler(device: &PhysicalDevice) -> AirCompiler {
     // SAFETY: the fake service never reads the options.
-    unsafe { AirCompiler::new(service, device) }
+    unsafe { AirCompiler::new(service(), device) }
+}
+
+#[test]
+fn internal_kernels_are_released_with_their_code() {
+    // SAFETY: the fake service never reads the options.
+    let kernels = unsafe { service().internal_kernels() }.unwrap();
+    assert_eq!(kernels.code(), [0x100, 0x200, 0x300, 0x400].map(ShaderCode));
+    drop(kernels);
+    assert_eq!(
+        FAKE.with_borrow(|fake| fake.released.clone()),
+        [0x100, 0x200, 0x300, 0x400]
+    );
+}
+
+#[test]
+fn a_failed_internal_kernel_releases_those_built() {
+    FAKE.with_borrow_mut(|fake| fake.failing_kernel = Some(2));
+    // SAFETY: the fake service never reads the options.
+    let kernels = unsafe { service().internal_kernels() };
+    assert!(matches!(kernels, Err(Error::OutOfMemory)));
+    assert_eq!(
+        FAKE.with_borrow(|fake| fake.released.clone()),
+        [0x100, 0x200]
+    );
 }
 
 fn with_library() -> (AirCompiler, u64) {

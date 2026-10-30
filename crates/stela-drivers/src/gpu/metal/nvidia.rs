@@ -3,7 +3,8 @@
 //!
 //! Hardware access, firmware, memory management, command submission and
 //! shader code generation stay with nouveau, NVK and NAK; this module only
-//! admits a device and supplies the facts Vulkan does not report. The chip
+//! admits a device and supplies the facts Vulkan does not report, and
+//! [`open`] serves it. The chip
 //! table follows nouveau's `nvkm_device_ctor` in
 //! `drivers/gpu/drm/nouveau/nvkm/engine/device/base.c` (Linux v7.2.12): every
 //! Turing and later chipset it names, which are exactly the GPUs nouveau
@@ -15,6 +16,8 @@ use super::{
     vulkan::{DriverId, PhysicalDeviceType, physical::Identity},
 };
 use alloc::string::String;
+
+pub mod open;
 
 pub const VENDOR_ID: u32 = 0x10de;
 
