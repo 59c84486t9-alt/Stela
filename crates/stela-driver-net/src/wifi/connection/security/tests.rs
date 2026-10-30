@@ -117,3 +117,28 @@ fn a_passphrase_takes_sae_with_protection() {
         Err(Refusal::Akm)
     );
 }
+
+#[test]
+fn six_ghz_takes_sae_by_hash_to_element_alone() {
+    use crate::wifi::{Band, sae::H2E_RSNXE};
+    let sae = ap(&rsn(4, &[4], &[2, 8], MFPC));
+    let mut h2e = sae.clone();
+    h2e.extend_from_slice(&H2E_RSNXE);
+    assert_eq!(
+        Security::select_on(Band::Ghz6, &h2e, true).unwrap().akm,
+        Akm::Sae
+    );
+    // Hunting and pecking, or a PSK without SAE, is refused there alone.
+    assert_eq!(
+        Security::select_on(Band::Ghz6, &sae, true),
+        Err(Refusal::SixGhz)
+    );
+    assert_eq!(
+        Security::select_on(Band::Ghz6, &h2e, false),
+        Err(Refusal::SixGhz)
+    );
+    assert_eq!(
+        Security::select_on(Band::Ghz5, &sae, true).unwrap().akm,
+        Akm::Sae
+    );
+}

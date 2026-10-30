@@ -8,6 +8,8 @@
 //! group (CCMP, TKIP) ciphers, and `ieee80211w=1`, optional management frame
 //! protection.
 use crate::wifi::{
+    Band,
+    sae::Derivation,
     security::{Cipher, management::ManagementCipher},
     supplicant::{Akm, Suites},
 };
@@ -39,6 +41,9 @@ pub enum Refusal {
     /// Management frame protection the AP requires but does not offer, or
     /// a group management cipher outside BIP.
     ManagementProtection,
+    /// A 6 GHz AP without SAE by hash-to-element, the only personal security
+    /// wpa_supplicant takes on 6 GHz.
+    SixGhz,
 }
 
 /// The suites of one association.
@@ -124,6 +129,19 @@ impl Security {
     /// `wpa_supplicant_set_suites` prefers them, the first two only when
     /// management frames are protected, as the station's association
     /// request admits them.
+    /// `select` for an AP on `band`: on 6 GHz only SAE, and only when the
+    /// AP's RSNXE offers hash-to-element (`wpa_scan_res_ok`).
+    pub fn select_on(band: Band, elements: &[u8], passphrase: bool) -> Result<Self, Refusal> {
+        let security = Self::select(elements, passphrase)?;
+        if band == Band::Ghz6
+            && (security.akm != Akm::Sae
+                || Derivation::for_rsnxe(super::find(elements, 244)) != Derivation::HashToElement)
+        {
+            return Err(Refusal::SixGhz);
+        }
+        Ok(security)
+    }
+
     pub fn select(elements: &[u8], passphrase: bool) -> Result<Self, Refusal> {
         let body = rsn_element(elements).ok_or(Refusal::NoRsn)?;
         let rsn = Advertised::parse(body)?;

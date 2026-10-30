@@ -2,11 +2,12 @@
 // Adapted from pinned Linux net/mac80211/mlme.c; full source notices in
 // THIRD_PARTY.md. The connection policy follows wpa_supplicant's behavior.
 //! One MT7925 station kept connected to the configured network, as
-//! wpa_supplicant and mac80211 keep one: an active scan, the strongest BSS
-//! of the network whose security the station supports, open-system or SAE
-//! authentication and association on mac80211's channel and mode, the 4-way
-//! and group key handshakes, their keys and the controlled port. A lost or
-//! failed connection scans again after wpa_supplicant's delays.
+//! wpa_supplicant and mac80211 keep one: a scan of every band, 6 GHz last as
+//! cfg80211 splits it, the strongest BSS of the network whose security the
+//! station supports, open-system or SAE authentication and association on
+//! mac80211's channel and mode, the 4-way and group key handshakes, their
+//! keys and the controlled port. A lost or failed connection scans again
+//! after wpa_supplicant's delays.
 use super::{
     bootstrap::client::{
         self, BssHandle, Event, LinkControlError, LinkEvent, ManagedLink, Phase, PolicyError,
@@ -21,14 +22,14 @@ use crate::{
     Clock, Link, LinkError, Mac,
     bus::dma::memory::PageSource,
     wifi::{
-        Band,
+        Band, Channel,
         connection::{
             self, Request,
             mode::{self, Channels},
             security::{self, Security},
         },
         network::{Network, Secret},
-        regulatory::database::Country,
+        regulatory::{PowerType, database::Country},
         sae::{self, Derivation, Exchange},
         scan::{self, result::Bss},
         security::KeyIdentity,
@@ -38,7 +39,7 @@ use crate::{
             external::{self, Received},
             operations::Operations,
             phy::{Capabilities, Role},
-            wire::AssociationRequest,
+            wire::{AssociationRequest, six_ghz::Selection},
         },
         supplicant::{Akm, EAPOL, IntegrityKey, Step, Supplicant},
     },
@@ -88,6 +89,21 @@ fn failure_delay_us(failures: u32) -> u64 {
         _ => 10,
     };
     seconds * 1_000_000
+}
+
+/// `cfg80211_6ghz_power_type_valid`: whether a client may use the 6 GHz
+/// `bss` under the flags its channel has among `channels`.
+fn power_type_usable(bss: &Bss, channels: &[(Channel, u32)]) -> bool {
+    let info = Operations::parse(&bss.elements)
+        .ok()
+        .and_then(|operations| operations.he?.six_ghz)
+        .map(|six| (six[1] & 0x78) >> 3);
+    let flags = channels
+        .iter()
+        .find(|&&(channel, _)| channel == bss.channel)
+        .map(|&(_, flags)| flags);
+    info.zip(flags)
+        .is_some_and(|(info, flags)| PowerType::usable(info, flags))
 }
 
 /// The chosen BSS of the network.
@@ -322,18 +338,22 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
         }
     }
 
-    /// `wpa_supplicant_req_scan`: a scan with the wildcard SSID on every 2.4
-    /// and 5 GHz channel that may transmit. It probes where the channel
-    /// permits and listens elsewhere, as mac80211 scans NO_IR channels
-    /// passively within one active scan, so it runs in those two parts.
+    /// `wpa_supplicant_req_scan`: a scan with the wildcard SSID on every
+    /// channel that may transmit, 2.4 and 5 GHz first and 6 GHz after them as
+    /// cfg80211 splits a scan. It probes where the channel permits and listens
+    /// elsewhere, as mac80211 scans NO_IR channels passively within one active
+    /// scan, so each runs in those two parts.
     fn scan(&mut self, now: u64) {
-        let (active, passive): (Vec<_>, Vec<_>) = [Band::Ghz2, Band::Ghz5]
+        let parts = [&[Band::Ghz2, Band::Ghz5][..], &[Band::Ghz6]]
             .into_iter()
-            .flat_map(|band| self.link.channels(band))
-            .map(|(channel, _)| channel)
-            .partition(|&channel| self.link.probes(channel));
-        let parts = [(active, vec![Vec::new()]), (passive, Vec::new())]
-            .into_iter()
+            .flat_map(|bands| {
+                let (active, passive): (Vec<_>, Vec<_>) = bands
+                    .iter()
+                    .flat_map(|&band| self.link.channels(band))
+                    .map(|(channel, _)| channel)
+                    .partition(|&channel| self.link.probes(channel));
+                [(active, vec![Vec::new()]), (passive, Vec::new())]
+            })
             .filter(|(channels, _)| !channels.is_empty())
             .map(|(channels, ssids)| scan::Request::new(channels, ssids, Vec::new()))
             .collect::<Result<Vec<_>, _>>();
@@ -362,12 +382,28 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
         }
     }
 
-    /// Start the first of `parts`, or choose a BSS once none remains.
+    /// Start the first of `parts`, or choose a BSS once none remains. A
+    /// 6 GHz part scans what `cfg80211_scan_6ghz` plans from the BSSes the
+    /// parts before it found, with wpa_supplicant's colocated 6 GHz scan.
     fn next_scan(&mut self, now: u64, mut parts: Vec<scan::Request>) {
-        if parts.is_empty() {
-            return self.choose(now);
-        }
-        let part = parts.remove(0);
+        let part = loop {
+            if parts.is_empty() {
+                return self.choose(now);
+            }
+            let part = parts.remove(0);
+            if part.channels()[0].band != Band::Ghz6 {
+                break part;
+            }
+            let options = scan::six_ghz::Options {
+                colocated: true,
+                bssid: None,
+            };
+            match self.link.six_ghz_scan(&part, options) {
+                Ok(Some(planned)) => break planned,
+                Ok(None) => {}
+                Err(error) => self.fail(format!("{error}")),
+            }
+        };
         self.state = match self.link.begin_scan(part, SCAN_BUDGET_US) {
             Ok(_) => State::Scanning(parts),
             Err(error) => {
@@ -380,18 +416,25 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
     }
 
     /// Join the strongest BSS of the network whose security the station
-    /// supports, after an SAE exchange when that is the security.
+    /// supports, after an SAE exchange when that is the security. A 6 GHz
+    /// BSS whose power type its channel bars is not one cfg80211 connects to.
     fn choose(&mut self, now: u64) {
         let mut best: Option<(BssHandle, &Bss, Security)> = None;
         let mut refusal = None;
         let passphrase = matches!(self.network.secret, Secret::Passphrase(_));
+        let six = self.link.channels(Band::Ghz6);
         for (handle, bss) in self.link.bss() {
-            if bss.ssid.as_deref() != Some(&self.network.ssid[..])
-                || !matches!(bss.channel.band, Band::Ghz2 | Band::Ghz5)
-            {
+            if bss.ssid.as_deref() != Some(&self.network.ssid[..]) {
                 continue;
             }
-            match Security::select(&bss.elements, passphrase) {
+            if bss.channel.band == Band::Ghz6 && !power_type_usable(bss, &six) {
+                refusal = Some(format!(
+                    "is on 6 GHz channel {} only as an AP whose power type the channel bars",
+                    bss.channel.number
+                ));
+                continue;
+            }
+            match Security::select_on(bss.channel.band, &bss.elements, passphrase) {
                 Ok(security) => {
                     let signal = |bss: &Bss| bss.signal_dbm.unwrap_or(i8::MIN);
                     if best
@@ -401,13 +444,15 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
                         best = Some((handle, bss, security));
                     }
                 }
-                Err(reason) => refusal = Some(reason),
+                Err(reason) => {
+                    refusal = Some(format!("offers no supported security: {reason:?}"));
+                }
             }
         }
         let ssid = String::from_utf8_lossy(&self.network.ssid).into_owned();
         let Some((handle, bss, security)) = best else {
             self.fail(match refusal {
-                Some(reason) => format!("MT7925: {ssid} offers no supported security: {reason:?}"),
+                Some(reason) => format!("MT7925: {ssid} {reason}"),
                 None => format!("MT7925: {ssid} not found"),
             });
             self.state = State::Waiting {
@@ -447,10 +492,24 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
             return Err(String::from("MT7925: SAE needs the network's passphrase"));
         };
         let (_, profile, _) = self.association(&bss, security, None, self.pmk.clone())?;
-        let session = self
-            .link
-            .begin_external_authentication(handle, profile, SAE_BUDGET_US)
-            .map_err(|error| format!("{error}"))?;
+        let session = if bss.channel.band == Band::Ghz6 {
+            // The exchange binds the RSN element and RSNXE the association
+            // will carry.
+            let mut elements = security.element();
+            elements.extend_from_slice(&sae::H2E_RSNXE);
+            let selection = Selection::new(elements)
+                .map_err(|error| format!("MT7925 6 GHz SAE selection: {error:?}"))?;
+            self.link.begin_six_ghz_external_authentication(
+                handle,
+                selection,
+                profile,
+                SAE_BUDGET_US,
+            )
+        } else {
+            self.link
+                .begin_external_authentication(handle, profile, SAE_BUDGET_US)
+        }
+        .map_err(|error| format!("{error}"))?;
         let derivation = Derivation::for_rsnxe(connection::find(&bss.elements, 244));
         let mut unavailable = None;
         let mut random = || {

@@ -1,8 +1,9 @@
 //! The station drives the managed link from scan to an open port against
 //! the device model and a software authenticator.
 use super::*;
-use crate::wifi::mediatek::bootstrap::client::policy::tests::{
-    passive_country, setup_passive_five,
+use crate::wifi::mediatek::bootstrap::client::{
+    policy::tests::{passive_country, setup_passive_five, setup_six, six_country},
+    six_ghz::tests::beacon_elements,
 };
 use crate::wifi::{
     connection::security::Security,
@@ -21,8 +22,17 @@ impl Entropy for Fixed {
     }
 }
 
+/// The receive descriptor's encoding of 6 GHz channel 1: 6 GHz channel n
+/// is 181 + (n - 1) / 4.
+const SIX_CHANNEL: u8 = 181;
+
 /// An EAPOL frame from the AP, as the device receives it in the clear.
 fn eapol(model: &Model, payload: &[u8]) {
+    eapol_on(model, payload, false);
+}
+
+/// An EAPOL frame from the AP, received on 6 GHz channel 1 when `six`.
+fn eapol_on(model: &Model, payload: &[u8], six: bool) {
     let mut bytes = data(false);
     bytes.truncate(24);
     bytes.extend_from_slice(&[0xaa, 0xaa, 3, 0, 0, 0, 0x88, 0x8e]);
@@ -30,12 +40,20 @@ fn eapol(model: &Model, payload: &[u8]) {
     bytes[1] &= !0x40;
     let mut raw = incoming_bytes(&bytes, None, false);
     raw[4] = 1;
+    if six {
+        raw[13] = SIX_CHANNEL;
+    }
     device_receive(&model.queues[&0xd4520], &raw, true, 0);
 }
 
 /// The EAPOL payload of the station's last transmitted data frame.
 fn sent_eapol(model: &Model) -> Vec<u8> {
-    let frame = finish_tx(model).pop().unwrap();
+    sent_eapol_on(model, 36)
+}
+
+/// The EAPOL payload of the station's last data frame on `channel`.
+fn sent_eapol_on(model: &Model, channel: u8) -> Vec<u8> {
+    let frame = finish_tx_on(model, channel).pop().unwrap();
     let at = frame
         .windows(8)
         .position(|w| w == [0xaa, 0xaa, 3, 0, 0, 0, 0x88, 0x8e])
@@ -364,4 +382,147 @@ fn a_scan_listens_where_its_channels_bar_probes_and_finds_the_ap_there() {
     done(&model);
     assert!(!station.carrier());
     assert_eq!(finish_tx(&model)[0][..2], [0xb0, 0]);
+}
+
+/// A frame the device received on 6 GHz channel 1.
+fn incoming_six(model: &Model, frame: &[u8]) {
+    let mut raw = incoming_bytes(frame, None, false);
+    raw[13] = SIX_CHANNEL;
+    device_receive(&model.queues[&0xd4520], &raw, true, 0);
+}
+
+#[test]
+fn a_reported_six_ghz_ap_is_scanned_and_joined_by_sae_hash_to_element() {
+    let (client, model) = setup_six(0);
+    let client = ManagedClient::new(client, six_country(), Environment::Indoor).unwrap();
+    let link = ManagedLink::new(
+        client,
+        Provider(Arc::new(AtomicUsize::new(0)), Default::default()),
+    )
+    .unwrap();
+    let password = b"correct horse battery";
+    let network = Network {
+        ssid: b"x".to_vec(),
+        secret: Secret::parse(password).unwrap(),
+        country: None,
+    };
+    let mut station = Station::new(
+        link,
+        profile().interface,
+        six_country(),
+        network,
+        Arc::new(Fixed),
+        crate::Clock {
+            ticks_per_microsecond: 1,
+        },
+    );
+    // The 2.4 and 5 GHz part finds another network's AP, whose Reduced
+    // Neighbor Report names the colocated AP on 6 GHz channel 1.
+    assert!(!station.carrier());
+    let mut body = vec![0; 8];
+    body.extend_from_slice(&100u16.to_le_bytes());
+    body.extend_from_slice(&1u16.to_le_bytes());
+    body.extend_from_slice(&[0, 1, b'y', 1, 1, 0x8c, 201, 17, 0, 13, 131, 1, 0]);
+    body.extend_from_slice(&AP.0);
+    body.extend_from_slice(&crate::wifi::scan::six_ghz::short_ssid(b"x").to_le_bytes());
+    body.extend_from_slice(&[0x40, 0]);
+    let mut beacon = response(0x80, &body);
+    beacon[4..10].copy_from_slice(&Mac::BROADCAST.0);
+    beacon[10..16].copy_from_slice(&[2, 0, 0, 0, 0, 9]);
+    beacon[16..22].copy_from_slice(&[2, 0, 0, 0, 0, 9]);
+    incoming(&model, &beacon, None, false);
+    assert!(!station.carrier());
+    done(&model);
+    assert!(!station.carrier());
+    // The 6 GHz part cfg80211 plans from it finds the AP beaconing there.
+    let mut body = vec![0; 8];
+    body.extend_from_slice(&100u16.to_le_bytes());
+    body.extend_from_slice(&0x11u16.to_le_bytes());
+    body.extend_from_slice(&beacon_elements());
+    let mut beacon = response(0x80, &body);
+    beacon[4..10].copy_from_slice(&Mac::BROADCAST.0);
+    incoming_six(&model, &beacon);
+    assert!(!station.carrier());
+    done(&model);
+    assert!(!station.carrier());
+    // The station commits by hash-to-element on the AP's channel.
+    let sent = |model: &Model| {
+        let frame = finish_tx_on(model, 1).pop().unwrap();
+        assert_eq!(frame[..2], [0xb0, 0]);
+        let field = |at: usize| u16::from_le_bytes([frame[at], frame[at + 1]]);
+        (field(26), field(28), frame[30..].to_vec())
+    };
+    let from_ap = |model: &Model, frame: &crate::wifi::sae::Frame| {
+        let mut body = vec![3, 0];
+        body.extend_from_slice(&frame.transaction.to_le_bytes());
+        body.extend_from_slice(&frame.status.to_le_bytes());
+        body.extend_from_slice(&frame.data);
+        incoming_six(model, &response(0xb0, &body));
+    };
+    let (transaction, status, commit) = sent(&model);
+    assert_eq!((transaction, status), (1, 126));
+    let mut random = 7u8;
+    let mut next = || {
+        random = random.wrapping_add(1);
+        [random; 32]
+    };
+    let template = crate::wifi::sae::Template::derive(b"x", password, None);
+    let mut sae = Exchange::new(
+        Derivation::HashToElement,
+        password,
+        Some(&template),
+        None,
+        AP,
+        LOCAL,
+        &mut next,
+    )
+    .unwrap();
+    let confirm = sae.receive(1, 126, &commit).unwrap().unwrap();
+    station.carrier();
+    from_ap(&model, &sae.commit());
+    assert!(!station.carrier());
+    let (transaction, status, own_confirm) = sent(&model);
+    assert_eq!((transaction, status), (2, 0));
+    assert_eq!(sae.receive(2, 0, &own_confirm).unwrap(), None);
+    station.carrier();
+    from_ap(&model, &confirm);
+    assert!(!station.carrier());
+    // The association carries the RSN element and RSNXE the exchange chose.
+    let request = finish_tx_on(&model, 1).pop().unwrap();
+    assert_eq!(request[..2], [0, 0]);
+    let elements = beacon_elements();
+    let security = Security::select_on(crate::wifi::Band::Ghz6, &elements, true).unwrap();
+    let own_rsn = security.element();
+    let mut selected = own_rsn.clone();
+    selected.extend_from_slice(&crate::wifi::sae::H2E_RSNXE);
+    assert!(request.windows(own_rsn.len()).any(|w| w == own_rsn));
+    assert!(request.windows(3).any(|w| w == crate::wifi::sae::H2E_RSNXE));
+    station.carrier();
+    let mut association = vec![0x11, 0, 0, 0, 1, 0xc0];
+    let mut rest = &elements[..];
+    while let [id, length, tail @ ..] = rest {
+        let (body, next) = tail.split_at(usize::from(*length));
+        if !matches!(*id, 48 | 244) {
+            association.extend_from_slice(&[*id, *length]);
+            association.extend_from_slice(body);
+        }
+        rest = next;
+    }
+    incoming_six(&model, &response(0x10, &association));
+    assert!(!station.carrier());
+    // The 4-way handshake proves the SAE PMK.
+    let mut ap = Authenticator::between(security.suites(), sae.pmk().unwrap(), AP, LOCAL, own_rsn);
+    eapol_on(&model, &ap.message_1(), true);
+    assert!(!station.carrier());
+    ap.message_2(&sent_eapol_on(&model, 1));
+    let rsn = crate::wifi::connection::find(&elements, 48).unwrap();
+    let mut whole = vec![48, rsn.len() as u8];
+    whole.extend_from_slice(rsn);
+    let mut igtk = vec![0xdd, 4 + 8 + 16, 0x00, 0x0f, 0xac, 9, 4, 0];
+    igtk.extend_from_slice(&[0; 6]);
+    igtk.extend_from_slice(&[0x77; 16]);
+    eapol_on(&model, &ap.message_3_with(&whole, &igtk), true);
+    assert!(!station.carrier());
+    ap.signed_reply(&sent_eapol_on(&model, 1), 0x308);
+    assert!(station.carrier());
 }

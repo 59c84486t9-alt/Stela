@@ -199,8 +199,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 .data_tx
                 .as_ref()
                 .is_some_and(|queue| !queue.is_poisoned())
-            && c.profile
-                .is_some_and(|p| matches!(p.channel.band, Band::Ghz2 | Band::Ghz5))
+            && c.profile.is_some()
     }
     /// An association whose management state may change: a PMF one once
     /// the OS has installed its handshake's pairwise key.
