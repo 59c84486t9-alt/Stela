@@ -3089,8 +3089,9 @@ memory_intrinsic(struct translator *t, LLVMValueRef inst, unsigned intrinsic, bo
 }
 
 /* The field of an argument buffer an element access at address reads: the
- * field whose elements the constant offset names, which dynamic indices
- * step through by whole elements. */
+ * field whose elements the constant offset names in an element of an array
+ * of the buffer's structure, which dynamic indices step through by whole
+ * structures or by whole elements of the field. */
 static const struct stela_air_field *
 argument_field(struct translator *t, const struct value *address)
 {
@@ -3098,13 +3099,14 @@ argument_field(struct translator *t, const struct value *address)
       fail(t, STELA_AIR_MEMORY, "argument buffer field access through a pointer PHI");
       return NULL;
    }
+   uint64_t offset = address->offset % address->fields.size;
+   uint64_t steps = address->steps % address->fields.size ? address->steps : 0;
    for (unsigned i = 0; i < address->fields.count; i++) {
       const struct stela_air_field *field = &t->fields[address->fields.first + i];
-      if (address->offset < field->offset || address->offset - field->offset >= field->size)
+      if (offset < field->offset || offset - field->offset >= field->size)
          continue;
       unsigned element = field->size / field->count;
-      if ((address->offset - field->offset) % element || address->steps % element ||
-          (address->steps && field->count == 1))
+      if ((offset - field->offset) % element || steps % element || (steps && field->count == 1))
          break;
       return field;
    }

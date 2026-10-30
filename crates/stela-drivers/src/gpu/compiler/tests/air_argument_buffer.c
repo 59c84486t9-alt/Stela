@@ -272,6 +272,12 @@ kernels_read_argument_buffers(void)
    assert(size);
    assert(!nir_src_is_const(resource_id(size, nir_tex_src_texture_deref)->src[0]));
    ralloc_free(shader);
+
+   /* A nested argument buffer's pointer indexes an array of them. */
+   shader = kernel(replaced(kernel_body, "%inner, i64 0, i32 0", "%inner, i64 %idx, i32 0"),
+                   kernel_metadata, &error);
+   assert(shader);
+   ralloc_free(shader);
 }
 
 static void
@@ -336,6 +342,108 @@ argument_buffer_misuse_is_refused(void)
           error.kind == STELA_AIR_INSTRUCTION);
 }
 
+/* Outer is { float scale; Pair pair[2]; device float *data; } with Pair
+ * { Inner inner; sampler smp; } and Inner { texture2d<float> tex; }, each
+ * inlined as Apple's compiler reflects them: pair[i] takes [[id]]s 1 + 2i
+ * and 2 + 2i. The kernel samples pair[1]'s texture with its sampler. */
+static const char *inlined_body =
+   "%struct.Leaf = type { ptr addrspace(1) }\n"
+   "%struct.Pair = type { %struct.Leaf, ptr addrspace(2) }\n"
+   "%struct.Outer = type { float, [2 x %struct.Pair], ptr addrspace(1) }\n" KERNEL(
+   "%tp = getelementptr inbounds %struct.Outer, ptr addrspace(2) %args, i64 0, i32 1, i64 1,"
+   " i32 0, i32 0\n"
+   "%tex = load ptr addrspace(1), ptr addrspace(2) %tp, align 8\n"
+   "%sp = getelementptr inbounds %struct.Outer, ptr addrspace(2) %args, i64 0, i32 1, i64 1, i32 1\n"
+   "%smp = load ptr addrspace(2), ptr addrspace(2) %sp, align 8\n"
+   "%s = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %tex,"
+   " ptr addrspace(2) %smp, <2 x float> <float 0.5, float 0.25>, i1 true, <2 x i32> zeroinitializer,"
+   " i1 true, float 0.0, float 0.0, i32 0)\n"
+   "%t = extractvalue { <4 x float>, i8 } %s, 0\n"
+   "%x = extractelement <4 x float> %t, i64 0\n"
+   "%dp = getelementptr inbounds %struct.Outer, ptr addrspace(2) %args, i64 0, i32 2\n"
+   "%data = load ptr addrspace(1), ptr addrspace(2) %dp, align 8\n"
+   "store float %x, ptr addrspace(1) %data, align 4\n"
+   "ret void\n");
+
+static const char *inlined_metadata =
+   "!air.kernel = !{!2}\n"
+   "!air.version = !{!20}\n!air.language_version = !{!21}\n"
+   "!2 = !{ptr @kernel, !3, !4}\n!3 = !{}\n!4 = !{!5, !6, !7}\n"
+   "!5 = !{i32 0, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n"
+   "!6 = !{i32 1, !\"air.indirect_buffer\", !\"air.buffer_size\", i32 48, !\"air.location_index\","
+   " i32 0, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.struct_type_info\", !40,"
+   " !\"air.arg_type_size\", i32 48, !\"air.arg_type_align_size\", i32 8, !\"air.arg_type_name\","
+   " !\"Outer\", !\"air.arg_name\", !\"args\"}\n"
+   "!7 = !{i32 2, !\"air.buffer\", !\"air.location_index\", i32 1, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
+   " !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"out\"}\n"
+   "!40 = !{i32 0, i32 4, i32 0, !\"float\", !\"scale\", !\"air.indirect_argument\", !41,"
+   " !\"air.struct_type_info\", !42, i32 8, i32 16, i32 2, !\"Pair\", !\"pair\","
+   " !\"air.indirect_argument\", i32 1,"
+   " i32 40, i32 8, i32 0, !\"float*\", !\"data\", !\"air.indirect_argument\", !45}\n"
+   "!41 = !{i32 0, !\"air.indirect_constant\", !\"air.location_index\", i32 0, i32 1,"
+   " !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"scale\"}\n"
+   "!42 = !{!\"air.struct_type_info\", !43, i32 0, i32 8, i32 0, !\"Leaf\", !\"inner\","
+   " !\"air.indirect_argument\", i32 0,"
+   " i32 8, i32 8, i32 0, !\"sampler\", !\"smp\", !\"air.indirect_argument\", !46}\n"
+   "!43 = !{i32 0, i32 8, i32 0, !\"texture2d<float, sample>\", !\"tex\", !\"air.indirect_argument\", !44}\n"
+   "!44 = !{i32 0, !\"air.texture\", !\"air.location_index\", i32 0, i32 1, !\"air.sample\","
+   " !\"air.arg_type_name\", !\"texture2d<float, sample>\", !\"air.arg_name\", !\"tex\"}\n"
+   "!45 = !{i32 2, !\"air.buffer\", !\"air.location_index\", i32 5, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
+   " !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"data\"}\n"
+   "!46 = !{i32 1, !\"air.sampler\", !\"air.location_index\", i32 1, i32 1,"
+   " !\"air.arg_type_name\", !\"sampler\", !\"air.arg_name\", !\"smp\"}\n"
+   "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n";
+
+/* The constant bytes a load's address adds, step by step, to its argument
+ * buffer's. */
+static uint64_t
+constant_offset(nir_intrinsic_instr *load)
+{
+   uint64_t offset = 0;
+   for (nir_def *address = load->src[0].ssa;;) {
+      nir_instr *instr = nir_def_instr(address);
+      nir_alu_instr *add = instr->type == nir_instr_type_alu ? nir_instr_as_alu(instr) : NULL;
+      if (!add || add->op != nir_op_iadd)
+         return offset;
+      unsigned constant = nir_src_is_const(add->src[0].src) ? 0 : 1;
+      if (!nir_src_is_const(add->src[constant].src))
+         return offset;
+      offset += nir_src_as_uint(add->src[constant].src);
+      address = add->src[!constant].src.ssa;
+   }
+}
+
+/* Inlined structures' fields are their enclosing buffer's, element after
+ * element. */
+static void
+inlined_structures_are_fields_of_their_buffer(void)
+{
+   struct stela_air_error error;
+   nir_shader *shader = kernel(inlined_body, inlined_metadata, &error);
+   if (!shader)
+      fprintf(stderr, "inlined: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "inlined argument buffer kernel");
+   nir_opt_constant_folding(shader);
+   nir_tex_instr *sample = texture_instruction(shader, nir_texop_txl);
+   assert(sample);
+   assert(constant_offset(resource_id(sample, nir_tex_src_texture_deref)) == 24);
+   assert(constant_offset(resource_id(sample, nir_tex_src_sampler_deref)) == 32);
+   ralloc_free(shader);
+
+   /* Elements past their buffer, and an inlined structure without its
+    * first [[id]]. */
+   refused(inlined_body, replaced(inlined_metadata, "i32 8, i32 16, i32 2", "i32 8, i32 24, i32 2"),
+           STELA_AIR_TYPE);
+   refused(inlined_body,
+           replaced(inlined_metadata, "!\"air.indirect_argument\", i32 1,",
+                    "!\"air.indirect_argument\", !\"pair\","),
+           STELA_AIR_METADATA);
+}
+
 static bool
 ssbo_slot(const struct stela_air_buffer *buffer, unsigned *slot, void *data)
 {
@@ -362,6 +470,20 @@ invalid_argument_buffers_are_refused(void)
                                  "i32 32, i32 24, i32 4"), STELA_AIR_TYPE);
    refused(kernel_body, replaced(kernel_metadata, "i32 32, i32 32, i32 4",
                                  "i32 32, i32 32, i32 2"), STELA_AIR_METADATA);
+   /* Apple's spelling of the array, whose length must be its count. */
+   const char *spelled = "!\"air.read\", !\"air.arg_type_name\", !\"texture2d<float, read>\"";
+   refused(kernel_body,
+           replaced(kernel_metadata, spelled,
+                    "!\"air.read\", !\"air.arg_type_name\", !\"array<texture2d<float, read>, 3>\""),
+           STELA_AIR_METADATA);
+   struct stela_air_error spelled_error;
+   nir_shader *shader = kernel(
+      kernel_body,
+      replaced(kernel_metadata, spelled,
+               "!\"air.read\", !\"air.arg_type_name\", !\"array<texture2d<float, read>, 4>\""),
+      &spelled_error);
+   assert(shader);
+   ralloc_free(shader);
    /* Unknown kinds, a size the reflection contradicts and a writable
     * constant address. */
    refused(kernel_body, replaced(kernel_metadata, "!\"air.indirect_constant\"",
@@ -382,6 +504,7 @@ main(void)
    kernels_read_argument_buffers();
    fragments_sample_argument_buffers();
    argument_buffer_misuse_is_refused();
+   inlined_structures_are_fields_of_their_buffer();
    invalid_argument_buffers_are_refused();
    glsl_type_singleton_decref();
    puts("air argument buffer: ok");

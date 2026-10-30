@@ -466,9 +466,10 @@ LLVMValueRef stela_air_metadata_constructors(LLVMModuleRef module);
 bool stela_air_metadata_constructed(LLVMValueRef global);
 
 /* An argument buffer's fields: kernel->fields[first, first + count), in
- * increasing offsets. */
+ * increasing offsets, of a structure of size bytes, through arrays of
+ * which pointers to it step. */
 struct stela_air_fields {
-   unsigned first, count;
+   unsigned first, count, size;
 };
 enum stela_air_field_kind {
    STELA_AIR_FIELD_DATA, /* Inline constant data. */

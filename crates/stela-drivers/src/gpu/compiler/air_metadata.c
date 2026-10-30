@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#define MAX2(a, b) ((a) > (b) ? (a) : (b))
 #define MIN2(a,b) ((a) < (b) ? (a) : (b))
 static bool
 fail(struct stela_air_metadata *t, enum stela_air_error_kind kind, const char *fmt, ...)
@@ -1150,10 +1151,12 @@ field_access(LLVMValueRef key, bool texture, unsigned *access)
 }
 
 /* One field's argument tuple: its position, its kind and its keyed
- * reflection, as a top-level argument of that kind spells it. */
+ * reflection, as a top-level argument of that kind spells it. Its [[id]],
+ * *id, counts from id_base, that of the structure inlining it. */
 static bool
 argument_field(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LLVMValueRef node,
-               unsigned argument, unsigned depth, struct stela_air_field *field)
+               unsigned argument, unsigned depth, unsigned id_base, struct stela_air_field *field,
+               unsigned *id)
 {
    static const struct {
       const char *name;
@@ -1223,8 +1226,15 @@ argument_field(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LL
          return fail(m, STELA_AIR_METADATA, "unsupported argument buffer field metadata");
       }
    }
-   if (!has_location)
+   if (!has_location || index > UINT16_MAX - id_base)
       return fail(m, STELA_AIR_METADATA, "argument buffer field lacks a location");
+   index += id_base;
+   *id = index;
+   /* Apple's compiler names an array of resources array<element, count>. */
+   if (type_name && field->count > 1 && type_name_bytes > strlen("array<") &&
+       !memcmp(type_name, "array<", strlen("array<")) &&
+       !array_type(&type_name, &type_name_bytes, field->count))
+      return fail(m, STELA_AIR_METADATA, "argument buffer array and location counts differ");
    switch (field->kind) {
    case STELA_AIR_FIELD_DATA:
    case STELA_AIR_FIELD_COMMANDS:
@@ -1260,49 +1270,139 @@ argument_field(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LL
    return argument_fields(m, kernel, info, desc->type_size, argument, depth + 1, &field->arguments);
 }
 
-/* An argument buffer's air.struct_type_info: per field its offset, byte size,
- * element count (zero for one), type name, name, "air.indirect_argument" and
- * argument tuple, in increasing offsets within extent bytes. */
+/* An argument buffer's air.struct_type_info lists its members in increasing
+ * offsets: per field its offset, byte size, element count (zero for one),
+ * type name, name, "air.indirect_argument" and argument tuple; per structure
+ * it inlines "air.struct_type_info" and that structure's node first, its
+ * element size in place of the byte size and its first [[id]] in place of
+ * an argument tuple. An inlined structure's fields are the enclosing
+ * buffer's, element after element, each taking the [[id]]s after the
+ * last's. */
+enum { MEMBER = 7, INLINED = 9 };
+
+static bool
+structure_operands(struct stela_air_metadata *m, LLVMValueRef node, unsigned depth,
+                   LLVMValueRef *operands, unsigned *count)
+{
+   if (depth >= AIR_MAX_ARGUMENT_BUFFER_DEPTH)
+      return fail(m, STELA_AIR_LIMIT, "argument buffer nesting exceeded");
+   return (stela_air_md_node(m, node, operands, count) && *count) ||
+      fail(m, STELA_AIR_METADATA, "invalid argument buffer structure");
+}
+
+/* The fields of a structure, its inlined structures' among them. */
+static bool
+structure_field_count(struct stela_air_metadata *m, LLVMValueRef node, unsigned depth,
+                      unsigned *fields)
+{
+   LLVMValueRef operands[AIR_MAX_METADATA_OPERANDS];
+   unsigned count;
+   if (!structure_operands(m, node, depth, operands, &count))
+      return false;
+   *fields = 0;
+   for (unsigned i = 0; i < count;) {
+      bool inlined = stela_air_md_string(operands[i], "air.struct_type_info");
+      unsigned inner = 1, elements = 1;
+      if (i + (inlined ? INLINED : MEMBER) > count ||
+          (inlined && (!stela_air_md_uint(operands[i + 4], &elements) ||
+                       !structure_field_count(m, operands[i + 1], depth + 1, &inner))))
+         return fail(m, STELA_AIR_METADATA, "invalid argument buffer structure");
+      elements = MAX2(elements, 1);
+      if (inner > (AIR_MAX_FIELDS - *fields) / elements)
+         return fail(m, STELA_AIR_LIMIT, "argument buffer field budget exceeded");
+      *fields += inner * elements;
+      i += inlined ? INLINED : MEMBER;
+   }
+   return true;
+}
+
+/* A member's offset, size and element count, checking its names. */
+static bool
+member_layout(struct stela_air_metadata *m, const LLVMValueRef *member, unsigned *offset,
+              unsigned *size, unsigned *elements)
+{
+   return (stela_air_md_uint(member[0], offset) && stela_air_md_uint(member[1], size) &&
+           stela_air_md_uint(member[2], elements) && member[3] && LLVMIsAMDString(member[3]) &&
+           member[4] && LLVMIsAMDString(member[4]) &&
+           stela_air_md_string(member[5], "air.indirect_argument")) ||
+      fail(m, STELA_AIR_METADATA, "invalid argument buffer member");
+}
+
+/* Fills the fields of a structure at byte base and [[id]] id_base of its
+ * argument buffer, in extent bytes, from kernel->fields[*next]. Their
+ * offsets increase from *end, which receives the last one's end, and *ids
+ * receives the [[id]]s the structure spans. */
+static bool
+structure_fields(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LLVMValueRef node,
+                 unsigned base, unsigned id_base, unsigned extent, unsigned argument,
+                 unsigned depth, unsigned *next, unsigned *end, unsigned *ids)
+{
+   LLVMValueRef operands[AIR_MAX_METADATA_OPERANDS];
+   unsigned count;
+   if (!structure_operands(m, node, depth, operands, &count))
+      return false;
+   *ids = 0;
+   for (unsigned i = 0; i < count;) {
+      bool inlined = stela_air_md_string(operands[i], "air.struct_type_info");
+      const LLVMValueRef *member = &operands[inlined ? i + 2 : i];
+      unsigned offset, size, elements, id;
+      if (!member_layout(m, member, &offset, &size, &elements))
+         return false;
+      if (inlined) {
+         elements = MAX2(elements, 1);
+         if (!stela_air_md_uint(member[6], &id) || id > UINT16_MAX - id_base)
+            return fail(m, STELA_AIR_METADATA, "invalid inlined argument buffer structure");
+         if (!size || offset > extent || size > (extent - offset) / elements)
+            return fail(m, STELA_AIR_TYPE, "argument buffer members overlap or exceed the buffer");
+         unsigned span = 0;
+         for (unsigned e = 0; e < elements; e++) {
+            unsigned spanned;
+            if (e * span > UINT16_MAX - id_base - id)
+               return fail(m, STELA_AIR_METADATA, "invalid inlined argument buffer structure");
+            if (!structure_fields(m, kernel, operands[i + 1], base + offset + e * size,
+                                  id_base + id + e * span, size, argument, depth + 1, next, end,
+                                  &spanned))
+               return false;
+            span = e ? span : spanned;
+         }
+         *ids = MAX2(*ids, id + elements * span);
+         i += INLINED;
+         continue;
+      }
+      struct stela_air_field *field = &kernel->fields[(*next)++];
+      *field = (struct stela_air_field){0};
+      if (!argument_field(m, kernel, member[6], argument, depth, id_base, field, &id))
+         return false;
+      *ids = MAX2(*ids, id - id_base + field->count);
+      field->offset = base + offset;
+      field->size = size;
+      if (elements && elements != field->count)
+         return fail(m, STELA_AIR_METADATA, "argument buffer member and location counts differ");
+      if (!size || size % field->count || offset > extent || size > extent - offset ||
+          field->offset < *end)
+         return fail(m, STELA_AIR_TYPE, "argument buffer members overlap or exceed the buffer");
+      if (field->kind != STELA_AIR_FIELD_DATA && (field->offset % 8 || size / field->count != 8))
+         return fail(m, STELA_AIR_TYPE, "argument buffer addresses and IDs are aligned 8-byte values");
+      *end = field->offset + size;
+      i += MEMBER;
+   }
+   return true;
+}
+
 static bool
 argument_fields(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LLVMValueRef node,
                 unsigned extent, unsigned argument, unsigned depth, struct stela_air_fields *fields)
 {
-   enum { MEMBER = 7 };
-   LLVMValueRef operands[AIR_MAX_METADATA_OPERANDS];
    unsigned count;
-   if (depth >= AIR_MAX_ARGUMENT_BUFFER_DEPTH)
-      return fail(m, STELA_AIR_LIMIT, "argument buffer nesting exceeded");
-   if (!stela_air_md_node(m, node, operands, &count) || !count || count % MEMBER)
-      return fail(m, STELA_AIR_METADATA, "invalid argument buffer structure");
-   if (count / MEMBER > AIR_MAX_FIELDS - kernel->field_count)
+   if (!structure_field_count(m, node, depth, &count))
+      return false;
+   if (count > AIR_MAX_FIELDS - kernel->field_count)
       return fail(m, STELA_AIR_LIMIT, "argument buffer field budget exceeded");
    /* Reserve this level's range before nested levels take theirs. */
-   *fields = (struct stela_air_fields){kernel->field_count, count / MEMBER};
-   kernel->field_count += fields->count;
-   unsigned end = 0;
-   for (unsigned i = 0; i < fields->count; i++) {
-      const LLVMValueRef *member = &operands[i * MEMBER];
-      struct stela_air_field *field = &kernel->fields[fields->first + i];
-      *field = (struct stela_air_field){0};
-      unsigned offset, size, elements;
-      if (!stela_air_md_uint(member[0], &offset) || !stela_air_md_uint(member[1], &size) ||
-          !stela_air_md_uint(member[2], &elements) || !member[3] || !LLVMIsAMDString(member[3]) ||
-          !member[4] || !LLVMIsAMDString(member[4]) ||
-          !stela_air_md_string(member[5], "air.indirect_argument"))
-         return fail(m, STELA_AIR_METADATA, "invalid argument buffer member");
-      if (!argument_field(m, kernel, member[6], argument, depth, field))
-         return false;
-      field->offset = offset;
-      field->size = size;
-      if (elements && elements != field->count)
-         return fail(m, STELA_AIR_METADATA, "argument buffer member and location counts differ");
-      if (!size || size % field->count || offset < end || offset > extent || size > extent - offset)
-         return fail(m, STELA_AIR_TYPE, "argument buffer members overlap or exceed the buffer");
-      if (field->kind != STELA_AIR_FIELD_DATA && (offset % 8 || size / field->count != 8))
-         return fail(m, STELA_AIR_TYPE, "argument buffer addresses and IDs are aligned 8-byte values");
-      end = offset + size;
-   }
-   return true;
+   *fields = (struct stela_air_fields){kernel->field_count, count, extent};
+   kernel->field_count += count;
+   unsigned next = fields->first, end = 0, ids;
+   return structure_fields(m, kernel, node, 0, 0, extent, argument, depth, &next, &end, &ids);
 }
 
 /* A post-tessellation vertex function's patch_control_point<T> stage-in:
