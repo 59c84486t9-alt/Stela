@@ -1868,3 +1868,32 @@ fn handing_out_an_indirect_address_keeps_commands_as_records() {
     assert_eq!(fill, Some((layout.record(0), 2 * u64::from(layout.stride))));
     device.destroy_indirect_command_buffer(icb).unwrap();
 }
+
+#[test]
+fn synchronized_managed_buffers_are_invalidated_on_completion() {
+    let mut device = device();
+    let managed = device
+        .new_buffer(256, options(StorageMode::Managed))
+        .unwrap();
+    let shared = device
+        .new_buffer(256, options(StorageMode::Shared))
+        .unwrap();
+    assert_eq!(
+        device.managed_range(shared),
+        Err(Error::Invalid(
+            "synchronizeResource: is for managed resources"
+        ))
+    );
+    let range = device.managed_range(managed).unwrap();
+    let mut commands = device.new_command_buffer();
+    commands.begin_blit().unwrap();
+    commands.synchronize_buffer(range).unwrap();
+    commands.end_encoding(&mut device.resolver()).unwrap();
+    let serial = device.commit(commands).unwrap();
+    // The managed buffer outlives its handle until the work completes.
+    device.destroy_buffer(managed).unwrap();
+    assert!(device.backend().invalidated.is_empty());
+    complete(&mut device, serial);
+    let invalidated = (range.memory, range.offset, range.length);
+    assert_eq!(device.backend().invalidated, [invalidated]);
+}

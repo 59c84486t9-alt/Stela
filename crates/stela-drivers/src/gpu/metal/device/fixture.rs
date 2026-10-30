@@ -39,6 +39,7 @@ pub(crate) struct MockBackend {
     pub(crate) compute: Vec<ComputePipelineInfo>,
     pub(crate) submissions: Vec<Vec<Segment>>,
     pub(crate) writes: Vec<(Memory, u64, Vec<u8>)>,
+    pub(crate) invalidated: Vec<(Memory, u64, u64)>,
     pub(crate) semaphores: BTreeMap<u64, u64>,
     pub(crate) queries_ready: bool,
     pub(crate) layouts: Vec<IndirectCommandsLayoutInfo>,
@@ -217,7 +218,8 @@ impl Backend for MockBackend {
     fn flush_memory(&mut self, _: Memory, _: u64, _: u64) -> Result<()> {
         Ok(())
     }
-    fn invalidate_memory(&mut self, _: Memory, _: u64, _: u64) -> Result<()> {
+    fn invalidate_memory(&mut self, memory: Memory, offset: u64, size: u64) -> Result<()> {
+        self.invalidated.push((memory, offset, size));
         Ok(())
     }
     /// Memory `n` is mapped at `1 << 63 | n << 32`.

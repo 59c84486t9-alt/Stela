@@ -22,8 +22,8 @@ use crate::gpu::metal::{
     },
     binding::ResourceId,
     command_buffer::{
-        BufferRef, CommandBuffer, ComputePipelineState, DynamicFeatures, RenderPipelineState,
-        Resolver, Segment,
+        BufferRef, CommandBuffer, ComputePipelineState, DynamicFeatures, MappedRange,
+        RenderPipelineState, Resolver, Segment,
         counters::{self, CounterRange, CounterSample, STATISTIC_SAMPLE_BYTES},
         generated::{GeneratedLayoutKey, IndirectRenderClass},
         render::PassBoundary,
@@ -81,6 +81,7 @@ struct InFlight {
     serial: u64,
     chunks: Vec<Chunk>,
     pools: Vec<(QueryType, QueryPool)>,
+    invalidations: Vec<MappedRange>,
 }
 
 /// Segments of a committed command buffer that the host submits: either all
@@ -362,6 +363,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             serial,
             chunks,
             pools: recording.query_pools,
+            invalidations: recording.invalidations,
         });
         self.queue.held.extend(held);
         self.advance()?;
@@ -502,7 +504,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             return Err(Error::DeviceLost);
         }
         let completed = self.backend.semaphore_value(self.timeline)?;
-        self.retire(completed);
+        self.retire(completed)?;
         Ok(completed)
     }
 
@@ -526,16 +528,27 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(reached)
     }
 
-    fn retire(&mut self, completed: u64) {
+    /// Recycles what completed work held and destroys what it kept alive;
+    /// a failed invalidation is answered once the bookkeeping is done.
+    fn retire(&mut self, completed: u64) -> Result<()> {
         if completed <= self.completed {
-            return;
+            return Ok(());
         }
         self.completed = completed;
         let (done, pending): (Vec<_>, Vec<_>) = core::mem::take(&mut self.queue.in_flight)
             .into_iter()
             .partition(|flight| flight.serial <= completed);
         self.queue.in_flight = pending;
+        let mut invalidated = Ok(());
         for flight in done {
+            // Before deferred destruction, which may free the memory.
+            for range in flight.invalidations {
+                invalidated = invalidated.and(self.backend.invalidate_memory(
+                    range.memory,
+                    range.offset,
+                    range.length,
+                ));
+            }
             self.queue.free_chunks.extend(flight.chunks);
             for (query_type, pool) in flight.pools {
                 self.backend.reset_queries(pool, 0, POOL_QUERIES);
@@ -551,6 +564,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .for_each(|(_, object)| self.backend.destroy(object));
         self.descriptors.retire(completed);
         self.execution_sets.retire(completed);
+        invalidated
     }
 
     /// `newEvent` and `newSharedEvent`: both are timeline semaphores.

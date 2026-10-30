@@ -6,7 +6,7 @@
 //! Hints with no Vulkan counterpart in the general image layout
 //! (`optimizeContentsFor*Access`) record nothing, and fences need no
 //! commands because the hazard tracker orders the queue.
-use super::{BufferRef, CommandBuffer, Encoder, Resolver};
+use super::{BufferRef, CommandBuffer, Encoder, MappedRange, Resolver};
 use crate::gpu::metal::{
     abi::BlitOption,
     error::{Error, Result, ensure},
@@ -413,9 +413,17 @@ impl CommandBuffer {
         Ok(())
     }
 
-    /// `synchronizeResource:` for a managed buffer, or a managed texture the
-    /// CPU reads with host image copies: GPU writes become visible to the
-    /// host once the command buffer completes.
+    /// `synchronizeResource:` for a managed buffer: GPU writes reach its
+    /// mapping, which is invalidated once the command buffer completes.
+    pub fn synchronize_buffer(&mut self, range: MappedRange) -> Result<()> {
+        self.synchronize()?;
+        self.recorder.invalidations.push(range);
+        Ok(())
+    }
+
+    /// `synchronizeResource:` for a managed texture the CPU reads with host
+    /// image copies: GPU writes become visible to the host once the command
+    /// buffer completes.
     pub fn synchronize(&mut self) -> Result<()> {
         self.blit()?;
         if let Some(barrier) = self.recorder.hazards.host() {

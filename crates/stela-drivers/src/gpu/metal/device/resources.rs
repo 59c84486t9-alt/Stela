@@ -4,7 +4,7 @@ use crate::gpu::metal::{
     abi::{CpuCacheMode, HazardTrackingMode, HeapType, ResourceOptions, StorageMode, TextureType},
     binding::{HeapArray, NULL_DESCRIPTOR, ResourceId},
     command_buffer::{
-        BufferRef,
+        BufferRef, MappedRange,
         blit::{BufferLayout, Region},
     },
     error::{Error, Result, ensure, require},
@@ -242,12 +242,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.backend.flush_memory(memory, base + offset, length)
     }
 
-    /// Makes GPU writes to a managed buffer visible to the CPU after the
-    /// command buffer that synchronized it completes.
-    pub fn invalidate_buffer(&mut self, id: BufferId) -> Result<()> {
+    /// The mapping `synchronizeResource:` makes current for a managed buffer.
+    pub fn managed_range(&self, id: BufferId) -> Result<MappedRange> {
         let buffer = self.resources.buffers.get(id.0)?;
-        let (memory, offset, length) = (buffer.memory, buffer.memory_offset, buffer.length);
-        self.backend.invalidate_memory(memory, offset, length)
+        ensure(
+            buffer.options.storage_mode == StorageMode::Managed,
+            "synchronizeResource: is for managed resources",
+        )?;
+        Ok(MappedRange {
+            memory: buffer.memory,
+            offset: buffer.memory_offset,
+            length: buffer.length,
+        })
     }
 
     pub fn destroy_buffer(&mut self, id: BufferId) -> Result<()> {

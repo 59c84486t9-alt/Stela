@@ -22,7 +22,8 @@ use super::{
         backend::Requirements,
         command::{Command, SparseBind},
         object::{
-            Buffer, ExecutionSet, IndirectCommandsLayout, Pipeline, QueryPool, QueryType, Semaphore,
+            Buffer, ExecutionSet, IndirectCommandsLayout, Memory, Pipeline, QueryPool, QueryType,
+            Semaphore,
         },
     },
 };
@@ -45,6 +46,14 @@ pub struct BufferRef {
     pub offset: u64,
     /// The device address of the Metal buffer's first byte.
     pub address: u64,
+    pub length: u64,
+}
+
+/// The mapped bytes of a managed buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MappedRange {
+    pub memory: Memory,
+    pub offset: u64,
     pub length: u64,
 }
 
@@ -213,6 +222,9 @@ pub struct Recording {
     pub query_pools: Vec<(QueryType, QueryPool)>,
     /// Sparse mapping operations and the segment whose binds they become.
     pub mappings: Vec<(usize, Mapping)>,
+    /// Managed buffers to invalidate on completion, for the host to read
+    /// what the GPU wrote.
+    pub invalidations: Vec<MappedRange>,
 }
 
 /// One stage's argument table and whether the GPU copy is current.
@@ -358,6 +370,7 @@ struct Recorder {
     query_pools: Vec<(QueryType, QueryPool)>,
     statistics: Option<counters::Statistics>,
     mappings: Vec<(usize, Mapping)>,
+    invalidations: Vec<MappedRange>,
 }
 
 impl Recorder {
@@ -369,6 +382,7 @@ impl Recorder {
             query_pools: Vec::new(),
             statistics: None,
             mappings: Vec::new(),
+            invalidations: Vec::new(),
         };
         recorder.start_segment(Vec::new());
         recorder
@@ -538,6 +552,7 @@ impl CommandBuffer {
             uploads: self.recorder.uploads.finish(),
             query_pools: self.recorder.query_pools,
             mappings: self.recorder.mappings,
+            invalidations: self.recorder.invalidations,
         })
     }
 }
