@@ -424,6 +424,29 @@ fn a_per_file_key_unwraps_to_the_same_inline_key_only_under_its_volume_class_key
 }
 
 #[test]
+fn a_class_check_succeeds_without_a_key_once_its_volume_class_keys_load() {
+    let (mut keys, _) = keys(1);
+    let (vek, _) = new_vek(&mut keys, &[], &[]);
+    let check = |keys: &mut VolumeKeys| {
+        let request = file_request(&VOLUME, 3).word(0).blob(&[]).blob(&[]);
+        send_file_key(keys, file_key::NEW_KEY, request, &mut Vec::new())
+    };
+    assert!(check(&mut keys).is_err());
+    load_class_keys(&mut keys, &vek);
+    let reply = check(&mut keys).unwrap();
+    let mut fields = reply_fields(&reply);
+    for _ in 0..5 {
+        assert!(fields.blob().unwrap().is_empty());
+    }
+    assert_eq!(fields.word().unwrap(), 0);
+    assert_eq!(fields.word().unwrap(), 3);
+    fields.end().unwrap();
+    // A class check carries no context or trailing blob.
+    let request = file_request(&VOLUME, 3).word(0).blob(&[0; 28]).blob(&[]);
+    assert!(send_file_key(&mut keys, file_key::NEW_KEY, request, &mut Vec::new()).is_err());
+}
+
+#[test]
 fn per_file_keys_report_what_they_do_not_interpret_once_and_refuse_unmodeled_requests() {
     let (mut keys, _) = keys(1);
     let (vek, _) = new_vek(&mut keys, &[], &[]);

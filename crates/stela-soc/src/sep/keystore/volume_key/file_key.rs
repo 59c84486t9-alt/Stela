@@ -12,9 +12,12 @@
 //! - NEW_KEY 0x10 (`__ipc_new_pfk_data_v2` 0x2d59448, codec 0x2d3f6d0),
 //!   variant 2 from `new_key` (0x2d51d48) for request type 1: u64, handle,
 //!   parameters, class, flags, a 28-byte file-system context and an empty
-//!   blob -> key, IV key, wrapped key in its third and fourth blobs (the
-//!   caller passes no buffer for the third or fifth), flags and the wrapped
-//!   key's class, which lands at `aks_wrapped_key_s` + 12.
+//!   blob -> key, IV key, a blob the caller takes no buffer for, wrapped
+//!   key, another such blob, flags and the wrapped key's class, which lands
+//!   at `aks_wrapped_key_s` + 12. `check_class` (0x2d25df4), APFS's class
+//!   availability check, sends the same command with flags 0, no context
+//!   and no buffer for any reply field: no key is made, and the class is
+//!   available when its volume's class keys are loaded.
 //! - UNWRAP_KEY 0x09 (`__ipc_unwrap_pfk_data_v1` 0x2d58d74, codec
 //!   0x2d3e22c), variant 1 from `unwrap_data` (0x2d25f78) for request type
 //!   1: u64, handle, parameters, the wrapped key's class, wrapped key, flags
@@ -59,6 +62,8 @@ const CLIENT: u64 = 1;
 const NO_KEY: u32 = 1;
 const WRAPPED_KEY: u32 = 1 << 1;
 const UNRECOVERED: u32 = 1 << 8;
+/// `check_class`'s request flags.
+const CHECK_CLASS: u32 = 0;
 /// Reply flags: the key is SEP-wrapped.
 const SEP_WRAPPED: u32 = 1 << 1;
 const CONTEXT_BYTES: usize = 28;
@@ -132,8 +137,22 @@ impl VolumeKeys {
         }
         let mut reply = Reply::default();
         if command == NEW_KEY {
-            flags(fields.word()?)?;
-            if fields.blob()?.len() != CONTEXT_BYTES || !fields.blob()?.is_empty() {
+            let request = fields.word()?;
+            let context = fields.blob()?.len();
+            let trailing = fields.blob()?.len();
+            if request == CHECK_CLASS && context == 0 && trailing == 0 {
+                fields.end()?;
+                self.class_keys(volume)?;
+                for _ in 0..5 {
+                    reply.blob(&[]);
+                }
+                reply.word(0);
+                reply.word(class);
+                self.report(UNINTERPRETED, notes);
+                return Ok(reply.0);
+            }
+            flags(request)?;
+            if context != CONTEXT_BYTES || trailing != 0 {
                 return Err(refuse!(
                     "SEP new per-file key context or trailing blob is not modeled"
                 ));
