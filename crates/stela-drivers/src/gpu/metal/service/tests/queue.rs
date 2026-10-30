@@ -4,9 +4,9 @@ use crate::gpu::metal::{
     service::{
         GuestMemory,
         wire::{
-            CounterSetCode, Empty, EventValueRequest, Handle, NewCounterBufferRequest, Operation,
-            ResolveCountersRequest, ResolveCountersResponse, Status, TimestampsResponse, Value,
-            WaitEventRequest, WaitRequest, WaitResponse,
+            CommandBufferTimesResponse, CounterSetCode, Empty, EventValueRequest, Handle,
+            NewCounterBufferRequest, Operation, ResolveCountersRequest, ResolveCountersResponse,
+            Status, TimestampsResponse, Value, WaitEventRequest, WaitRequest, WaitResponse,
         },
     },
 };
@@ -177,6 +177,17 @@ fn the_queue_answers_its_serials_and_clocks() {
             memory,
         )),
         Status::Invalid
+    );
+    assert_eq!(
+        status(call::<_, CommandBufferTimesResponse>(
+            &mut service,
+            connection,
+            Operation::CommandBufferTimes,
+            &Value { value: 1 },
+            memory,
+        )),
+        Status::Invalid,
+        "the command buffer has not completed"
     );
     let clocks: TimestampsResponse = call(
         &mut service,

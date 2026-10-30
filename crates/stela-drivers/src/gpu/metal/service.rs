@@ -378,6 +378,11 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             Operation::Wait => self.wait(&mut call),
             Operation::Commit => self.commit(&mut call),
+            Operation::CommandBufferTimes => {
+                let wire::Value { value } = call.request()?;
+                let [start, end] = self.device.command_buffer_times(value)?;
+                call.reply(&wire::CommandBufferTimesResponse { start, end })
+            }
             Operation::NewIndirectCommandBuffer => self.new_indirect_command_buffer(&mut call),
             Operation::IndirectResourceId => self.indirect_resource_id(&mut call),
             Operation::EncodeIndirect => self.encode_indirect(&mut call),

@@ -375,7 +375,8 @@ fn encoders_sample_and_resolve_counters() {
     let count = |matches: fn(&Command) -> bool| commands.iter().filter(|c| matches(c)).count();
     assert_eq!(
         count(|command| matches!(command, Command::WriteTimestamp { .. })),
-        2
+        2 + 2,
+        "the samples and the command buffer's GPU times"
     );
     assert_eq!(
         count(|command| matches!(command, Command::CopyQueryResults { count: 2, .. })),

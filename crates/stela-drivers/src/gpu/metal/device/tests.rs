@@ -36,7 +36,7 @@ use crate::gpu::metal::{
     shader::{LinkedFunction, Linking, Specialization, Stage},
     sparse::{MappingUpdate, SparseRegion},
     vulkan::{
-        MemoryProperties, PrimitiveTopology, ShaderStages,
+        MemoryProperties, PipelineStages, PrimitiveTopology, ShaderStages,
         backend::Descriptor,
         command::Command,
         object::{Buffer, MemoryRequest, Pipeline},
@@ -1903,6 +1903,28 @@ fn synchronized_managed_buffers_are_invalidated_on_completion() {
 }
 
 #[test]
+fn command_buffers_are_timed_from_their_first_command_to_their_last() {
+    let mut device = device();
+    let serial = submit(&mut device);
+    let segments = device.backend().submissions.last().unwrap().clone();
+    let stamp = |command: &Command| match command {
+        Command::WriteTimestamp { query, stage, .. } => Some((*query, *stage)),
+        _ => None,
+    };
+    let first = &segments[0].commands;
+    assert_eq!(stamp(&first[1]), Some((0, PipelineStages::TOP_OF_PIPE)));
+    let last = segments.last().unwrap().commands.last().unwrap();
+    assert_eq!(stamp(last), Some((1, PipelineStages::ALL_COMMANDS)));
+    assert_eq!(
+        device.command_buffer_times(serial),
+        Err(Error::Invalid("the command buffer has not completed"))
+    );
+    device.backend().queries_ready = true;
+    complete(&mut device, serial);
+    assert_eq!(device.command_buffer_times(serial), Ok([0, 10]));
+}
+
+#[test]
 fn uncommitted_command_buffers_return_their_upload_memory() {
     let mut device = device();
     let encode = |device: &mut TestDevice| {
@@ -1926,8 +1948,8 @@ fn uncommitted_command_buffers_return_their_upload_memory() {
     device.commit(commands).unwrap();
     assert_eq!(
         device.backend().next,
-        created,
-        "each command buffer reused the first one's chunk"
+        created + 1,
+        "each command buffer reused the first one's chunk; only the commit's timestamp pool is new"
     );
 }
 

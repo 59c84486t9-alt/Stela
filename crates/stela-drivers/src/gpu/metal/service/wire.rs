@@ -616,6 +616,13 @@ records! {
         pub cpu: u64,
         pub gpu: u64,
     }
+
+    /// `GPUStartTime` and `GPUEndTime` in timestamp ticks, which the
+    /// frontend converts with `sampleTimestamps:gpuTimestamp:`.
+    pub struct CommandBufferTimesResponse {
+        pub start: u64,
+        pub end: u64,
+    }
 }
 
 raw_enum! {
@@ -844,6 +851,8 @@ operations! {
     /// Replays a command stream into a command buffer, submits it and
     /// answers its serial.
     Commit = 0x040b => commands::CommitRequest, Value;
+    /// The GPU times of the completed command buffer with a serial.
+    CommandBufferTimes = 0x040c => Value, CommandBufferTimesResponse;
     NewIndirectCommandBuffer = 0x0501 => NewIndirectRequest, Handle;
     /// `gpuResourceID`, which makes the buffer GPU-resident.
     IndirectResourceId = 0x0502 => Handle, Value;

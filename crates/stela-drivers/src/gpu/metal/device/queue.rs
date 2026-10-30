@@ -40,8 +40,9 @@ use crate::gpu::metal::{
     sparse::{MAP_INDIRECT_ARGUMENTS_BYTES, Mapping, MappingRequest, MappingUpdate},
     upload::{Chunk, ChunkSource},
     vulkan::{
-        BufferCreate, BufferUsage, MemoryProperties, PipelineStatistics,
+        BufferCreate, BufferUsage, MemoryProperties, PipelineStages, PipelineStatistics,
         backend::{Backend, BufferAllocation, Object, Requirements},
+        command::Command,
         object::{
             BufferInfo, ExecutionSet, ImageView, IndirectCommandsLayout, Memory, MemoryRequest,
             Pipeline, QueryPool, QueryPoolInfo, QueryType, Semaphore,
@@ -50,8 +51,11 @@ use crate::gpu::metal::{
 };
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 
-/// Queries per occlusion or statistics pool.
+/// Queries per occlusion, statistics or timestamp pool.
 const POOL_QUERIES: u32 = 256;
+
+/// Completed command buffers whose GPU times are kept.
+const TIMES_KEPT: usize = 1024;
 
 /// A `MTLCounterSet` the device samples.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,6 +86,9 @@ struct InFlight {
     chunks: Vec<Chunk>,
     pools: Vec<(QueryType, QueryPool)>,
     invalidations: Vec<MappedRange>,
+    /// The pool, among `pools`, whose first two queries time the command
+    /// buffer.
+    times: Option<QueryPool>,
 }
 
 /// Segments of a committed command buffer that the host submits: either all
@@ -112,6 +119,9 @@ pub(super) struct Queue {
     /// copied; created with the first.
     steps: Option<Semaphore>,
     step: u64,
+    /// GPU start and end ticks of the latest completed command buffers, by
+    /// serial, oldest first.
+    times: VecDeque<(u64, [u64; 2])>,
 }
 
 /// One attachment of a [`RenderPassRequest`].
@@ -347,7 +357,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             return Err(error);
         }
         let mut held = self.hold(serial, recording.segments, recording.mappings)?;
-        // CPU-copy writes reach the images first, after the opening barrier.
+        let mut pools = recording.query_pools;
+        let times = self.time(&mut held)?;
+        pools.extend(times.map(|pool| (QueryType::Timestamp, pool)));
+        // CPU-copy writes reach the images first, after the opening barrier
+        // and outside the command buffer's GPU times.
         let uploads = self.take_cpu_copy_uploads();
         held[0].segments[0].commands.splice(1..1, uploads);
         let mut chunks = Vec::with_capacity(recording.uploads.len());
@@ -360,12 +374,54 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.queue.in_flight.push(InFlight {
             serial,
             chunks,
-            pools: recording.query_pools,
+            pools,
             invalidations: recording.invalidations,
+            times,
         });
         self.queue.held.extend(held);
         self.advance()?;
         Ok(serial)
+    }
+
+    /// Brackets a command buffer's work with timestamps for `GPUStartTime`
+    /// and `GPUEndTime`; `None` without timestamps.
+    fn time(&mut self, held: &mut [Held]) -> Result<Option<QueryPool>> {
+        if self.capabilities.timestamp_frequency == 0 {
+            return Ok(None);
+        }
+        let (pool, _) = self.resolver().query_pool(QueryType::Timestamp)?;
+        held[0].segments[0].commands.insert(
+            1,
+            Command::WriteTimestamp {
+                pool,
+                query: 0,
+                stage: PipelineStages::TOP_OF_PIPE,
+            },
+        );
+        let last = held.last_mut().and_then(|held| held.segments.last_mut());
+        last.expect("a segment")
+            .commands
+            .push(Command::WriteTimestamp {
+                pool,
+                query: 1,
+                stage: PipelineStages::ALL_COMMANDS,
+            });
+        Ok(Some(pool))
+    }
+
+    /// `GPUStartTime` and `GPUEndTime` of the completed command buffer with
+    /// `serial`, in timestamp ticks; the latest [`TIMES_KEPT`] are kept.
+    pub fn command_buffer_times(&self, serial: u64) -> Result<[u64; 2]> {
+        ensure(
+            serial != 0 && serial <= self.completed,
+            "the command buffer has not completed",
+        )?;
+        require(self.capabilities.timestamp_frequency != 0, "GPU times")?;
+        let times = &self.queue.times;
+        let found = times.binary_search_by_key(&serial, |&(serial, _)| serial);
+        found
+            .map(|index| times[index].1)
+            .map_err(|_| Error::Invalid("the command buffer's GPU times are no longer kept"))
     }
 
     /// Drops a command buffer that will not be committed.
@@ -552,8 +608,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(reached)
     }
 
-    /// Recycles what completed work held and destroys what it kept alive;
-    /// a failed invalidation is answered once the bookkeeping is done.
+    /// Recycles what completed work held, keeps its GPU times and destroys
+    /// what it kept alive; a failed invalidation or read is answered once
+    /// the bookkeeping is done.
     fn retire(&mut self, completed: u64) -> Result<()> {
         if completed <= self.completed {
             return Ok(());
@@ -563,15 +620,24 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .into_iter()
             .partition(|flight| flight.serial <= completed);
         self.queue.in_flight = pending;
-        let mut invalidated = Ok(());
+        let mut outcome = Ok(());
         for flight in done {
             // Before deferred destruction, which may free the memory.
             for range in flight.invalidations {
-                invalidated = invalidated.and(self.backend.invalidate_memory(
+                outcome = outcome.and(self.backend.invalidate_memory(
                     range.memory,
                     range.offset,
                     range.length,
                 ));
+            }
+            // Before the pool is reset.
+            if let Some(pool) = flight.times {
+                let mut times = [0; 2];
+                match self.backend.query_results(pool, 0, &mut times) {
+                    Ok(true) => self.keep_times(flight.serial, times),
+                    Ok(false) => {}
+                    Err(error) => outcome = outcome.and(Err(error)),
+                }
             }
             self.queue.free_chunks.extend(flight.chunks);
             for (query_type, pool) in flight.pools {
@@ -588,7 +654,15 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .for_each(|(_, object)| self.backend.destroy(object));
         self.descriptors.retire(completed);
         self.execution_sets.retire(completed);
-        invalidated
+        outcome
+    }
+
+    fn keep_times(&mut self, serial: u64, times: [u64; 2]) {
+        let kept = &mut self.queue.times;
+        if kept.len() == TIMES_KEPT {
+            kept.pop_front();
+        }
+        kept.push_back((serial, times));
     }
 
     /// `newEvent` and `newSharedEvent`: both are timeline semaphores.
