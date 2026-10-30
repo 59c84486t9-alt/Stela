@@ -54,6 +54,24 @@ pub struct Profile {
     /// Source Connac3 cipher number: open0, CCMP1284/CCMP25610/GCMP12811/GCMP25612.
     pub cipher: u8,
 }
+/// One link of a station MLD's association as the MT7925's MLD records
+/// name it: `mt7925_mcu_sta_mld_tlv`, `mt7925_mcu_sta_eht_mld_tlv` and
+/// `mt7925_mcu_bss_mld_tlv`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MldLink {
+    pub link_id: u8,
+    /// The station MLD's address.
+    pub local: Mac,
+    /// The AP MLD's address.
+    pub ap: Mac,
+    /// The setup link's BSS index and AP WCID, the MLD's primary link.
+    pub primary_bss: u8,
+    pub primary_wcid: u16,
+    /// The EML capabilities `STA_REC_EHT_MLD` takes when the AP and the
+    /// station both support EMLSR, which `eml_enable` then switches on.
+    pub eml: Option<u16>,
+}
+
 fn put16(bytes: &mut [u8], at: usize, v: u16) {
     bytes[at..at + 2].copy_from_slice(&v.to_le_bytes());
 }
@@ -146,21 +164,23 @@ impl Profile {
     /// ASSOC=2 includes the source single-link MLD record. PORT_SECURE is the
     /// source wire state only; the shared OS controlled port stays independent.
     pub fn peer_request(self, enable: bool, associated: bool) -> Result<Vec<u8>, Error> {
-        self.peer_request_inner(enable, associated, None)
+        self.peer_request_inner(enable, associated, None, None)
     }
     fn peer_request_inner(
         self,
         enable: bool,
         associated: bool,
         modern: Option<&modern::Configuration>,
+        link: Option<&MldLink>,
     ) -> Result<Vec<u8>, Error> {
-        self.peer_request_validated(enable, associated, modern, modern.is_some())
+        self.peer_request_validated(enable, associated, modern, link, modern.is_some())
     }
     fn peer_request_validated(
         self,
         enable: bool,
         associated: bool,
         modern: Option<&modern::Configuration>,
+        link: Option<&MldLink>,
         allow_six: bool,
     ) -> Result<Vec<u8>, Error> {
         self.validate_inner(allow_six)?;
@@ -210,13 +230,34 @@ impl Profile {
             state[12] = m.station_bandwidth() | m.negotiated().tx_nss << 4;
         }
         if associated {
+            // STA_REC_MLD: the primary link first, then a secondary link's
+            // own WCID and BSS.
+            let (address, primary, bss) = link
+                .map_or((self.peer, self.wcid, self.interface.bss_index), |link| {
+                    (link.ap, link.primary_wcid, link.primary_bss)
+                });
             let mld = tlv(&mut out, 0x20, 28);
-            mld[4..10].copy_from_slice(&self.peer.0);
-            put16(mld, 10, self.wcid);
-            put16(mld, 14, self.wcid);
+            mld[4..10].copy_from_slice(&address.0);
+            put16(mld, 10, primary);
+            put16(mld, 14, primary);
             mld[16] = 1;
-            put16(mld, 20, self.wcid);
-            mld[22] = self.interface.bss_index;
+            put16(mld, 20, primary);
+            mld[22] = bss;
+            if self.wcid != primary {
+                put16(mld, 12, self.wcid);
+                mld[16] = 2;
+                put16(mld, 24, self.wcid);
+                mld[26] = self.interface.bss_index;
+            }
+            if let Some(link) = link {
+                // STA_REC_EHT_MLD: EMLSR's capabilities, or STR otherwise.
+                let eht = tlv(&mut out, 0x21, 16);
+                eht[5] = 0xff;
+                match link.eml {
+                    Some(eml) => eht[10..12].copy_from_slice(&eml.to_le_bytes()),
+                    None => eht[7] = 1 << 1,
+                }
+            }
         }
         let hdr = tlv(&mut out, 0x2b, 8);
         hdr[5] = 1;
@@ -396,6 +437,44 @@ impl Profile {
         b[24] = 255;
         Ok(super::init::Request::roc(b))
     }
+    /// `mt7925_mcu_set_mlo_roc`: one channel request for this setup link's
+    /// channel and `other`'s, each at 20 MHz on its control channel, as
+    /// single-radio multi-link operation with a 2.4 GHz link among them
+    /// (MT7925_ROC_REQ_MLSR_AG) or not (MT7925_ROC_REQ_MLSR_AA).
+    pub fn mlo_roc(
+        self,
+        other: Self,
+        token: u8,
+        duration_ms: u32,
+    ) -> Result<super::init::Request, Error> {
+        self.validate_inner(true)?;
+        other.validate_inner(true)?;
+        if duration_ms == 0 {
+            return Err(Error::InvalidTiming);
+        }
+        let two = [self, other]
+            .iter()
+            .any(|link| link.channel.band == Band::Ghz2);
+        let mut b = vec![0; 4];
+        // UNI_ROC_ACQUIRE for the setup link, UNI_ROC_SUB_LINK for the other.
+        for (link, tag) in [(self, 0), (other, 3)] {
+            let roc = tlv(&mut b, tag, 24);
+            roc[4] = link.interface.bss_index;
+            roc[5] = token;
+            roc[6] = link.channel.number as u8;
+            roc[8] = match link.channel.band {
+                Band::Ghz2 => 1,
+                Band::Ghz5 => 2,
+                Band::Ghz6 => 3,
+            };
+            roc[10] = link.channel.number as u8;
+            roc[13] = link.channel.number as u8;
+            roc[15] = if two { 10 } else { 11 };
+            put32(roc, 16, duration_ms);
+            roc[20] = 255;
+        }
+        Ok(super::init::Request::roc(b))
+    }
     pub fn abort_roc(self, token: u8) -> Result<super::init::Request, Error> {
         self.abort_roc_validated(token, false)
     }
@@ -415,19 +494,21 @@ impl Profile {
     }
     /// Full associated BSS helper for the admitted local/peer legacy profile.
     pub fn bss_request(self, enable: bool) -> Result<Vec<u8>, Error> {
-        self.bss_request_inner(enable, None)
+        self.bss_request_inner(enable, None, None)
     }
     fn bss_request_inner(
         self,
         enable: bool,
         modern: Option<&modern::Configuration>,
+        link: Option<&MldLink>,
     ) -> Result<Vec<u8>, Error> {
-        self.bss_request_validated(enable, modern, modern.is_some())
+        self.bss_request_validated(enable, modern, link, modern.is_some())
     }
     fn bss_request_validated(
         self,
         enable: bool,
         modern: Option<&modern::Configuration>,
+        link: Option<&MldLink>,
         allow_six: bool,
     ) -> Result<Vec<u8>, Error> {
         self.validate_inner(allow_six)?;
@@ -469,12 +550,15 @@ impl Profile {
         rate[13] = (if two { 14 } else { 18 }) + self.basic_rates.trailing_zeros() as u8;
         rate[14] = rate[13];
         tlv(&mut out, 15, 8);
+        // UNI_BSS_INFO_MLD: an MLD link names its link, the primary link's
+        // BSS and the station MLD.
         let m = tlv(&mut out, 26, 20);
-        m[4] = 255;
+        m[4] = link.map_or(255, |link| link.primary_bss);
         m[5] = c.bss_index + 32;
-        m[6..12].copy_from_slice(&c.address.0);
+        m[6..12].copy_from_slice(&link.map_or(c.address, |link| link.local).0);
         m[12] = 255;
-        m[13] = 255;
+        m[13] = link.map_or(255, |link| link.link_id);
+        m[14] = u8::from(link.is_some_and(|link| link.eml.is_some()));
         let ifs = tlv(&mut out, 23, 20);
         ifs[4] = 1;
         put16(ifs, 8, self.slot_time);

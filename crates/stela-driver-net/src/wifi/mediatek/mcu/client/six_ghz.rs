@@ -102,7 +102,9 @@ impl Preauthentication {
         self.profile.interface.band_index = band;
     }
     pub fn bss_request(&self) -> Result<Vec<u8>, Error> {
-        let mut bytes = self.profile.bss_request_validated(false, None, true)?;
+        let mut bytes = self
+            .profile
+            .bss_request_validated(false, None, None, true)?;
         // Real nonNULL initial zero-capability peer: source6GHz older-family
         // bitmap is unconditional A|AN|AC|AX5, extension remains zero.
         bytes[4 + 25] = 0xb1;
@@ -110,7 +112,7 @@ impl Preauthentication {
     }
     pub fn peer_request(&self, enable: bool) -> Result<Vec<u8>, Error> {
         self.profile
-            .peer_request_validated(enable, false, None, true)
+            .peer_request_validated(enable, false, None, None, true)
     }
     pub fn broadcast_request(&self) -> Result<Vec<u8>, Error> {
         self.profile.broadcast_request()

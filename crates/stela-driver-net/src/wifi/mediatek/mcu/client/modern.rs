@@ -3,7 +3,7 @@
 //! Full single-link MT7925 modern station/BSS/EDCA and BA requests.
 //! Negotiated metadata encodes capabilities; only the current shared
 //! association owner and matching native completions can install these bytes.
-use super::{Error, Profile, put16, put32, tlv};
+use super::{Error, MldLink, Profile, put16, put32, tlv};
 use crate::wifi::{
     Band,
     station::phy::{AccessCategory, McsMaps, Negotiated, Width},
@@ -152,11 +152,26 @@ impl Configuration {
     }
     pub fn peer_request(&self, profile: Profile, associated: bool) -> Result<Vec<u8>, Error> {
         self.matches(profile)?;
-        profile.peer_request_inner(true, associated, Some(self))
+        profile.peer_request_inner(true, associated, Some(self), None)
     }
     pub fn bss_request(&self, profile: Profile, enable: bool) -> Result<Vec<u8>, Error> {
         self.matches(profile)?;
-        profile.bss_request_inner(enable, Some(self))
+        profile.bss_request_inner(enable, Some(self), None)
+    }
+    /// The associated AP's record on one link of a station MLD.
+    pub fn link_peer_request(&self, profile: Profile, link: &MldLink) -> Result<Vec<u8>, Error> {
+        self.matches(profile)?;
+        profile.peer_request_inner(true, true, Some(self), Some(link))
+    }
+    /// The BSS of one link of a station MLD.
+    pub fn link_bss_request(
+        &self,
+        profile: Profile,
+        link: &MldLink,
+        enable: bool,
+    ) -> Result<Vec<u8>, Error> {
+        self.matches(profile)?;
+        profile.bss_request_inner(enable, Some(self), Some(link))
     }
     fn matches(&self, profile: Profile) -> Result<(), Error> {
         // Recheck supplied resources/rates/antenna against this kept
