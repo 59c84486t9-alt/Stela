@@ -180,10 +180,11 @@ impl Security {
     }
 
     /// `wpa_write_rsn_ie`: the whole RSN element the station sends, with one
-    /// pairwise cipher and AKM, MFPC when it protects management frames, the
-    /// `pmkid` of the SAE exchange as `wpa_insert_pmkid` adds it, and the
-    /// group management cipher when it is not the default BIP-CMAC-128.
-    pub fn element(&self, pmkid: Option<&[u8; 16]>) -> Vec<u8> {
+    /// pairwise cipher and AKM, MFPC when it protects management frames, and
+    /// the group management cipher when it is not the default BIP-CMAC-128.
+    /// It carries no PMKID: wpa_supplicant's `sae_pmkid_in_assoc` defaults
+    /// to leaving an SAE exchange's out of the association request.
+    pub fn element(&self) -> Vec<u8> {
         let akm = match self.akm {
             Akm::Psk => PSK,
             Akm::PskSha256 => PSK_SHA256,
@@ -203,15 +204,9 @@ impl Security {
         let management = self
             .management
             .filter(|&cipher| cipher != ManagementCipher::Cmac128);
-        match pmkid {
-            Some(pmkid) => {
-                body.extend_from_slice(&[1, 0]);
-                body.extend_from_slice(pmkid);
-            }
-            None if management.is_some() => body.extend_from_slice(&[0, 0]),
-            None => {}
-        }
+        // An empty PMKID list precedes the group management cipher.
         if let Some(cipher) = management {
+            body.extend_from_slice(&[0, 0]);
             body.extend_from_slice(&[0, 0x0f, 0xac, cipher.suite()]);
         }
         let mut element = Vec::from([48, body.len() as u8]);

@@ -33,7 +33,7 @@ fn a_wpa2_personal_ap_takes_psk_and_ccmp_without_protection() {
         }
     );
     assert_eq!(
-        security.element(None),
+        security.element(),
         [
             48, 20, 1, 0, 0, 15, 172, 4, 1, 0, 0, 15, 172, 4, 1, 0, 0, 15, 172, 2, 0, 0
         ]
@@ -42,7 +42,7 @@ fn a_wpa2_personal_ap_takes_psk_and_ccmp_without_protection() {
     // A TKIP group stays the AP's.
     let mixed = Security::select(&ap(&rsn(2, &[4, 2], &[2], 0)), true).unwrap();
     assert_eq!(mixed.group, Cipher::Tkip);
-    assert_eq!(mixed.element(None)[7], 2);
+    assert_eq!(mixed.element()[7], 2);
 }
 
 #[test]
@@ -50,7 +50,7 @@ fn a_protecting_ap_takes_psk_sha256_and_bip() {
     let security = Security::select(&ap(&rsn(4, &[4], &[2, 6], MFPC)), true).unwrap();
     assert_eq!(security.akm, Akm::PskSha256);
     assert_eq!(security.management, Some(ManagementCipher::Cmac128));
-    let element = security.element(None);
+    let element = security.element();
     assert_eq!(element[19], 6);
     assert_eq!(&element[20..], &[0x80, 0]);
     // PSK alone is protected too when the AP can protect.
@@ -70,7 +70,7 @@ fn a_non_default_management_cipher_follows_an_empty_pmkid_list() {
     let security = Security::select(&ap(&body), true).unwrap();
     assert_eq!(security.management, Some(ManagementCipher::Gmac256));
     assert_eq!(
-        &security.element(None)[20..],
+        &security.element()[20..],
         &[0x80, 0, 0, 0, 0, 0x0f, 0xac, 12]
     );
 }
@@ -101,14 +101,14 @@ fn unsupported_networks_are_refused_for_their_reason() {
 }
 
 #[test]
-fn a_passphrase_takes_sae_with_protection_and_its_pmkid() {
+fn a_passphrase_takes_sae_with_protection() {
     let offered = ap(&rsn(4, &[4], &[2, 8], MFPC));
     let security = Security::select(&offered, true).unwrap();
     assert_eq!(security.akm, Akm::Sae);
-    let element = security.element(Some(&[7; 16]));
+    let element = security.element();
     assert_eq!(element[19], 8);
-    assert_eq!(&element[20..24], &[0x80, 0, 1, 0]);
-    assert_eq!(&element[24..], &[7; 16]);
+    // MFPC, and no PMKID as sae_pmkid_in_assoc=0 leaves it out.
+    assert_eq!(&element[20..], &[0x80, 0]);
     assert_eq!(element[1] as usize, element.len() - 2);
     // A raw PSK cannot run SAE: a transition network falls back to PSK.
     assert_eq!(Security::select(&offered, false).unwrap().akm, Akm::Psk);

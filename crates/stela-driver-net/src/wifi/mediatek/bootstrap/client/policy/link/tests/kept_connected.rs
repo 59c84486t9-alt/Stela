@@ -60,7 +60,7 @@ fn the_station_scans_joins_and_opens_the_port_after_the_4_way_handshake() {
     };
     let pmk = network.secret.pmk(&network.ssid);
     let security = Security::select(&bss.elements, true).unwrap();
-    let mut ap = Authenticator::between(security.suites(), pmk, AP, LOCAL, security.element(None));
+    let mut ap = Authenticator::between(security.suites(), pmk, AP, LOCAL, security.element());
     let mut station = Station::new(
         link,
         profile().interface,
@@ -201,9 +201,9 @@ fn a_passphrase_network_offering_sae_authenticates_by_it_before_the_handshake() 
     assert!(!station.carrier());
     let request = finish_tx(&model).pop().unwrap();
     assert_eq!(request[..2], [0, 0]);
-    let pmkid = sae.pmkid().unwrap();
+    // The RSN element carries no PMKID, as sae_pmkid_in_assoc=0 leaves.
     let security = Security::select(&bss.elements, true).unwrap();
-    let own_rsn = security.element(Some(&pmkid));
+    let own_rsn = security.element();
     assert!(request.windows(own_rsn.len()).any(|w| w == own_rsn));
     station.carrier();
     // An AP's association response carries no RSN element outside FT.
@@ -258,7 +258,7 @@ fn a_protected_psk_association_opens_its_port_once_the_igtk_installs() {
     let pmk = network.secret.pmk(&network.ssid);
     let security = Security::select(&bss.elements, true).unwrap();
     assert!(security.management.is_some());
-    let mut ap = Authenticator::between(security.suites(), pmk, AP, LOCAL, security.element(None));
+    let mut ap = Authenticator::between(security.suites(), pmk, AP, LOCAL, security.element());
     let mut station = Station::new(
         link,
         profile().interface,

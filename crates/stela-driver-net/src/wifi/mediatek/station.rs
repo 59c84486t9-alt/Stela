@@ -420,7 +420,7 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
             self.authenticate(handle, bss, security)
                 .map(State::Authenticating)
         } else {
-            self.association(&bss, security, None, None, self.pmk.clone())
+            self.association(&bss, security, None, self.pmk.clone())
                 .and_then(|(join, profile, candidate)| {
                     self.link
                         .join(handle, join, profile)
@@ -446,7 +446,7 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
         let Secret::Passphrase(passphrase) = &self.network.secret else {
             return Err(String::from("MT7925: SAE needs the network's passphrase"));
         };
-        let (_, profile, _) = self.association(&bss, security, None, None, self.pmk.clone())?;
+        let (_, profile, _) = self.association(&bss, security, None, self.pmk.clone())?;
         let session = self
             .link
             .begin_external_authentication(handle, profile, SAE_BUDGET_US)
@@ -523,8 +523,8 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
         }
     }
 
-    /// `sme_associate` once SAE authenticated the station: the association
-    /// request carries the exchange's PMKID, and its PMK keys the handshake.
+    /// `sme_associate` once SAE authenticated the station: its PMK keys the
+    /// handshake, and the request carries no PMKID (`sae_pmkid_in_assoc`).
     fn associate(&mut self, now: u64) {
         let State::Authenticating(authenticating) =
             core::mem::replace(&mut self.state, State::Scanning(Vec::new()))
@@ -539,18 +539,18 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
             exchange,
             h2e,
         } = *authenticating;
-        let (Some(pmk), Some(pmkid)) = (exchange.pmk(), exchange.pmkid()) else {
+        let Some(pmk) = exchange.pmk() else {
             return self.failed(now, String::from("MT7925: SAE gave no PMK"));
         };
         let rsnxe = h2e.then_some(&sae::H2E_RSNXE[..]);
-        let started = self
-            .association(&bss, security, Some(&pmkid), rsnxe, pmk)
-            .and_then(|(join, _, candidate)| {
-                self.link
-                    .associate_external(&session, handle, join)
-                    .map_err(|error| format!("{error}"))?;
-                Ok(candidate)
-            });
+        let started =
+            self.association(&bss, security, rsnxe, pmk)
+                .and_then(|(join, _, candidate)| {
+                    self.link
+                        .associate_external(&session, handle, join)
+                        .map_err(|error| format!("{error}"))?;
+                    Ok(candidate)
+                });
         match started {
             Ok(candidate) => self.state = State::Joining(Box::new(candidate)),
             Err(message) => self.failed(now, message),
@@ -559,12 +559,11 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
 
     /// `ieee80211_mgd_assoc`: the association request and station profile
     /// for `bss` on mac80211's mode and channel, its RSN element with an SAE
-    /// exchange's `pmkid` and `rsnxe`, and the handshake's `pmk`.
+    /// exchange's `rsnxe`, and the handshake's `pmk`.
     fn association(
         &self,
         bss: &Bss,
         security: Security,
-        pmkid: Option<&[u8; 16]>,
         rsnxe: Option<&[u8]>,
         pmk: Zeroizing<[u8; 32]>,
     ) -> Result<(Join, Profile, Candidate), String> {
@@ -593,7 +592,7 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
                 regd::channels(band),
             )
         });
-        let own_rsn = security.element(pmkid);
+        let own_rsn = security.element();
         let elements = connection::request_elements(
             &Request {
                 ssid: &self.network.ssid,
