@@ -698,15 +698,7 @@ impl Station {
             return Err(Error::Stale);
         }
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
-        let channel = self.current_channel().ok_or(Error::NotAssociated)?;
-        if (
-            frame.radio.band,
-            frame.radio.channel,
-            frame.radio.frequency_mhz,
-        ) != (channel.band, channel.number, channel.frequency_mhz)
-        {
-            return Err(Error::WrongChannel);
-        }
+        let (frame, link) = self.mld_view(frame)?;
         if frame.fcs_error || frame.monitor_only {
             return Err(Error::Wire(wire::Error::Integrity));
         }
@@ -723,9 +715,15 @@ impl Station {
         if header.control & 0x800c != 0 || header.length != 24 || header.fragmented() {
             return Err(Error::Unsupported("nonordinary management frame"));
         }
-        if (header.receiver != self.link_address() && header.receiver != Mac::BROADCAST)
-            || header.transmitter != Some(join.bssid)
-            || frame.bytes()[16..22] != join.bssid.0
+        let (local, peer) = self.addresses()?;
+        let peer = if header.receiver.is_multicast() {
+            link.ap
+        } else {
+            peer
+        };
+        if (header.receiver != local && header.receiver != Mac::BROADCAST)
+            || header.transmitter != Some(peer)
+            || frame.bytes()[16..22] != peer.0
         {
             return Err(Error::Wire(wire::Error::WrongPeer));
         }
@@ -750,19 +748,18 @@ impl Station {
             return Err(Error::Stale);
         }
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
-        let channel = self.current_channel().ok_or(Error::NotAssociated)?;
-        if (
-            frame.radio.band,
-            frame.radio.channel,
-            frame.radio.frequency_mhz,
-        ) != (channel.band, channel.number, channel.frequency_mhz)
-        {
-            return Err(Error::WrongChannel);
-        }
+        let (view, link) = self.mld_view(frame)?;
+        let frame = view.as_ref();
         if frame.fcs_error || frame.monitor_only {
             return Err(Error::Wire(wire::Error::Integrity));
         }
-        wire::check_peer(frame, self.link_address(), join.bssid)?;
+        let (local, peer) = self.addresses()?;
+        let peer = if frame.header().receiver.is_multicast() {
+            link.ap
+        } else {
+            peer
+        };
+        wire::check_peer(frame, local, peer)?;
         if join.request.pmf().is_some() && super::security::management::robust(frame) {
             return Err(Error::Unsupported(
                 "PMF requires authenticated management consumer",

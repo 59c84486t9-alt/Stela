@@ -410,7 +410,7 @@ impl Station {
             };
             let wire = wire::request(
                 self.local,
-                record.session.context.bssid(),
+                record.session.context.peer(),
                 self.sequence,
                 request,
                 n.he.is_some(),
@@ -625,7 +625,7 @@ impl Station {
                 let record = self.tx_ba.records[index].as_ref().unwrap();
                 let bytes = wire::delete(
                     self.local,
-                    record.session.context.bssid(),
+                    record.session.context.peer(),
                     self.sequence,
                     index as u8,
                     true,

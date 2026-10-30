@@ -260,6 +260,13 @@ impl AssociationContext {
     pub fn bssid(&self) -> Mac {
         self.bssid
     }
+    /// The AP the association's frames address: the AP MLD of a multi-link
+    /// association, or the BSS.
+    pub fn peer(&self) -> Mac {
+        self.affiliation
+            .as_ref()
+            .map_or(self.bssid, |affiliation| affiliation.mld.ap)
+    }
     pub fn channel(&self) -> Channel {
         self.definition.control
     }

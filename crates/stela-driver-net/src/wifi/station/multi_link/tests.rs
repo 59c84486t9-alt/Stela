@@ -282,3 +282,94 @@ fn a_setup_needs_distinct_links_and_addresses() {
             .is_err()
     );
 }
+
+/// A data frame on the air: from `ap` to `receiver` on `channel`, its
+/// third address `source`, carrying EAPOL.
+fn eapol_on_air(ap: Mac, receiver: Mac, source: Mac, channel: Channel) -> Mpdu {
+    let mut bytes = vec![0x08, 0x02, 0, 0];
+    for address in [receiver, ap, source] {
+        bytes.extend_from_slice(&address.0);
+    }
+    bytes.extend_from_slice(&[0, 0, 0xaa, 0xaa, 3, 0, 0, 0, 0x88, 0x8e, 1, 3]);
+    let mut frame = response(0, &[]);
+    frame = Mpdu::new(bytes, frame.radio, SecurityStatus::default()).unwrap();
+    frame.radio.band = channel.band;
+    frame.radio.channel = channel.number;
+    frame.radio.frequency_mhz = channel.frequency_mhz;
+    frame
+}
+
+/// mac80211's MLD addressing once the setup made both links: a unicast
+/// frame on either link reaches the OS between the MLDs, a group-addressed
+/// one keeps its link's AP, and frames sent address the MLDs.
+#[test]
+fn an_mld_association_addresses_the_mlds_on_every_link() {
+    use crate::wifi::station::{
+        Completion,
+        data::{Ingress, SequenceOwner, TxClass},
+    };
+    let (mut station, action) = associate_station(association_response(vec![answer(0)]));
+    let Action::Configure {
+        context: Some(context),
+        ..
+    } = action
+    else {
+        panic!("configuration");
+    };
+    station
+        .complete_configuration(context.ticket(), Completion::Accepted, 12)
+        .unwrap();
+    let epoch = station.association_epoch().unwrap();
+    let setup = join(PortPolicy::Controlled).channel;
+    assert_eq!(
+        station.on_air().collect::<Vec<_>>(),
+        [(SETUP_LINK, AP, setup), (OTHER_LINK, OTHER, CHANNEL_149)]
+            .map(|(local, ap, channel)| OnAir { local, ap, channel })
+    );
+    for (ap, local, channel) in [(AP, SETUP_LINK, setup), (OTHER, OTHER_LINK, CHANNEL_149)] {
+        let frame = eapol_on_air(ap, local, AP_MLD, channel);
+        let (view, link) = station.mld_view(&frame).unwrap();
+        assert_eq!((link.ap, link.channel), (ap, channel));
+        assert_eq!(
+            (view.header().receiver, view.header().transmitter),
+            (LOCAL, Some(AP_MLD))
+        );
+        let Ingress::ControlPort { ethernet, .. } =
+            station.receive_msdu(epoch, &frame, &mut []).unwrap()
+        else {
+            panic!("EAPOL");
+        };
+        assert_eq!(
+            (&ethernet[..6], &ethernet[6..12]),
+            (&LOCAL.0[..], &AP_MLD.0[..])
+        );
+    }
+    // A group-addressed frame keeps the link's own addresses.
+    let group = eapol_on_air(OTHER, Mac::BROADCAST, OTHER, CHANNEL_149);
+    let (view, _) = station.mld_view(&group).unwrap();
+    assert_eq!(view.header().transmitter, Some(OTHER));
+    // No link of the association runs on another channel.
+    let mut stray = eapol_on_air(OTHER, OTHER_LINK, AP_MLD, CHANNEL_149);
+    stray.radio.frequency_mhz += 5;
+    assert!(matches!(station.mld_view(&stray), Err(Error::WrongChannel)));
+    let mut ethernet = AP_MLD.0.to_vec();
+    ethernet.extend_from_slice(&LOCAL.0);
+    ethernet.extend_from_slice(&[0x88, 0x8e, 1, 3]);
+    let plan = station
+        .prepare_msdu(
+            epoch,
+            &ethernet,
+            TxClass::ControlPortPlaintext,
+            SequenceOwner::Host,
+            &mut [],
+            &mut Policy(true),
+        )
+        .unwrap();
+    assert_eq!(
+        (
+            &plan.plaintext_mpdu()[4..10],
+            &plan.plaintext_mpdu()[10..16]
+        ),
+        (&AP_MLD.0[..], &LOCAL.0[..])
+    );
+}

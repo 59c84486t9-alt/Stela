@@ -282,7 +282,7 @@ impl Station {
         let ticket = self.ticket()?;
         let bytes = wire::response(
             self.local,
-            context.bssid(),
+            context.peer(),
             self.sequence,
             request,
             wire::Reply {
@@ -390,15 +390,8 @@ impl Station {
         if epoch != self.epoch {
             return Err(Error::Stale);
         }
-        let channel = self.operating_definition().ok_or(Error::Stale)?.control;
-        if (
-            frame.radio.band,
-            frame.radio.channel,
-            frame.radio.frequency_mhz,
-        ) != (channel.band, channel.number, channel.frequency_mhz)
-        {
-            return Err(Error::Station(super::Error::WrongChannel));
-        }
+        let (view, _) = self.mld_view(frame).map_err(Error::Station)?;
+        let frame = view.as_ref();
         if frame.fcs_error
             || frame.monitor_only
             || frame.aggregation != crate::wifi::Aggregation::default()
@@ -407,7 +400,7 @@ impl Station {
             return Err(Error::InvalidFrame);
         }
         if frame.header().control & TYPE_SUBTYPE == BLOCK_ACK_REQUEST {
-            let (tid, sequence) = wire::bar(frame, self.local, context.bssid())?;
+            let (tid, sequence) = wire::bar(frame, self.local, context.peer())?;
             let session = self.active_rx_block_ack(tid).ok_or(Error::NoSession)?;
             return Ok(Action::Bar {
                 session: Arc::clone(session),
@@ -417,7 +410,7 @@ impl Station {
         if context.pmf().is_some() {
             return Err(Error::Unsupported);
         }
-        super::wire::check_peer(frame, self.local, context.bssid()).map_err(super::Error::Wire)?;
+        super::wire::check_peer(frame, self.local, context.peer()).map_err(super::Error::Wire)?;
         let action = wire::action(
             frame,
             context.negotiated().he.is_some(),
@@ -439,7 +432,8 @@ impl Station {
     ) -> Result<Action, Error> {
         self.validate_association_context(original)?;
         let context = self.ba_context()?;
-        let channel = self.operating_definition().ok_or(Error::Stale)?.control;
+        let (view, _) = self.mld_view(frame).map_err(Error::Station)?;
+        let frame = view.as_ref();
         let h = frame.header();
         if h.control & TYPE_SUBTYPE != crate::wifi::frame::ACTION
             || !h.protected()
@@ -447,21 +441,13 @@ impl Station {
             || h.length != 24
             || h.fragmented()
             || h.receiver != self.local
-            || h.transmitter != Some(context.bssid())
-            || frame.bytes()[16..22] != context.bssid().0
+            || h.transmitter != Some(context.peer())
+            || frame.bytes()[16..22] != context.peer().0
             || frame.fcs_error
             || frame.monitor_only
             || frame.aggregation != crate::wifi::Aggregation::default()
         {
             return Err(Error::InvalidFrame);
-        }
-        if (
-            frame.radio.band,
-            frame.radio.channel,
-            frame.radio.frequency_mhz,
-        ) != (channel.band, channel.number, channel.frequency_mhz)
-        {
-            return Err(Error::Station(super::Error::WrongChannel));
         }
         let action = wire::action_body(
             body,
@@ -658,7 +644,7 @@ impl Station {
                 let ticket = self.ticket()?;
                 let bytes = wire::delete(
                     self.local,
-                    record.session.context.bssid(),
+                    record.session.context.peer(),
                     self.sequence,
                     record.session.tid,
                     false,

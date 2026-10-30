@@ -326,15 +326,15 @@ impl Station {
             return Err(Error::Stale);
         }
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
-        let channel = self.current_channel().ok_or(Error::NotAssociated)?;
-        if (
-            frame.radio.band,
-            frame.radio.channel,
-            frame.radio.frequency_mhz,
-        ) != (channel.band, channel.number, channel.frequency_mhz)
-        {
-            return Err(Error::WrongChannel);
-        }
+        let (view, link) = self.mld_view(frame).map_err(|_| Error::WrongChannel)?;
+        let frame = view.as_ref();
+        let (local, peer) = self.addresses().map_err(|_| Error::NotAssociated)?;
+        // Group-addressed frames keep the address of the link they arrive on.
+        let transmitter = if frame.header().receiver.is_multicast() {
+            link.ap
+        } else {
+            peer
+        };
         let header = frame.header();
         if !header.data_present() || header.control & 0x0300 != 0x0200 {
             return Err(Error::Unsupported("nonstation FromDS data"));
@@ -342,13 +342,13 @@ impl Station {
         if header.fragmented() || header.amsdu || frame.aggregation != Aggregation::default() {
             return Err(Error::Unsupported("fragment/aggregate data"));
         }
-        if header.transmitter != Some(join.bssid)
-            || (header.receiver != self.local && !header.receiver.is_multicast())
+        if header.transmitter != Some(transmitter)
+            || (header.receiver != local && !header.receiver.is_multicast())
         {
             return Err(Error::WrongPeer);
         }
         let source = Mac(frame.bytes()[16..22].try_into().unwrap());
-        if header.receiver.is_multicast() && source == self.local {
+        if header.receiver.is_multicast() && source == local {
             return Err(Error::WrongPeer);
         }
         if frame.fcs_error || frame.monitor_only {
@@ -361,9 +361,9 @@ impl Station {
             }
             let key = frame.security.key.ok_or(Error::WrongKey)?;
             let expected = if header.receiver.is_multicast() {
-                KeyScope::Group(join.bssid)
+                KeyScope::Group(transmitter)
             } else {
-                KeyScope::Pairwise(join.bssid)
+                KeyScope::Pairwise(transmitter)
             };
             if key.scope() != expected {
                 return Err(Error::WrongKey);
@@ -396,7 +396,7 @@ impl Station {
         };
         let ethernet = ethernet(header.receiver, source, payload)?;
         if u16::from_be_bytes([ethernet[12], ethernet[13]]) == EAPOL {
-            if header.receiver != self.local && header.receiver != PAE_GROUP {
+            if header.receiver != local && header.receiver != PAE_GROUP {
                 return Err(Error::WrongPeer);
             }
             return Ok(Ingress::ControlPort {
@@ -576,7 +576,10 @@ impl Station {
             return Err(Error::Regulatory);
         }
         let (destination, source, protocol, payload) = msdu(ethernet)?;
-        if source != self.local {
+        // An MLD association's frames address the MLDs; the device puts them
+        // on a link, as mt792x_tx does.
+        let (local, peer) = self.addresses().map_err(|_| Error::NotAssociated)?;
+        if source != local {
             return Err(Error::WrongPeer);
         }
         let control_port = protocol == EAPOL;
@@ -597,7 +600,7 @@ impl Station {
                 }
             }
             TxClass::ControlPortPlaintext | TxClass::ControlPortProtected(_) => {
-                if !control_port || (destination != join.bssid && destination != PAE_GROUP) {
+                if !control_port || (destination != peer && destination != PAE_GROUP) {
                     return Err(Error::WrongPeer);
                 }
                 if let TxClass::ControlPortProtected(key) = class {
@@ -611,7 +614,7 @@ impl Station {
             if key.index() != 0 && !key.cipher().is_wep() {
                 return Err(Error::Unsupported("extended pairwise key ID"));
             }
-            if key.scope() != KeyScope::Pairwise(join.bssid)
+            if key.scope() != KeyScope::Pairwise(peer)
                 || join.request.key_ciphers().map(|pair| pair.0) != Some(key.cipher())
             {
                 return Err(Error::WrongKey);
@@ -639,8 +642,8 @@ impl Station {
             0x0108_u16
         };
         plaintext[..2].copy_from_slice(&control.to_le_bytes());
-        plaintext[4..10].copy_from_slice(&join.bssid.0);
-        plaintext[10..16].copy_from_slice(&self.local.0);
+        plaintext[4..10].copy_from_slice(&peer.0);
+        plaintext[10..16].copy_from_slice(&local.0);
         plaintext[16..22].copy_from_slice(&destination.0);
         let sequence = match sequence_owner {
             SequenceOwner::Host => {

@@ -198,6 +198,23 @@ impl Mpdu {
     pub const fn header(&self) -> &Header {
         &self.header
     }
+    /// The frame with each address its header carries, numbered from 1,
+    /// as `address` maps it; every other byte and the receive status kept.
+    pub fn readdressed(&self, mut address: impl FnMut(u8, Mac) -> Mac) -> Self {
+        let mut frame = self.clone();
+        for (number, at) in [(1, 4), (2, 10), (3, 16)] {
+            if frame.header.length >= at + 6 {
+                let field = &mut frame.bytes[at..at + 6];
+                let mapped = address(number, Mac(field.try_into().unwrap()));
+                field.copy_from_slice(&mapped.0);
+            }
+        }
+        frame.header.receiver = Mac(frame.bytes[4..10].try_into().unwrap());
+        if frame.header.transmitter.is_some() {
+            frame.header.transmitter = Some(Mac(frame.bytes[10..16].try_into().unwrap()));
+        }
+        frame
+    }
 }
 
 #[cfg(test)]
