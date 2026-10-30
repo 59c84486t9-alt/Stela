@@ -1,14 +1,14 @@
 use super::{
     GuestMemory, Outcome, Service,
     wire::{
-        self, ConstantRecord, Empty, Fault, Handle, Length, LibraryFunctionNamesRequest,
-        NegotiateRequest, NegotiateResponse, NewFunctionRequest, NewLibraryRequest, Operation,
-        Record, Span, Status,
+        self, ConstantInfo, ConstantRecord, Empty, Fault, FunctionReflectionRequest,
+        FunctionReflectionResponse, Handle, Length, LibraryFunctionNamesRequest, NegotiateRequest,
+        NegotiateResponse, NewFunctionRequest, NewLibraryRequest, Operation, Record, Span, Status,
     },
 };
 use crate::gpu::{
     metal::{
-        abi::DataType,
+        abi::{DataType, FunctionType},
         capabilities::block::Block,
         device::{
             LibraryId,
@@ -363,6 +363,74 @@ fn libraries_list_and_make_their_functions() {
         )),
         Status::StaleHandle
     );
+}
+
+#[test]
+fn functions_reflect_their_constants_and_patches() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let library = new_library(&mut service, connection, memory);
+    let scale = ConstantRecord {
+        data_type: DataType::UInt.raw(),
+        index: 0,
+        name: Span::default(),
+        value: memory.put(&[2, 0, 0, 0]),
+    };
+    let constants = new_function(
+        &mut service,
+        connection,
+        library,
+        "constants",
+        &[scale],
+        memory,
+    )
+    .unwrap()
+    .handle;
+    let patch = new_function(&mut service, connection, library, "patch", &[], memory)
+        .unwrap()
+        .handle;
+    let mut reflect = |function, capacity| {
+        let out = memory.put(&vec![0; capacity]);
+        let request = FunctionReflectionRequest { function, out };
+        let response: FunctionReflectionResponse = call(
+            &mut service,
+            connection,
+            Operation::FunctionReflection,
+            &request,
+            memory,
+        )
+        .unwrap();
+        (response, memory.read(out).unwrap().to_vec())
+    };
+    // Two constants' records, then "scale" and "tint".
+    let (response, nothing) = reflect(constants, 8);
+    assert_eq!(nothing, [0; 8]);
+    let length = 2 * size_of::<ConstantInfo>() + 9;
+    assert_eq!(
+        response,
+        FunctionReflectionResponse {
+            function_type: FunctionType::Kernel.raw(),
+            patch_type: 0,
+            patch_control_points: 0,
+            constant_count: 2,
+            attribute_count: 0,
+            length: length as u64,
+        }
+    );
+    let (_, data) = reflect(constants, length);
+    let infos: Vec<ConstantInfo> =
+        wire::read_array(&data[..2 * size_of::<ConstantInfo>()]).unwrap();
+    let tint = infos[1];
+    assert_eq!(
+        (tint.index, tint.required, tint.data_type),
+        (1, 0, DataType::Half3.raw())
+    );
+    let name = tint.name as usize..(tint.name + tint.name_length) as usize;
+    assert_eq!(&data[name], b"tint");
+
+    let (response, _) = reflect(patch, 0);
+    assert_eq!((response.patch_type, response.patch_control_points), (2, 4));
 }
 
 #[test]

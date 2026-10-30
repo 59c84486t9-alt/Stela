@@ -2,17 +2,18 @@
 use super::{
     Call, Object, Service,
     wire::{
-        self, ConstantRecord, Fault, LibraryFunctionNamesRequest, NewFunctionRequest,
+        self, AttributeInfo, ConstantInfo, ConstantRecord, Fault, FunctionReflectionRequest,
+        FunctionReflectionResponse, LibraryFunctionNamesRequest, NewFunctionRequest,
         NewLibraryRequest,
     },
 };
 use crate::gpu::metal::{
     abi::DataType,
     device::{
-        LibraryId,
+        FunctionId, LibraryId,
         pipelines::{ConstantKey, ConstantValue},
     },
-    shader::Compiler,
+    shader::{Compiler, PatchDomain, Reflection},
     vulkan::backend::Backend,
 };
 use alloc::{string::String, vec::Vec};
@@ -62,6 +63,82 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let function = self.device.new_function(library, &name, &values)?;
         let handle = self.hold(call.connection, Object::Function(function))?;
         call.reply(&handle)
+    }
+
+    pub(super) fn function_reflection(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: FunctionReflectionRequest = call.request()?;
+        let function = self.object::<FunctionId>(call.connection, request.function)?;
+        let reflection = self.device.function_reflection(function)?;
+        let (patch, attributes) = match reflection {
+            Reflection::Stage(interface) => {
+                (interface.patch, interface.declared_attributes.as_slice())
+            }
+            Reflection::Visible { .. } => (None, &[][..]),
+        };
+        let constants = reflection.constants();
+        // Records first, then the names they point into.
+        let mut names = Names {
+            base: constants.len() * size_of::<ConstantInfo>()
+                + attributes.len() * size_of::<AttributeInfo>(),
+            bytes: Vec::new(),
+        };
+        let mut data = Vec::with_capacity(names.base);
+        for constant in constants {
+            let (name, name_length) = names.add(&constant.name)?;
+            data.extend_from_slice(wire::bytes(&ConstantInfo {
+                name,
+                name_length,
+                data_type: constant.data_type.raw(),
+                index: constant.index,
+                required: constant.required.into(),
+            }));
+        }
+        for attribute in attributes {
+            let (name, name_length) = names.add(&attribute.name)?;
+            data.extend_from_slice(wire::bytes(&AttributeInfo {
+                name,
+                name_length,
+                data_type: attribute.data_type.raw(),
+                index: attribute.index,
+                active: attribute.active.into(),
+                patch_control_point: attribute.patch_control_point.into(),
+                reserved: 0,
+            }));
+        }
+        data.extend_from_slice(&names.bytes);
+        let response = FunctionReflectionResponse {
+            function_type: reflection.function_type().raw(),
+            // `MTLPatchType`.
+            patch_type: match patch.map(|patch| patch.domain) {
+                None => 0,
+                Some(PatchDomain::Triangle) => 1,
+                Some(PatchDomain::Quad) => 2,
+            },
+            patch_control_points: patch
+                .and_then(|patch| patch.control_points)
+                .map_or(0, u64::from),
+            constant_count: constants.len() as u32,
+            attribute_count: attributes.len() as u32,
+            length: data.len() as u64,
+        };
+        call.write_fitting(request.out, &data)?;
+        call.reply(&response)
+    }
+}
+
+/// The names of a reflection, which follow its `base` bytes of records.
+struct Names {
+    base: usize,
+    bytes: Vec<u8>,
+}
+
+impl Names {
+    /// Adds `name`, returning its offset and length in the reflection.
+    fn add(&mut self, name: &str) -> Result<(u32, u32), Fault> {
+        let offset = u32::try_from(self.base + self.bytes.len())
+            .map_err(|_| Fault::malformed("reflection too large"))?;
+        self.bytes.extend_from_slice(name.as_bytes());
+        Ok((offset, name.len() as u32))
     }
 }
 

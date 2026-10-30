@@ -129,18 +129,28 @@ impl Call<'_> {
         wire::write(value, self.response)
     }
 
-    /// Writes variable data to `out` when it fits, replying its length
-    /// either way, so a frontend with too short a span asks again.
-    fn reply_data(&mut self, out: Span, data: &[u8]) -> Result<(), Fault> {
+    /// Writes variable data to `out` when it fits; its response answers
+    /// its length either way, so a frontend with too short a span asks
+    /// again.
+    fn write_fitting(&mut self, out: Span, data: &[u8]) -> Result<(), Fault> {
         let length = data.len() as u64;
-        if length <= out.length {
-            let span = Span {
-                address: out.address,
-                length,
-            };
-            self.memory.write(span, data)?;
+        if length > out.length {
+            return Ok(());
         }
-        self.reply(&wire::Length { length })
+        let span = Span {
+            address: out.address,
+            length,
+        };
+        self.memory.write(span, data)
+    }
+
+    /// Writes variable data as [`write_fitting`](Self::write_fitting) does
+    /// and replies its length.
+    fn reply_data(&mut self, out: Span, data: &[u8]) -> Result<(), Fault> {
+        self.write_fitting(out, data)?;
+        self.reply(&wire::Length {
+            length: data.len() as u64,
+        })
     }
 }
 
@@ -261,6 +271,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Operation::NewLibrary => self.new_library(&mut call),
             Operation::LibraryFunctionNames => self.library_function_names(&mut call),
             Operation::NewFunction => self.new_function(&mut call),
+            Operation::FunctionReflection => self.function_reflection(&mut call),
             Operation::NewBuffer => self.new_buffer(&mut call),
             Operation::BufferDidModifyRange => self.buffer_did_modify_range(&mut call),
             Operation::NewTexture => self.new_texture(&mut call),

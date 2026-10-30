@@ -434,6 +434,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.pipelines.interface(id)
     }
 
+    /// What the compiler reflects of a function.
+    pub fn function_reflection(&self, id: FunctionId) -> Result<&Reflection> {
+        Ok(&self.pipelines.functions.get(id.0)?.reflection)
+    }
+
     pub fn function_type(&self, id: FunctionId) -> Result<FunctionType> {
         Ok(self
             .pipelines

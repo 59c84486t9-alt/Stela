@@ -89,16 +89,20 @@ pub fn read<T: Record>(bytes: &[u8]) -> Result<T, Fault> {
     Ok(unsafe { bytes.as_ptr().cast::<T>().read_unaligned() })
 }
 
+/// The bytes of `value`.
+pub fn bytes<T: Record>(value: &T) -> &[u8] {
+    // SAFETY: a record has no padding, so its bytes are initialized.
+    unsafe {
+        core::slice::from_raw_parts((value as *const T).cast::<u8>(), core::mem::size_of::<T>())
+    }
+}
+
 /// Writes `value` to `out`, which must be exactly its size.
 pub fn write<T: Record>(value: &T, out: &mut [u8]) -> Result<(), Fault> {
     if out.len() != core::mem::size_of::<T>() {
         return Err(Fault::MALFORMED);
     }
-    // SAFETY: a record has no padding, so its bytes are initialized.
-    let bytes = unsafe {
-        core::slice::from_raw_parts((value as *const T).cast::<u8>(), core::mem::size_of::<T>())
-    };
-    out.copy_from_slice(bytes);
+    out.copy_from_slice(bytes(value));
     Ok(())
 }
 
@@ -163,6 +167,47 @@ records! {
         pub index: u64,
         pub name: Span,
         pub value: Span,
+    }
+
+    /// `FunctionReflection`: the span receiving the function's
+    /// `ConstantInfo`s, then its `AttributeInfo`s, then their names.
+    pub struct FunctionReflectionRequest {
+        pub function: u64,
+        pub out: Span,
+    }
+
+    /// `functionType`, `patchType`, the control points the function
+    /// declares (zero for none), and the counts and length of the
+    /// reflection written when it fit.
+    pub struct FunctionReflectionResponse {
+        pub function_type: u64,
+        pub patch_type: u64,
+        pub patch_control_points: u64,
+        pub constant_count: u32,
+        pub attribute_count: u32,
+        pub length: u64,
+    }
+
+    /// An entry of `functionConstantsDictionary`; names are offsets and
+    /// lengths in the reflection.
+    pub struct ConstantInfo {
+        pub name: u32,
+        pub name_length: u32,
+        pub data_type: u64,
+        pub index: u32,
+        pub required: u32,
+    }
+
+    /// An `MTLVertexAttribute` of `vertexAttributes`, or an `MTLAttribute`
+    /// of a kernel's `stageInputAttributes`.
+    pub struct AttributeInfo {
+        pub name: u32,
+        pub name_length: u32,
+        pub data_type: u64,
+        pub index: u32,
+        pub active: u32,
+        pub patch_control_point: u32,
+        pub reserved: u32,
     }
 
     /// `newBufferWithLength:options:`.
@@ -437,6 +482,8 @@ operations! {
     LibraryFunctionNames = 0x0102 => LibraryFunctionNamesRequest, Length;
     /// `newFunctionWithName:constantValues:`.
     NewFunction = 0x0103 => NewFunctionRequest, Handle;
+    /// What `MTLFunction` reports of the function.
+    FunctionReflection = 0x0104 => FunctionReflectionRequest, FunctionReflectionResponse;
     /// `newBufferWithLength:options:`.
     NewBuffer = 0x0201 => NewBufferRequest, BufferResponse;
     /// `didModifyRange:`.
