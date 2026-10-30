@@ -272,6 +272,26 @@ pub(crate) fn emit_integer(
             target,
         );
         index_right(code, operand);
+        if !wide
+            && matches!(
+                operand.kind,
+                Kind::Integer {
+                    signedness: Signedness::Unsigned,
+                    products: Products::Two,
+                }
+            )
+            && vector_extensions::unsigned_word_dot(code, ACCUMULATOR, LEFT, RIGHT, target)
+        {
+            store_z_chunk(
+                code,
+                operand.destination,
+                chunk,
+                ACCUMULATOR,
+                length,
+                target,
+            );
+            continue;
+        }
         let result = match operand.kind {
             Kind::Integer {
                 signedness,

@@ -59,7 +59,9 @@ pub(crate) fn host() -> TargetCpu {
         let installed = unsafe { sigaction(SIGILL, &action, core::ptr::null_mut()) };
         assert_eq!(installed, 0);
     });
-    host.with_avx_vnni_int8().with_sha512()
+    host.with_avx_vnni_int8()
+        .with_avx_vnni_int16()
+        .with_sha512()
 }
 
 #[repr(C)]
@@ -253,6 +255,37 @@ fn from_qwords(qwords: [u64; 4]) -> [u8; 64] {
     value
 }
 
+/// VPDPWUUD, VPDPWUSD and VPDPWSUD (AVX-VNNI-INT16): each dword of
+/// `accumulator` plus the two products of its words of `left` and `right`,
+/// wrapping; bytes above the vector length clear.
+fn word_dots(
+    accumulator: &[u8; 64],
+    left: &[u8; 64],
+    right: &[u8; 64],
+    signed: [bool; 2],
+    bytes: usize,
+) -> [u8; 64] {
+    let word = |value: &[u8; 64], at: usize, signed: bool| {
+        let word = u16::from_le_bytes([value[at], value[at + 1]]);
+        if signed {
+            i64::from(word as i16)
+        } else {
+            i64::from(word)
+        }
+    };
+    let mut result = [0; 64];
+    for lane in (0..bytes).step_by(4) {
+        let sum = [lane, lane + 2].into_iter().fold(
+            u32::from_le_bytes(accumulator[lane..][..4].try_into().unwrap()),
+            |sum, at| {
+                sum.wrapping_add((word(left, at, signed[0]) * word(right, at, signed[1])) as u32)
+            },
+        );
+        result[lane..][..4].copy_from_slice(&sum.to_le_bytes());
+    }
+    result
+}
+
 /// VPDPBUUD, VPDPBSUD and VPDPBSSD (AVX-VNNI-INT8): each dword of
 /// `accumulator` plus the four products of its bytes of `left` and `right`,
 /// wrapping; bytes above the vector length clear.
@@ -339,6 +372,11 @@ fn apply(vex: Vex, destination: [u8; 64], first: [u8; 64], second: [u8; 64]) -> 
         (0x50, pp, false) if pp != 1 => {
             let signed = [pp != 0, pp == 3];
             Some(byte_dots(&destination, &first, &second, signed, bytes))
+        }
+        (0xd2, pp, false) => {
+            // VEX.pp: VPDPWUUD, VPDPWUSD (signed second source), VPDPWSUD.
+            let signed = [pp == 2, pp == 1];
+            Some(word_dots(&destination, &first, &second, signed, bytes))
         }
         (0xcb, 3, false) if vex.l => Some(from_qwords(sha512_rounds(
             qwords(&destination),
@@ -427,6 +465,7 @@ mod tests {
     fn models_match_the_host_instructions() {
         let host = TargetCpu::detect();
         let int8 = TargetCpu::X86_64_V3.with_avx_vnni_int8();
+        let int16 = TargetCpu::X86_64_V3.with_avx_vnni_int16();
         let sha512 = TargetCpu::X86_64_V3.with_sha512();
         // YMM1 is the destination, YMM2 the VEX.vvvv source (0 when the form
         // has none) and YMM3 the ModRM.rm source.
@@ -443,6 +482,11 @@ mod tests {
         for pp in [0, 2, 3] {
             for l in [false, true] {
                 forms.push((int8, form(0x50, pp, l, 2)));
+            }
+        }
+        for pp in [0, 1, 2] {
+            for l in [false, true] {
+                forms.push((int16, form(0xd2, pp, l, 2)));
             }
         }
         forms.extend([

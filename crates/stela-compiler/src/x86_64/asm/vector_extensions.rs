@@ -243,6 +243,34 @@ pub(crate) fn byte_dot_supported(target: TargetCpu) -> bool {
         && !target.data_independent_timing()
 }
 
+/// VPDPWUUD (AVX-VNNI-INT16): add to each dword of `sum` the two products of
+/// its unsigned words in `left` and `right`, wrapping. The DIT profile keeps
+/// its reviewed recipe.
+pub(crate) fn unsigned_word_dot(
+    code: &mut Code,
+    sum: u8,
+    left: u8,
+    right: u8,
+    target: TargetCpu,
+) -> bool {
+    if !target.supports(TargetCpu::AvxVnniInt16) || target.data_independent_timing() {
+        return false;
+    }
+    code.asm().vex(
+        Vex {
+            map: Map::M0f38,
+            pp: Pp::None,
+            w: false,
+            l: false,
+        },
+        0xd2,
+        sum,
+        left,
+        Rm::Xmm(right),
+    );
+    true
+}
+
 /// The host instruction behind a [`ByteDot`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DotForm {

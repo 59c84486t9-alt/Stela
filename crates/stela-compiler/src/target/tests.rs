@@ -76,7 +76,7 @@ fn canonical_ids_and_aliases_keep_their_spelling() {
         "x86_64-baseline+ssse3+sse4.1+sse4.2+pclmulqdq+fma+f16c+popcnt+bmi1+aes+sha\
          +atomic-load16+cx8+cx16+avx2+avx512f+lzcnt+bmi2+fast-pdep+movbe+gfni\
          +avx512vl+avx512bw+avx512cd+avx512dq+avx512vpopcntdq+avx512bitalg+avx512vbmi+avx512vnni\
-         +avxvnni+avxvnniint8+avx512bf16+avxneconvert+avx512fp16+vaes+vpclmulqdq+sha512+sm3+sm4\
+         +avxvnni+avxvnniint8+avxvnniint16+avx512bf16+avxneconvert+avx512fp16+vaes+vpclmulqdq+sha512+sm3+sm4\
          +apx+apx-ndd+line-atomic+doit+dit"
     );
 }
@@ -569,6 +569,10 @@ fn native_detection_matches_std_detect() {
             (
                 TargetCpu::AvxVnniInt8,
                 std::is_x86_feature_detected!("avxvnniint8"),
+            ),
+            (
+                TargetCpu::AvxVnniInt16,
+                std::is_x86_feature_detected!("avxvnniint16"),
             ),
             (
                 TargetCpu::AvxNeConvert,

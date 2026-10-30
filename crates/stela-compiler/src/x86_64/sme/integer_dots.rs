@@ -201,6 +201,11 @@ fn dot_chunk(code: &mut Code, operand: &Operand, target: TargetCpu, horizontal: 
     } else if operand.terms == 2 && operand.left_signed {
         Host::MultiplyAddWords.register(code, LEFT, RIGHT, target);
         Host::AddDword.register(code, LEFT, ACCUMULATOR, target);
+    } else if operand.terms == 2
+        && !operand.right_signed
+        && vector_extensions::unsigned_word_dot(code, ACCUMULATOR, LEFT, RIGHT, target)
+    {
+        return ACCUMULATOR;
     } else if operand.terms == 2 {
         word_products(code, false, target);
         // High products occupy XMM4, which the reduction uses as scratch.

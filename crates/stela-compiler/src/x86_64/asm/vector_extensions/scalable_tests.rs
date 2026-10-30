@@ -160,7 +160,7 @@ fn compare(
     values: Values,
     changed: impl Fn(u32, usize) -> bool,
 ) {
-    let host = TargetCpu::detect();
+    let host = crate::x86_64::modeled::host();
     let candidates: Vec<_> = candidates
         .iter()
         .copied()
@@ -249,10 +249,38 @@ fn streaming_and_za_byte_dots_match_the_sse_recipes() {
         &WORDS,
         &[
             TargetCpu::X86_64_V3.with_avx_vnni(),
+            TargetCpu::X86_64_V3.with_avx_vnni_int8(),
             TargetCpu::X86_64_V4.with_avx512vnni(),
         ],
         Values::Bits,
         |_, _| true,
+    );
+}
+
+/// llvm-mc encodings: SVE2.1 UDOT Z3.S, Z1.H, Z2.H by vector and indexed;
+/// SME2 UDOT into ZA.S[W8, 1] from {Z0.H-Z1.H} by single, indexed and
+/// multiple vectors and from {Z0.H-Z3.H} by single and multiple vectors;
+/// UVDOT; and the signed SDOT controls, which keep PMADDWD.
+const WORD_DOTS: [u32; 10] = [
+    0x4402_cc23,
+    0x448a_cc23,
+    0xc164_1419,
+    0xc154_1411,
+    0xc1e4_1419,
+    0xc174_1419,
+    0xc1e5_1419,
+    0xc154_0431,
+    0x4402_c823,
+    0xc164_1409,
+];
+
+#[test]
+fn streaming_and_za_unsigned_word_dots_match_the_sse_recipes() {
+    compare(
+        &WORD_DOTS,
+        &[TargetCpu::X86_64_V3.with_avx_vnni_int16()],
+        Values::Bits,
+        |word, _| !matches!(word, 0x4402_c823 | 0xc164_1409),
     );
 }
 
