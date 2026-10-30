@@ -382,3 +382,124 @@ fn only_a_successful_response_yields_its_ticket() {
     assert!(message.to_string().contains("STATUS=94"));
     assert!(ticket(b"<?xml").is_err());
 }
+
+/// A restore's `FirmwareUpdaterData` arguments for a nonce-bound cryptex.
+fn cryptex_args(ecid: u64) -> Value {
+    Value::dict([
+        ("MessageArgUpdaterName", Value::from("Cryptex1")),
+        (
+            "MessageArgInfo",
+            Value::dict([
+                ("ApChipId", Value::Integer(0x8112)),
+                ("ApECID", Value::Signed(ecid as i64)),
+                ("ApProductionMode", Value::Boolean(true)),
+                ("Nonce", Value::Data(vec![3; 32])),
+            ]),
+        ),
+        (
+            "DeviceGeneratedRequest",
+            Value::dict([
+                ("@Cryptex1,Ticket", Value::Boolean(true)),
+                ("ApSecurityDomain", Value::from("0x01")),
+                ("Cryptex1,Nonce", Value::Data(vec![3; 32])),
+                ("Cryptex1,ChipID", Value::from("0xFF10")),
+            ]),
+        ),
+        (
+            "DeviceGeneratedTags",
+            Value::dict([
+                (
+                    "BuildIdentityTags",
+                    Value::Array(vec![
+                        Value::from("ApBoardID"),
+                        Value::from("Cryptex1,LiveNonceDomain"),
+                    ]),
+                ),
+                (
+                    "ResponseTags",
+                    Value::Array(vec![Value::from("Cryptex1,Ticket")]),
+                ),
+            ]),
+        ),
+    ])
+}
+
+#[test]
+fn the_cryptex_request_merges_identity_tags_common_tags_and_the_devices_request() {
+    let store = super::super::store::tests::fixture(b"x", false);
+    let ecid = 0xfedc_ba98_7654_3210;
+    let request = cryptex_request(store.identity(), ecid, &cryptex_args(ecid)).unwrap();
+    let Value::Dict(fields) = &request else {
+        panic!()
+    };
+    let keys: Vec<_> = fields.keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        [
+            "@Cryptex1,Ticket",
+            "@HostPlatformInfo",
+            "@UUID",
+            "@VersionInfo",
+            "ApBoardID",
+            "ApECID",
+            "ApProductionMode",
+            "ApSecurityDomain",
+            "Cryptex1,ChipID",
+            "Cryptex1,Nonce",
+        ]
+    );
+    assert_eq!(request.required("ApECID").unwrap().uint().unwrap(), ecid);
+    // The device's own security domain string wins over the identity's.
+    assert_eq!(
+        request
+            .required("ApSecurityDomain")
+            .unwrap()
+            .string()
+            .unwrap(),
+        "0x01"
+    );
+    assert!(cryptex_request(store.identity(), ecid + 1, &cryptex_args(ecid)).is_err());
+}
+
+struct CryptexSigner(Vec<u8>);
+impl Transport for CryptexSigner {
+    fn post(
+        &mut self,
+        _host: &str,
+        _path: &str,
+        _headers: &[(&str, &str)],
+        _content_type: &str,
+        body: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.0 = body.to_vec();
+        let answer = Value::dict([("Cryptex1,Ticket", Value::Data(vec![9, 8, 7]))]);
+        let mut response = b"STATUS=0&MESSAGE=SUCCESS&REQUEST_STRING=".to_vec();
+        response.extend(plist::encode_xml(&answer, plist::Limits::default())?);
+        Ok(response)
+    }
+}
+
+#[test]
+fn a_nonce_bound_cryptex_takes_apples_ticket_only_with_the_signing_service() {
+    use super::super::answers::{Answers, Plan};
+    let store = super::super::store::tests::fixture(b"x", false);
+    let mut answers = Answers::new(store);
+    let request = Value::dict([
+        ("DataType", Value::from("FirmwareUpdaterData")),
+        ("Arguments", cryptex_args(0x77)),
+    ]);
+    assert!(answers.plan(&request).is_err());
+    answers.signer = Some(Signer {
+        ecid: 0x77,
+        nonces: nonces(),
+        transport: alloc::boxed::Box::new(CryptexSigner(vec![])),
+    });
+    let Plan::Reply(reply) = answers.plan(&request).unwrap() else {
+        panic!()
+    };
+    let data = reply.required("FirmwareResponseData").unwrap();
+    assert_eq!(
+        data.required("Cryptex1,Ticket").unwrap().data().unwrap(),
+        [9, 8, 7]
+    );
+}

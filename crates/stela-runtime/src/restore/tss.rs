@@ -1,6 +1,7 @@
 //! The opt-in requests to Apple's signing service (TSS): the personalized AP
-//! root tickets a restore installs, and the recoveryOS LocalPolicy, the one
-//! object restored verifies against Apple's fixed roots
+//! root tickets a restore installs, the Cryptex1 ticket the restore's
+//! cryptex updater asks for with its own nonce, and the recoveryOS
+//! LocalPolicy, the one object restored verifies against Apple's fixed roots
 //! (`docs/research/restore-trust.md`), so no Stela key can sign it.
 //!
 //! Wire: libtatsu `tss.c` (`tss_request_new`, `tss_parameters_add_from_manifest`,
@@ -9,7 +10,8 @@
 //! `tss_entry_apply_restore_request_rules`, `tss_request_add_local_policy_tags`,
 //! `tss_request_send`) and idevicerestore 4b3e847e `idevicerestore.c`
 //! (`get_tss_response`, `get_recoveryos_root_ticket_tss_response`,
-//! `get_recovery_os_local_policy_tss_response`, `lpol_file`). A request carries
+//! `get_recovery_os_local_policy_tss_response`, `lpol_file`) and `restore.c`
+//! (`restore_get_cryptex1_firmware_data`). A request carries
 //! the device's ECID, its chip, board and security domain, the build's
 //! component digests and the boot's nonces; nothing is sent without a
 //! [`Transport`], which the user enables explicitly. The answer is Apple's
@@ -350,9 +352,83 @@ pub fn local_policy_request(identity: &Identity, ecid: u64, args: &Value) -> Res
     Ok(request)
 }
 
+/// The Cryptex1 TSS request for a restore's `FirmwareUpdaterData` arguments,
+/// as idevicerestore's `restore_get_cryptex1_firmware_data` builds it: the
+/// identity's values for the device's `BuildIdentityTags`, the common tags
+/// of its `MessageArgInfo` (libtatsu copies `ApECID` and `ApProductionMode`;
+/// it names the chip `ApChipId`, which is not copied), then the device's
+/// `DeviceGeneratedRequest` unchanged, its cryptex nonce included. The
+/// device's ECID must be the signer's, so a ticket never names another
+/// machine.
+pub fn cryptex_request(identity: &Identity, ecid: u64, args: &Value) -> Result<Value> {
+    let info = args.required("MessageArgInfo")?;
+    if ecid == 0 || info.required("ApECID")?.bits()? != ecid {
+        return Err(Error::Invalid(
+            "cryptex request names another machine's ECID",
+        ));
+    }
+    let mut request = Value::dict([
+        ("@HostPlatformInfo", Value::from("mac")),
+        ("@VersionInfo", Value::from(VERSION)),
+        ("ApECID", Value::Integer(ecid)),
+    ]);
+    let Value::Dict(fields) = &mut request else {
+        unreachable!()
+    };
+    if let Some(production) = info.get("ApProductionMode") {
+        fields.insert(
+            "ApProductionMode".into(),
+            Value::Boolean(production.boolean()?),
+        );
+    }
+    let tags = args
+        .required("DeviceGeneratedTags")?
+        .required("BuildIdentityTags")?
+        .array()?;
+    for tag in tags {
+        let tag = tag.string()?;
+        if let Some(value) = identity.value.get(tag) {
+            fields.insert(tag.into(), value.clone());
+        }
+    }
+    let Value::Dict(generated) = args.required("DeviceGeneratedRequest")? else {
+        return Err(Error::Invalid("DeviceGeneratedRequest dictionary"));
+    };
+    if !generated.keys().any(|key| key.starts_with("Cryptex1,")) {
+        return Err(Error::Invalid("DeviceGeneratedRequest names no cryptex"));
+    }
+    fields.extend(generated.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let id = guid(&plist::encode_xml(&request, plist::Limits::default())?);
+    if let Value::Dict(fields) = &mut request {
+        fields.insert("@UUID".into(), Value::String(id));
+    }
+    Ok(request)
+}
+
+/// Ask Apple for the cryptex ticket the device's request names in its one
+/// `ResponseTags` entry.
+pub fn request_cryptex_ticket(
+    signer: &mut Signer,
+    identity: &Identity,
+    args: &Value,
+    response_tag: &str,
+) -> Result<Vec<u8>> {
+    let request = cryptex_request(identity, signer.ecid, args)?;
+    let body = plist::encode_xml(&request, plist::Limits::default())?;
+    let response = signer
+        .transport
+        .post(HOST, PATH, &HEADERS, CONTENT_TYPE, &body)?;
+    answer(&response, response_tag)
+}
+
 /// Apple's ticket from a TSS response (`STATUS=0&MESSAGE=SUCCESS&REQUEST_STRING=<plist>`);
 /// any other status refuses with the server's message.
 pub fn ticket(response: &[u8]) -> Result<Vec<u8>> {
+    answer(response, "ApImg4Ticket")
+}
+
+/// The data under `key` in a successful TSS response.
+fn answer(response: &[u8], key: &str) -> Result<Vec<u8>> {
     if response.len() > MAX_RESPONSE_BYTES {
         return Err(Error::Limit("TSS response bytes"));
     }
@@ -375,7 +451,7 @@ pub fn ticket(response: &[u8]) -> Result<Vec<u8>> {
         .find("<?xml")
         .ok_or(Error::Invalid("TSS response has no plist"))?;
     let answer = plist::decode(&response[start..], plist::Limits::default())?;
-    Ok(answer.required("ApImg4Ticket")?.data()?.to_vec())
+    Ok(answer.required(key)?.data()?.to_vec())
 }
 
 /// Ask Apple for the recoveryOS policy ticket.
