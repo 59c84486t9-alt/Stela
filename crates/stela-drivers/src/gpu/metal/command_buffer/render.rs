@@ -20,7 +20,7 @@ use super::{
 use crate::gpu::metal::{
     abi::{
         BarrierScope, CullMode as MtlCullMode, DepthClipMode, IndexType as MtlIndexType,
-        PrimitiveTopologyClass, PrimitiveType, RenderStages, StoreAction,
+        PrimitiveTopologyClass, PrimitiveType, RenderStages, StoreAction, StoreActionOptions,
         TessellationControlPointIndexType, TriangleFillMode, VisibilityResultMode, Winding,
     },
     binding::{
@@ -908,6 +908,17 @@ impl CommandBuffer {
         render(&mut self.encoder)?
             .pass
             .set_store_action(slot, action)
+    }
+
+    /// `set{Color,Depth,Stencil}StoreActionOptions:`.
+    pub fn set_store_action_options(
+        &mut self,
+        slot: AttachmentSlot,
+        options: StoreActionOptions,
+    ) -> Result<()> {
+        render(&mut self.encoder)?
+            .pass
+            .set_store_action_options(slot, options)
     }
 
     /// `memoryBarrierWithScope:afterStages:beforeStages:` (and the

@@ -12,11 +12,11 @@ use crate::gpu::metal::{
         NewCounterBufferRequest, Operation, RenderPipelineResponse, Status,
         TextureDescriptorRecord, TextureResponse, Value,
         commands::{
-            BeginCompute, BeginRender, BlitCode, CommandBufferCode, ComputeCode, CopyBuffer,
-            DepthStencilRecord, Dispatch, DrawPrimitives, FillBuffer, MappingRecord, Mode,
-            PassAttachmentRecord, RenderCode, ResolveCounters, Resource, ResourceStateCode,
-            SampleCounters, SetBuffer, SetBytes, SetPipeline, StencilRecord, UpdateMappings,
-            ViewportRecord,
+            BeginCompute, BeginRender, BlitCode, ColorStoreActionOptions, CommandBufferCode,
+            ComputeCode, CopyBuffer, DepthStencilRecord, Dispatch, DrawPrimitives, FillBuffer,
+            MappingRecord, Mode, PassAttachmentRecord, RenderCode, ResolveCounters, Resource,
+            ResourceStateCode, SampleCounters, SetBuffer, SetBytes, SetPipeline, StencilRecord,
+            UpdateMappings, ViewportRecord,
         },
     },
     vulkan::command::Command,
@@ -297,6 +297,14 @@ fn render_passes_replay_their_state_and_draws() {
         )
         .push(RenderCode::SetDepthStencilState.raw(), &depth_stencil, &[])
         .push(RenderCode::DrawPrimitives.raw(), &draw, &[])
+        .push(
+            RenderCode::SetColorStoreActionOptions.raw(),
+            &ColorStoreActionOptions {
+                options: 0,
+                index: 0,
+            },
+            &[],
+        )
         .end();
     assert_eq!(
         commit(&mut service, connection, &stream),
@@ -324,6 +332,18 @@ fn render_passes_replay_their_state_and_draws() {
         ..begin
     };
     stream.push(RenderCode::Begin.raw(), &short, &[]);
+    assert_eq!(
+        status(commit(&mut service, connection, &stream)),
+        Status::Malformed
+    );
+
+    // Options Metal does not define.
+    let mut stream = Stream::default();
+    stream.push(RenderCode::Begin.raw(), &begin, &[]).push(
+        RenderCode::SetDepthStoreActionOptions.raw(),
+        &Mode { mode: 1 << 8 },
+        &[],
+    );
     assert_eq!(
         status(commit(&mut service, connection, &stream)),
         Status::Malformed

@@ -441,6 +441,12 @@ records! {
         pub index: u64,
     }
 
+    /// `setColorStoreActionOptions:atIndex:`.
+    pub struct ColorStoreActionOptions {
+        pub options: u64,
+        pub index: u64,
+    }
+
     /// `memoryBarrierWithScope:afterStages:beforeStages:`.
     pub struct RenderBarrier {
         pub scope: u64,
@@ -859,6 +865,12 @@ raw_enum! {
         DrawMeshThreads = 0x0322,
         /// `DrawMeshIndirect`.
         DrawMeshIndirect = 0x0323,
+        /// `ColorStoreActionOptions`.
+        SetColorStoreActionOptions = 0x0324,
+        /// `Mode`: an `MTLStoreActionOptions`.
+        SetDepthStoreActionOptions = 0x0325,
+        /// `Mode`: an `MTLStoreActionOptions`.
+        SetStencilStoreActionOptions = 0x0326,
     }
 }
 

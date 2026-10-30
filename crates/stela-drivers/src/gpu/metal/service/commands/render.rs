@@ -22,13 +22,13 @@ use crate::gpu::metal::{
         wire::{
             self, Fault, Status,
             commands::{
-                BeginRender, BlendColor, ColorStoreAction, CounterSampleRecord, DepthBias,
-                DrawIndexed, DrawIndexedIndirect, DrawIndirect, DrawMesh, DrawMeshIndirect,
-                DrawPatches, DrawPatchesIndirect, DrawPrimitives, FactorBuffer, FactorScale, Mode,
-                PassAttachmentRecord, PassBoundaryCode, RenderBarrier, RenderCode, ScissorRecord,
-                SetPipeline, StageBuffer, StageBufferOffset, StageBytes, StageSampler,
-                StageTexture, StencilReference, VertexBufferStride, ViewMappingRecord,
-                ViewportRecord, VisibilityMode,
+                BeginRender, BlendColor, ColorStoreAction, ColorStoreActionOptions,
+                CounterSampleRecord, DepthBias, DrawIndexed, DrawIndexedIndirect, DrawIndirect,
+                DrawMesh, DrawMeshIndirect, DrawPatches, DrawPatchesIndirect, DrawPrimitives,
+                FactorBuffer, FactorScale, Mode, PassAttachmentRecord, PassBoundaryCode,
+                RenderBarrier, RenderCode, ScissorRecord, SetPipeline, StageBuffer,
+                StageBufferOffset, StageBytes, StageSampler, StageTexture, StencilReference,
+                VertexBufferStride, ViewMappingRecord, ViewportRecord, VisibilityMode,
             },
         },
     },
@@ -216,6 +216,22 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             RenderCode::SetStencilStoreAction => {
                 let Mode { mode } = payload.record()?;
                 commands.set_store_action(AttachmentSlot::Stencil, store_action(mode)?)?;
+            }
+            RenderCode::SetColorStoreActionOptions => {
+                let ColorStoreActionOptions { options, index } = payload.record()?;
+                let index = usize::try_from(index).map_err(|_| Fault::malformed("color index"))?;
+                commands.set_store_action_options(
+                    AttachmentSlot::Color(index),
+                    store_options(options)?,
+                )?;
+            }
+            RenderCode::SetDepthStoreActionOptions => {
+                let Mode { mode } = payload.record()?;
+                commands.set_store_action_options(AttachmentSlot::Depth, store_options(mode)?)?;
+            }
+            RenderCode::SetStencilStoreActionOptions => {
+                let Mode { mode } = payload.record()?;
+                commands.set_store_action_options(AttachmentSlot::Stencil, store_options(mode)?)?;
             }
             RenderCode::MemoryBarrier => {
                 let RenderBarrier {
@@ -433,10 +449,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             resolve,
             load_action: known(LoadAction::from_raw(record.load_action), "load action")?,
             store_action: store_action(record.store_action)?,
-            store_action_options: known(
-                StoreActionOptions::from_bits(record.store_action_options),
-                "store action options",
-            )?,
+            store_action_options: store_options(record.store_action_options)?,
             clear,
         }))
     }
@@ -460,4 +473,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
 
 fn store_action(raw: u64) -> Result<StoreAction, Fault> {
     known(StoreAction::from_raw(raw), "store action")
+}
+
+fn store_options(raw: u64) -> Result<StoreActionOptions, Fault> {
+    known(StoreActionOptions::from_bits(raw), "store action options")
 }

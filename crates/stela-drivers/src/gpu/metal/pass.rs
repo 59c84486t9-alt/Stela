@@ -165,6 +165,25 @@ impl<T: Copy> RenderPassPlan<T> {
         Ok(())
     }
 
+    /// `set{Color,Depth,Stencil}StoreActionOptions:`. Vulkan stores the
+    /// samples a pass's custom positions produced as it stores any, so the
+    /// options only need those positions.
+    pub fn set_store_action_options(
+        &mut self,
+        slot: AttachmentSlot,
+        options: StoreActionOptions,
+    ) -> Result<()> {
+        ensure(
+            self.attachment(slot).is_some(),
+            "no attachment at that slot",
+        )?;
+        ensure(
+            !options.contains(StoreActionOptions::CUSTOM_SAMPLE_POSITIONS)
+                || !self.sample_locations.is_empty(),
+            "custom sample position stores need sample positions",
+        )
+    }
+
     /// Fails while any store action is still `Unknown`; Metal requires
     /// them set before `endEncoding`.
     pub fn finish(&self) -> Result<()> {

@@ -254,6 +254,23 @@ fn unknown_store_actions_are_set_before_the_pass_ends() {
         plan.set_store_action(AttachmentSlot::Depth, StoreAction::Store)
             .is_err()
     );
+    assert_eq!(
+        plan.set_store_action_options(AttachmentSlot::Color(0), StoreActionOptions::EMPTY),
+        Ok(())
+    );
+    assert_eq!(
+        plan.set_store_action_options(
+            AttachmentSlot::Color(0),
+            StoreActionOptions::CUSTOM_SAMPLE_POSITIONS
+        ),
+        Err(Error::Invalid(
+            "custom sample position stores need sample positions"
+        ))
+    );
+    assert!(
+        plan.set_store_action_options(AttachmentSlot::Stencil, StoreActionOptions::EMPTY)
+            .is_err()
+    );
 }
 
 #[test]
