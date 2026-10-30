@@ -42,16 +42,18 @@ pub const LOCAL_POLICY: [u8; 22] = [
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// One HTTP POST to the signing service with `headers` besides its
-/// content type, returning the response body.
+/// content type, without waiting: the response body once it has arrived,
+/// `None` while it is on its way. Asking again with the same body continues
+/// the exchange; another body abandons it.
 pub trait Transport {
-    fn post(
+    fn exchange(
         &mut self,
         host: &str,
         path: &str,
         headers: &[(&str, &str)],
         content_type: &str,
         body: &[u8],
-    ) -> Result<Vec<u8>>;
+    ) -> Result<Option<Vec<u8>>>;
 }
 
 /// The device the request personalizes for, and the way out to Apple.
@@ -461,11 +463,7 @@ pub fn request_cryptex_ticket(
     response_tag: &str,
 ) -> Result<Vec<u8>> {
     let request = cryptex_request(identity, signer.ecid, args)?;
-    let body = plist::encode_xml(&request, plist::Limits::default())?;
-    let response = signer
-        .transport
-        .post(HOST, PATH, &HEADERS, CONTENT_TYPE, &body)?;
-    answer(&response, response_tag)
+    answer(&post(signer, &request)?, response_tag)
 }
 
 /// Apple's ticket from a TSS response (`STATUS=0&MESSAGE=SUCCESS&REQUEST_STRING=<plist>`);
@@ -512,11 +510,17 @@ pub fn request_local_policy(
 }
 
 fn send(signer: &mut Signer, request: &Value) -> Result<Vec<u8>> {
+    ticket(&post(signer, request)?)
+}
+
+/// The service's response to `request`, or [`Error::Pending`] while it is
+/// on its way.
+fn post(signer: &mut Signer, request: &Value) -> Result<Vec<u8>> {
     let body = plist::encode_xml(request, plist::Limits::default())?;
-    let response = signer
+    signer
         .transport
-        .post(HOST, PATH, &HEADERS, CONTENT_TYPE, &body)?;
-    ticket(&response)
+        .exchange(HOST, PATH, &HEADERS, CONTENT_TYPE, &body)?
+        .ok_or(Error::Pending)
 }
 
 /// `Ap,VolumeUUID` as restored sends it, canonical 8-4-4-4-12 hex.

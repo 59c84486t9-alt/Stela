@@ -181,14 +181,14 @@ struct Signing {
     nonces: Nonces,
 }
 impl Transport for Signing {
-    fn post(
+    fn exchange(
         &mut self,
         _: &str,
         _: &str,
         _: &[(&str, &str)],
         _: &str,
         body: &[u8],
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>> {
         self.posts.set(self.posts.get() + 1);
         let request = plist::decode(body, plist::Limits::default())?;
         assert_eq!(request.required("ApNonce")?.data()?, nonces().ap);
@@ -201,7 +201,7 @@ impl Transport for Signing {
         let answer = Value::dict([("ApImg4Ticket", Value::Data(ticket))]);
         let mut response = b"STATUS=0&MESSAGE=SUCCESS&REQUEST_STRING=".to_vec();
         response.extend(plist::encode_xml(&answer, plist::Limits::default())?);
-        Ok(response)
+        Ok(Some(response))
     }
 }
 
@@ -242,6 +242,59 @@ fn the_root_ticket_is_apples_personalized_one_asked_once() {
         }),
     });
     assert!(answers.plan(&request).is_err());
+}
+
+/// A transport whose response takes `waits` more calls to arrive, each
+/// asking for the same request.
+struct Slow<T> {
+    inner: T,
+    waits: usize,
+    body: Option<Vec<u8>>,
+}
+impl<T: Transport> Transport for Slow<T> {
+    fn exchange(
+        &mut self,
+        host: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        assert_eq!(self.body.get_or_insert_with(|| body.to_vec()), body);
+        if self.waits > 0 {
+            self.waits -= 1;
+            return Ok(None);
+        }
+        self.inner.exchange(host, path, headers, content_type, body)
+    }
+}
+
+#[test]
+fn an_answer_waits_for_its_signing_exchange_without_blocking() {
+    use super::super::answers::{Answers, Plan};
+    let mut answers = Answers::new(super::super::store::tests::fixture(b"x", false));
+    let posts = alloc::rc::Rc::new(core::cell::Cell::new(0));
+    answers.signer = Some(Signer {
+        ecid: 0x77,
+        nonces: nonces(),
+        transport: alloc::boxed::Box::new(Slow {
+            inner: Signing {
+                posts: posts.clone(),
+                nonces: nonces(),
+            },
+            waits: 2,
+            body: None,
+        }),
+    });
+    let request = Value::dict([("DataType", Value::from("RootTicket"))]);
+    for _ in 0..2 {
+        assert_eq!(answers.plan(&request).err(), Some(Error::Pending));
+    }
+    let Ok(Plan::Reply(reply)) = answers.plan(&request) else {
+        panic!()
+    };
+    assert!(reply.required("RootTicketData").is_ok());
+    assert_eq!(posts.get(), 1);
 }
 
 #[test]
@@ -294,14 +347,14 @@ struct Apple {
     ecid: u64,
 }
 impl Transport for Apple {
-    fn post(
+    fn exchange(
         &mut self,
         host: &str,
         path: &str,
         headers: &[(&str, &str)],
         content_type: &str,
         body: &[u8],
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>> {
         assert_eq!((host, path, content_type), (HOST, PATH, CONTENT_TYPE));
         assert_eq!(headers, HEADERS);
         self.sent = body.to_vec();
@@ -310,7 +363,7 @@ impl Transport for Apple {
         let answer = Value::dict([("ApImg4Ticket", Value::Data(ticket))]);
         let mut response = b"STATUS=0&MESSAGE=SUCCESS&REQUEST_STRING=".to_vec();
         response.extend(plist::encode_xml(&answer, plist::Limits::default())?);
-        Ok(response)
+        Ok(Some(response))
     }
 }
 
@@ -472,19 +525,19 @@ fn the_cryptex_request_merges_identity_tags_common_tags_and_the_devices_request(
 
 struct CryptexSigner(Vec<u8>);
 impl Transport for CryptexSigner {
-    fn post(
+    fn exchange(
         &mut self,
         _host: &str,
         _path: &str,
         _headers: &[(&str, &str)],
         _content_type: &str,
         body: &[u8],
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>> {
         self.0 = body.to_vec();
         let answer = Value::dict([("Cryptex1,Ticket", Value::Data(vec![9, 8, 7]))]);
         let mut response = b"STATUS=0&MESSAGE=SUCCESS&REQUEST_STRING=".to_vec();
         response.extend(plist::encode_xml(&answer, plist::Limits::default())?);
-        Ok(response)
+        Ok(Some(response))
     }
 }
 

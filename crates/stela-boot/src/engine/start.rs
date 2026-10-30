@@ -1538,7 +1538,7 @@ fn prepare_restore(
                 sep: [0; 20],
             },
             transport: match host_network.as_ref().expect("--tss opens the host network") {
-                Ok(network) => alloc::boxed::Box::new(network.clone()),
+                Ok(network) => alloc::boxed::Box::new(network::Signing::new(network.clone())),
                 Err(reason) => alloc::boxed::Box::new(network::Offline(reason.clone())),
             },
         }

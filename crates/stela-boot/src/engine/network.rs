@@ -27,7 +27,8 @@ use stela_drivers::{
     probe::Adapter,
 };
 use stela_runtime::net::{
-    HttpRequest, HttpTransfer, NetError, Stack, TlsUnavailable, Transfer, stack::DOWNLOAD_BUFFER,
+    HttpPost, HttpRequest, HttpTransfer, NetError, Stack, TlsUnavailable, Transfer,
+    stack::DOWNLOAD_BUFFER,
 };
 use stela_soc::machine::AppleDevices;
 
@@ -189,18 +190,10 @@ impl HostNetwork {
         &self.description
     }
 
-    /// Initial plaintext endpoint used by the signing transport; redirects
-    /// keep the full resulting URL and can never downgrade an HTTPS hop.
-    pub fn post(
-        &mut self,
-        host: &str,
-        path: &str,
-        headers: &[(&str, &str)],
-        content_type: &str,
-        body: &[u8],
-    ) -> Result<Vec<u8>, NetError> {
-        self.post_url(&format!("http://{host}{path}"), headers, content_type, body)
-    }
+    /// The connectivity check's POST (`--network-check`), waiting for its
+    /// response. Redirects keep the full resulting URL and can never
+    /// downgrade an HTTPS hop.
+    #[cfg(feature = "diagnostics")]
     pub fn post_url(
         &mut self,
         url: &str,
@@ -221,6 +214,50 @@ impl HostNetwork {
         }
         result
     }
+
+    /// Starts a POST without waiting ([`Self::read_post`]).
+    pub fn open_post(
+        &mut self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: &[u8],
+    ) -> Result<HttpPost, NetError> {
+        self.stack
+            .open_post(url, headers, content_type, body, self.security.clone())
+            .inspect_err(|error| {
+                output::arguments(format_args!(
+                    "NETWORK POST {url} refused: {error}
+"
+                ))
+            })
+    }
+
+    /// The POST's response body once it has arrived, `None` while it is on
+    /// its way.
+    pub fn read_post(&mut self, post: &mut HttpPost) -> Result<Option<Vec<u8>>, NetError> {
+        let result = self.stack.read_post(post);
+        let url = post.url();
+        match &result {
+            Ok(Some(reply)) => output::arguments(format_args!(
+                "NETWORK POST {url} sent={} received={}
+",
+                post.sent(),
+                reply.len()
+            )),
+            Ok(None) => {}
+            Err(error) => output::arguments(format_args!(
+                "NETWORK POST {url} refused: {error}
+"
+            )),
+        }
+        result
+    }
+
+    pub fn close_post(&mut self, post: HttpPost) {
+        self.stack.close_post(post);
+    }
+
     pub fn check_url(&self, url: &str) -> Result<(), NetError> {
         let destination = stela_runtime::net::http::Url::parse(url).map_err(NetError::Url)?;
         if destination.scheme == stela_runtime::net::http::Scheme::Https {
@@ -295,24 +332,60 @@ impl HostNetwork {
 #[derive(Clone)]
 pub struct Shared(pub Rc<RefCell<HostNetwork>>);
 
-/// The restore client's way to Apple's signing service (`--tss`).
-impl stela_runtime::restore::tss::Transport for Shared {
-    fn post(
+/// The restore client's way to Apple's signing service (`--tss`): one POST
+/// at a time, moved along by each host service without waiting, so no
+/// guest processor stalls while Apple answers.
+pub struct Signing {
+    network: Shared,
+    /// The POST in flight and the body it sends.
+    exchange: Option<(Vec<u8>, HttpPost)>,
+}
+
+impl Signing {
+    pub fn new(network: Shared) -> Self {
+        Self {
+            network,
+            exchange: None,
+        }
+    }
+}
+
+impl stela_runtime::restore::tss::Transport for Signing {
+    fn exchange(
         &mut self,
         host: &str,
         path: &str,
         headers: &[(&str, &str)],
         content_type: &str,
         body: &[u8],
-    ) -> stela_runtime::restore::Result<Vec<u8>> {
-        self.0
-            .borrow_mut()
-            .post(host, path, headers, content_type, body)
-            .map_err(|error| {
-                stela_runtime::restore::Error::Transport(
-                    refuse!("signing request: {error}", %error),
-                )
-            })
+    ) -> stela_runtime::restore::Result<Option<Vec<u8>>> {
+        let failed = |error: NetError| {
+            stela_runtime::restore::Error::Transport(refuse!("signing request: {error}", %error))
+        };
+        let mut network = self.network.0.borrow_mut();
+        if let Some((sent, _)) = &self.exchange
+            && sent != body
+        {
+            let (_, post) = self.exchange.take().unwrap();
+            network.close_post(post);
+        }
+        let (_, post) = match &mut self.exchange {
+            Some(exchange) => exchange,
+            None => {
+                let url = format!("http://{host}{path}");
+                let post = network
+                    .open_post(&url, headers, content_type, body)
+                    .map_err(failed)?;
+                self.exchange.insert((body.to_vec(), post))
+            }
+        };
+        let result = network.read_post(post);
+        if let Ok(None) = result {
+            return Ok(None);
+        }
+        let (_, post) = self.exchange.take().unwrap();
+        network.close_post(post);
+        result.map_err(failed)
     }
 }
 
@@ -322,14 +395,14 @@ impl stela_runtime::restore::tss::Transport for Shared {
 pub struct Offline(pub Refusal);
 
 impl stela_runtime::restore::tss::Transport for Offline {
-    fn post(
+    fn exchange(
         &mut self,
         host: &str,
         path: &str,
         _headers: &[(&str, &str)],
         _content_type: &str,
         _body: &[u8],
-    ) -> stela_runtime::restore::Result<Vec<u8>> {
+    ) -> stela_runtime::restore::Result<Option<Vec<u8>>> {
         Err(stela_runtime::restore::Error::Transport(
             refuse!("no host network for http://{host}{path}", host, path).because(self.0.clone()),
         ))

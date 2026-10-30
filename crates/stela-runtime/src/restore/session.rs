@@ -250,11 +250,11 @@ impl Session {
         answers: &mut Answers<R>,
     ) -> Result<Action> {
         let result = self.receive_inner(&message, answers);
-        if result.is_err() {
+        if result.is_err() && !matches!(result, Err(Error::Pending)) {
             self.phase = Phase::Failed;
         }
         result.map_err(|e| match e {
-            Error::Refused { .. } => e,
+            Error::Refused { .. } | Error::Pending => e,
             _ => super::refuse(refuse!("restore message: {e}", ?e), &message),
         })
     }
@@ -310,10 +310,17 @@ impl Session {
                     ));
                 }
                 let plan = if kind == "NORData" && !self.route.flashes_nor() {
-                    answers.sep_firmware(m)?
+                    answers.sep_firmware(m)
                 } else {
-                    answers.plan(m)?
+                    answers.plan(m)
                 };
+                // A pending answer is asked again with the same message, which
+                // the ledger records then.
+                if matches!(plan, Err(Error::Pending)) {
+                    self.ledger.pop();
+                    self.ledger_bytes -= size;
+                }
+                let plan = plan?;
                 let port = m
                     .get("DataPort")
                     .map(Value::uint)

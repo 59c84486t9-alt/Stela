@@ -40,6 +40,10 @@ pub enum Error {
         reason: Refusal,
         request: Box<Value>,
     },
+    /// Not a failure: the answer waits for a signing exchange in flight,
+    /// as a non-blocking socket's operation would block. The same request
+    /// asked again continues it.
+    Pending,
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -55,6 +59,7 @@ impl Error {
             Self::Transport(why) => format!("transport: {why}"),
             Self::Payload(why) => format!("payload: {why}"),
             Self::Refused { reason, .. } => reason.to_string(),
+            Self::Pending => String::from("waiting for a signing exchange"),
         }
     }
 }

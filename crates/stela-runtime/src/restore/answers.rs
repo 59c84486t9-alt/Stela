@@ -518,8 +518,10 @@ impl<R: ReadAt> Answers<R> {
         global.wrap(&bytes, digest)
     }
     pub fn plan(&mut self, request: &Value) -> Result<Plan> {
-        self.plan_inner(request)
-            .map_err(|e| super::refuse(refuse!("restore plan: {e}", ?e), request))
+        self.plan_inner(request).map_err(|e| match e {
+            Error::Pending => e,
+            e => super::refuse(refuse!("restore plan: {e}", ?e), request),
+        })
     }
     fn plan_inner(&mut self, r: &Value) -> Result<Plan> {
         let kind = r.required("DataType")?.string()?;

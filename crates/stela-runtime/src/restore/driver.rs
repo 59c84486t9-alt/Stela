@@ -110,20 +110,24 @@ impl<R: ReadAt, H: Copy + Eq> Driver<R, H> {
     }
 
     /// Answer the control message the last poll received, queueing the
-    /// reply for the next one. A failure fails the session at its next poll.
+    /// reply for the next one. A failure fails the session at its next poll;
+    /// an answer waiting for a signing exchange keeps the message for the
+    /// next call, which continues the exchange.
     pub fn work(&mut self) {
         if self.failure.is_some() || self.complete {
             return;
         }
-        if let Some(message) = self.received.take()
-            && let Err(error) = self.answer(message)
-        {
-            self.failure = Some(error);
+        if let Some(message) = self.received.take() {
+            match self.answer(&message) {
+                Ok(()) => {}
+                Err(Error::Pending) => self.received = Some(message),
+                Err(error) => self.failure = Some(error),
+            }
         }
     }
 
-    fn answer(&mut self, message: Value) -> Result<()> {
-        match self.session.receive(message, &mut self.answers)? {
+    fn answer(&mut self, message: &Value) -> Result<()> {
+        match self.session.receive(message.clone(), &mut self.answers)? {
             Action::None | Action::Event(_) => {}
             Action::Transfer(job) => self.jobs.push(Transfer {
                 job,
