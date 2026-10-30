@@ -53,10 +53,14 @@ impl Span {
     }
 }
 
+/// Bytes a buffer starts with room for: most blocks' code, so emission
+/// rarely grows it (growth was a fifth of compile time).
+const INITIAL_BYTES: usize = 512;
+
 impl Code {
-    pub(crate) const fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            bytes: Vec::new(),
+            bytes: Vec::with_capacity(INITIAL_BYTES),
             instructions: 0,
             sites: Vec::new(),
         }
