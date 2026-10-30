@@ -173,6 +173,20 @@ fn equal(code: &mut Code, lane_bytes: u8, target: crate::TargetCpu) {
 }
 
 pub(super) fn greater(code: &mut Code, lane_bytes: u8, unsigned: bool, target: crate::TargetCpu) {
+    // Unsigned lanes compare directly instead of after a sign bias.
+    if unsigned
+        && vector_extensions::compare(
+            code,
+            lane_bytes,
+            false,
+            vector_extensions::Predicate::Greater,
+            0,
+            1,
+            target,
+        )
+    {
+        return;
+    }
     if lane_bytes == 8 && target >= crate::TargetCpu::Sse42 {
         if unsigned {
             move_constant(code, 4, 0x8000000000000000);
@@ -389,7 +403,12 @@ pub(super) fn emit_after(
             lane_bytes,
         } => {
             use Comparison::*;
-            let reverse = matches!(operation, GreaterEqual | HigherEqual | LessZero);
+            // AVX-512 compares unsigned lanes without a bias (CMHI through
+            // `greater`) and tests lanes directly. Signed relations keep one
+            // SSE compare, inverted where needed: a mask round trip is slower.
+            let extended = vector_extensions::compare_supported(lane_bytes, target)
+                && matches!(operation, HigherEqual | Test);
+            let reverse = !extended && matches!(operation, GreaterEqual | HigherEqual | LessZero);
             let left_xmm = u8::from(reverse);
             let right_xmm = u8::from(!reverse);
             read_vector(code, left, left_xmm);
@@ -398,23 +417,30 @@ pub(super) fn emit_after(
             } else {
                 packed(code, Host::Xor, right_xmm, right_xmm);
             }
-            match operation {
-                Equal => equal(code, lane_bytes, target),
-                Test => {
-                    packed(code, Host::And, 0, 1);
-                    packed(code, Host::Xor, 1, 1);
-                    equal(code, lane_bytes, target);
+            if extended && operation == Test {
+                vector_extensions::test(code, lane_bytes, 0, 1, target);
+            } else if extended {
+                let predicate = vector_extensions::Predicate::GreaterEqual;
+                vector_extensions::compare(code, lane_bytes, false, predicate, 0, 1, target);
+            } else {
+                match operation {
+                    Equal => equal(code, lane_bytes, target),
+                    Test => {
+                        packed(code, Host::And, 0, 1);
+                        packed(code, Host::Xor, 1, 1);
+                        equal(code, lane_bytes, target);
+                    }
+                    _ => greater(
+                        code,
+                        lane_bytes,
+                        matches!(operation, Higher | HigherEqual),
+                        target,
+                    ),
                 }
-                _ => greater(
-                    code,
-                    lane_bytes,
-                    matches!(operation, Higher | HigherEqual),
-                    target,
-                ),
-            }
-            if matches!(operation, GreaterEqual | HigherEqual | LessEqualZero | Test) {
-                packed(code, Host::EqualDword, 1, 1);
-                packed(code, Host::Xor, 0, 1);
+                if matches!(operation, GreaterEqual | HigherEqual | LessEqualZero | Test) {
+                    packed(code, Host::EqualDword, 1, 1);
+                    packed(code, Host::Xor, 0, 1);
+                }
             }
             if bytes == 8 {
                 packed(code, Host::MoveQword, 0, 0);

@@ -1,7 +1,7 @@
 //! Streaming SVE and SME extension recipes (VNNI byte dots, GFNI byte and
-//! AVX-512 quadword shifts, AVX-512 integer conversions, table permutes and
-//! quadword extrema), compared with the reviewed SSE recipes on random Z, P,
-//! ZA and selector state.
+//! AVX-512 quadword shifts, AVX-512 integer conversions, table permutes,
+//! quadword extrema and lane compares), compared with the reviewed SSE
+//! recipes on random Z, P, ZA and selector state.
 use super::execution::Native;
 use crate::aarch64::floating::features::NumericalFeatures;
 use crate::aarch64::scalable::{
@@ -400,5 +400,42 @@ fn streaming_quadword_extrema_match_the_sse_recipes() {
         &[TargetCpu::X86_64_V3.with_avx512f().with_avx512vl()],
         Values::Bits,
         |word, svl| svl > 16 || !segment_reductions.contains(&word),
+    );
+}
+
+/// llvm-mc encodings: CMPHI, CMPHS, CMPGE, CMPNE and CMPHI on B, H, S, D and
+/// D lanes; CMPLO, CMPLS and CMPLE by immediate; CMPHS and CMPLT against
+/// wide elements; ADCLB, whose carries compare unsigned lanes, and SBCLT on
+/// D lanes, which carries through general registers.
+const COMPARES: [u32; 12] = [
+    0x2405_0493,
+    0x2445_0483,
+    0x2485_8483,
+    0x24c5_a493,
+    0x24c5_0493,
+    0x2424_6483,
+    0x24a0_e493,
+    0x255e_2493,
+    0x2405_c483,
+    0x2445_6483,
+    0x4505_d083,
+    0x45c5_d483,
+];
+
+#[test]
+fn streaming_lane_compares_match_the_sse_recipes() {
+    // Signed relations keep their SSE compares.
+    let unchanged = [
+        0x2485_8483,
+        0x24c5_a493,
+        0x255e_2493,
+        0x2445_6483,
+        0x45c5_d483,
+    ];
+    compare(
+        &COMPARES,
+        &[TargetCpu::X86_64_V4],
+        Values::Indices,
+        |word, _| !unchanged.contains(&word),
     );
 }

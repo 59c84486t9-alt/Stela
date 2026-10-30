@@ -637,6 +637,94 @@ pub(crate) fn quadword_absolute(code: &mut Code, xmm: u8, target: TargetCpu) -> 
     true
 }
 
+/// Lane comparisons into all-ones or zero lanes need AVX-512 VL with BW for
+/// bytes and halfwords or DQ for dwords and quadwords (VPMOVM2*). The DIT
+/// profile keeps its reviewed recipe.
+pub(crate) fn compare_supported(lane_bytes: u8, target: TargetCpu) -> bool {
+    let required = match lane_bytes {
+        1 | 2 => TargetCpu::Avx512f.with_avx512vl().with_avx512bw(),
+        4 | 8 => TargetCpu::Avx512f.with_avx512vl().with_avx512dq(),
+        _ => return false,
+    };
+    target.supports(required) && !target.data_independent_timing()
+}
+
+/// VPCMP immediates: whether the left lane is equal to, below, at most,
+/// unequal to, at least or above the right one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Predicate {
+    Equal = 0,
+    Less = 1,
+    LessEqual = 2,
+    NotEqual = 4,
+    GreaterEqual = 5,
+    Greater = 6,
+}
+
+/// The mask in K1 as all-ones or zero `lane_bytes` lanes of `xmm`:
+/// VPMOVM2B/W/D/Q.
+fn lanes_from_mask(code: &mut Code, lane_bytes: u8, xmm: u8) {
+    code.asm().evex(
+        masked(Map::M0f38, Pp::Pf3, matches!(lane_bytes, 2 | 8), 0, false),
+        if lane_bytes <= 2 { 0x28 } else { 0x38 },
+        xmm,
+        0,
+        Rm::Xmm(IN_RANGE),
+    );
+}
+
+/// All ones in each `lane_bytes` lane of `left` where `predicate` holds
+/// against `right`, signed or unsigned, and zero elsewhere:
+/// VPCMP[U]{B,W,D,Q} into K1, then VPMOVM2. Clobbers K1.
+pub(crate) fn compare(
+    code: &mut Code,
+    lane_bytes: u8,
+    signed: bool,
+    predicate: Predicate,
+    left: u8,
+    right: u8,
+    target: TargetCpu,
+) -> bool {
+    if !compare_supported(lane_bytes, target) {
+        return false;
+    }
+    let opcode = if lane_bytes <= 2 { 0x3e } else { 0x1e } + u8::from(signed);
+    code.asm().evex(
+        masked(Map::M0f3a, Pp::P66, matches!(lane_bytes, 2 | 8), 0, false),
+        opcode,
+        IN_RANGE,
+        left,
+        Rm::Xmm(right),
+    );
+    code.asm().data(&[predicate as u8]);
+    lanes_from_mask(code, lane_bytes, left);
+    true
+}
+
+/// All ones in each `lane_bytes` lane of `left` that shares a set bit with
+/// `right`, and zero elsewhere: VPTESTM{B,W,D,Q} into K1, then VPMOVM2.
+/// Clobbers K1.
+pub(crate) fn test(
+    code: &mut Code,
+    lane_bytes: u8,
+    left: u8,
+    right: u8,
+    target: TargetCpu,
+) -> bool {
+    if !compare_supported(lane_bytes, target) {
+        return false;
+    }
+    code.asm().evex(
+        masked(Map::M0f38, Pp::P66, matches!(lane_bytes, 2 | 8), 0, false),
+        if lane_bytes <= 2 { 0x26 } else { 0x27 },
+        IN_RANGE,
+        left,
+        Rm::Xmm(right),
+    );
+    lanes_from_mask(code, lane_bytes, left);
+    true
+}
+
 /// AVX-512 conversions between S/D lanes and W/X integers: unsigned dwords
 /// need F and VL, quadwords DQ as well. SSE2 already converts signed dwords.
 /// The DIT profile keeps its reviewed recipe.
@@ -1409,6 +1497,118 @@ mod tests {
                 0x3f, 0xc1,
             ]
         );
+    }
+
+    #[test]
+    fn lane_compares_check_each_extension_and_match_gnu_encodings() {
+        let mut code = Code::new();
+        for (lane_bytes, target) in [
+            (1, TargetCpu::Avx512f.with_avx512vl().with_avx512dq()),
+            (8, TargetCpu::Avx512f.with_avx512vl().with_avx512bw()),
+            (4, TargetCpu::X86_64_V4.with_data_independent_timing()),
+            (16, TargetCpu::X86_64_V4),
+        ] {
+            assert!(!compare(
+                &mut code,
+                lane_bytes,
+                true,
+                Predicate::Equal,
+                0,
+                1,
+                target
+            ));
+            assert!(!test(&mut code, lane_bytes, 0, 1, target));
+        }
+        assert!(code.is_empty());
+        // GNU as: VPCMPNLTUB, VPCMPNLEQ, VPCMPLTUD and VPCMPLEW into K1 of
+        // xmm0 against xmm1 and VPTESTMW of xmm2 and xmm3, each followed by
+        // VPMOVM2 back into its left register.
+        let target = TargetCpu::X86_64_V4;
+        for (lane_bytes, signed, predicate) in [
+            (1, false, Predicate::GreaterEqual),
+            (8, true, Predicate::Greater),
+            (4, false, Predicate::Less),
+            (2, true, Predicate::LessEqual),
+        ] {
+            assert!(compare(
+                &mut code, lane_bytes, signed, predicate, 0, 1, target
+            ));
+        }
+        assert!(test(&mut code, 2, 2, 3, target));
+        assert_eq!(
+            code.into_bytes(),
+            [
+                0x62, 0xf3, 0x7d, 0x08, 0x3e, 0xc9, 0x05, 0x62, 0xf2, 0x7e, 0x08, 0x28, 0xc1, 0x62,
+                0xf3, 0xfd, 0x08, 0x1f, 0xc9, 0x06, 0x62, 0xf2, 0xfe, 0x08, 0x38, 0xc1, 0x62, 0xf3,
+                0x7d, 0x08, 0x1e, 0xc9, 0x01, 0x62, 0xf2, 0x7e, 0x08, 0x38, 0xc1, 0x62, 0xf3, 0xfd,
+                0x08, 0x3f, 0xc9, 0x02, 0x62, 0xf2, 0xfe, 0x08, 0x28, 0xc1, 0x62, 0xf2, 0xed, 0x08,
+                0x26, 0xcb, 0x62, 0xf2, 0xfe, 0x08, 0x28, 0xd1,
+            ]
+        );
+    }
+
+    #[test]
+    fn lane_compares_match_the_sse_recipes() {
+        use crate::{GuestAddress, GuestState, context::ExecutionContext};
+        use alloc::vec::Vec;
+        use execution::Native;
+        if !TargetCpu::detect().supports(TargetCpu::X86_64_V4) {
+            return;
+        }
+        let mut random = 0x2545_f491_4f6c_dd1d_u64;
+        // CMHI, CMHS and CMTST on vector and scalar lanes, and UABD, UQXTN
+        // and UQSHRN, which compare unsigned lanes inside.
+        for word in [
+            0x6e22_3423u32,
+            0x6e62_3c23,
+            0x6ee2_3423,
+            0x6ee2_3c23,
+            0x0e62_8c23,
+            0x4ee2_8c23,
+            0x7ee2_3423,
+            0x7ee2_3c23,
+            0x5ee2_8c23,
+            0x6ea2_7423,
+            0x2e21_4823,
+            0x2f3d_9423,
+        ] {
+            let source: Vec<u8> = [word, 0xd65f03c0]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            let compile = |target| {
+                crate::testing::leaf_for(&source, GuestAddress(0x1000), target)
+                    .unwrap()
+                    .x86_64_code
+            };
+            let baseline = compile(TargetCpu::X86_64_V3);
+            let extended = compile(TargetCpu::X86_64_V4);
+            assert_ne!(baseline, extended, "{word:#010x} uses an AVX-512 compare");
+            let [baseline, extended] = [&baseline, &extended].map(|code| Native::new(code));
+            for sample in 0..48 {
+                let mut state = GuestState::default();
+                for vector in &mut state.v {
+                    for limb in vector {
+                        random ^= random << 13;
+                        random ^= random >> 7;
+                        random ^= random << 17;
+                        // Small lanes and equal operands in two thirds.
+                        *limb = if sample % 3 == 0 {
+                            random
+                        } else {
+                            random & 0x8181_8181_8181_8181
+                        };
+                    }
+                }
+                if sample % 2 == 0 {
+                    state.v[2] = state.v[1];
+                }
+                let mut expected = state.clone();
+                baseline.run(&mut expected, &mut ExecutionContext::default());
+                extended.run(&mut state, &mut ExecutionContext::default());
+                assert_eq!(state, expected, "{word:#010x} sample={sample}");
+            }
+        }
     }
 
     #[test]
