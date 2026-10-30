@@ -161,7 +161,7 @@ fn authenticated() -> (Station, Arc<Session>, Join, Arc<NativeBssObservation>) {
 }
 
 /// The AP MLD's association response accepting link 0 with `profiles`.
-fn association_response(profiles: Vec<Profile>) -> Mpdu {
+pub(crate) fn association_response(profiles: Vec<Profile>) -> Mpdu {
     let mut body = vec![0x11, 0, 0, 0, 1, 0xc0];
     body.extend_from_slice(&ap_elements(36, 42));
     body.extend(
@@ -178,7 +178,7 @@ fn association_response(profiles: Vec<Profile>) -> Mpdu {
 }
 
 /// The AP MLD's answer for link 1.
-fn answer(status: u16) -> Profile {
+pub(crate) fn answer(status: u16) -> Profile {
     let mut body = vec![0x11, 0];
     body.extend_from_slice(&status.to_le_bytes());
     body.extend_from_slice(&ap_elements(149, 155));
@@ -194,6 +194,12 @@ fn answer(status: u16) -> Profile {
 
 /// Associate on the setup link and take the AP MLD's `response`.
 fn associate(response: Mpdu) -> Action {
+    associate_station(response).1
+}
+
+/// The station associating on the setup link and its action on the AP
+/// MLD's `response`.
+pub(crate) fn associate_station(response: Mpdu) -> (Station, Action) {
     let (mut station, session, join, observation) = authenticated();
     let mut policy = Policy(true);
     let Action::Transmit { ticket, bytes, .. } = station
@@ -211,7 +217,8 @@ fn associate(response: Mpdu) -> Action {
     );
     station.submitted(ticket).unwrap();
     let epoch = station.association_epoch().unwrap();
-    station.receive(epoch, &response, 11, &mut policy).unwrap()
+    let action = station.receive(epoch, &response, 11, &mut policy).unwrap();
+    (station, action)
 }
 
 #[test]

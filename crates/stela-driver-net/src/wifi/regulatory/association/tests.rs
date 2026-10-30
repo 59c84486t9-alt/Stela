@@ -26,7 +26,20 @@ struct Model {
     applied_power: Cell<bool>,
     channel: Cell<Channel>,
     context: Arc<AssociationContext>,
+    /// An MLD association's other links, each with the channel the
+    /// hardware knows it by.
+    links: RefCell<Vec<(Arc<AssociationContext>, Channel)>>,
     log: RefCell<Vec<&'static str>>,
+}
+impl Model {
+    fn knows(&self, context: &AssociationContext) -> bool {
+        core::ptr::eq(context, self.context.as_ref())
+            || self
+                .links
+                .borrow()
+                .iter()
+                .any(|(link, _)| core::ptr::eq(context, link.as_ref()))
+    }
 }
 impl Model {
     fn revoke(&self) -> bool {
@@ -70,15 +83,17 @@ impl reg::HardwareLease for HardwareGuard {
         self.0.native.get()
     }
     fn lookup_channel(&mut self, band: Band, number: u16) -> Option<Channel> {
-        let c = self.0.channel.get();
-        (c.band == band && c.number == number).then_some(c)
+        let links = self.0.links.borrow();
+        core::iter::once(self.0.channel.get())
+            .chain(links.iter().map(|(_, channel)| *channel))
+            .find(|c| c.band == band && c.number == number)
     }
     fn allows(&mut self, _: reg::Operation) -> bool {
         true
     }
     fn allows_association(&mut self, op: &reg::AssociationOperation<'_>) -> bool {
         assert!(self.0.hw_held.get() && self.0.os_held.get());
-        core::ptr::eq(op.context(), self.0.context.as_ref())
+        self.0.knows(op.context())
             && self.0.applied_power.get()
             && self.0.hw_mask.get() & mask(op.purpose()) != 0
     }
@@ -92,8 +107,10 @@ impl reg::OsLease for OsGuard {
     }
     fn allows_association(&mut self, op: &reg::AssociationOperation<'_>) -> bool {
         assert!(self.0.hw_held.get() && self.0.os_held.get());
-        core::ptr::eq(op.context(), self.0.context.as_ref())
-            && self.0.os_mask.get() & mask(op.purpose()) != 0
+        self.0.knows(op.context()) && self.0.os_mask.get() & mask(op.purpose()) != 0
+    }
+    fn allows_protected_management(&mut self, op: &reg::AssociationOperation<'_>) -> bool {
+        self.allows_association(op)
     }
 }
 // SAFETY: synthetic model has no physical permission; its only modeled mutation
@@ -143,6 +160,17 @@ fn fixture() -> (
     Rc<Model>,
 ) {
     let (station, c) = current();
+    model(station, c)
+}
+fn model(
+    station: Station,
+    c: Arc<AssociationContext>,
+) -> (
+    Station,
+    Arc<AssociationContext>,
+    reg::Owner<Hardware, Os>,
+    Rc<Model>,
+) {
     let model = Rc::new(Model {
         hw_held: Cell::new(false),
         os_held: Cell::new(false),
@@ -155,6 +183,7 @@ fn fixture() -> (
         applied_power: Cell::new(true),
         channel: Cell::new(c.channel()),
         context: Arc::clone(&c),
+        links: RefCell::new(Vec::new()),
         log: RefCell::new(Vec::new()),
     });
     let owner = reg::Owner::new(Hardware(Rc::clone(&model)), Os(Rc::clone(&model))).unwrap();
@@ -573,4 +602,53 @@ fn mutable_management_consumer_denies_foreign_purpose_epochs_and_revoked_guards(
         assert_eq!(station.phase(), phase);
         assert!(!model.hw_held.get() && !model.os_held.get());
     }
+}
+
+/// Each link of an AP MLD association is its own operation on its own
+/// channel, which both providers check.
+#[test]
+fn every_link_of_an_mld_association_is_admitted_on_its_own_channel() {
+    use crate::wifi::station::multi_link::tests::{
+        answer, associate_station, association_response,
+    };
+    let (station, action) = associate_station(association_response(vec![answer(0)]));
+    let Action::Configure {
+        context: Some(c),
+        links,
+        ..
+    } = action
+    else {
+        panic!("configuration");
+    };
+    let [link] = &links[..] else {
+        panic!("one other link");
+    };
+    assert_ne!(link.channel(), c.channel());
+    let (s, c, mut owner, m) = model(station, c);
+    // Unknown to both providers, the other link keeps the setup out.
+    assert_eq!(
+        owner
+            .admit_association(&s, Arc::clone(&c), Use::Configure)
+            .unwrap_err(),
+        reg::Error::HardwareDenied
+    );
+    m.links
+        .borrow_mut()
+        .push((Arc::clone(link), link.channel()));
+    let admission = owner
+        .admit_association(&s, Arc::clone(&c), Use::Configure)
+        .unwrap();
+    // SAFETY: the model publication has no native effect.
+    unsafe { owner.publish_association(admission, &s, Use::Configure, |_, _| ()) }.unwrap();
+    // A channel the hardware no longer has for the link refuses it again.
+    let admission = owner
+        .admit_association(&s, Arc::clone(&c), Use::Configure)
+        .unwrap();
+    m.links.borrow_mut()[0].1.frequency_mhz += 1;
+    assert_eq!(
+        // SAFETY: the refused publication cannot execute.
+        unsafe { owner.publish_association::<()>(admission, &s, Use::Configure, |_, _| panic!()) }
+            .unwrap_err(),
+        reg::Error::HardwareDenied
+    );
 }
