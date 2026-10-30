@@ -523,8 +523,6 @@ pub(super) fn always_exits(operand: &Operand) -> bool {
     operand.format == Format::Half && operand.operation == BinaryOperation::Divide
 }
 
-pub(in crate::x86_64) use half::emit_native as half_division;
-
 /// The S/D forms return their [`ColdSplit`].
 pub(in crate::x86_64) fn emit(
     code: &mut Code,
@@ -533,7 +531,7 @@ pub(in crate::x86_64) fn emit(
     target: TargetCpu,
     entry: Entry,
 ) -> Option<ColdSplit> {
-    if always_exits(operand) {
+    if always_exits(operand) && !crate::x86_64::asm::vector_extensions::half_supported(target) {
         super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
         None
     } else if operand.format == Format::Half {

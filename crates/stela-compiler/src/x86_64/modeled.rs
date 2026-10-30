@@ -600,6 +600,66 @@ mod half {
         round(lattice(sum), rounding)
     }
 
+    /// The integer of `width` bits nearest `bits` in the rounding direction,
+    /// or the integer indefinite with IE.
+    pub(super) fn to_integer(
+        bits: u16,
+        [signed, truncate]: [bool; 2],
+        width: u32,
+        rounding: u32,
+    ) -> (u64, u32) {
+        let mask = u64::MAX >> (64 - width);
+        let indefinite = if signed { 1 << (width - 1) } else { mask };
+        if bits & EXPONENT == EXPONENT {
+            return (indefinite, INVALID);
+        }
+        let exact = value(bits);
+        let negative = exact < 0.0;
+        let magnitude = exact.abs();
+        let rounded = integer(magnitude, if truncate { 3 } else { rounding }, negative);
+        let result = if negative {
+            -(rounded as i128)
+        } else {
+            rounded as i128
+        };
+        let range = if signed {
+            -(1 << (width - 1))..=(1 << (width - 1)) - 1
+        } else {
+            0..=i128::from(mask)
+        };
+        if !range.contains(&result) {
+            return (indefinite, INVALID);
+        }
+        let status = if rounded == magnitude { 0 } else { INEXACT };
+        (result as u64 & mask, status)
+    }
+
+    /// The Half nearest the integer `value`.
+    pub(super) fn from_integer(value: i128, rounding: u32) -> (u16, u32) {
+        if value == 0 {
+            (0, 0)
+        } else {
+            round(lattice(value << 48), rounding)
+        }
+    }
+
+    /// The Half nearest `value`.
+    pub(super) fn from_double(value: f64, rounding: u32) -> (u16, u32) {
+        let bits = value.to_bits();
+        let sign = (bits >> 48) as u16 & SIGN;
+        if value.is_nan() {
+            let fraction = (bits >> 42) as u16 & 0x3ff;
+            let status = if bits >> 51 & 1 == 0 { INVALID } else { 0 };
+            return (sign | EXPONENT | QUIET | fraction, status);
+        }
+        if value.is_infinite() || value == 0.0 {
+            return (sign | if value == 0.0 { 0 } else { EXPONENT }, 0);
+        }
+        // Beyond these bounds every rounding sees only the sign and inexactness.
+        let bound = value.abs().clamp(power(-40), power(20));
+        round(if value < 0.0 { -bound } else { bound }, rounding)
+    }
+
     /// One lane: the result bits and the MXCSR status it raises.
     pub(super) fn arithmetic(
         operation: Operation,
@@ -743,6 +803,47 @@ fn apply(
             };
             return half_lanes(instruction, &destination, lane, control);
         }
+        match (
+            instruction.map,
+            instruction.opcode,
+            instruction.pp,
+            instruction.w,
+        ) {
+            (5, opcode @ (0x7c | 0x7d), pp @ (0 | 1), false) => {
+                let forms = [pp == 1, opcode == 0x7c];
+                let lane = |at| {
+                    let (bits, status) =
+                        half::to_integer(half_word(&second, at), forms, 16, rounding);
+                    (bits as u16, status)
+                };
+                return half_lanes(instruction, &destination, lane, control);
+            }
+            (5, 0x7d, pp @ (2 | 3), false) => {
+                let lane = |at| {
+                    let word = half_word(&second, at);
+                    let value = if pp == 2 {
+                        i128::from(word as i16)
+                    } else {
+                        i128::from(word)
+                    };
+                    half::from_integer(value, rounding)
+                };
+                return half_lanes(instruction, &destination, lane, control);
+            }
+            (5, 0x5a, 3, true) if instruction.opmask == 0 => {
+                let double = f64::from_bits(qwords(&second)[0]);
+                let (bits, status) = half::from_double(double, rounding);
+                if status & !(control.mxcsr >> 7) & 0x3f != 0 {
+                    return None;
+                }
+                control.mxcsr |= status;
+                let mut result = [0; 64];
+                result[..16].copy_from_slice(&first[..16]);
+                result[..2].copy_from_slice(&bits.to_le_bytes());
+                return Some(result);
+            }
+            _ => {}
+        }
         let operation = match (
             instruction.map,
             instruction.opcode,
@@ -790,6 +891,96 @@ fn apply(
     }
 }
 
+/// A VCVT(T)SH2(U)SI or VCVT(U)SI2SH: [signed, truncate] for one to a general
+/// register, or [signed] for one from it.
+#[derive(Clone, Copy)]
+enum General {
+    To([bool; 2]),
+    From(bool),
+}
+
+impl General {
+    fn of(instruction: Instruction) -> Option<Self> {
+        if !instruction.evex || instruction.map != 5 || instruction.pp != 2 {
+            return None;
+        }
+        match instruction.opcode {
+            0x2c => Some(Self::To([true, true])),
+            0x2d => Some(Self::To([true, false])),
+            0x78 => Some(Self::To([false, true])),
+            0x79 => Some(Self::To([false, false])),
+            0x2a => Some(Self::From(true)),
+            0x7b => Some(Self::From(false)),
+            _ => None,
+        }
+    }
+}
+
+/// `ucontext_t` gregs slots of RAX..R15, by x86 register number.
+const GENERAL_SLOTS: [usize; 16] = [13, 14, 12, 11, 15, 10, 9, 8, 0, 1, 2, 3, 4, 5, 6, 7];
+
+/// The bits of the [`General`] form between `value` and the Half of `rm`,
+/// or `None` when an unmasked exception would trap.
+fn general_result(
+    form: General,
+    instruction: Instruction,
+    value: u64,
+    half_bits: u16,
+    control: &mut Control,
+) -> Option<u64> {
+    let rounding = control.mxcsr >> 13 & 3;
+    let width = if instruction.w { 64 } else { 32 };
+    let (bits, status) = match form {
+        General::To(forms) => half::to_integer(half_bits, forms, width, rounding),
+        General::From(signed) => {
+            let value = match (signed, instruction.w) {
+                (true, true) => i128::from(value as i64),
+                (true, false) => i128::from(value as u32 as i32),
+                (false, true) => i128::from(value),
+                (false, false) => i128::from(value as u32),
+            };
+            let (bits, status) = half::from_integer(value, rounding);
+            (u64::from(bits), status)
+        }
+    };
+    if status & !(control.mxcsr >> 7) & 0x3f != 0 {
+        return None;
+    }
+    control.mxcsr |= status;
+    Some(bits)
+}
+
+/// Apply a [`General`] form to the frame and `gregs`.
+///
+/// # Safety
+/// `gregs` addresses the interrupted general registers.
+unsafe fn apply_general(
+    form: General,
+    instruction: Instruction,
+    frame: &mut Frame,
+    gregs: *mut u64,
+    control: &mut Control,
+) -> Option<()> {
+    match form {
+        General::To(_) => {
+            let bits = half_word(&frame.read(instruction.rm), 0);
+            let result = general_result(form, instruction, 0, bits, control)?;
+            // SAFETY: the caller passes the register bank; a slot is in it.
+            unsafe { *gregs.add(GENERAL_SLOTS[usize::from(instruction.reg)]) = result };
+        }
+        General::From(_) => {
+            // SAFETY: as above.
+            let value = unsafe { *gregs.add(GENERAL_SLOTS[usize::from(instruction.rm)]) };
+            let bits = general_result(form, instruction, value, 0, control)? as u16;
+            let mut result = [0; 64];
+            result[..16].copy_from_slice(&frame.read(instruction.vvvv)[..16]);
+            result[..2].copy_from_slice(&bits.to_le_bytes());
+            frame.write(instruction.reg, &result).then_some(())?;
+        }
+    }
+    Some(())
+}
+
 unsafe extern "C" fn trap(signal: i32, info: *mut c_void, context: *mut c_void) {
     // SAFETY: the kernel passes a ucontext_t whose RIP addresses the
     // instruction that faulted, and fpregs its XSAVE image.
@@ -807,7 +998,18 @@ unsafe extern "C" fn trap(signal: i32, info: *mut c_void, context: *mut c_void) 
                 mxcsr: frame.mxcsr().read(),
                 opmask: 0,
             };
-            let result = Instruction::decode(bytes).and_then(|instruction| {
+            let decoded = Instruction::decode(bytes);
+            if let Some((instruction, form)) =
+                decoded.and_then(|instruction| Some((instruction, General::of(instruction)?)))
+            {
+                let gregs = context.add(GREGS).cast::<u64>();
+                if apply_general(form, instruction, &mut frame, gregs, &mut control).is_some() {
+                    frame.mxcsr().write(control.mxcsr);
+                    *rip += length as u64;
+                    return;
+                }
+            }
+            let result = decoded.and_then(|instruction| {
                 control.opmask = frame.opmask(instruction.opmask);
                 let [destination, first, second] =
                     [instruction.reg, instruction.vvvv, instruction.rm].map(|r| frame.read(r));
@@ -982,7 +1184,37 @@ mod tests {
                     ));
                 }
             }
+            for (opcode, pp) in [
+                (0x7d, 1),
+                (0x7c, 1),
+                (0x7d, 0),
+                (0x7c, 0),
+                (0x7d, 2),
+                (0x7d, 3),
+            ] {
+                for (opmask, zeroing) in [(0, false), (1, true), (1, false)] {
+                    forms.push((
+                        fp16,
+                        Instruction {
+                            evex: true,
+                            map: 5,
+                            opmask,
+                            zeroing,
+                            ..vex(opcode, pp, bytes, 0)
+                        },
+                    ));
+                }
+            }
         }
+        forms.push((
+            fp16,
+            Instruction {
+                evex: true,
+                map: 5,
+                w: true,
+                ..vex(0x5a, 3, 16, 2)
+            },
+        ));
         forms.extend([
             (sha512, vex(0xcb, 3, 32, 2)),
             (sha512, vex(0xcc, 3, 32, 0)),
@@ -1074,6 +1306,111 @@ mod tests {
             }
         }
         std::println!("MODELED_FORMS_CHECKED={checked}");
+    }
+
+    #[test]
+    fn general_register_models_match_the_host_instructions() {
+        if !TargetCpu::detect().supports(TargetCpu::X86_64_V4.with_avx512fp16()) {
+            return;
+        }
+        let vector = |register: usize| core::mem::offset_of!(GuestState, v) + 32 * register;
+        let x = |i: usize| core::mem::offset_of!(GuestState, x) + 8 * i;
+        let mut random = 0x3956_c25b_f348_b538_u64;
+        let mut next = move || {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            random
+        };
+        let mut checked = 0;
+        for opcode in [0x2c, 0x2d, 0x78, 0x79, 0x2a, 0x7b] {
+            for w in [false, true] {
+                let to = opcode != 0x2a && opcode != 0x7b;
+                let instruction = Instruction {
+                    evex: true,
+                    map: 5,
+                    opcode,
+                    pp: 2,
+                    w,
+                    bytes: 16,
+                    reg: if to { 0 } else { 1 },
+                    vvvv: if to { 0 } else { 2 },
+                    rm: if to { 3 } else { 0 },
+                    opmask: 0,
+                    zeroing: false,
+                };
+                // X0 holds the MXCSR to run under, X1 receives the resulting
+                // one, X2 holds the caller's, X4 RAX before and X5 RAX after.
+                let mut code = at_rdi(&[0x0f, 0xae], 2, x(0));
+                code.extend(at_rdi(&[0x48, 0x8b], 0, x(4)));
+                for register in 1..4 {
+                    code.extend(at_rdi(
+                        &[0xc5, 0xfe, 0x6f],
+                        register,
+                        vector(usize::from(register)),
+                    ));
+                }
+                code.extend(instruction.encode());
+                code.extend(at_rdi(&[0x48, 0x89], 0, x(5)));
+                code.extend(at_rdi(&[0xc5, 0xfe, 0x7f], 1, vector(1)));
+                code.extend(at_rdi(&[0x0f, 0xae], 3, x(1)));
+                code.extend(at_rdi(&[0x0f, 0xae], 2, x(2)));
+                code.extend([0xc5, 0xf8, 0x77, 0xc3]); // vzeroupper; ret
+                let native = Native::new(&code);
+                let form = General::of(instruction).unwrap();
+                for sample in 0..256 {
+                    let mut state = GuestState::default();
+                    for limb in state.v.as_flattened_mut() {
+                        *limb = (0..4).fold(0, |limb, lane| {
+                            limb | u64::from(half(next())) << (16 * lane)
+                        });
+                    }
+                    let mut caller = 0u32;
+                    // SAFETY: STMXCSR writes four bytes to the local.
+                    unsafe { core::arch::asm!("stmxcsr [{}]", in(reg) &mut caller) };
+                    let rounding = (sample % 4) << 13;
+                    let integer = next() >> (next() % 64);
+                    state.x[0] = 0x1f80 | rounding;
+                    state.x[2] = u64::from(caller);
+                    state.x[4] = if next() & 1 == 0 {
+                        integer
+                    } else {
+                        integer.wrapping_neg()
+                    };
+                    let mut control = Control {
+                        mxcsr: 0x1f80 | rounding as u32,
+                        opmask: 0,
+                    };
+                    let value = state.x[4];
+                    let source = half_word(&ymm(&state, 3), 0);
+                    let model =
+                        general_result(form, instruction, value, source, &mut control).unwrap();
+                    let vvvv = ymm(&state, 2);
+                    native.run(&mut state, &mut ExecutionContext::default());
+                    let compared = !0x3f | half::INVALID;
+                    if to {
+                        // Intel SDE 10.13.1 sign-extends a dword VCVTSH2SI into RAX.
+                        let result = if w {
+                            state.x[5]
+                        } else {
+                            state.x[5] as u32 as u64
+                        };
+                        assert_eq!(result, model, "{instruction:x?} sample={sample}");
+                    } else {
+                        let mut expected = vvvv[..16].to_vec();
+                        expected[..2].copy_from_slice(&(model as u16).to_le_bytes());
+                        assert_eq!(ymm(&state, 1)[..16], expected, "{instruction:x?}");
+                    }
+                    assert_eq!(
+                        state.x[1] as u32 & compared,
+                        control.mxcsr & compared,
+                        "{instruction:x?} sample={sample}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        std::println!("GENERAL_MODELS_CHECKED={checked}");
     }
 
     #[test]
@@ -1231,6 +1568,21 @@ mod tests {
             fused([0x8000, 0x8000, 0x3c00], [false, false], 0),
             (0x8000, 0)
         );
+        // Conversions truncate or round by MXCSR; out of range is indefinite.
+        assert_eq!(to_integer(0x4110, [true, true], 16, 0), (2, INEXACT));
+        assert_eq!(to_integer(0xc110, [true, false], 16, 1), (0xfffd, INEXACT));
+        assert_eq!(to_integer(0x7bff, [true, true], 16, 0), (0x8000, INVALID));
+        assert_eq!(to_integer(0x7bff, [false, true], 16, 0), (0xffe0, 0));
+        assert_eq!(
+            to_integer(0xbc00, [false, true], 32, 0),
+            (u32::MAX as u64, INVALID)
+        );
+        assert_eq!(to_integer(0xb800, [false, true], 64, 0), (0, INEXACT));
+        assert_eq!(from_integer(3, 0), (0x4200, 0));
+        assert_eq!(from_integer(2049, 0), (0x6800, INEXACT));
+        assert_eq!(from_integer(65535, 0), (0x7c00, OVERFLOW | INEXACT));
+        assert_eq!(from_double(1.5, 0), (0x3e00, 0));
+        assert_eq!(from_double(1e300, 3), (0x7bff, OVERFLOW | INEXACT));
         // Infinity times zero is invalid, as is infinities of opposite sign.
         assert_eq!(fused([0, 0, 0x7c00], [false, false], 0), (0xfe00, INVALID));
         assert_eq!(

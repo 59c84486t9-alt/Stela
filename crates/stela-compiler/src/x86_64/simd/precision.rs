@@ -1,19 +1,23 @@
-//! FCVT between FP formats: SSE2 or integer paths, software fallback otherwise.
+//! FCVT between FP formats: SSE2, F16C, AVX512-FP16 or integer paths, software
+//! fallback otherwise.
 use super::super::isa::ShiftOpcode;
 use super::numerical::helper_section;
 use super::numerical::{
     Condition, INPUT_MINIMUM_EXPONENT, MINIMUM_EXPONENT_VECTOR, RESULT_MINIMUM_EXPONENT, Rounding,
     branch, clear_scalar, commit_inexact, environment_round, exponent_range,
-    prepare_vector_input_range, prepare_vector_result_range, read_numerical_vector,
-    reject_other_status, resolve, restore_environment, test_control, vector_exponent_range,
+    prepare_half_result_range, prepare_vector_input_range, prepare_vector_result_range,
+    read_numerical_vector, reject_other_status, resolve, restore_environment, test_control,
+    vector_exponent_range,
 };
 use super::{Host, commit, packed, read_vector};
 use crate::x86_64::asm::FloatLanes;
-use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Rm, ShiftOp, Size};
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Rm, ShiftOp, Size, vector_extensions};
 use crate::{
-    GuestAddress,
+    GuestAddress, TargetCpu,
     aarch64::{
-        floating::{FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format, precision::PrecisionRounding},
+        floating::{
+            FPCR_AHP, FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format, precision::PrecisionRounding,
+        },
         simd::{
             arithmetic::Shape,
             conversion::{PrecisionMode, PrecisionOperand},
@@ -27,6 +31,10 @@ use alloc::vec::Vec;
 const RESULT_VECTOR: u8 = 0;
 const SOURCE_VECTOR: u8 = 1;
 const JAM_VECTOR: u8 = 6;
+/// The low Half of a scalar narrowing, ahead of its merge into old Vd.
+const HALF_LANE_VECTOR: u8 = 6;
+/// VCVTPS2PH's immediate: round by MXCSR.RC.
+const CONVERT_USING_MXCSR: u8 = 1 << 2;
 const COMPARE_EQUAL: u8 = 0;
 const UPPER_QWORD_BYTES: u8 = 8;
 const HALF_EXPONENT_BITS: u8 = 5;
@@ -330,7 +338,116 @@ fn emit_narrow(
     }
 }
 
-pub(in crate::x86_64) fn emit(code: &mut Code, operand: &PrecisionOperand, pc: GuestAddress) {
+/// VCVTPS2PH narrows Single in one rounding, and AVX512-FP16's VCVTSD2SH
+/// narrows Double. The DIT profile keeps its reviewed recipe.
+pub(super) fn half_narrowing_supported(mode: PrecisionMode, target: TargetCpu) -> bool {
+    match mode {
+        PrecisionMode::Narrow {
+            destination: Format::Half,
+            ..
+        }
+        | PrecisionMode::Scalar {
+            source: Format::Single,
+            destination: Format::Half,
+            ..
+        } => target.supports(TargetCpu::F16c) && !target.data_independent_timing(),
+        PrecisionMode::Scalar {
+            source: Format::Double,
+            destination: Format::Half,
+            ..
+        } => vector_extensions::half_supported(target),
+        _ => false,
+    }
+}
+
+/// Narrow to Half under the guards of the Half arithmetic path: normal inputs,
+/// and a helper for other status or a result below exponent 2, so x86's
+/// tininess rule never decides a guest result. FPCR.AHP selects a format the
+/// host lacks.
+fn emit_narrow_half(
+    code: &mut Code,
+    operand: &PrecisionOperand,
+    pc: GuestAddress,
+    target: TargetCpu,
+) {
+    let mut helper = Vec::new();
+    exception_guard(code, &mut helper);
+    test_control(code, FPCR_AHP);
+    helper.push(branch(code, Condition::NotZero));
+    let scalar = match operand.mode {
+        PrecisionMode::Scalar { source, .. } => Some(source),
+        _ => None,
+    };
+    if let Some(source) = scalar {
+        read_vector(code, operand.source, SOURCE_VECTOR);
+        exponent_range(code, source, SOURCE_VECTOR, INPUT_MINIMUM_EXPONENT);
+        helper.push(branch(code, Condition::AboveOrEqual));
+        clear_scalar(code, source, SOURCE_VECTOR);
+    } else {
+        read_numerical_vector(code, Shape::Vector128, operand.source, SOURCE_VECTOR);
+        prepare_vector_input_range(code, Format::Single);
+        vector_exponent_range(code, Format::Single, Shape::Vector128, SOURCE_VECTOR);
+        helper.push(branch(code, Condition::NotZero));
+    }
+    let result = if scalar.is_some() {
+        HALF_LANE_VECTOR
+    } else {
+        RESULT_VECTOR
+    };
+    environment_round(code, Rounding::Fpcr);
+    if scalar == Some(Format::Double) {
+        vector_extensions::half_from_double(code, result, SOURCE_VECTOR);
+    } else {
+        // VCVTPS2PH encodes its source in ModRM.reg, and clears above the low
+        // qword of its destination.
+        Host::ConvertSingleToHalf.register_imm(
+            code,
+            SOURCE_VECTOR,
+            result,
+            CONVERT_USING_MXCSR,
+            target,
+        );
+    }
+    restore_environment(code);
+    helper.push(reject_other_status(code));
+    prepare_vector_input_range(code, Format::Half);
+    prepare_half_result_range(code);
+    let shape = if scalar.is_some() {
+        Shape::Scalar
+    } else {
+        Shape::Vector64
+    };
+    vector_exponent_range(code, Format::Half, shape, result);
+    helper.push(branch(code, Condition::NotZero));
+    helper_section(code, &helper, pc);
+    commit_inexact(code);
+    match operand.mode {
+        PrecisionMode::Narrow { upper: true, .. } => {
+            read_vector(code, operand.destination, SOURCE_VECTOR);
+            code.asm().movlhps(SOURCE_VECTOR, Rm::Xmm(RESULT_VECTOR));
+            commit(code, operand.destination, SOURCE_VECTOR);
+        }
+        PrecisionMode::Narrow { .. } => commit(code, operand.destination, RESULT_VECTOR),
+        _ => {
+            read_vector(code, operand.destination, RESULT_VECTOR);
+            let mut asm = code.asm();
+            asm.movd_from_xmm(Rax, HALF_LANE_VECTOR);
+            asm.pinsrw(RESULT_VECTOR, Rax, 0);
+            scalar_commit(code, operand.destination, Format::Half);
+        }
+    }
+}
+
+pub(in crate::x86_64) fn emit(
+    code: &mut Code,
+    operand: &PrecisionOperand,
+    pc: GuestAddress,
+    target: TargetCpu,
+) {
+    if half_narrowing_supported(operand.mode, target) {
+        emit_narrow_half(code, operand, pc, target);
+        return;
+    }
     match operand.mode {
         PrecisionMode::Scalar {
             source,

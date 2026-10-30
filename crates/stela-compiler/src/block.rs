@@ -253,10 +253,10 @@ pub(crate) enum Terminator {
     Clock(ClockInstruction),
     ThreadRegister(ThreadRegisterInstruction),
     /// Unexecuted scalar or vector operation delegated to numerical
-    /// completion. `inline` keeps a Half division that a host with its
-    /// instruction completes in place, without changing the block's extent.
+    /// completion. `inline` keeps one that a host with its instructions
+    /// completes in place, without changing the block's extent.
     FloatingPoint {
-        inline: Option<crate::aarch64::simd::arithmetic::Operand>,
+        inline: Option<crate::aarch64::FloatingPointOperation>,
     },
     Amx(crate::amx::AmxInstruction),
 }

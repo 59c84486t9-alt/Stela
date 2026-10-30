@@ -111,10 +111,24 @@ fn integer_offset(integer: IntegerOperand, lane: u32) -> u32 {
     vector_offset(register) + lane * (format.width.bits() / BITS_PER_BYTE)
 }
 
+/// AVX512-FP16 converts Half in one rounding; a fixed-point scale would add
+/// another.
+pub(super) fn half_supported(operand: &IntegerConversion, target: TargetCpu) -> bool {
+    vector_extensions::half_supported(target) && operand.frac_bits == 0
+}
+
 fn read_integer(code: &mut Code, integer: IntegerOperand, lane: u32) {
     let format = integer.format();
     match integer {
         IntegerOperand::General { register, .. } => super::super::load(code, register),
+        IntegerOperand::Simd { .. } if format.width == IntegerWidth::Bits16 => {
+            let element = guest(integer_offset(integer, lane));
+            if format.signed {
+                code.asm().movsx(Size::Dword, Rax, Size::Word, element);
+            } else {
+                code.asm().movzx(Size::Dword, Rax, Size::Word, element);
+            }
+        }
         IntegerOperand::Simd { .. } => {
             code.asm().mov_load(
                 width(format.width == IntegerWidth::Bits64),
@@ -180,6 +194,22 @@ fn convert_integer_lane(
 ) {
     let integer = operand.integer.format();
     read_integer(code, operand.integer, lane);
+    if operand.format == Format::Half {
+        let wide = integer.width == IntegerWidth::Bits64;
+        if integer.signed {
+            vector_extensions::half_from_signed(code, RESULT_VECTOR, wide, Rax);
+        } else {
+            vector_extensions::scalar_from_unsigned(
+                code,
+                RESULT_VECTOR,
+                Format::Half,
+                wide,
+                Rax,
+                target,
+            );
+        }
+        return;
+    }
     let wide = integer.width == IntegerWidth::Bits64 || !integer.signed;
     if integer.signed || integer.width != IntegerWidth::Bits64 {
         to_float(code, operand.format, wide);
@@ -251,7 +281,7 @@ pub(in crate::x86_64) fn from_integer(
     pc: GuestAddress,
     target: TargetCpu,
 ) {
-    if operand.format == Format::Half {
+    if operand.format == Format::Half && !half_supported(operand, target) {
         // S->H after integer->S can double round; there is no baseline H CVT.
         helper(code, pc);
         return;
@@ -329,10 +359,44 @@ fn guard_float_source(code: &mut Code, operand: &IntegerConversion) -> usize {
 fn read_float_lane(code: &mut Code, operand: &IntegerConversion, lane: u32) {
     let element =
         guest(vector_offset(operand.float) + lane * (operand.format.bits() / BITS_PER_BYTE));
-    if operand.format == Format::Single {
-        code.asm().movd_to_xmm(RESULT_VECTOR, element);
-    } else {
+    if operand.format == Format::Double {
         Host::MoveQword.emit(code, RESULT_VECTOR, element, TargetCpu::Baseline);
+    } else {
+        code.asm().movd_to_xmm(RESULT_VECTOR, element);
+    }
+}
+
+/// VCVT(T)SH2(U)SI of the low Half lane. Half's largest finite value fits a
+/// dword, so an H integer checks the range of the dword result.
+fn half_to_general(
+    code: &mut Code,
+    integer: IntegerFormat,
+    truncate: bool,
+    failures: &mut Vec<usize>,
+    target: TargetCpu,
+) {
+    let wide = integer.width == IntegerWidth::Bits64;
+    if integer.signed {
+        vector_extensions::half_to_signed(code, Rax, RESULT_VECTOR, wide, truncate);
+    } else {
+        vector_extensions::scalar_to_unsigned(
+            code,
+            Rax,
+            RESULT_VECTOR,
+            Format::Half,
+            wide,
+            truncate,
+            target,
+        );
+    }
+    if integer.width == IntegerWidth::Bits16 {
+        let mut asm = code.asm();
+        asm.mov(Size::Dword, Rdx, Rax);
+        if integer.signed {
+            asm.alu_imm32(Alu::Add, Size::Dword, Rdx, i32::from(i16::MAX) + 1);
+        }
+        asm.shift_imm(ShiftOp::Shr, Size::Dword, Rdx, u16::BITS as u8);
+        failures.push(branch(code, Condition::NotZero));
     }
 }
 
@@ -346,7 +410,9 @@ fn convert_float_lane(
     let integer = operand.integer.format();
     let truncate = mode == IntegerRounding::TowardZero;
     let wide = integer.width == IntegerWidth::Bits64;
-    if integer.signed {
+    if operand.format == Format::Half {
+        half_to_general(code, integer, truncate, failures, target);
+    } else if integer.signed {
         from_float(code, operand.format, truncate, wide);
     } else if !vector_extensions::scalar_to_unsigned(
         code,
@@ -410,19 +476,23 @@ fn finish_integer(code: &mut Code, operand: &IntegerConversion, packed_result: b
                 }
             } else {
                 read_vector(code, register, RESULT_VECTOR);
-                let wide = format.width == IntegerWidth::Bits64;
-                lane_to_vector(code, wide, TEMPORARY_VECTOR);
-                if wide {
-                    Host::MoveScalarDouble
+                if format.width == IntegerWidth::Bits16 {
+                    code.asm().pinsrw(RESULT_VECTOR, Rax, 0);
                 } else {
-                    Host::MoveScalarSingle
+                    let wide = format.width == IntegerWidth::Bits64;
+                    lane_to_vector(code, wide, TEMPORARY_VECTOR);
+                    if wide {
+                        Host::MoveScalarDouble
+                    } else {
+                        Host::MoveScalarSingle
+                    }
+                    .register(
+                        code,
+                        RESULT_VECTOR,
+                        TEMPORARY_VECTOR,
+                        TargetCpu::Baseline,
+                    );
                 }
-                .register(
-                    code,
-                    RESULT_VECTOR,
-                    TEMPORARY_VECTOR,
-                    TargetCpu::Baseline,
-                );
                 test_control(code, FPCR_NEP);
                 let merge = branch(code, Condition::NotZero);
                 clear_scalar(code, operand.format, RESULT_VECTOR);
@@ -441,7 +511,9 @@ pub(in crate::x86_64) fn to_integer(
     pc: GuestAddress,
     target: TargetCpu,
 ) {
-    if operand.format == Format::Half || mode == IntegerRounding::NearestAway {
+    if operand.format == Format::Half && !half_supported(operand, target)
+        || mode == IntegerRounding::NearestAway
+    {
         // SSE2 has no ties-away control. Adding 0.5 before truncation double
         // rounds near half ties; keep the exact integer-core route instead.
         helper(code, pc);

@@ -1357,3 +1357,4 @@ fn unsupported_conversion_controls_preserve_every_register_flags_and_status() {
 
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 mod fused_native;
+mod half_conversion_native;

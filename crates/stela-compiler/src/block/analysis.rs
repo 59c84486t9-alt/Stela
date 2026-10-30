@@ -431,12 +431,7 @@ pub(super) fn parse(
                 // The checked full-system prefix has no inline numerical recipe.
                 // Recover its exact prefix and complete through the existing FP
                 // service, including forms other profiles can execute inline.
-                let inline = match operand {
-                    crate::aarch64::FloatingPointOperation::Binary(operand) if !checked => {
-                        Some(*operand)
-                    }
-                    _ => None,
-                };
+                let inline = (!checked).then_some(*operand);
                 terminal = Some((pc, Terminator::FloatingPoint { inline }));
                 break;
             }

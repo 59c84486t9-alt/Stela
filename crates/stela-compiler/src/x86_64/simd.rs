@@ -230,19 +230,34 @@ pub(super) fn greater(code: &mut Code, lane_bytes: u8, unsigned: bool, target: c
     packed(code, Host::Or, 0, 2);
 }
 
-/// Whether [`half_division`] can complete a Half division on `target`.
-pub(super) fn half_division_inline(target: crate::TargetCpu) -> bool {
-    crate::x86_64::asm::vector_extensions::half_supported(target)
-}
-
-/// A Half division on its host instruction, exiting to numerical completion
-/// at `pc` where that cannot produce the guest result.
-pub(super) fn half_division(
-    code: &mut Code,
-    operand: &crate::aarch64::simd::arithmetic::Operand,
-    pc: crate::GuestAddress,
-) {
-    arithmetic::half_division(code, operand, pc);
+/// Whether [`emit_numerical`] completes on `target` an `operation` that
+/// [`numerical_always_exits`] ends its block with.
+pub(super) fn numerical_terminal_inline(
+    operation: &crate::aarch64::FloatingPointOperation,
+    target: crate::TargetCpu,
+) -> bool {
+    use crate::aarch64::{
+        FloatingPointOperation,
+        floating::{Format, integer::IntegerRounding},
+        simd::conversion::Operand,
+    };
+    match operation {
+        FloatingPointOperation::Binary(operand) => {
+            operand.format == Format::Half
+                && crate::x86_64::asm::vector_extensions::half_supported(target)
+        }
+        FloatingPointOperation::Conversion(Operand::Precision(operand)) => {
+            precision::half_narrowing_supported(operand.mode, target)
+        }
+        FloatingPointOperation::Conversion(Operand::FromInteger(operand)) => {
+            integer_conversion::half_supported(operand, target)
+        }
+        FloatingPointOperation::Conversion(Operand::ToInteger { operand, rounding }) => {
+            integer_conversion::half_supported(operand, target)
+                && *rounding != IntegerRounding::NearestAway
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOperation) -> bool {
@@ -331,7 +346,7 @@ pub(super) fn emit_numerical_split(
         crate::aarch64::FloatingPointOperation::Conversion(operand) => {
             use crate::aarch64::simd::conversion::Operand;
             match operand {
-                Operand::Precision(operand) => precision::emit(code, operand, pc),
+                Operand::Precision(operand) => precision::emit(code, operand, pc, target),
                 Operand::FromInteger(operand) => {
                     integer_conversion::from_integer(code, operand, pc, target)
                 }

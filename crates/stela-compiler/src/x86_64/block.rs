@@ -595,7 +595,7 @@ pub(crate) fn successor_exits(
         // System instruction exits at itself, which the stub check below
         // rejects.
         Some(Terminator::System(request)) => (request.next_pc, ExitKind::Fallthrough, false),
-        // So does a Half division completed inline; otherwise the same check
+        // So does a numerical operation completed inline; otherwise the same check
         // rejects the exit at the instruction.
         Some(Terminator::FloatingPoint { .. }) => (fallthrough, ExitKind::Fallthrough, false),
         Some(_) => return vec![],
@@ -655,12 +655,14 @@ fn emit_terminal(
             Terminator::FloatingPoint { inline } => {
                 // A numerical terminal is unexecuted. Ordinary profiles put
                 // inline-capable forms in the body; the checked system profile
-                // delegates every numerical form to the runtime service. Half
-                // division ends its block on every host, and completes here
-                // where the host has its instruction.
+                // delegates every numerical form to the runtime service. What
+                // ends its block on every host completes here on a host with
+                // the instructions for it.
                 match inline {
-                    Some(operand) if super::simd::half_division_inline(target) => {
-                        super::simd::half_division(code, operand, *pc);
+                    Some(operation)
+                        if super::simd::numerical_terminal_inline(operation, target) =>
+                    {
+                        super::simd::emit_numerical(code, operation, *pc, target);
                         direct_exit(code, fallthrough, ExitKind::Fallthrough);
                     }
                     _ => direct_exit(code, *pc, ExitKind::FloatingPoint),

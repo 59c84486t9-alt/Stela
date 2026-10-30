@@ -147,7 +147,7 @@ fn native_sign(code: &mut Code, operation: BinaryOperation, lanes: u8) {
 }
 
 /// One AVX512-FP16 operation under the same input guards as the lane recipe.
-pub(in crate::x86_64) fn emit_native(code: &mut Code, operand: &Operand, pc: GuestAddress) {
+fn emit_native(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     let mut helper = vec![branch(code, Condition::NotZero)];
     prepare_inputs(code, operand);

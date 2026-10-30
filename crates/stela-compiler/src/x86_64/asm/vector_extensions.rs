@@ -927,13 +927,15 @@ pub(crate) fn saturating_narrow(
 
 /// AVX-512 conversions between S/D lanes and W/X integers: unsigned dwords
 /// need F and VL, quadwords DQ as well. SSE2 already converts signed dwords.
-/// The DIT profile keeps its reviewed recipe.
+/// Half lanes convert with H integers on AVX512-FP16. The DIT profile keeps
+/// its reviewed recipe.
 pub(crate) fn packed_conversion_supported(
     format: Format,
     integer: IntegerFormat,
     target: TargetCpu,
 ) -> bool {
     let required = match (format, integer.width, integer.signed) {
+        (Format::Half, IntegerWidth::Bits16, _) => return half_supported(target),
         (Format::Half, ..) | (_, IntegerWidth::Bits16, _) | (_, IntegerWidth::Bits32, true) => {
             return false;
         }
@@ -957,10 +959,24 @@ const fn packed_conversion(pp: Pp, w: bool) -> Evex {
     }
 }
 
-/// Convert the `integer` lanes of `xmm` in place to S/D lanes rounded by
-/// MXCSR: VCVTUDQ2PS/PD, VCVTQQ2PS/PD or VCVTUQQ2PS/PD. Inexact results set
-/// PE. Between widths the two narrow lanes are the low quadword; a narrow
-/// result clears the high one.
+/// EVEX.128 for a packed Half conversion.
+const fn packed_half_conversion(pp: Pp) -> Evex {
+    Evex {
+        map: Map::M5,
+        pp,
+        w: false,
+        length: 0,
+        mask: 0,
+        zeroing: false,
+        broadcast: false,
+        scale: 16,
+    }
+}
+
+/// Convert the `integer` lanes of `xmm` in place to float lanes rounded by
+/// MXCSR: VCVTW2PH, VCVTUW2PH, VCVTUDQ2PS/PD, VCVTQQ2PS/PD or VCVTUQQ2PS/PD.
+/// Inexact results set PE. Between widths the two narrow lanes are the low
+/// quadword; a narrow result clears the high one.
 pub(crate) fn packed_from_integer(
     code: &mut Code,
     xmm: u8,
@@ -970,6 +986,12 @@ pub(crate) fn packed_from_integer(
 ) -> bool {
     if !packed_conversion_supported(format, integer, target) {
         return false;
+    }
+    if format == Format::Half {
+        let pp = if integer.signed { Pp::Pf3 } else { Pp::Pf2 };
+        let prefix = packed_half_conversion(pp);
+        code.asm().evex(prefix, 0x7d, xmm, 0, Rm::Xmm(xmm));
+        return true;
     }
     let (pp, opcode) = match (format, integer.signed) {
         (Format::Single, true) => (Pp::None, 0x5b),
@@ -988,10 +1010,11 @@ pub(crate) fn packed_from_integer(
     true
 }
 
-/// Convert the S/D lanes of `xmm` in place to `integer` lanes, truncated or
-/// rounded by MXCSR: VCVT(T)PS2UDQ/QQ/UQQ or VCVT(T)PD2UDQ/QQ/UQQ, with
-/// lanes placed as for [`packed_from_integer`]. An unrepresentable result
-/// sets IE and PE marks an inexact one, as for the scalar forms.
+/// Convert the float lanes of `xmm` in place to `integer` lanes, truncated or
+/// rounded by MXCSR: VCVT(T)PH2(U)W, VCVT(T)PS2UDQ/QQ/UQQ or
+/// VCVT(T)PD2UDQ/QQ/UQQ, with lanes placed as for [`packed_from_integer`]. An
+/// unrepresentable result sets IE and PE marks an inexact one, as for the
+/// scalar forms.
 pub(crate) fn packed_to_integer(
     code: &mut Code,
     xmm: u8,
@@ -1002,6 +1025,13 @@ pub(crate) fn packed_to_integer(
 ) -> bool {
     if !packed_conversion_supported(format, integer, target) {
         return false;
+    }
+    if format == Format::Half {
+        let pp = if integer.signed { Pp::P66 } else { Pp::None };
+        let opcode = 0x7d - u8::from(truncate);
+        let prefix = packed_half_conversion(pp);
+        code.asm().evex(prefix, opcode, xmm, 0, Rm::Xmm(xmm));
+        return true;
     }
     let pp = if integer.width == IntegerWidth::Bits64 {
         Pp::P66
@@ -1024,26 +1054,80 @@ pub(crate) fn unsigned_scalar_supported(target: TargetCpu) -> bool {
     target.supports(TargetCpu::Avx512f) && !target.data_independent_timing()
 }
 
-/// EVEX.LIG for a scalar S/D conversion; a 64-bit integer sets W.
+/// EVEX.LIG for a scalar conversion; a 64-bit integer sets W.
 fn scalar_conversion(format: Format, wide: bool) -> Evex {
     Evex {
-        map: Map::M0f,
+        map: if format == Format::Half {
+            Map::M5
+        } else {
+            Map::M0f
+        },
         pp: match format {
-            Format::Single => Pp::Pf3,
+            Format::Half | Format::Single => Pp::Pf3,
             Format::Double => Pp::Pf2,
-            Format::Half => unreachable!("half conversions use the exact core"),
         },
         w: wide,
         length: 0,
         mask: 0,
         zeroing: false,
         broadcast: false,
-        scale: if format == Format::Single { 4 } else { 8 },
+        scale: (format.bits() / u8::BITS) as u8,
     }
 }
 
-/// VCVTUSI2SS/SD: the low S/D lane of `xmm` from unsigned `source` (64-bit
-/// when `wide`), rounded by MXCSR; the other lanes of `xmm` are kept.
+/// VCVTSI2SH: the low Half lane of `xmm` from signed `source` (64-bit when
+/// `wide`), rounded by MXCSR; the other lanes of `xmm` are kept.
+pub(crate) fn half_from_signed(code: &mut Code, xmm: u8, wide: bool, source: Gpr) {
+    code.asm().evex(
+        scalar_conversion(Format::Half, wide),
+        0x2a,
+        xmm,
+        xmm,
+        Rm::Reg(source),
+    );
+}
+
+/// VCVT(T)SH2SI: signed `destination` (64-bit when `wide`) from the low Half
+/// lane of `xmm`, truncated or rounded by MXCSR.
+pub(crate) fn half_to_signed(
+    code: &mut Code,
+    destination: Gpr,
+    xmm: u8,
+    wide: bool,
+    truncate: bool,
+) {
+    code.asm().evex(
+        scalar_conversion(Format::Half, wide),
+        0x2d - u8::from(truncate),
+        destination as u8,
+        0,
+        Rm::Xmm(xmm),
+    );
+}
+
+/// VCVTSD2SH: the low Half lane of `xmm` from the low Double lane of `source`,
+/// rounded by MXCSR.
+pub(crate) fn half_from_double(code: &mut Code, xmm: u8, source: u8) {
+    code.asm().evex(
+        Evex {
+            map: Map::M5,
+            pp: Pp::Pf2,
+            w: true,
+            length: 0,
+            mask: 0,
+            zeroing: false,
+            broadcast: false,
+            scale: 8,
+        },
+        0x5a,
+        xmm,
+        xmm,
+        Rm::Xmm(source),
+    );
+}
+
+/// VCVTUSI2SH/SS/SD: the low float lane of `xmm` from unsigned `source`
+/// (64-bit when `wide`), rounded by MXCSR; the other lanes of `xmm` are kept.
 pub(crate) fn scalar_from_unsigned(
     code: &mut Code,
     xmm: u8,
@@ -1065,9 +1149,10 @@ pub(crate) fn scalar_from_unsigned(
     true
 }
 
-/// VCVT(T)SS2USI and VCVT(T)SD2USI: unsigned `destination` (64-bit when
-/// `wide`) from the low S/D lane of `xmm`, truncated or rounded by MXCSR.
-/// An unrepresentable result, negative ones included, sets IE.
+/// VCVT(T)SH2USI, VCVT(T)SS2USI and VCVT(T)SD2USI: unsigned `destination`
+/// (64-bit when `wide`) from the low float lane of `xmm`, truncated or
+/// rounded by MXCSR. An unrepresentable result, negative ones included, sets
+/// IE.
 pub(crate) fn scalar_to_unsigned(
     code: &mut Code,
     destination: Gpr,
@@ -1233,6 +1318,9 @@ mod tests {
         half_arithmetic(&mut code, HalfOpcode::Multiply, 2, 3);
         half_fused(&mut code, 0x98, 0, 6, 1);
         half_fused(&mut code, 0x9c, 9, 10, 11);
+        half_from_signed(&mut code, 0, true, Gpr::Rax);
+        half_to_signed(&mut code, Gpr::Rax, 0, false, true);
+        half_from_double(&mut code, 0, 1);
         assert_eq!(
             code,
             [
@@ -1243,6 +1331,9 @@ mod tests {
                 &[0x62, 0xf5, 0x6c, 0x89, 0x59, 0xd3], // vmulph xmm2{k1}{z},xmm2,xmm3
                 &[0x62, 0xf6, 0x4d, 0x89, 0x98, 0xc1], // vfmadd132ph xmm0{k1}{z},xmm6,xmm1
                 &[0x62, 0x56, 0x2d, 0x89, 0x9c, 0xcb], // vfnmadd132ph xmm9{k1}{z},xmm10,xmm11
+                &[0x62, 0xf5, 0xfe, 0x08, 0x2a, 0xc0], // vcvtsi2sh xmm0,xmm0,rax
+                &[0x62, 0xf5, 0x7e, 0x08, 0x2c, 0xc0], // vcvttsh2si eax,xmm0
+                &[0x62, 0xf5, 0xff, 0x08, 0x5a, 0xc1], // vcvtsd2sh xmm0,xmm0,xmm1
             ]
             .concat()
         );
