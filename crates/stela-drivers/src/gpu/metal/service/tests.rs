@@ -21,6 +21,7 @@ use crate::gpu::{
 use alloc::{vec, vec::Vec};
 use core::num::NonZeroU64;
 
+mod pipelines;
 mod resources;
 
 type TestService = Service<MockBackend, MockCompiler>;
@@ -56,6 +57,9 @@ impl Memory {
     }
 
     fn range(&self, span: Span) -> Result<core::ops::Range<usize>, Fault> {
+        if span.length == 0 {
+            return Ok(0..0);
+        }
         let start = span
             .address
             .checked_sub(Self::BASE)

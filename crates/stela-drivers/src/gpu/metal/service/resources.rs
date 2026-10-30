@@ -1,6 +1,6 @@
 //! Buffers, textures, samplers and heaps.
 use super::{
-    Call, Object, Service,
+    Call, Object, Service, boolean, known,
     wire::{
         AUTOMATIC, BufferRangeRequest, BufferResponse, Empty, Fault, Handle, HeapBufferSizeRequest,
         HeapDescriptorRecord, HeapUsageRequest, HeapUsageResponse, NewBufferRequest,
@@ -185,7 +185,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         call.reply(&Empty {})
     }
 
-    fn adopt_buffer(
+    pub(super) fn adopt_buffer(
         &mut self,
         connection: NonZeroU64,
         buffer: BufferId,
@@ -240,16 +240,11 @@ fn texture_response<B: Backend, C: Compiler>(
     })
 }
 
-/// A decoded value, or the value's name when it is not one.
-fn known<T>(value: Option<T>, name: &'static str) -> Result<T, Fault> {
-    value.ok_or(Fault::malformed(name))
-}
-
 fn options(raw: u64) -> Result<ResourceOptions, Fault> {
     known(ResourceOptions::from_raw(raw), "resource options")
 }
 
-fn pixel_format(raw: u64) -> Result<PixelFormat, Fault> {
+pub(super) fn pixel_format(raw: u64) -> Result<PixelFormat, Fault> {
     known(PixelFormat::from_raw(raw), "pixel format")
 }
 
@@ -316,11 +311,7 @@ fn sampler_descriptor(record: &SamplerDescriptorRecord) -> Result<SamplerDescrip
             SamplerReductionMode::from_raw(record.reduction_mode),
             "sampler reduction mode",
         )?,
-        normalized_coordinates: match record.normalized_coordinates {
-            0 => false,
-            1 => true,
-            _ => return Err(Fault::malformed("boolean")),
-        },
+        normalized_coordinates: boolean(record.normalized_coordinates)?,
         lod_min_clamp: record.lod_min_clamp,
         lod_max_clamp: record.lod_max_clamp,
         compare_function: known(

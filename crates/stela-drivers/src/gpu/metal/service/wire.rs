@@ -372,6 +372,184 @@ records! {
     }
 }
 
+records! {
+    /// `MTLRenderPipelineColorAttachmentDescriptor`; pixel format zero
+    /// leaves the attachment unused.
+    pub struct ColorAttachmentRecord {
+        pub pixel_format: u64,
+        pub source_rgb_blend_factor: u64,
+        pub destination_rgb_blend_factor: u64,
+        pub rgb_blend_operation: u64,
+        pub source_alpha_blend_factor: u64,
+        pub destination_alpha_blend_factor: u64,
+        pub alpha_blend_operation: u64,
+        pub write_mask: u64,
+        pub blending_enabled: u32,
+        pub reserved: u32,
+    }
+
+    /// The attachments and rasterization a render pipeline draws with.
+    pub struct RenderTargetsRecord {
+        pub color_attachments: [ColorAttachmentRecord; 8],
+        pub depth_attachment_pixel_format: u64,
+        pub stencil_attachment_pixel_format: u64,
+        pub raster_sample_count: u64,
+        pub alpha_to_coverage_enabled: u32,
+        pub alpha_to_one_enabled: u32,
+        pub rasterization_enabled: u32,
+        pub reserved: u32,
+    }
+
+    /// An attribute of a vertex or stage-input descriptor, at its index;
+    /// format zero leaves it unused.
+    pub struct AttributeRecord {
+        pub format: u64,
+        pub offset: u64,
+        pub buffer_index: u64,
+    }
+
+    /// A buffer layout of a vertex or stage-input descriptor, at its
+    /// buffer index; only those its attributes read are taken.
+    pub struct LayoutRecord {
+        pub stride: u64,
+        pub step_function: u64,
+        pub step_rate: u64,
+    }
+
+    /// `MTLVertexDescriptor`.
+    pub struct VertexDescriptorRecord {
+        pub attributes: [AttributeRecord; 31],
+        pub layouts: [LayoutRecord; 31],
+    }
+
+    /// `MTLStageInputOutputDescriptor`.
+    pub struct StageInputRecord {
+        pub attributes: [AttributeRecord; 31],
+        pub layouts: [LayoutRecord; 31],
+        pub index_type: u64,
+        pub index_buffer_index: u64,
+    }
+
+    /// A render pipeline's tessellation state.
+    pub struct TessellationRecord {
+        pub partition_mode: u64,
+        pub max_tessellation_factor: u64,
+        pub factor_format: u64,
+        pub control_point_index_type: u64,
+        pub factor_step_function: u64,
+        pub output_winding_order: u64,
+        pub factor_scale_enabled: u32,
+        pub reserved: u32,
+    }
+
+    /// `MTLLinkedFunctions` and the stage's call stack depth: spans of
+    /// function and library handles.
+    pub struct LinkedFunctionsRecord {
+        pub functions: Span,
+        pub private_functions: Span,
+        pub libraries: Span,
+        pub max_call_stack_depth: u64,
+    }
+
+    /// `newRenderPipelineStateWithDescriptor:`; a zero fragment function
+    /// is none.
+    pub struct NewRenderPipelineRequest {
+        pub vertex_function: u64,
+        pub fragment_function: u64,
+        pub input_primitive_topology: u64,
+        pub max_vertex_amplification_count: u64,
+        pub targets: RenderTargetsRecord,
+        pub vertex_descriptor: VertexDescriptorRecord,
+        pub tessellation: TessellationRecord,
+        pub vertex_linked_functions: LinkedFunctionsRecord,
+        pub fragment_linked_functions: LinkedFunctionsRecord,
+        /// `PipelineFlags`.
+        pub flags: u64,
+    }
+
+    /// `newRenderPipelineStateWithMeshDescriptor:`; zero object and
+    /// fragment functions are none.
+    pub struct NewMeshPipelineRequest {
+        pub object_function: u64,
+        pub mesh_function: u64,
+        pub fragment_function: u64,
+        pub max_vertex_amplification_count: u64,
+        pub targets: RenderTargetsRecord,
+        pub object_linked_functions: LinkedFunctionsRecord,
+        pub mesh_linked_functions: LinkedFunctionsRecord,
+        pub fragment_linked_functions: LinkedFunctionsRecord,
+    }
+
+    /// A new render pipeline and its `gpuResourceID`, zero when indirect
+    /// command buffers cannot switch to it.
+    pub struct RenderPipelineResponse {
+        pub handle: u64,
+        pub resource_id: u64,
+    }
+
+    /// `newComputePipelineStateWithDescriptor:`; zero total threads leaves
+    /// the device's limit.
+    pub struct NewComputePipelineRequest {
+        pub compute_function: u64,
+        pub max_total_threads_per_threadgroup: u64,
+        pub stage_input: StageInputRecord,
+        pub linked_functions: LinkedFunctionsRecord,
+        /// `PipelineFlags`.
+        pub flags: u64,
+    }
+
+    /// A new compute pipeline: its `gpuResourceID` (zero when indirect
+    /// command buffers cannot switch to it),
+    /// `maxTotalThreadsPerThreadgroup`, `threadExecutionWidth` and
+    /// `staticThreadgroupMemoryLength`.
+    pub struct ComputePipelineResponse {
+        pub handle: u64,
+        pub resource_id: u64,
+        pub max_total_threads_per_threadgroup: u64,
+        pub thread_execution_width: u64,
+        pub static_threadgroup_memory_length: u64,
+    }
+
+    /// `functionHandleWithFunction:` (`stage` zero) or
+    /// `functionHandleWithFunction:stage:` (one `MTLRenderStages` bit).
+    pub struct FunctionHandleRequest {
+        pub pipeline: u64,
+        pub function: u64,
+        pub stage: u64,
+    }
+
+    /// A function handle's value, zero when the pipeline does not link the
+    /// function.
+    pub struct FunctionHandleResponse {
+        pub value: u64,
+    }
+
+    /// `newVisibleFunctionTableWithDescriptor:`.
+    pub struct NewFunctionTableRequest {
+        pub function_count: u64,
+    }
+
+    /// `setFunctions:withRange:` from a span of handle values, zero for
+    /// none.
+    pub struct SetFunctionsRequest {
+        pub table: u64,
+        pub index: u64,
+        pub handles: Span,
+    }
+}
+
+option_set! {
+    /// What a pipeline request asks besides its records.
+    pub struct PipelineFlags: u64 {
+        /// The request's vertex or stage-input descriptor is set.
+        const DESCRIBED_INPUT = 1 << 0;
+        /// `supportIndirectCommandBuffers`.
+        const INDIRECT_COMMAND_BUFFERS = 1 << 1;
+        /// `threadGroupSizeIsMultipleOfThreadExecutionWidth`.
+        const THREADGROUP_SIZE_IS_MULTIPLE_OF_WIDTH = 1 << 2;
+    }
+}
+
 /// The offset of a resource the heap places itself.
 pub const AUTOMATIC: u64 = u64::MAX;
 
@@ -506,4 +684,12 @@ operations! {
     HeapUsage = 0x020e => HeapUsageRequest, HeapUsageResponse;
     /// `makeAliasable` of a heap buffer or texture.
     MakeAliasable = 0x020f => Handle, Empty;
+    NewRenderPipeline = 0x0301 => NewRenderPipelineRequest, RenderPipelineResponse;
+    NewMeshPipeline = 0x0302 => NewMeshPipelineRequest, RenderPipelineResponse;
+    NewComputePipeline = 0x0303 => NewComputePipelineRequest, ComputePipelineResponse;
+    FunctionHandle = 0x0304 => FunctionHandleRequest, FunctionHandleResponse;
+    /// A visible function table: a buffer of function handle values whose
+    /// `gpuAddress` is the table's `gpuResourceID`.
+    NewFunctionTable = 0x0305 => NewFunctionTableRequest, BufferResponse;
+    SetFunctions = 0x0306 => SetFunctionsRequest, Empty;
 }

@@ -13,7 +13,10 @@
 //! refused, and closing a connection releases what it still holds, newest
 //! first, so views and aliases go before the resources under them.
 use super::{
-    device::{BufferId, Device, FunctionId, HeapId, LibraryId, SamplerId, TextureId},
+    device::{
+        BufferId, ComputePipelineId, Device, FunctionId, HeapId, LibraryId, RenderPipelineId,
+        SamplerId, TextureId,
+    },
     error::Error,
     shader::Compiler,
     vulkan::backend::Backend,
@@ -24,16 +27,31 @@ use core::num::{NonZeroU32, NonZeroU64};
 use wire::{Fault, Handle, NegotiateRequest, NegotiateResponse, Operation, Record, Span, Status};
 
 mod libraries;
+mod pipelines;
 mod resources;
 #[cfg(test)]
 mod tests;
 pub mod wire;
 
+/// A decoded value, or the value's name when it is not one.
+fn known<T>(value: Option<T>, name: &'static str) -> Result<T, Fault> {
+    value.ok_or(Fault::malformed(name))
+}
+
+fn boolean(raw: u32) -> Result<bool, Fault> {
+    match raw {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(Fault::malformed("boolean")),
+    }
+}
+
 /// The objects one connection may hold.
 const MAX_OBJECTS: NonZeroU32 = NonZeroU32::new(1 << 20).unwrap();
 
 /// Guest memory the call gate resolves for one call: spans of the calling
-/// task's address space, checked against its mappings.
+/// task's address space, checked against its mappings. An empty span is no
+/// bytes wherever it points.
 pub trait GuestMemory {
     fn read(&self, span: Span) -> Result<&[u8], Fault>;
     fn write(&mut self, span: Span, bytes: &[u8]) -> Result<(), Fault>;
@@ -48,6 +66,8 @@ enum Object {
     Heap(HeapId),
     Library(LibraryId),
     Function(FunctionId),
+    RenderPipeline(RenderPipelineId),
+    ComputePipeline(ComputePipelineId),
 }
 
 /// A kind of object a handle may name.
@@ -75,6 +95,8 @@ kinds! {
     Heap(HeapId);
     Library(LibraryId);
     Function(FunctionId);
+    RenderPipeline(RenderPipelineId);
+    ComputePipeline(ComputePipelineId);
 }
 
 /// An object and when its connection made it.
@@ -287,6 +309,12 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Operation::NewHeapTexture => self.new_heap_texture(&mut call),
             Operation::HeapUsage => self.heap_usage(&mut call),
             Operation::MakeAliasable => self.make_aliasable(&mut call),
+            Operation::NewRenderPipeline => self.new_render_pipeline(&mut call),
+            Operation::NewMeshPipeline => self.new_mesh_pipeline(&mut call),
+            Operation::NewComputePipeline => self.new_compute_pipeline(&mut call),
+            Operation::FunctionHandle => self.function_handle(&mut call),
+            Operation::NewFunctionTable => self.new_function_table(&mut call),
+            Operation::SetFunctions => self.set_functions(&mut call),
         }
     }
 
@@ -386,6 +414,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Object::Heap(id) => device.destroy_heap(id),
             Object::Library(id) => device.destroy_library(id),
             Object::Function(id) => device.destroy_function(id),
+            Object::RenderPipeline(id) => device.destroy_render_pipeline(id),
+            Object::ComputePipeline(id) => device.destroy_compute_pipeline(id),
         }
     }
 }
