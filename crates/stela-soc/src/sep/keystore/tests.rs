@@ -634,6 +634,24 @@ fn a_null_d_key_request_is_acknowledged_with_the_variant_alone() {
 }
 
 #[test]
+fn an_unimplemented_command_is_named_once() {
+    let mut keystore = KeyStore::default();
+    let request = message(2, 0, 1, &[]);
+    for sequence in [1, 2] {
+        let (reply, _) = ask(
+            &mut keystore,
+            frame(0x7f, sequence, request.len()),
+            request.clone(),
+        );
+        assert!(reply.is_err());
+    }
+    assert_eq!(
+        keystore.diagnostics().collect::<Vec<_>>(),
+        ["SEP keystore: command 0x7f is not implemented"]
+    );
+}
+
+#[test]
 fn decoded_keybags_and_malformed_bodies_never_publish_success_or_change_environment() {
     let mut keystore = KeyStore::default();
     let env = message(2, 0, 1, &environment(3, 4));

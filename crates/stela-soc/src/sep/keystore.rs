@@ -148,15 +148,25 @@ pub struct KeyStore {
     system_keys: Option<system_key::SystemKeys>,
     volume_keys: Option<volume_key::VolumeKeys>,
     diagnostics: Journal,
+    /// Commands already reported as unimplemented.
+    unimplemented: Vec<u8>,
 }
 
 impl KeyStore {
     pub(super) fn with_system_keys(root: Zeroizing<[u8; 32]>) -> Self {
         Self {
-            environment: None,
             system_keys: Some(system_key::SystemKeys::new(root)),
-            volume_keys: None,
-            diagnostics: Journal::default(),
+            ..Self::default()
+        }
+    }
+
+    /// Name an unimplemented command in the diagnostics, once per command.
+    fn report_unimplemented(&mut self, command: u8) {
+        if !self.unimplemented.contains(&command) {
+            self.unimplemented.push(command);
+            self.diagnostics.record(alloc::format!(
+                "SEP keystore: command {command:#04x} is not implemented"
+            ));
         }
     }
 
@@ -211,6 +221,7 @@ impl KeyStore {
         ) && !keybag::recognizes(command)
             && !volume_key::recognizes(command)
         {
+            self.report_unimplemented(command);
             return Err(refuse(refuse!("SEP keystore command is not implemented")));
         }
         let mut bytes = vec![0; (frame.data >> LENGTH_SHIFT) as usize];
@@ -279,6 +290,7 @@ impl KeyStore {
         }
         if keybag::recognizes(command) {
             keybag::validate(command, message.variant(), &mut fields).map_err(refuse)?;
+            self.report_unimplemented(command);
             return Err(refuse(keybag::UNIMPLEMENTED.into()));
         }
         if message.variant() != 0 {
