@@ -1304,3 +1304,4 @@ mod management_controls;
 mod pmf_controls;
 
 mod discovery;
+mod kept_connected;

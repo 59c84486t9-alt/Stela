@@ -75,10 +75,14 @@ fn suites(akm: Akm) -> Suites {
 }
 
 /// The authenticator's side of the handshakes.
-struct Authenticator {
+pub(crate) struct Authenticator {
     suites: Suites,
     akm: Akm,
     pmk: Zeroizing<[u8; 32]>,
+    own: Mac,
+    station: Mac,
+    /// The station's RSN element, which message 2 carries.
+    station_rsn: Vec<u8>,
     anonce: [u8; 32],
     replay: u64,
     ptk: Option<Ptk>,
@@ -86,17 +90,38 @@ struct Authenticator {
 
 impl Authenticator {
     fn new(suites: Suites) -> Self {
+        Self::between(
+            suites,
+            Zeroizing::new([0x44; 32]),
+            AP,
+            STATION,
+            RSN.to_vec(),
+        )
+    }
+
+    /// The authenticator `own` with `pmk` for `station`, whose message 2
+    /// carries `station_rsn`.
+    pub(crate) fn between(
+        suites: Suites,
+        pmk: Zeroizing<[u8; 32]>,
+        own: Mac,
+        station: Mac,
+        station_rsn: Vec<u8>,
+    ) -> Self {
         Self {
             suites,
             akm: suites.akm,
-            pmk: Zeroizing::new([0x44; 32]),
+            pmk,
+            own,
+            station,
+            station_rsn,
             anonce: [0xa1; 32],
             replay: 0,
             ptk: None,
         }
     }
 
-    fn message_1(&mut self) -> Vec<u8> {
+    pub(crate) fn message_1(&mut self) -> Vec<u8> {
         self.replay += 1;
         build(
             self.akm,
@@ -109,15 +134,15 @@ impl Authenticator {
     }
 
     /// Check message 2 and derive the PTK from its SNonce.
-    fn message_2(&mut self, frame: &[u8]) {
+    pub(crate) fn message_2(&mut self, frame: &[u8]) {
         let key = Frame::parse(frame).unwrap();
         assert_eq!(key.info & (PAIRWISE | MIC | ACK), PAIRWISE | MIC);
-        assert_eq!(key.data, RSN);
+        assert_eq!(key.data, self.station_rsn);
         let ptk = Ptk::derive(
             &self.suites,
             &self.pmk,
-            AP,
-            STATION,
+            self.own,
+            self.station,
             &self.anonce,
             &key.nonce,
         );
@@ -144,7 +169,7 @@ impl Authenticator {
         frame
     }
 
-    fn message_3(&mut self, rsn: &[u8]) -> Vec<u8> {
+    pub(crate) fn message_3(&mut self, rsn: &[u8]) -> Vec<u8> {
         self.message_3_with(rsn, &[])
     }
 
@@ -166,7 +191,7 @@ impl Authenticator {
         self.signed(ACK | MIC | SECURE | ENCRYPTED, &gtk_kde(2, &[0x66; 16]))
     }
 
-    fn signed_reply(&self, frame: &[u8], info: u16) {
+    pub(crate) fn signed_reply(&self, frame: &[u8], info: u16) {
         let key = Frame::parse(frame).unwrap();
         assert_eq!(key.info & !VERSION, info);
         assert_eq!(key.replay, self.replay);

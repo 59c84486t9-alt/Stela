@@ -284,6 +284,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     pub fn country(&self) -> [u8; 2] {
         self.state().client.country()
     }
+    /// The verified domain's channels on `band` that may transmit, with
+    /// their cfg80211 flags.
+    pub fn channels(&self, band: Band) -> Vec<(wifi::Channel, u32)> {
+        self.state().client.channels(band)
+    }
     pub fn local_advertisement(&self, band: Band) -> Result<Advertisement, LinkControlError> {
         self.state()
             .client

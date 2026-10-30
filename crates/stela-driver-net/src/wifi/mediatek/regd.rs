@@ -63,6 +63,15 @@ const UNII: [(u16, u16, u8); 5] = [
     (6875, 7125, 1 << 4),
 ];
 
+/// The channel numbers mt76 registers on `band`.
+pub fn channels(band: Band) -> &'static [u8] {
+    match band {
+        Band::Ghz2 => &CHANNELS_2GHZ,
+        Band::Ghz5 => &CHANNELS_5GHZ,
+        Band::Ghz6 => &CHANNELS_6GHZ,
+    }
+}
+
 /// `ieee80211_channel_to_frequency`.
 fn frequency(band: Band, channel: u8) -> u16 {
     let n = u16::from(channel);

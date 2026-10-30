@@ -20,6 +20,7 @@ pub mod registers;
 pub mod reorder;
 pub mod ring;
 pub mod rx;
+pub mod station;
 pub mod tx_free;
 pub mod txp;
 pub mod txwi;

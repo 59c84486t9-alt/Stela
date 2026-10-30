@@ -697,6 +697,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
     pub fn country(&self) -> [u8; 2] {
         self.country.alpha2()
     }
+    /// The verified domain's channels on `band` that may transmit, with
+    /// their cfg80211 flags.
+    pub fn channels(&self, band: Band) -> Vec<(Channel, u32)> {
+        self.snapshot
+            .channels
+            .iter()
+            .filter(|c| c.channel.band == band && c.max_half_dbm.is_some())
+            .map(|c| (c.channel, c.flags))
+            .collect()
+    }
     pub fn begin_scan(
         &mut self,
         request: scan::Request,
