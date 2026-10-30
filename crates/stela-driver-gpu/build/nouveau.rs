@@ -64,19 +64,6 @@ const OPEN: &[(&str, &[&str])] = &[
     ("device model references", &["put_device"]),
     ("interrupts", &["free_irq", "request_threaded_irq"]),
     (
-        "wait queues and completions",
-        &[
-            "__init_swait_queue_head",
-            "__init_waitqueue_head",
-            "__wake_up",
-            "complete_all",
-            "finish_wait",
-            "init_wait_entry",
-            "prepare_to_wait_event",
-            "wait_for_completion_timeout",
-        ],
-    ),
-    (
         "workqueues",
         &[
             "alloc_workqueue_noprof",

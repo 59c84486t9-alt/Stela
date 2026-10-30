@@ -50,6 +50,9 @@
 /kernel/sched/core.c
 /kernel/sched/Makefile
 /kernel/sched/wait_support.c
+/kernel/sched/wait.c
+/kernel/sched/swait.c
+/kernel/sched/completion.c
 /kernel/exit.c
 /kernel/Makefile
 /kernel/rcu/update.c

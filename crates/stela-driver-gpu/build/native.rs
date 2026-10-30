@@ -195,6 +195,9 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/exec_state.c")),
             PathBuf::from(format!("{LINUX}/kernel/locking/mutex.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/wait_support.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/wait.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/swait.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/completion.c")),
             PathBuf::from(format!("{LINUX}/kernel/rcuwait_wake.c")),
             PathBuf::from(format!("{LINUX}/kernel/rcu/rcuwait_finish.c")),
             PathBuf::from(format!("{LINUX}/fs/seq_output.c")),
@@ -237,6 +240,7 @@ impl Linux {
                     format!("{COMPAT}/stela/atomic_callback_test.c"),
                     format!("{COMPAT}/stela/mutex_test.c"),
                     format!("{COMPAT}/stela/resource_test.c"),
+                    format!("{COMPAT}/stela/timer_test.c"),
                 ])
                 .objects(helper_objects)
                 .compile("linux-task-fixture");
@@ -463,8 +467,11 @@ fn linux_archive(
     upstream: &[PathBuf],
 ) -> PathBuf {
     check_declarations(build, kernel);
-    check_declarations(build, upstream);
     let mut upstream_build = build.clone();
+    // The scheduler's shared units include its internal header as "sched.h";
+    // Stela's scheduler supplies what they take from it.
+    upstream_build.flag(format!("-iquote{COMPAT}/kernel/sched"));
+    check_declarations(&upstream_build, upstream);
     upstream_warnings(&mut upstream_build);
     upstream_build.files(upstream);
     let objects = upstream_build.compile_intermediates();

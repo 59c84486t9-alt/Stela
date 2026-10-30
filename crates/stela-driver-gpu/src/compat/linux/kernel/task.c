@@ -15,6 +15,7 @@
 #include <stela/linux.h>
 #include <stela/page.h>
 #include <stela/task.h>
+#include "sched/sched.h"
 
 static_assert(CONFIG_THREAD_INFO_IN_TASK == 1);
 static_assert(!IS_ENABLED(CONFIG_SMP));
@@ -711,6 +712,33 @@ int wake_up_process(struct task_struct *task)
 int wake_up_state(struct task_struct *task, unsigned int state)
 {
 	return wake_state(task, state);
+}
+
+/* Linux's wake core (kernel/sched/core.c). Its flags only hint at the CPU
+ * that runs the woken task. */
+int try_to_wake_up(struct task_struct *task, unsigned int state, int wake_flags)
+{
+	(void)wake_flags;
+	return wake_state(task, state);
+}
+
+int default_wake_function(struct wait_queue_entry *curr, unsigned mode, int wake_flags, void *key)
+{
+	(void)key;
+	return try_to_wake_up(curr->private, mode, wake_flags);
+}
+
+void io_schedule(void)
+{
+	int token = io_schedule_prepare();
+	schedule();
+	io_schedule_finish(token);
+}
+
+/* Linux asks only its own kthreads to stop or park, and Stela creates none. */
+bool kthread_should_stop_or_park(void)
+{
+	return false;
 }
 
 static int wait_signal(unsigned int kind)
